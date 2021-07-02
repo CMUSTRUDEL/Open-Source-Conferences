@@ -1,5 +1,5 @@
 # Open-Source-Conferences
-A dataset of transcripts and descriptions from most OSS conferences.
+A dataset of transcripts and descriptions from most OSS conferences after 2013.
 
 ## Method
 1. Searched for list of conferences through previous knowledge, Wikipedia (https://en.wikipedia.org/wiki/List_of_free-software_events), and several calendars tracking FOSS events (https://calendify.com/@blinkenweb/foss-events and https://lwn.net/Calendar/Monthly/cfp/).
