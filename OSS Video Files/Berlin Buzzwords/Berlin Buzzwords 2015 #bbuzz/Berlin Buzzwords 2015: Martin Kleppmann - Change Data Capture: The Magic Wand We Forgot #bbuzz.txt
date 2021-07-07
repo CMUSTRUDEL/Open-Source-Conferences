@@ -1,0 +1,2645 @@
+Title: Berlin Buzzwords 2015: Martin Kleppmann - Change Data Capture: The Magic Wand We Forgot #bbuzz
+Publication date: 2015-06-04
+Playlist: Berlin Buzzwords 2015 #bbuzz
+Description: 
+	A simple application may start out with one database, but as you scale and add features, it usually turns into a tangled mess of datastores, replicas, caches, search indexes, analytics systems and message queues. When new data is written, how do you make sure it ends up in all the right places? If something goes wrong, how do you recover?
+
+Change Data Capture (CDC) is an old idea: let the application subscribe to a stream of everything that is written to a database — a feed of data changes. You can use that feed to update search indexes, invalidate caches, create snapshots, generate recommendations, copy data into another database, and so on. For example, LinkedIn's Databus and Facebook's Wormhole do this. But the idea is not as widely known as it should be.
+
+In this talk, I will explain why change data capture is so useful, and how it prevents race conditions and other ugly problems. Then I'll go into the practical details of implementing CDC with PostgreSQL and Apache Kafka, and discuss the approaches you can use to do the same with various other databases.
+
+Read more:
+https://2015.berlinbuzzwords.de/session/change-data-capture-magic-wand-we-forgot
+
+About Martin Kleppmann:
+https://2015.berlinbuzzwords.de/users/martin-kleppmann
+
+Website: https://berlinbuzzwords.de/
+Twitter: https://twitter.com/berlinbuzzwords
+LinkedIn: https://www.linkedin.com/showcase/berlin-buzzwords/ 
+Reddit: https://www.reddit.com/r/berlinbuzzwords/
+Captions: 
+	00:00:00,000 --> 00:00:02,030
+Oh
+
+00:00:07,770 --> 00:00:12,420
+before I get started if you want to
+
+00:00:09,960 --> 00:00:16,680
+follow along the slides already online I
+
+00:00:12,420 --> 00:00:19,380
+put them at Martin KL comm /b buzz at
+
+00:00:16,680 --> 00:00:21,150
+that URL on the slide so you can follow
+
+00:00:19,380 --> 00:00:24,720
+along on your own screen if you like as
+
+00:00:21,150 --> 00:00:26,820
+well at your own pace so anyone here
+
+00:00:24,720 --> 00:00:29,039
+know about change data capture already
+
+00:00:26,820 --> 00:00:33,000
+could you just raise your hand okay so
+
+00:00:29,039 --> 00:00:35,850
+maybe 20% or so this is an idea that's
+
+00:00:33,000 --> 00:00:38,220
+actually really simple and it's really
+
+00:00:35,850 --> 00:00:40,110
+powerful if you build systems based on
+
+00:00:38,220 --> 00:00:42,570
+this idea and when I first came across
+
+00:00:40,110 --> 00:00:44,659
+it I felt it was like a kind of magic
+
+00:00:42,570 --> 00:00:47,040
+wand where you could simply make
+
+00:00:44,659 --> 00:00:49,199
+magically certain problems in building
+
+00:00:47,040 --> 00:00:50,760
+systems go away and maybe that's over
+
+00:00:49,199 --> 00:00:52,769
+selling it a bit but I'm still quite
+
+00:00:50,760 --> 00:00:54,930
+excited about it and find it
+
+00:00:52,769 --> 00:00:57,570
+surprisingly not that well known so
+
+00:00:54,930 --> 00:00:59,820
+hopefully I can bring across some of the
+
+00:00:57,570 --> 00:01:01,890
+excitement for that and also showed the
+
+00:00:59,820 --> 00:01:03,809
+details of a practical concrete
+
+00:01:01,890 --> 00:01:07,500
+implementation that I open-source last
+
+00:01:03,809 --> 00:01:10,680
+month anyway so I I'm Martin clapman I
+
+00:01:07,500 --> 00:01:12,929
+used to work at LinkedIn doing love
+
+00:01:10,680 --> 00:01:14,789
+scale data stuff I was working on a
+
+00:01:12,929 --> 00:01:18,270
+stream processing framework they're an
+
+00:01:14,789 --> 00:01:19,770
+open source one called Samsa I'm now
+
+00:01:18,270 --> 00:01:21,090
+actually doing a sabbatical at the
+
+00:01:19,770 --> 00:01:23,189
+moment and writing this book for
+
+00:01:21,090 --> 00:01:25,320
+O'Reilly the book is called designing
+
+00:01:23,189 --> 00:01:28,729
+data intensive applications and it it's
+
+00:01:25,320 --> 00:01:31,229
+not about any one particular tool or
+
+00:01:28,729 --> 00:01:34,170
+system that you can use it's really
+
+00:01:31,229 --> 00:01:36,359
+trying to be an overview over all the
+
+00:01:34,170 --> 00:01:40,259
+different fundamental algorithms and
+
+00:01:36,359 --> 00:01:41,939
+techniques and trade-offs that feed into
+
+00:01:40,259 --> 00:01:45,450
+building data systems especially
+
+00:01:41,939 --> 00:01:47,969
+distributed ones so its focuses on
+
+00:01:45,450 --> 00:01:50,789
+replication and partitioning and the
+
+00:01:47,969 --> 00:01:53,789
+internals of databases data models data
+
+00:01:50,789 --> 00:01:56,249
+storage engines and so on very broad
+
+00:01:53,789 --> 00:01:58,530
+it's still work-in-progress but you can
+
+00:01:56,249 --> 00:02:00,630
+find the first seven chapters online ups
+
+00:01:58,530 --> 00:02:05,009
+data intensive dotnet if if you are so
+
+00:02:00,630 --> 00:02:06,630
+inclined anyway let's talk about just an
+
+00:02:05,009 --> 00:02:07,829
+example application for the sake of
+
+00:02:06,630 --> 00:02:10,259
+argument the kind of thing we're talking
+
+00:02:07,829 --> 00:02:12,840
+about is assume you're building some
+
+00:02:10,259 --> 00:02:15,990
+kind of website so you've probably got
+
+00:02:12,840 --> 00:02:18,840
+clients talking from a mobile app or web
+
+00:02:15,990 --> 00:02:20,740
+browser to some kind of server where
+
+00:02:18,840 --> 00:02:23,230
+your application code lives
+
+00:02:20,740 --> 00:02:24,790
+and whenever that server wants to store
+
+00:02:23,230 --> 00:02:25,630
+something for the future it writes into
+
+00:02:24,790 --> 00:02:27,220
+a database
+
+00:02:25,630 --> 00:02:29,590
+whenever it wants to look up something
+
+00:02:27,220 --> 00:02:32,980
+that was stored previously it queries
+
+00:02:29,590 --> 00:02:34,960
+the database obviously and in very
+
+00:02:32,980 --> 00:02:37,270
+simple systems one database is enough
+
+00:02:34,960 --> 00:02:39,100
+but as we find as systems get more
+
+00:02:37,270 --> 00:02:41,380
+complex we start needing different tools
+
+00:02:39,100 --> 00:02:43,870
+for different purposes so maybe you need
+
+00:02:41,380 --> 00:02:45,970
+a cache to speed up reads maybe you need
+
+00:02:43,870 --> 00:02:49,000
+a full-text search index in order to
+
+00:02:45,970 --> 00:02:51,340
+allow full text queries and so the
+
+00:02:49,000 --> 00:02:54,070
+problem is what we end up now is we have
+
+00:02:51,340 --> 00:02:55,600
+these different systems and data lives
+
+00:02:54,070 --> 00:02:57,100
+in all of these systems and we somehow
+
+00:02:55,600 --> 00:02:59,830
+need to keep them in sync
+
+00:02:57,100 --> 00:03:02,560
+so we have data the same data just
+
+00:02:59,830 --> 00:03:04,960
+stored in different forms if you think
+
+00:03:02,560 --> 00:03:07,600
+about a full-text search index a at an
+
+00:03:04,960 --> 00:03:10,060
+elastic search for example you probably
+
+00:03:07,600 --> 00:03:11,680
+want your you want all of your documents
+
+00:03:10,060 --> 00:03:13,600
+in there but you also want them in some
+
+00:03:11,680 --> 00:03:15,910
+other database which is your source of
+
+00:03:13,600 --> 00:03:17,170
+truth your transactional database so now
+
+00:03:15,910 --> 00:03:19,510
+you have to make sure that all of the
+
+00:03:17,170 --> 00:03:21,550
+same data ends up in both places and
+
+00:03:19,510 --> 00:03:23,590
+indexing is just one example of that so
+
+00:03:21,550 --> 00:03:26,230
+you can see caching as being just
+
+00:03:23,590 --> 00:03:27,850
+another way of saying well I've got this
+
+00:03:26,230 --> 00:03:30,190
+different data and I want to represent
+
+00:03:27,850 --> 00:03:32,290
+it in different data stores in different
+
+00:03:30,190 --> 00:03:35,200
+forms but it's still the same underlying
+
+00:03:32,290 --> 00:03:36,910
+data when the underlying data changes it
+
+00:03:35,200 --> 00:03:40,560
+has to be changed in all these different
+
+00:03:36,910 --> 00:03:43,600
+places which leads us to the problem of
+
+00:03:40,560 --> 00:03:45,790
+really integrating these different
+
+00:03:43,600 --> 00:03:47,890
+systems where you need to make sure that
+
+00:03:45,790 --> 00:03:50,530
+the same that the right data ends up in
+
+00:03:47,890 --> 00:03:52,030
+the right systems at the right time this
+
+00:03:50,530 --> 00:03:54,250
+is not that straightforward actually
+
+00:03:52,030 --> 00:03:55,810
+because if you implement this the naive
+
+00:03:54,250 --> 00:03:58,240
+way you end up with something like this
+
+00:03:55,810 --> 00:04:00,640
+so this is a diagram with time going
+
+00:03:58,240 --> 00:04:03,040
+from left to right and we've got here
+
+00:04:00,640 --> 00:04:05,500
+two databases for two data stores maybe
+
+00:04:03,040 --> 00:04:08,350
+one is a database one is search index
+
+00:04:05,500 --> 00:04:10,690
+and you've got two users writing to
+
+00:04:08,350 --> 00:04:14,320
+these and so say the the first user
+
+00:04:10,690 --> 00:04:16,180
+wants to write some document a under a
+
+00:04:14,320 --> 00:04:18,340
+key X and it writes it first to the
+
+00:04:16,180 --> 00:04:19,840
+first data store and it's okay and then
+
+00:04:18,340 --> 00:04:22,120
+writes into the second data store and
+
+00:04:19,840 --> 00:04:24,460
+that's okay and now concurrently with
+
+00:04:22,120 --> 00:04:26,650
+this we've got a second user the red one
+
+00:04:24,460 --> 00:04:30,130
+who wants to write some document B and
+
+00:04:26,650 --> 00:04:32,350
+they've first write B under the same key
+
+00:04:30,130 --> 00:04:33,410
+X to the first datastore and and write
+
+00:04:32,350 --> 00:04:35,030
+it to the second data
+
+00:04:33,410 --> 00:04:36,980
+and now it's happened well if you look
+
+00:04:35,030 --> 00:04:38,630
+at the evolution of the value in each
+
+00:04:36,980 --> 00:04:41,150
+data store in the first data store it
+
+00:04:38,630 --> 00:04:43,700
+first got set to a and then got set to B
+
+00:04:41,150 --> 00:04:45,440
+so the final value is B in the other one
+
+00:04:43,700 --> 00:04:48,560
+it's the other way round you it was
+
+00:04:45,440 --> 00:04:50,150
+first B then a and this is not eventual
+
+00:04:48,560 --> 00:04:53,240
+consistency right this is perpetual
+
+00:04:50,150 --> 00:04:54,860
+inconsistency because unless somebody
+
+00:04:53,240 --> 00:04:56,630
+comes and overwrites this thing again
+
+00:04:54,860 --> 00:04:57,830
+these two data stores are now going to
+
+00:04:56,630 --> 00:05:00,020
+be forever out of sync
+
+00:04:57,830 --> 00:05:01,610
+due to this race condition and there are
+
+00:05:00,020 --> 00:05:03,020
+other problems that can occur like for
+
+00:05:01,610 --> 00:05:05,090
+example you can imagine one of the right
+
+00:05:03,020 --> 00:05:06,830
+succeeding and the other one failing and
+
+00:05:05,090 --> 00:05:08,450
+now what do you do like okay you can
+
+00:05:06,830 --> 00:05:11,540
+retry for a while but that may not
+
+00:05:08,450 --> 00:05:13,850
+eventually succeed the process that is
+
+00:05:11,540 --> 00:05:15,500
+retrying may itself crash so there are
+
+00:05:13,850 --> 00:05:17,570
+all sorts of different ways of how these
+
+00:05:15,500 --> 00:05:19,280
+if you're writing the same data to
+
+00:05:17,570 --> 00:05:21,590
+multiple systems how they can go out of
+
+00:05:19,280 --> 00:05:24,260
+sync and it really gets rather messy so
+
+00:05:21,590 --> 00:05:26,630
+how do we solve this problem of getting
+
+00:05:24,260 --> 00:05:28,790
+the right data into the right places
+
+00:05:26,630 --> 00:05:31,190
+which I call fancy words data
+
+00:05:28,790 --> 00:05:34,910
+integration but there's not that much to
+
+00:05:31,190 --> 00:05:38,480
+it really so this approach of simply the
+
+00:05:34,910 --> 00:05:40,760
+application doing dual writes or triple
+
+00:05:38,480 --> 00:05:42,290
+writes to different systems doesn't work
+
+00:05:40,760 --> 00:05:45,440
+very well because of these race
+
+00:05:42,290 --> 00:05:47,780
+conditions so change capture what I want
+
+00:05:45,440 --> 00:05:49,790
+to talk about here is really a super
+
+00:05:47,780 --> 00:05:52,130
+solution to this problem and the
+
+00:05:49,790 --> 00:05:54,560
+approach is very simple rather than
+
+00:05:52,130 --> 00:05:57,020
+writing to several different data stores
+
+00:05:54,560 --> 00:05:59,450
+just write to one database pick one
+
+00:05:57,020 --> 00:06:01,700
+database doesn't really matter what
+
+00:05:59,450 --> 00:06:03,830
+technology that is but that is now your
+
+00:06:01,700 --> 00:06:06,770
+source of truth or your system of record
+
+00:06:03,830 --> 00:06:09,200
+you call it and now whenever some data
+
+00:06:06,770 --> 00:06:12,530
+gets modified in that database through a
+
+00:06:09,200 --> 00:06:15,770
+write we take those changes that are
+
+00:06:12,530 --> 00:06:17,690
+happening in the database and extract
+
+00:06:15,770 --> 00:06:19,100
+them in some way and move them out into
+
+00:06:17,690 --> 00:06:22,010
+a separate system and so I'm suggesting
+
+00:06:19,100 --> 00:06:24,020
+Kafka here we've heard Kafka a few times
+
+00:06:22,010 --> 00:06:26,620
+already of this conference I'll mention
+
+00:06:24,020 --> 00:06:30,200
+it a bit more later
+
+00:06:26,620 --> 00:06:32,330
+the basic idea here being that you can
+
+00:06:30,200 --> 00:06:34,340
+get every time somebody writes to the
+
+00:06:32,330 --> 00:06:36,500
+database that is actually a message like
+
+00:06:34,340 --> 00:06:38,360
+a message on a message queue and you can
+
+00:06:36,500 --> 00:06:40,280
+simply stick it at the end of this log
+
+00:06:38,360 --> 00:06:42,890
+and other people can then come and
+
+00:06:40,280 --> 00:06:44,720
+consume that so if for example you want
+
+00:06:42,890 --> 00:06:46,639
+to keep your search index up-to-date
+
+00:06:44,720 --> 00:06:48,379
+whenever a document get
+
+00:06:46,639 --> 00:06:50,990
+written in the database it should also
+
+00:06:48,379 --> 00:06:53,449
+be written in the search index it can
+
+00:06:50,990 --> 00:06:55,909
+just consume this log of changes and it
+
+00:06:53,449 --> 00:06:58,939
+will apply the changes in the same order
+
+00:06:55,909 --> 00:07:01,340
+as they were applied in the database so
+
+00:06:58,939 --> 00:07:03,319
+this now you can start building this
+
+00:07:01,340 --> 00:07:06,319
+index and just keep it up to date by
+
+00:07:03,319 --> 00:07:07,909
+keep consuming and so it may lag
+
+00:07:06,319 --> 00:07:10,099
+slightly behind depending on what your
+
+00:07:07,909 --> 00:07:12,860
+latency endured this pipeline is but it
+
+00:07:10,099 --> 00:07:14,599
+won't go perpetually out of sync but
+
+00:07:12,860 --> 00:07:16,849
+it's now not just the search index you
+
+00:07:14,599 --> 00:07:18,740
+can actually have you can have multiple
+
+00:07:16,849 --> 00:07:21,500
+different systems which are feeding off
+
+00:07:18,740 --> 00:07:24,560
+that same that same log they can all
+
+00:07:21,500 --> 00:07:26,270
+subscribe to the same list of changes
+
+00:07:24,560 --> 00:07:28,159
+happening in the database for example
+
+00:07:26,270 --> 00:07:30,349
+you can do cache invalidation this way
+
+00:07:28,159 --> 00:07:33,800
+or you can take the data and archive it
+
+00:07:30,349 --> 00:07:37,069
+to HDFS and run some kind of batch
+
+00:07:33,800 --> 00:07:38,900
+analysis on it offline or another this
+
+00:07:37,069 --> 00:07:40,580
+all works because all of these consumers
+
+00:07:38,900 --> 00:07:42,169
+are independent from each other they
+
+00:07:40,580 --> 00:07:43,909
+independently just subscribe to to
+
+00:07:42,169 --> 00:07:46,009
+change and do whatever they need to do
+
+00:07:43,909 --> 00:07:48,560
+with it that different consumers are not
+
+00:07:46,009 --> 00:07:50,029
+dependent on each other it's not just
+
+00:07:48,560 --> 00:07:51,800
+data stores that you can feed this into
+
+00:07:50,029 --> 00:07:53,500
+you can feed it into string for extreme
+
+00:07:51,800 --> 00:07:57,139
+processing frameworks as well so
+
+00:07:53,500 --> 00:08:00,439
+anything like Sam saw or flingers Bach
+
+00:07:57,139 --> 00:08:02,569
+streaming or strong you can use to now
+
+00:08:00,439 --> 00:08:03,889
+analyze any data that's that's any
+
+00:08:02,569 --> 00:08:05,899
+rights that are happening to the
+
+00:08:03,889 --> 00:08:11,029
+databases you can use it for monitoring
+
+00:08:05,899 --> 00:08:13,009
+anomaly detection etc so I wanted to
+
+00:08:11,029 --> 00:08:16,580
+implement a practical example of this
+
+00:08:13,009 --> 00:08:18,770
+and did so using Postgres as the the
+
+00:08:16,580 --> 00:08:20,810
+source database now in principle you
+
+00:08:18,770 --> 00:08:23,300
+could do exactly the same ideas with any
+
+00:08:20,810 --> 00:08:26,149
+database Postgres is interesting here
+
+00:08:23,300 --> 00:08:27,979
+because it's launched a new API in
+
+00:08:26,149 --> 00:08:30,259
+Postgres 9.4 which came out last
+
+00:08:27,979 --> 00:08:33,130
+December so it's a it's the basis on
+
+00:08:30,259 --> 00:08:35,570
+which it's building is fairly new and
+
+00:08:33,130 --> 00:08:37,219
+this this new API is called logical
+
+00:08:35,570 --> 00:08:41,240
+decoding which I'll explain in a moment
+
+00:08:37,219 --> 00:08:43,669
+and it allows change data capture to be
+
+00:08:41,240 --> 00:08:46,220
+implemented in a nice way so it actually
+
+00:08:43,669 --> 00:08:48,079
+makes quite a nice like example proof
+
+00:08:46,220 --> 00:08:49,850
+point of what this kind of system can
+
+00:08:48,079 --> 00:08:51,199
+look like and I'm hoping that this will
+
+00:08:49,850 --> 00:08:52,820
+kind of encourage people to do the same
+
+00:08:51,199 --> 00:08:55,790
+thing for lots of other databases as
+
+00:08:52,820 --> 00:08:57,319
+well this it's open source in this open
+
+00:08:55,790 --> 00:08:58,710
+source work was sponsored by these nice
+
+00:08:57,319 --> 00:09:01,080
+folks at confluence there
+
+00:08:58,710 --> 00:09:03,360
+a couple of people who left LinkedIn to
+
+00:09:01,080 --> 00:09:05,880
+start the startup they're the original
+
+00:09:03,360 --> 00:09:07,920
+authors of Kafka they're very smart very
+
+00:09:05,880 --> 00:09:09,660
+nice people and they're building now a
+
+00:09:07,920 --> 00:09:12,690
+kind of commercial distribution around
+
+00:09:09,660 --> 00:09:15,380
+Kafka so they allowed me to work on this
+
+00:09:12,690 --> 00:09:19,790
+which is very nice Thank You confluent
+
+00:09:15,380 --> 00:09:22,530
+the basic idea of how the system works
+
+00:09:19,790 --> 00:09:24,330
+which oh I call it bottled water for
+
+00:09:22,530 --> 00:09:26,790
+example by the way I forgot to mention
+
+00:09:24,330 --> 00:09:28,740
+that which is kind of a stupid pun on
+
+00:09:26,790 --> 00:09:30,840
+taking data streams and packaging them
+
+00:09:28,740 --> 00:09:33,510
+up in a format that's kind of nice to
+
+00:09:30,840 --> 00:09:37,460
+transport around so the way this works
+
+00:09:33,510 --> 00:09:40,530
+is you have a Postgres database and
+
+00:09:37,460 --> 00:09:43,740
+bottled water consists of two main parts
+
+00:09:40,530 --> 00:09:45,900
+one part is a little plugin which sits
+
+00:09:43,740 --> 00:09:47,160
+inside the database server so that may
+
+00:09:45,900 --> 00:09:49,950
+sound a little bit scary because you're
+
+00:09:47,160 --> 00:09:52,080
+actually running code inside the your
+
+00:09:49,950 --> 00:09:53,490
+main database server at the moment
+
+00:09:52,080 --> 00:09:55,260
+there's no way around that
+
+00:09:53,490 --> 00:09:58,500
+maybe at some point in future there will
+
+00:09:55,260 --> 00:10:01,470
+be but for now the way this works is
+
+00:09:58,500 --> 00:10:04,590
+this plug-in hooks into an API in the
+
+00:10:01,470 --> 00:10:07,410
+database which receives callbacks every
+
+00:10:04,590 --> 00:10:09,750
+time a row is inserted a rows updated a
+
+00:10:07,410 --> 00:10:12,020
+row is deleted whenever transaction
+
+00:10:09,750 --> 00:10:14,790
+starts in the transaction commits and
+
+00:10:12,020 --> 00:10:16,710
+that's all you need this plug-in can now
+
+00:10:14,790 --> 00:10:19,050
+take this and you can use all of the
+
+00:10:16,710 --> 00:10:22,470
+internal Postgres functions to format
+
+00:10:19,050 --> 00:10:23,850
+the data nicely and format the data into
+
+00:10:22,470 --> 00:10:26,280
+some way that you can send it over a
+
+00:10:23,850 --> 00:10:29,040
+network connection and now the second
+
+00:10:26,280 --> 00:10:32,460
+part is a client daemon which connects
+
+00:10:29,040 --> 00:10:34,140
+to the Postgres database it gets a
+
+00:10:32,460 --> 00:10:36,270
+snapshot of the entire contents of the
+
+00:10:34,140 --> 00:10:38,810
+database and then it also hooks into
+
+00:10:36,270 --> 00:10:41,160
+this stream of writes happening live
+
+00:10:38,810 --> 00:10:43,560
+every write that happens every insert
+
+00:10:41,160 --> 00:10:46,440
+update or delete at a row level gets
+
+00:10:43,560 --> 00:10:49,620
+encoded it's using Avro as the encoding
+
+00:10:46,440 --> 00:10:52,290
+format here at the moment and all of
+
+00:10:49,620 --> 00:10:54,330
+those rights that are happening are then
+
+00:10:52,290 --> 00:10:57,720
+pushed out to Kafka and so it's using
+
+00:10:54,330 --> 00:10:59,640
+Kafka as the mechanism for other parties
+
+00:10:57,720 --> 00:11:02,190
+then to subscribe to the stream of
+
+00:10:59,640 --> 00:11:03,870
+activity happening so anyone who wants
+
+00:11:02,190 --> 00:11:06,390
+to consume this content is consumed from
+
+00:11:03,870 --> 00:11:08,280
+Kafka you've just got this bottled water
+
+00:11:06,390 --> 00:11:10,730
+kind of acts as this bridge between the
+
+00:11:08,280 --> 00:11:13,639
+Postgres world and Kafka
+
+00:11:10,730 --> 00:11:15,980
+it would be possible to instead of using
+
+00:11:13,639 --> 00:11:17,959
+Kafka just use it as a kind of embedded
+
+00:11:15,980 --> 00:11:19,130
+library that you build into your process
+
+00:11:17,959 --> 00:11:21,050
+that you load into your process like
+
+00:11:19,130 --> 00:11:24,019
+through J&I or something like that that
+
+00:11:21,050 --> 00:11:25,790
+would work just as well and the other
+
+00:11:24,019 --> 00:11:28,550
+thing that does actually it integrates
+
+00:11:25,790 --> 00:11:30,829
+with an avro schema registry there's a
+
+00:11:28,550 --> 00:11:34,220
+bit of a fine detail about how a Frode
+
+00:11:30,829 --> 00:11:37,339
+the serialization format works but it
+
+00:11:34,220 --> 00:11:39,889
+has a statically typed schema which can
+
+00:11:37,339 --> 00:11:42,769
+be evolved so if the if you add a column
+
+00:11:39,889 --> 00:11:45,380
+to a table for example this can be
+
+00:11:42,769 --> 00:11:47,750
+represented as an avro schema evolution
+
+00:11:45,380 --> 00:11:50,180
+it's not it can maintain backwards
+
+00:11:47,750 --> 00:11:52,279
+compatibility that way nice thing about
+
+00:11:50,180 --> 00:11:53,899
+schemas here well afro is a very nice
+
+00:11:52,279 --> 00:11:56,300
+format like I like it much more than
+
+00:11:53,899 --> 00:11:58,730
+JSON for example because say it
+
+00:11:56,300 --> 00:12:00,079
+distinguishes between integers and
+
+00:11:58,730 --> 00:12:02,420
+floating point numbers properly which
+
+00:12:00,079 --> 00:12:04,399
+Jason doesn't and various other issues
+
+00:12:02,420 --> 00:12:06,589
+with binary strings and such like so
+
+00:12:04,399 --> 00:12:09,440
+Avro works very well it's very compact
+
+00:12:06,589 --> 00:12:13,339
+very fast language neutral and so on
+
+00:12:09,440 --> 00:12:15,500
+and the this client daemon here
+
+00:12:13,339 --> 00:12:17,750
+registers the schemas so the schemas are
+
+00:12:15,500 --> 00:12:19,699
+actually derived from the Postgres
+
+00:12:17,750 --> 00:12:21,829
+database it simply looks at the tables
+
+00:12:19,699 --> 00:12:25,550
+that are there and automatically
+
+00:12:21,829 --> 00:12:27,529
+translates Postgres table into an avro
+
+00:12:25,550 --> 00:12:28,940
+schema so it's very low if I had to set
+
+00:12:27,529 --> 00:12:31,010
+this thing up it it just works
+
+00:12:28,940 --> 00:12:32,899
+maybe I should demo what it actually
+
+00:12:31,010 --> 00:12:35,480
+looks like so that you can get a feel
+
+00:12:32,899 --> 00:12:40,310
+for this this is a I don't know how well
+
+00:12:35,480 --> 00:12:44,449
+this will work but we'll see so I have
+
+00:12:40,310 --> 00:12:48,829
+here at the top is a Postgres database
+
+00:12:44,449 --> 00:12:50,329
+with a massive three rows in it and you
+
+00:12:48,829 --> 00:12:52,699
+can see it's got three columns in this
+
+00:12:50,329 --> 00:12:55,399
+table and it's quite straightforward and
+
+00:12:52,699 --> 00:12:57,019
+now what I'll do in this other window
+
+00:12:55,399 --> 00:13:02,329
+here is I will start a take Africa
+
+00:12:57,019 --> 00:13:04,130
+consumer and so this caf-co consumer it
+
+00:13:02,329 --> 00:13:07,160
+also integrates with the avro schema
+
+00:13:04,130 --> 00:13:09,170
+registry so it does a nice thing of the
+
+00:13:07,160 --> 00:13:11,269
+Avro encoded data is actually binary and
+
+00:13:09,170 --> 00:13:13,279
+so it's a bit of a pain to read but it
+
+00:13:11,269 --> 00:13:15,769
+can be transformed into a sort of semi
+
+00:13:13,279 --> 00:13:18,139
+human readable Jason kind of right at
+
+00:13:15,769 --> 00:13:20,120
+the end of the output stage and for that
+
+00:13:18,139 --> 00:13:22,519
+it takes the schema from the registry
+
+00:13:20,120 --> 00:13:23,910
+parses the Avro data and prints it out
+
+00:13:22,519 --> 00:13:28,140
+here as JSON so right now
+
+00:13:23,910 --> 00:13:30,900
+as nothing happening yet so I will now
+
+00:13:28,140 --> 00:13:33,900
+switch over to bottled water so bottled
+
+00:13:30,900 --> 00:13:35,160
+water is this is the client here the
+
+00:13:33,900 --> 00:13:37,710
+little plug-in is really installed in
+
+00:13:35,160 --> 00:13:39,390
+the database server and this is just a
+
+00:13:37,710 --> 00:13:42,600
+command-line tool which you run and I'm
+
+00:13:39,390 --> 00:13:44,700
+going to run it and simply give it my
+
+00:13:42,600 --> 00:13:47,430
+Postgres on localhost into the database
+
+00:13:44,700 --> 00:13:49,860
+name so I run that and you can see here
+
+00:13:47,430 --> 00:13:52,680
+it has captured a consistent snapshot of
+
+00:13:49,860 --> 00:13:54,240
+the database and it is registered some
+
+00:13:52,680 --> 00:13:55,350
+schemas and then it says odor snapshot
+
+00:13:54,240 --> 00:13:59,190
+is complete and now it's streaming
+
+00:13:55,350 --> 00:14:01,320
+changes so if I switch over back to here
+
+00:13:59,190 --> 00:14:04,650
+oh look at the Kafka consumers has found
+
+00:14:01,320 --> 00:14:06,450
+some stuff in particular you can see
+
+00:14:04,650 --> 00:14:08,670
+that it's taken a dump of the database
+
+00:14:06,450 --> 00:14:12,540
+contents here so it's got a key and
+
+00:14:08,670 --> 00:14:17,520
+value and it's exported the 3 30 30
+
+00:14:12,540 --> 00:14:20,100
+years word 110 etc so each row here is a
+
+00:14:17,520 --> 00:14:22,650
+message in Kafka which is taken from one
+
+00:14:20,100 --> 00:14:25,500
+row in the original database and I can I
+
+00:14:22,650 --> 00:14:28,320
+don't know let's try inserted a row for
+
+00:14:25,500 --> 00:14:30,720
+example here 414 and certain and then it
+
+00:14:28,320 --> 00:14:32,910
+appears at the bottom so this is
+
+00:14:30,720 --> 00:14:34,800
+actually gone from Postgres through
+
+00:14:32,910 --> 00:14:38,070
+bottled water through Kafka and back out
+
+00:14:34,800 --> 00:14:43,830
+into the Kafka client and I can update
+
+00:14:38,070 --> 00:14:47,640
+stuff search foo equals 30 in all caps
+
+00:14:43,830 --> 00:14:51,240
+where ID equals 3 say and I do that and
+
+00:14:47,640 --> 00:14:55,170
+I've now got this 30 in all caps of
+
+00:14:51,240 --> 00:15:00,780
+hearing down here so it works on a very
+
+00:14:55,170 --> 00:15:03,170
+small database at least so a couple of
+
+00:15:00,780 --> 00:15:05,370
+interesting things to talk about in the
+
+00:15:03,170 --> 00:15:07,350
+internals of how this works so maybe I
+
+00:15:05,370 --> 00:15:11,360
+can just convey some of the interesting
+
+00:15:07,350 --> 00:15:13,950
+details there one question is this
+
+00:15:11,360 --> 00:15:16,730
+consistent snapshot and stream of
+
+00:15:13,950 --> 00:15:18,450
+changes how how do we make this work so
+
+00:15:16,730 --> 00:15:20,130
+imagine you've got this is an
+
+00:15:18,450 --> 00:15:22,020
+operational database so you've got
+
+00:15:20,130 --> 00:15:23,220
+people writing to it all the time and of
+
+00:15:22,020 --> 00:15:24,960
+course reading from it all the time as
+
+00:15:23,220 --> 00:15:27,090
+well but the rights of the difficult bit
+
+00:15:24,960 --> 00:15:29,970
+so people are constantly writing to this
+
+00:15:27,090 --> 00:15:32,040
+database and we somehow want to build a
+
+00:15:29,970 --> 00:15:34,470
+new search index on that for example how
+
+00:15:32,040 --> 00:15:36,420
+do we do that first thing is we take a
+
+00:15:34,470 --> 00:15:37,410
+consistent snapshot of the entire
+
+00:15:36,420 --> 00:15:39,059
+database
+
+00:15:37,410 --> 00:15:42,029
+and now in a dance database this might
+
+00:15:39,059 --> 00:15:43,589
+take a few hours so we don't want to
+
+00:15:42,029 --> 00:15:45,359
+lock the database for updates during
+
+00:15:43,589 --> 00:15:47,579
+that time we certainly have to be able
+
+00:15:45,359 --> 00:15:49,349
+to continue processing rights while
+
+00:15:47,579 --> 00:15:52,049
+that's nap shot is happening but
+
+00:15:49,349 --> 00:15:54,119
+fortunately Postgres is MVC MVCC
+
+00:15:52,049 --> 00:15:57,209
+concurrency control can handle that with
+
+00:15:54,119 --> 00:15:59,399
+no problems so it can present a snapshot
+
+00:15:57,209 --> 00:16:02,099
+of the database as of one point in time
+
+00:15:59,399 --> 00:16:04,289
+to one transaction and that can
+
+00:16:02,099 --> 00:16:05,699
+transaction can go on for a while and in
+
+00:16:04,289 --> 00:16:08,429
+the meantime others are happily reading
+
+00:16:05,699 --> 00:16:10,679
+and writing latest stuff and that's that
+
+00:16:08,429 --> 00:16:12,679
+one transaction is it's basically doing
+
+00:16:10,679 --> 00:16:15,119
+a select staff from every single table
+
+00:16:12,679 --> 00:16:17,129
+it sees the database as of that
+
+00:16:15,119 --> 00:16:20,519
+particular point in time and it doesn't
+
+00:16:17,129 --> 00:16:22,229
+see like later updates coming in so that
+
+00:16:20,519 --> 00:16:24,149
+snapshot will will dump the entire
+
+00:16:22,229 --> 00:16:26,220
+database and write all of that out every
+
+00:16:24,149 --> 00:16:27,989
+single row becomes a message to Kafka so
+
+00:16:26,220 --> 00:16:30,569
+you've dumped a whole lot of messages
+
+00:16:27,989 --> 00:16:31,829
+into Kafka and one go and now in the
+
+00:16:30,569 --> 00:16:33,839
+meantime of course there are more rights
+
+00:16:31,829 --> 00:16:36,029
+happening while while this is going on
+
+00:16:33,839 --> 00:16:38,939
+so in this diagram we've got here the
+
+00:16:36,029 --> 00:16:40,829
+the users at the top then postgrads on
+
+00:16:38,939 --> 00:16:42,869
+the second level bottled-water on the
+
+00:16:40,829 --> 00:16:47,239
+third level and Kafka at the bottom or
+
+00:16:42,869 --> 00:16:49,739
+or the full text index at the bottom so
+
+00:16:47,239 --> 00:16:53,279
+fortunately the way Postgres implements
+
+00:16:49,739 --> 00:16:54,899
+this is actually very nice this is not
+
+00:16:53,279 --> 00:16:57,419
+really bottled waters work it's just the
+
+00:16:54,899 --> 00:16:59,339
+way that Postgres provides this API it
+
+00:16:57,419 --> 00:17:02,039
+actually queues up all of these changes
+
+00:16:59,339 --> 00:17:03,809
+that have happened here so even if the
+
+00:17:02,039 --> 00:17:05,339
+snapshot takes a couple of hours that's
+
+00:17:03,809 --> 00:17:07,470
+not a problem it's not going to miss any
+
+00:17:05,339 --> 00:17:09,839
+rights because any rights will simply
+
+00:17:07,470 --> 00:17:11,759
+remain there in the log and then when
+
+00:17:09,839 --> 00:17:13,740
+the snapshot completes its going to
+
+00:17:11,759 --> 00:17:15,449
+catch up on all of those rights that had
+
+00:17:13,740 --> 00:17:16,829
+missed in the meantime though it's not
+
+00:17:15,449 --> 00:17:18,689
+actually going to miss any rights
+
+00:17:16,829 --> 00:17:21,329
+it'll just catch up on them when the
+
+00:17:18,689 --> 00:17:23,399
+snapshot is done so then quickly turns
+
+00:17:21,329 --> 00:17:26,370
+through that backlog of Rights that
+
+00:17:23,399 --> 00:17:28,919
+happened and when that is done it can
+
+00:17:26,370 --> 00:17:31,080
+relax so from that point onwards simply
+
+00:17:28,919 --> 00:17:32,850
+every right to the database it gets
+
+00:17:31,080 --> 00:17:34,440
+picked up by bottled water gets sent out
+
+00:17:32,850 --> 00:17:36,690
+to cafeteria gets picked up by the
+
+00:17:34,440 --> 00:17:39,509
+subscribers and does the whole thing
+
+00:17:36,690 --> 00:17:40,889
+within fairly low latency like just now
+
+00:17:39,509 --> 00:17:43,110
+in that example you saw it's about a
+
+00:17:40,889 --> 00:17:44,970
+second or so you could probably tuned up
+
+00:17:43,110 --> 00:17:48,990
+down lower if you fiddle with the with
+
+00:17:44,970 --> 00:17:50,460
+the settings a bit should talk a bit
+
+00:17:48,990 --> 00:17:51,390
+about transactions and concurrency
+
+00:17:50,460 --> 00:17:52,860
+because that's that's
+
+00:17:51,390 --> 00:17:55,440
+kind of an interesting area so that's
+
+00:17:52,860 --> 00:17:57,690
+where you know the a race condition that
+
+00:17:55,440 --> 00:18:00,540
+I mentioned at the beginning that's the
+
+00:17:57,690 --> 00:18:02,310
+problem we had yet another time diagram
+
+00:18:00,540 --> 00:18:05,190
+here so we've in this case we've got two
+
+00:18:02,310 --> 00:18:05,910
+users they are concurrently writing to a
+
+00:18:05,190 --> 00:18:08,820
+database
+
+00:18:05,910 --> 00:18:11,070
+what does bottled-water do of this in
+
+00:18:08,820 --> 00:18:13,080
+this case we've got the first user which
+
+00:18:11,070 --> 00:18:14,910
+is writing a equals one and B equals two
+
+00:18:13,080 --> 00:18:17,490
+and then committing and it's doing that
+
+00:18:14,910 --> 00:18:20,040
+within one Postgres transaction so this
+
+00:18:17,490 --> 00:18:22,500
+happens atomically from the point of
+
+00:18:20,040 --> 00:18:25,170
+view of everyone involved in particular
+
+00:18:22,500 --> 00:18:27,030
+we have to make sure that it remains
+
+00:18:25,170 --> 00:18:28,830
+atomic from the point of view of anyone
+
+00:18:27,030 --> 00:18:33,030
+consuming these streams downstream as
+
+00:18:28,830 --> 00:18:35,370
+well so now the a second user
+
+00:18:33,030 --> 00:18:37,980
+concurrently is writing x equals 3 y
+
+00:18:35,370 --> 00:18:39,030
+equals 4 and committing that to and it's
+
+00:18:37,980 --> 00:18:42,780
+doing that with in some other
+
+00:18:39,030 --> 00:18:45,000
+transaction now again Postgres actually
+
+00:18:42,780 --> 00:18:47,940
+does does this wonderfully well what it
+
+00:18:45,000 --> 00:18:51,180
+provides us here in this API it is
+
+00:18:47,940 --> 00:18:53,850
+plug-in API is that these rights are
+
+00:18:51,180 --> 00:18:56,820
+only seen by bottled water at the point
+
+00:18:53,850 --> 00:18:59,340
+when the transactions commit so even if
+
+00:18:56,820 --> 00:19:02,220
+here the X equal 3 actually happened
+
+00:18:59,340 --> 00:19:03,930
+before any of the transaction 1 that's
+
+00:19:02,220 --> 00:19:06,990
+right actually won't be visible to
+
+00:19:03,930 --> 00:19:09,540
+bottled water right until that transit
+
+00:19:06,990 --> 00:19:11,100
+that red transaction here commits and at
+
+00:19:09,540 --> 00:19:12,390
+the point where it commits then it gives
+
+00:19:11,100 --> 00:19:14,190
+us all of the rights from that
+
+00:19:12,390 --> 00:19:16,770
+transaction in one nice convenient
+
+00:19:14,190 --> 00:19:19,020
+package so what Postgres is actually
+
+00:19:16,770 --> 00:19:21,090
+doing here is reordering the rights to
+
+00:19:19,020 --> 00:19:22,830
+be consistent with the commit ordering
+
+00:19:21,090 --> 00:19:25,260
+it's got an internal thing called a
+
+00:19:22,830 --> 00:19:27,390
+reorder buffer to do exactly this as
+
+00:19:25,260 --> 00:19:28,860
+it's super handy because it means that
+
+00:19:27,390 --> 00:19:31,050
+for example if a transaction aborts
+
+00:19:28,860 --> 00:19:32,670
+halfway through then actually bottled
+
+00:19:31,050 --> 00:19:34,020
+water hasn't even seen any rights from
+
+00:19:32,670 --> 00:19:36,330
+that transaction so there's nothing to
+
+00:19:34,020 --> 00:19:37,250
+rollback or anything it just hasn't even
+
+00:19:36,330 --> 00:19:40,110
+happened
+
+00:19:37,250 --> 00:19:41,760
+so this ordering by commits is also
+
+00:19:40,110 --> 00:19:43,440
+super important for any downstream
+
+00:19:41,760 --> 00:19:45,360
+systems of course because you have to
+
+00:19:43,440 --> 00:19:46,800
+apply the rights in the same order as
+
+00:19:45,360 --> 00:19:48,510
+they were committed to the original
+
+00:19:46,800 --> 00:19:52,590
+database otherwise we get
+
+00:19:48,510 --> 00:19:56,010
+inconsistencies I'll maybe introduced
+
+00:19:52,590 --> 00:19:57,390
+Kafka briefly so we've had it mentioned
+
+00:19:56,010 --> 00:19:59,730
+in quite a few talks already so I don't
+
+00:19:57,390 --> 00:20:01,260
+need to say very much basically you can
+
+00:19:59,730 --> 00:20:03,420
+think of it as a message broker there
+
+00:20:01,260 --> 00:20:04,980
+are various processes which can dump
+
+00:20:03,420 --> 00:20:06,480
+data into its
+
+00:20:04,980 --> 00:20:09,470
+quite often used for kind of clickstream
+
+00:20:06,480 --> 00:20:12,419
+events for example where each event is
+
+00:20:09,470 --> 00:20:14,880
+the fact that a particular user at a
+
+00:20:12,419 --> 00:20:17,700
+particular time loaded a particular URL
+
+00:20:14,880 --> 00:20:19,740
+something like that and you just dump
+
+00:20:17,700 --> 00:20:21,630
+all of these things into Kafka and then
+
+00:20:19,740 --> 00:20:23,340
+anyone who wants to subscribe to those
+
+00:20:21,630 --> 00:20:24,990
+streams can do so and so you can have
+
+00:20:23,340 --> 00:20:28,049
+various different subscribers which are
+
+00:20:24,990 --> 00:20:29,730
+all independent from each other and they
+
+00:20:28,049 --> 00:20:31,740
+can do whatever they need to do build
+
+00:20:29,730 --> 00:20:33,960
+recommender systems or do analytics or
+
+00:20:31,740 --> 00:20:35,429
+monitoring and so on more interesting
+
+00:20:33,960 --> 00:20:38,100
+than this is actually how Kafka is
+
+00:20:35,429 --> 00:20:41,730
+implemented internally which is actually
+
+00:20:38,100 --> 00:20:44,730
+very different from say the AMQP based
+
+00:20:41,730 --> 00:20:48,000
+message brokers like like rabbitmq or
+
+00:20:44,730 --> 00:20:49,650
+ActiveMQ or JMS those types Kafka is
+
+00:20:48,000 --> 00:20:52,020
+quite a different model here which I
+
+00:20:49,650 --> 00:20:54,510
+which actually works really nicely in
+
+00:20:52,020 --> 00:20:56,790
+conjunction with change data capture and
+
+00:20:54,510 --> 00:20:58,380
+it was a Kafka was actually designed
+
+00:20:56,790 --> 00:21:01,169
+with this kind of thing in mind so it's
+
+00:20:58,380 --> 00:21:03,960
+not a coincidence you can think of Kafka
+
+00:21:01,169 --> 00:21:05,820
+as basically append-only files so
+
+00:21:03,960 --> 00:21:08,160
+whenever you publish a message to Kafka
+
+00:21:05,820 --> 00:21:10,020
+when a producer publishes a message it
+
+00:21:08,160 --> 00:21:11,160
+simply gets appended to the end of one
+
+00:21:10,020 --> 00:21:13,309
+of these files indeed these are
+
+00:21:11,160 --> 00:21:15,510
+literally memory mapped files on disk
+
+00:21:13,309 --> 00:21:18,510
+replicated across multiple broker nodes
+
+00:21:15,510 --> 00:21:22,650
+and now if you want to consume these
+
+00:21:18,510 --> 00:21:25,799
+streams as a subscriber what you have as
+
+00:21:22,650 --> 00:21:29,010
+a consumer is an offset a position into
+
+00:21:25,799 --> 00:21:31,590
+one of these append-only files and you
+
+00:21:29,010 --> 00:21:34,110
+only ever read messages in these files
+
+00:21:31,590 --> 00:21:36,240
+sequentially so it's it's very much like
+
+00:21:34,110 --> 00:21:37,669
+you know just opening a file pointer to
+
+00:21:36,240 --> 00:21:40,590
+a file on your local disk and
+
+00:21:37,669 --> 00:21:43,650
+sequentially reading byte by byte except
+
+00:21:40,590 --> 00:21:45,240
+this is message by message and because
+
+00:21:43,650 --> 00:21:48,660
+you're reading sequentially and these
+
+00:21:45,240 --> 00:21:51,510
+this offset into the the file is
+
+00:21:48,660 --> 00:21:53,280
+monotonically increasing it means that a
+
+00:21:51,510 --> 00:21:57,059
+consumer can keep track of its own
+
+00:21:53,280 --> 00:21:58,890
+offset the brokers don't need to keep
+
+00:21:57,059 --> 00:22:00,900
+track of which consumer has seen which
+
+00:21:58,890 --> 00:22:03,630
+message and acknowledgments and stuff
+
+00:22:00,900 --> 00:22:06,090
+like that instead each consumer just has
+
+00:22:03,630 --> 00:22:08,429
+its current position and because it
+
+00:22:06,090 --> 00:22:10,110
+reads sequentially it knows that all of
+
+00:22:08,429 --> 00:22:12,299
+the messages before its current position
+
+00:22:10,110 --> 00:22:14,400
+it's already processed and all of the
+
+00:22:12,299 --> 00:22:16,860
+messages after its current position have
+
+00:22:14,400 --> 00:22:18,480
+not yet been processed it's a super
+
+00:22:16,860 --> 00:22:20,970
+simple model actually
+
+00:22:18,480 --> 00:22:22,710
+and in this case where we want the
+
+00:22:20,970 --> 00:22:26,880
+message is actually be to be totally
+
+00:22:22,710 --> 00:22:28,350
+ordered it works super nicely so let's
+
+00:22:26,880 --> 00:22:30,120
+talk a little bit back to bottled water
+
+00:22:28,350 --> 00:22:32,640
+and how it translates some of the
+
+00:22:30,120 --> 00:22:35,910
+Postgres world over interview the Kafka
+
+00:22:32,640 --> 00:22:38,160
+world so there's some flexibility of
+
+00:22:35,910 --> 00:22:40,200
+changing these discs these decisions but
+
+00:22:38,160 --> 00:22:42,050
+this is kind of the way it's working
+
+00:22:40,200 --> 00:22:45,000
+right now in the open source release
+
+00:22:42,050 --> 00:22:47,730
+whenever you have a table in Postgres
+
+00:22:45,000 --> 00:22:49,500
+that turns into a topic in Cathcart
+
+00:22:47,730 --> 00:22:54,540
+which is kind of the unit at which you
+
+00:22:49,500 --> 00:22:58,110
+can subscribe to messages the DDL the
+
+00:22:54,540 --> 00:22:59,730
+like the form of a table in Postgres
+
+00:22:58,110 --> 00:23:00,930
+first class uses schema to use something
+
+00:22:59,730 --> 00:23:04,140
+means something completely different
+
+00:23:00,930 --> 00:23:05,550
+confusingly but a DDL in Postgres the
+
+00:23:04,140 --> 00:23:07,560
+definition of what the tables look like
+
+00:23:05,550 --> 00:23:09,840
+is translated by bottled water
+
+00:23:07,560 --> 00:23:13,410
+automatically into an avro schema as I
+
+00:23:09,840 --> 00:23:16,410
+mentioned and now every time a row is
+
+00:23:13,410 --> 00:23:19,350
+inserted or updated in a table that
+
+00:23:16,410 --> 00:23:22,560
+turns into a message in Kafka where it
+
+00:23:19,350 --> 00:23:26,340
+takes the primary key of that row as the
+
+00:23:22,560 --> 00:23:27,900
+message key and Kafka in tables which
+
+00:23:26,340 --> 00:23:29,610
+don't have a primary key there's some
+
+00:23:27,900 --> 00:23:32,630
+extra contortions but assume for now
+
+00:23:29,610 --> 00:23:35,580
+that everything has a primary key
+
+00:23:32,630 --> 00:23:38,880
+similar thing goes for an update what it
+
+00:23:35,580 --> 00:23:42,180
+simply does is it logs the new new
+
+00:23:38,880 --> 00:23:44,880
+entire row for a particular primary key
+
+00:23:42,180 --> 00:23:47,130
+so the the message in Kafka is simply
+
+00:23:44,880 --> 00:23:50,490
+the the primary key and the value is the
+
+00:23:47,130 --> 00:23:52,880
+new all of the columns of the new row
+
+00:23:50,490 --> 00:23:55,860
+new version of that row that was written
+
+00:23:52,880 --> 00:23:57,870
+what about deletes in this case that's
+
+00:23:55,860 --> 00:24:00,600
+kind of interesting so we also have the
+
+00:23:57,870 --> 00:24:03,540
+primary key for a delete and in this
+
+00:24:00,600 --> 00:24:05,700
+case what bottled-water does is it sets
+
+00:24:03,540 --> 00:24:09,210
+the value of the message and Kafka to
+
+00:24:05,700 --> 00:24:11,250
+know this is actually a special no null
+
+00:24:09,210 --> 00:24:14,580
+is a special message value that's has
+
+00:24:11,250 --> 00:24:17,220
+special handling in Kafka the way it's
+
+00:24:14,580 --> 00:24:20,520
+special is in the context of log
+
+00:24:17,220 --> 00:24:22,410
+compaction so log compaction is this
+
+00:24:20,520 --> 00:24:26,580
+interesting feature of Kafka that's many
+
+00:24:22,410 --> 00:24:28,770
+have not actually heard of but it it
+
+00:24:26,580 --> 00:24:31,759
+works if you have messages and this kind
+
+00:24:28,770 --> 00:24:33,830
+of key value model so if you just have
+
+00:24:31,759 --> 00:24:37,029
+clickstream event later than compaction
+
+00:24:33,830 --> 00:24:41,330
+doesn't make any sense but if you have
+
+00:24:37,029 --> 00:24:42,950
+this kind of key value model where in
+
+00:24:41,330 --> 00:24:46,240
+this case you can think of this as the
+
+00:24:42,950 --> 00:24:48,350
+the key here is a B or C and the key
+
+00:24:46,240 --> 00:24:50,149
+indicates the primary key of the road
+
+00:24:48,350 --> 00:24:52,580
+that was written and the value is the
+
+00:24:50,149 --> 00:24:54,649
+the new value of the road that was
+
+00:24:52,580 --> 00:24:57,470
+written so in this case here a was set
+
+00:24:54,649 --> 00:25:00,259
+to 42 then B was set to 21 then a was
+
+00:24:57,470 --> 00:25:02,480
+set to 44 and so on and so notice here
+
+00:25:00,259 --> 00:25:04,999
+that you only really need the most
+
+00:25:02,480 --> 00:25:07,519
+recent value for a given row it's like a
+
+00:25:04,999 --> 00:25:10,789
+key value store updating a particular
+
+00:25:07,519 --> 00:25:13,309
+key in place overwriting it with a new
+
+00:25:10,789 --> 00:25:16,249
+value you only really need the latest
+
+00:25:13,309 --> 00:25:17,779
+value so for a given key here in the
+
+00:25:16,249 --> 00:25:22,399
+sequence you actually only need the
+
+00:25:17,779 --> 00:25:25,220
+latest message with a given key and so
+
+00:25:22,399 --> 00:25:27,259
+if you turn on Log compaction in Kafka
+
+00:25:25,220 --> 00:25:31,399
+it's actually allowed to throw away some
+
+00:25:27,259 --> 00:25:33,499
+of the messages if Kafka has seen a
+
+00:25:31,399 --> 00:25:35,450
+later message with the same key it's
+
+00:25:33,499 --> 00:25:38,299
+allowed to throw away that message so it
+
+00:25:35,450 --> 00:25:41,659
+keeps only the most recent message for a
+
+00:25:38,299 --> 00:25:43,369
+particular key but the most recent
+
+00:25:41,659 --> 00:25:45,470
+message for a particular key is kept
+
+00:25:43,369 --> 00:25:48,470
+indefinitely it doesn't get thrown away
+
+00:25:45,470 --> 00:25:50,509
+so unlike the standard Kafka thing where
+
+00:25:48,470 --> 00:25:52,220
+it retains messages for a week or
+
+00:25:50,509 --> 00:25:53,990
+something like that and then just throws
+
+00:25:52,220 --> 00:25:56,210
+them away with a lot compaction it
+
+00:25:53,990 --> 00:25:58,580
+doesn't do that it keeps them forever if
+
+00:25:56,210 --> 00:26:01,909
+there's no new message with a certain
+
+00:25:58,580 --> 00:26:04,340
+key except if you send a message with a
+
+00:26:01,909 --> 00:26:06,710
+key that exists and a null value and
+
+00:26:04,340 --> 00:26:10,490
+that no value that I mentioned earlier
+
+00:26:06,710 --> 00:26:13,129
+that deletes get translated into that no
+
+00:26:10,490 --> 00:26:14,480
+value is a scientifica that it's allowed
+
+00:26:13,129 --> 00:26:16,669
+to completely forget about that
+
+00:26:14,480 --> 00:26:18,889
+particular key so when the next round of
+
+00:26:16,669 --> 00:26:20,509
+log compaction happens it will simply
+
+00:26:18,889 --> 00:26:23,210
+forget about that and the very nice
+
+00:26:20,509 --> 00:26:25,009
+thing with this is now that because if
+
+00:26:23,210 --> 00:26:26,899
+you keep updating the same key or if you
+
+00:26:25,009 --> 00:26:29,299
+insert some stuff and then delete it
+
+00:26:26,899 --> 00:26:30,919
+again it'll eventually disappear that
+
+00:26:29,299 --> 00:26:32,720
+history will disappear from Kafka as
+
+00:26:30,919 --> 00:26:36,019
+well so even though every single write
+
+00:26:32,720 --> 00:26:37,879
+was replicated up to Kafka at the end
+
+00:26:36,019 --> 00:26:39,919
+the size of the Kafka log is only the
+
+00:26:37,879 --> 00:26:41,779
+size of the database so if you can keep
+
+00:26:39,919 --> 00:26:43,700
+the database on disk without running out
+
+00:26:41,779 --> 00:26:44,250
+of disk space you can also keep to keep
+
+00:26:43,700 --> 00:26:47,040
+it
+
+00:26:44,250 --> 00:26:48,960
+Kafka without running out of disk this
+
+00:26:47,040 --> 00:26:51,240
+allows a very nice thing which means
+
+00:26:48,960 --> 00:26:55,140
+which is that if you want to build say a
+
+00:26:51,240 --> 00:26:56,460
+new search index you can actually you
+
+00:26:55,140 --> 00:26:59,310
+know in the search index it it has to be
+
+00:26:56,460 --> 00:27:01,110
+complete you want every single row in
+
+00:26:59,310 --> 00:27:03,780
+your database to be included in your
+
+00:27:01,110 --> 00:27:06,030
+search index so if you want to build a
+
+00:27:03,780 --> 00:27:07,770
+completely fresh index you need to have
+
+00:27:06,030 --> 00:27:11,160
+some kind of dump of the entire database
+
+00:27:07,770 --> 00:27:14,670
+and with LOC compaction in Kafka this is
+
+00:27:11,160 --> 00:27:18,300
+actually possible because a consumer can
+
+00:27:14,670 --> 00:27:22,290
+simply start at offset zero at the very
+
+00:27:18,300 --> 00:27:24,060
+oldest offset in a Kafka stream and it
+
+00:27:22,290 --> 00:27:26,010
+just sequentially churns through slowly
+
+00:27:24,060 --> 00:27:29,430
+consuming message by message and every
+
+00:27:26,010 --> 00:27:31,320
+single message is applied as a writes to
+
+00:27:29,430 --> 00:27:34,200
+say the search index or whatever it's
+
+00:27:31,320 --> 00:27:36,180
+updating and you know maybe there are
+
+00:27:34,200 --> 00:27:37,800
+multiple messages with the same key in
+
+00:27:36,180 --> 00:27:40,830
+which case the later ones overwrite the
+
+00:27:37,800 --> 00:27:42,930
+earlier ones no problem and eventually
+
+00:27:40,830 --> 00:27:46,110
+after turning through this for month for
+
+00:27:42,930 --> 00:27:47,430
+a while it reaches the head and then
+
+00:27:46,110 --> 00:27:50,390
+it's got an up-to-date copy of the
+
+00:27:47,430 --> 00:27:52,560
+entire data set because because we have
+
+00:27:50,390 --> 00:27:54,750
+this log compaction here we know that
+
+00:27:52,560 --> 00:27:57,570
+the most recent message for a given key
+
+00:27:54,750 --> 00:27:59,970
+is still there in the log we actually
+
+00:27:57,570 --> 00:28:03,210
+have a complete history you complete in
+
+00:27:59,970 --> 00:28:05,250
+in the sense of there no missing rows so
+
+00:28:03,210 --> 00:28:07,350
+if something got updated multiple times
+
+00:28:05,250 --> 00:28:10,140
+then those intermediate states might
+
+00:28:07,350 --> 00:28:12,180
+have got log compacted away but the most
+
+00:28:10,140 --> 00:28:14,370
+recent version of every row is there so
+
+00:28:12,180 --> 00:28:16,140
+you can simply turn through this entire
+
+00:28:14,370 --> 00:28:18,600
+thing and at the end you've got an
+
+00:28:16,140 --> 00:28:20,670
+up-to-date copy of your data in some
+
+00:28:18,600 --> 00:28:23,190
+replicated system but now you just
+
+00:28:20,670 --> 00:28:25,380
+continue consuming and it keeps itself
+
+00:28:23,190 --> 00:28:27,360
+up-to-date so there's no kind of
+
+00:28:25,380 --> 00:28:29,610
+switchover between like building an
+
+00:28:27,360 --> 00:28:31,260
+index in a batch process and then
+
+00:28:29,610 --> 00:28:32,580
+switching over to a stream process to
+
+00:28:31,260 --> 00:28:35,160
+maintain that index and keep it
+
+00:28:32,580 --> 00:28:37,680
+up-to-date that's just one way of
+
+00:28:35,160 --> 00:28:39,120
+building this which is when you want a
+
+00:28:37,680 --> 00:28:40,620
+completely fresh index you start at the
+
+00:28:39,120 --> 00:28:42,930
+front and it may take a while but that's
+
+00:28:40,620 --> 00:28:45,080
+alright and then thereafter just keeps
+
+00:28:42,930 --> 00:28:49,950
+itself up to date and it just seamlessly
+
+00:28:45,080 --> 00:28:51,150
+transitions from one to the other if you
+
+00:28:49,950 --> 00:28:53,820
+want to know a bit about some of the
+
+00:28:51,150 --> 00:28:56,670
+internals of how or Postgres and bottled
+
+00:28:53,820 --> 00:28:57,870
+water actually do this this you know I
+
+00:28:56,670 --> 00:29:00,600
+mentioned this is a logical
+
+00:28:57,870 --> 00:29:05,370
+decoding plug-in I will just briefly
+
+00:29:00,600 --> 00:29:07,440
+explain how that works so the recent
+
+00:29:05,370 --> 00:29:09,330
+Postgres has managed to only launch this
+
+00:29:07,440 --> 00:29:10,410
+last year even though post credit of
+
+00:29:09,330 --> 00:29:13,350
+course has been around for a very long
+
+00:29:10,410 --> 00:29:15,240
+time the reason for that has to do with
+
+00:29:13,350 --> 00:29:18,809
+the internal data structures that
+
+00:29:15,240 --> 00:29:22,530
+Postgres uses for storing its data and
+
+00:29:18,809 --> 00:29:24,450
+for replicating its data so you probably
+
+00:29:22,530 --> 00:29:27,120
+know what a b-tree is it's the most
+
+00:29:24,450 --> 00:29:29,520
+common type of index in a lot of sudden
+
+00:29:27,120 --> 00:29:31,350
+mood relational databases so you've got
+
+00:29:29,520 --> 00:29:32,790
+this kind of tree structure and you
+
+00:29:31,350 --> 00:29:34,620
+could by following the pointers from one
+
+00:29:32,790 --> 00:29:35,880
+block to an X you can find the
+
+00:29:34,620 --> 00:29:37,950
+particular record that you're looking
+
+00:29:35,880 --> 00:29:40,170
+for now what happens if you need to
+
+00:29:37,950 --> 00:29:42,510
+update an index if you're inserting some
+
+00:29:40,170 --> 00:29:44,820
+value for example if it doesn't fit in
+
+00:29:42,510 --> 00:29:47,070
+an existing block or page of this index
+
+00:29:44,820 --> 00:29:51,030
+you might have to split it in two and so
+
+00:29:47,070 --> 00:29:53,400
+now you have to write several several of
+
+00:29:51,030 --> 00:29:55,800
+these pages as kind of one atomic unit
+
+00:29:53,400 --> 00:29:58,470
+if you think about what what happens if
+
+00:29:55,800 --> 00:30:00,330
+the database crashes after it's updated
+
+00:29:58,470 --> 00:30:02,460
+only some of these pages of the b-tree
+
+00:30:00,330 --> 00:30:05,370
+well you've got a corrupted b-tree so
+
+00:30:02,460 --> 00:30:07,050
+that's not a nice situation to be in but
+
+00:30:05,370 --> 00:30:08,730
+of course people figure this out decades
+
+00:30:07,050 --> 00:30:11,220
+ago and they introduced the writer
+
+00:30:08,730 --> 00:30:13,170
+headlock and the rule of the writer head
+
+00:30:11,220 --> 00:30:17,340
+log is that before you make any changes
+
+00:30:13,170 --> 00:30:19,290
+to your disk structures of the you know
+
+00:30:17,340 --> 00:30:21,390
+the actual database contents if you want
+
+00:30:19,290 --> 00:30:23,429
+to change a page of b-tree for example
+
+00:30:21,390 --> 00:30:26,040
+you have to first write it to the right
+
+00:30:23,429 --> 00:30:30,120
+head log the right head log is basically
+
+00:30:26,040 --> 00:30:32,010
+this log of changes saying indicating
+
+00:30:30,120 --> 00:30:34,020
+your intent of what you're about to
+
+00:30:32,010 --> 00:30:36,809
+update in some of these internal data
+
+00:30:34,020 --> 00:30:38,760
+structures and only once the right head
+
+00:30:36,809 --> 00:30:40,470
+log has hit disk and it's been F synced
+
+00:30:38,760 --> 00:30:42,570
+only then are you allowed to go and
+
+00:30:40,470 --> 00:30:44,250
+modify the other disk pages and this
+
+00:30:42,570 --> 00:30:46,290
+means now if the database crashes while
+
+00:30:44,250 --> 00:30:48,030
+writing the log then your actual data
+
+00:30:46,290 --> 00:30:50,250
+structures haven't yet been modified so
+
+00:30:48,030 --> 00:30:52,740
+it's fine and if the database crashes
+
+00:30:50,250 --> 00:30:54,600
+while modifying the b-tree then the log
+
+00:30:52,740 --> 00:30:56,280
+contains the information of what changes
+
+00:30:54,600 --> 00:30:58,860
+were about to happen and so you can
+
+00:30:56,280 --> 00:31:01,020
+recover and so databases have been doing
+
+00:30:58,860 --> 00:31:03,630
+this for a very long time and Postgres
+
+00:31:01,020 --> 00:31:04,260
+uses the same writer header log for
+
+00:31:03,630 --> 00:31:07,320
+replication
+
+00:31:04,260 --> 00:31:09,270
+so if you've got a standby or leader
+
+00:31:07,320 --> 00:31:09,810
+follower master/slave whatever you want
+
+00:31:09,270 --> 00:31:11,520
+to call it
+
+00:31:09,810 --> 00:31:13,500
+replication setup
+
+00:31:11,520 --> 00:31:16,860
+the way it does that is actually by
+
+00:31:13,500 --> 00:31:19,110
+shipping these chunks of log and/or
+
+00:31:16,860 --> 00:31:21,929
+streaming an ongoing stream of writer
+
+00:31:19,110 --> 00:31:25,080
+head log from the leader which accepts
+
+00:31:21,929 --> 00:31:25,800
+the right down to the follower this is
+
+00:31:25,080 --> 00:31:27,570
+different
+
+00:31:25,800 --> 00:31:30,240
+compared to what's my sequel does for
+
+00:31:27,570 --> 00:31:33,210
+example so my sequels replication log is
+
+00:31:30,240 --> 00:31:34,890
+a logical log which actually contains
+
+00:31:33,210 --> 00:31:39,059
+the kind of row level inserts updates
+
+00:31:34,890 --> 00:31:42,809
+deletes whereas in Postgres this writer
+
+00:31:39,059 --> 00:31:44,610
+head log is describing modifications to
+
+00:31:42,809 --> 00:31:47,070
+internal data structures on a kind of
+
+00:31:44,610 --> 00:31:50,610
+byte level so it's basically impossible
+
+00:31:47,070 --> 00:31:52,290
+for anyone but Postgres to decode this
+
+00:31:50,610 --> 00:31:54,330
+right head lock because it depends
+
+00:31:52,290 --> 00:31:58,620
+entirely on all of the data structures
+
+00:31:54,330 --> 00:32:00,750
+that Postgres internally has and for
+
+00:31:58,620 --> 00:32:02,280
+that reason also you can't have for
+
+00:32:00,750 --> 00:32:04,320
+example a leader and follower on two
+
+00:32:02,280 --> 00:32:06,390
+different versions of Postgres - like
+
+00:32:04,320 --> 00:32:08,040
+major versions difference because they
+
+00:32:06,390 --> 00:32:10,530
+can't actually parse each other's writer
+
+00:32:08,040 --> 00:32:15,240
+head log because it's so implementation
+
+00:32:10,530 --> 00:32:19,230
+detail ii so if you want to do something
+
+00:32:15,240 --> 00:32:21,570
+like hook into this log and move it out
+
+00:32:19,230 --> 00:32:24,090
+to separate systems well you need some
+
+00:32:21,570 --> 00:32:27,510
+way of kind of consuming that log that's
+
+00:32:24,090 --> 00:32:29,910
+okay the writer head log and you process
+
+00:32:27,510 --> 00:32:32,220
+it sequentially and it's very much very
+
+00:32:29,910 --> 00:32:34,170
+similar actually to Kafka a Kafka
+
+00:32:32,220 --> 00:32:35,850
+consumer in that you know it just
+
+00:32:34,170 --> 00:32:38,400
+sequentially works its way through it
+
+00:32:35,850 --> 00:32:41,580
+but additionally you have to somehow
+
+00:32:38,400 --> 00:32:43,200
+take these internal data structures that
+
+00:32:41,580 --> 00:32:45,660
+are represented in the writer head log
+
+00:32:43,200 --> 00:32:47,670
+and expose them to applications as
+
+00:32:45,660 --> 00:32:49,980
+inserts updates and deletes which is the
+
+00:32:47,670 --> 00:32:51,780
+kind of stuff we can understand at an
+
+00:32:49,980 --> 00:32:53,640
+application level and that's really
+
+00:32:51,780 --> 00:32:57,809
+where this this little plugin here comes
+
+00:32:53,640 --> 00:33:00,210
+in so the what logical decoding here
+
+00:32:57,809 --> 00:33:02,850
+means is take the right head log which
+
+00:33:00,210 --> 00:33:05,400
+describes the physical modifications to
+
+00:33:02,850 --> 00:33:07,950
+the data structures on disk and decode
+
+00:33:05,400 --> 00:33:11,700
+it into these logical ie insert update
+
+00:33:07,950 --> 00:33:13,620
+delete type events which and which make
+
+00:33:11,700 --> 00:33:15,690
+sense to an application and then there's
+
+00:33:13,620 --> 00:33:17,880
+a plugin which can take those events
+
+00:33:15,690 --> 00:33:19,919
+further which are callbacks and turned
+
+00:33:17,880 --> 00:33:22,110
+them into bytes on a wire and that's
+
+00:33:19,919 --> 00:33:24,210
+then what's the bottled water demon can
+
+00:33:22,110 --> 00:33:25,049
+subscribe to and so on so this is how
+
+00:33:24,210 --> 00:33:28,110
+the
+
+00:33:25,049 --> 00:33:29,429
+system fits together in the end so
+
+00:33:28,110 --> 00:33:31,409
+hopefully that's giving you a bit of an
+
+00:33:29,429 --> 00:33:33,269
+idea of of what's going on here here's
+
+00:33:31,409 --> 00:33:37,200
+here's a whole list of other things that
+
+00:33:33,269 --> 00:33:38,789
+might be interesting so this idea of
+
+00:33:37,200 --> 00:33:40,940
+change data capture I actually ripped
+
+00:33:38,789 --> 00:33:42,509
+off shamelessly from LinkedIn's
+
+00:33:40,940 --> 00:33:44,610
+implementation of change data capture
+
+00:33:42,509 --> 00:33:47,340
+called data bus which is the second one
+
+00:33:44,610 --> 00:33:47,970
+on this list Facebook has a kind of
+
+00:33:47,340 --> 00:33:49,889
+similar issue
+
+00:33:47,970 --> 00:33:53,129
+looking system called wormhole which is
+
+00:33:49,889 --> 00:33:54,629
+the third one on this list so they're
+
+00:33:53,129 --> 00:33:56,100
+they're described in papers and they're
+
+00:33:54,629 --> 00:33:57,779
+they're very nice to read actually and
+
+00:33:56,100 --> 00:33:59,940
+also give a bit of background on the
+
+00:33:57,779 --> 00:34:01,440
+motivation of why these systems were
+
+00:33:59,940 --> 00:34:03,899
+built and some of the details of how
+
+00:34:01,440 --> 00:34:05,519
+they were implemented so for example
+
+00:34:03,899 --> 00:34:07,790
+it's possible to do similar things with
+
+00:34:05,519 --> 00:34:10,799
+triggers rather than parsing the log
+
+00:34:07,790 --> 00:34:12,240
+which has pros and cons don't really
+
+00:34:10,799 --> 00:34:14,490
+have time to go into it too much detail
+
+00:34:12,240 --> 00:34:17,760
+and a few other things kind of on the
+
+00:34:14,490 --> 00:34:19,740
+general topic if you're interested so if
+
+00:34:17,760 --> 00:34:22,109
+you want to take a look at bottled water
+
+00:34:19,740 --> 00:34:23,669
+it's it's very much alpha stage software
+
+00:34:22,109 --> 00:34:26,609
+I wouldn't recommend it for production
+
+00:34:23,669 --> 00:34:28,619
+use yet but it's kind of that I think
+
+00:34:26,609 --> 00:34:31,290
+the code is not too shabby it's well you
+
+00:34:28,619 --> 00:34:35,669
+saw it working just now it's open source
+
+00:34:31,290 --> 00:34:36,929
+at this URL on github there's also again
+
+00:34:35,669 --> 00:34:38,490
+the link to the book if you're
+
+00:34:36,929 --> 00:34:39,809
+interested in that kind of thing and I
+
+00:34:38,490 --> 00:34:41,839
+believe we still have a few minutes for
+
+00:34:39,809 --> 00:34:41,839
+questions
+
+00:34:48,950 --> 00:34:51,010
+
+YouTube URL: https://www.youtube.com/watch?v=ZAZJqEKUl3U
+
+

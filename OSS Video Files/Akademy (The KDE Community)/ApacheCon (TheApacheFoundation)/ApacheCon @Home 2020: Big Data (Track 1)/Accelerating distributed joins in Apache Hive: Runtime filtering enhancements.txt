@@ -1,0 +1,3385 @@
+Title: Accelerating distributed joins in Apache Hive: Runtime filtering enhancements
+Publication date: 2020-10-21
+Playlist: ApacheCon @Home 2020: Big Data (Track 1)
+Description: 
+	Accelerating distributed joins in Apache Hive: Runtime filtering enhancements
+Panagiotis Garefalakis, Stamatis Zampetakis
+
+A presentation from ApacheCon @Home 2020
+https://apachecon.com/acah2020/
+
+Apache Hive is an open-source relational database system that is widely adopted by several organizations for big data analytic workloads. It combines traditional MPP (massively parallel processing) techniques with more recent cloud computing concepts to achieve the increased scalability and high performance needed by modern data intensive applications. Even though it was originally tailored towards long running data warehousing queries, its architecture recently changed with the introduction of LLAP (Live Long and Process) layer. Instead of regular containers, LLAP utilizes long-running executors to exploit data sharing and caching possibilities within and across queries. Executors eliminate unnecessary disk IO overhead and thus reduce the latency of interactive BI (business intelligence) queries by orders of magnitude. However, as container startup cost and IO overhead is now minimized, the need to effectively utilize memory and CPU resources across long-running executors in the cluster is becoming increasingly essential. For instance, in a variety of production workloads, we noticed that the memory bandwidth of early decoding all table columns for every row, even when this row is dropped later on, is starting to overwhelm the performance of single query execution. In this talk, we focus on some of the optimizations we introduced in Hive 4.0 to increase CPU efficiency and save memory allocations. In particular, we describe the lazy decoding (or row-level filtering) and composite bloom-filters optimizations that greatly improve the performance of queries containing broadcast joins, reducing their runtime by up to 50%. Over several production and synthetic workloads, we show the benefit of the newly introduced optimizations as part of Cloudera’s cloud-native Data Warehouse engine. At the same time, the community can directly benefit from the presented features as are they 100% open-source!
+
+Panagiotis Garefalakis:
+Panagiotis Garefalakis is a Software Engineer at Cloudera where he is part of the Data Warehousing team. He holds a Ph.D. in Computer Science from Imperial College London were he was affiliated with the Large-Scale Data & Systems (LSDS) group. His interests lie within the broad area of systems including large-scale distributed systems, cluster resource management, and big data processing.
+Stamatis Zampetakis:
+Stamatis Zampetakis is a Software Engineer at Cloudera working on the Data Warehousing product. He holds a PhD in Big Data management on massively parallel systems
+Captions: 
+	00:00:06,420 --> 00:00:10,640
+[Music]
+
+00:00:14,160 --> 00:00:17,230
+[Music]
+
+00:00:26,080 --> 00:00:29,599
+i think
+
+00:00:26,720 --> 00:00:32,480
+that the recording is already on so we
+
+00:00:29,599 --> 00:00:34,719
+might as well let's get started and then
+
+00:00:32,480 --> 00:00:36,320
+yeah we can see how it goes i don't want
+
+00:00:34,719 --> 00:00:39,360
+to miss the demo
+
+00:00:36,320 --> 00:00:42,000
+so thanks everybody for joining
+
+00:00:39,360 --> 00:00:44,559
+um this talk is about accelerating the
+
+00:00:42,000 --> 00:00:48,320
+cb joints in apache hive using
+
+00:00:44,559 --> 00:00:48,320
+runtime filtering enhancements
+
+00:00:48,559 --> 00:00:52,320
+um yeah thanks thanks thanks martin for
+
+00:00:51,120 --> 00:00:54,719
+that
+
+00:00:52,320 --> 00:00:56,960
+for letting us know a few words about us
+
+00:00:54,719 --> 00:00:58,640
+i'm panos or panayotis
+
+00:00:56,960 --> 00:01:00,559
+i'm a software engineer at caldera part
+
+00:00:58,640 --> 00:01:01,359
+of the runtime team and i'm currently
+
+00:01:00,559 --> 00:01:03,520
+working on
+
+00:01:01,359 --> 00:01:05,680
+apache hive work and test open source
+
+00:01:03,520 --> 00:01:09,439
+projects before that i was
+
+00:01:05,680 --> 00:01:11,680
+a pc student at imperial college london
+
+00:01:09,439 --> 00:01:13,760
+where i was working on distributed
+
+00:01:11,680 --> 00:01:15,280
+systems
+
+00:01:13,760 --> 00:01:16,880
+my colleague here is thematics he's also
+
+00:01:15,280 --> 00:01:18,240
+the internet cloudera he's part of the
+
+00:01:16,880 --> 00:01:20,080
+query optimizer team
+
+00:01:18,240 --> 00:01:22,080
+and he's working mostly on apache hive
+
+00:01:20,080 --> 00:01:23,520
+and cal site project he holds a psd
+
+00:01:22,080 --> 00:01:26,560
+nether management from
+
+00:01:23,520 --> 00:01:28,159
+indriya and paris said university so let
+
+00:01:26,560 --> 00:01:29,439
+me start by providing some background
+
+00:01:28,159 --> 00:01:31,360
+about about hive here
+
+00:01:29,439 --> 00:01:33,280
+apache hive was one of the first sql
+
+00:01:31,360 --> 00:01:34,240
+processing systems working really well
+
+00:01:33,280 --> 00:01:35,920
+with hadoop
+
+00:01:34,240 --> 00:01:37,360
+it's been around for more than a decade
+
+00:01:35,920 --> 00:01:39,600
+started back at facebook
+
+00:01:37,360 --> 00:01:41,360
+back at 2008 and it has gone through
+
+00:01:39,600 --> 00:01:43,520
+major changes over the years
+
+00:01:41,360 --> 00:01:44,960
+to broaden the project scope and the use
+
+00:01:43,520 --> 00:01:47,200
+cases that it cover
+
+00:01:44,960 --> 00:01:49,280
+so we're currently in a position that we
+
+00:01:47,200 --> 00:01:51,040
+can run low latency multitasking queries
+
+00:01:49,280 --> 00:01:52,640
+on petabytes of data
+
+00:01:51,040 --> 00:01:55,280
+but of course this was not always the
+
+00:01:52,640 --> 00:01:57,200
+case in the early days um high started
+
+00:01:55,280 --> 00:01:58,880
+at a scalable sql processing system
+
+00:01:57,200 --> 00:02:00,399
+mostly targeting batch processing on
+
+00:01:58,880 --> 00:02:02,240
+read-only data
+
+00:02:00,399 --> 00:02:04,000
+it worked only with mapreduce and it
+
+00:02:02,240 --> 00:02:05,119
+supported only a subset of the sql
+
+00:02:04,000 --> 00:02:07,759
+language called
+
+00:02:05,119 --> 00:02:09,119
+hype dual in its second and third the
+
+00:02:07,759 --> 00:02:10,959
+version release hype went through some
+
+00:02:09,119 --> 00:02:13,840
+major changes to improve its
+
+00:02:10,959 --> 00:02:14,400
+latency its scalability and its sql
+
+00:02:13,840 --> 00:02:15,920
+support
+
+00:02:14,400 --> 00:02:17,920
+this was also known as the stinger
+
+00:02:15,920 --> 00:02:20,239
+initiative with energy nets initiative
+
+00:02:17,920 --> 00:02:22,160
+which was a community initiative to
+
+00:02:20,239 --> 00:02:24,480
+change the execution engine in hive
+
+00:02:22,160 --> 00:02:26,959
+including tests and spark run times
+
+00:02:24,480 --> 00:02:28,560
+adding vectorization so we now have bad
+
+00:02:26,959 --> 00:02:29,440
+processing on column vectors instead of
+
+00:02:28,560 --> 00:02:32,480
+just rows
+
+00:02:29,440 --> 00:02:34,160
+and also replace them traditional
+
+00:02:32,480 --> 00:02:35,680
+container execution model with
+
+00:02:34,160 --> 00:02:38,239
+persistent demons called the
+
+00:02:35,680 --> 00:02:38,959
+long live and process also known as llap
+
+00:02:38,239 --> 00:02:41,120
+demons
+
+00:02:38,959 --> 00:02:42,480
+these linear ep demons enabled low
+
+00:02:41,120 --> 00:02:44,640
+latency execution
+
+00:02:42,480 --> 00:02:45,760
+and data casting across users and
+
+00:02:44,640 --> 00:02:47,680
+queries
+
+00:02:45,760 --> 00:02:49,360
+so we're currently on the fourth version
+
+00:02:47,680 --> 00:02:51,280
+of five high four and the community
+
+00:02:49,360 --> 00:02:52,560
+introduced a number of extra compiler
+
+00:02:51,280 --> 00:02:54,879
+runtime optimizations
+
+00:02:52,560 --> 00:02:56,959
+to even further improve its efficiency
+
+00:02:54,879 --> 00:02:59,120
+such as materialized beauty writing
+
+00:02:56,959 --> 00:03:00,239
+and joint support semi-generally
+
+00:02:59,120 --> 00:03:03,360
+reduction and
+
+00:03:00,239 --> 00:03:04,560
+lazy materialization and those two those
+
+00:03:03,360 --> 00:03:08,400
+last two optimizations
+
+00:03:04,560 --> 00:03:10,000
+is the focus of today's presentation
+
+00:03:08,400 --> 00:03:11,440
+so all these optimizations i mentioned
+
+00:03:10,000 --> 00:03:12,480
+there many many more that i don't have
+
+00:03:11,440 --> 00:03:14,480
+time to mention
+
+00:03:12,480 --> 00:03:16,800
+um enabled the users in cloud there are
+
+00:03:14,480 --> 00:03:18,879
+customers who do crazy things with hive
+
+00:03:16,800 --> 00:03:20,800
+that were not doable in the early
+
+00:03:18,879 --> 00:03:22,159
+versions so we have customers in cloud
+
+00:03:20,800 --> 00:03:22,800
+there in a variety of sectors like
+
+00:03:22,159 --> 00:03:24,959
+banking
+
+00:03:22,800 --> 00:03:26,400
+telecommunication automotive life
+
+00:03:24,959 --> 00:03:28,239
+sciences technology
+
+00:03:26,400 --> 00:03:30,000
+that around a quarter of a million bi
+
+00:03:28,239 --> 00:03:31,760
+queries on a single cluster
+
+00:03:30,000 --> 00:03:33,760
+or we have thousands of analysts running
+
+00:03:31,760 --> 00:03:35,760
+subsequent obvious latency queries
+
+00:03:33,760 --> 00:03:37,200
+on a petabyte of data and those things
+
+00:03:35,760 --> 00:03:38,080
+were pretty unthinkable in the early
+
+00:03:37,200 --> 00:03:39,760
+days of five
+
+00:03:38,080 --> 00:03:41,599
+and even at the very least indeed they
+
+00:03:39,760 --> 00:03:43,599
+were not even doable so the community
+
+00:03:41,599 --> 00:03:46,159
+did a great job over the years
+
+00:03:43,599 --> 00:03:46,879
+to improve this project and move a step
+
+00:03:46,159 --> 00:03:50,480
+forward
+
+00:03:46,879 --> 00:03:51,920
+and support all those use cases
+
+00:03:50,480 --> 00:03:54,159
+for those of you who are not aware of
+
+00:03:51,920 --> 00:03:56,560
+the hive design or hive architecture
+
+00:03:54,159 --> 00:03:58,959
+let me go really really fast through it
+
+00:03:56,560 --> 00:04:00,959
+so we have on the upper left side
+
+00:03:58,959 --> 00:04:02,080
+users that connect to hive server to
+
+00:04:00,959 --> 00:04:03,360
+submit their queries
+
+00:04:02,080 --> 00:04:05,519
+to submit their queries they're using
+
+00:04:03,360 --> 00:04:08,000
+the favorite client like odbc
+
+00:04:05,519 --> 00:04:10,239
+jdbc or blind b line is inclined
+
+00:04:08,000 --> 00:04:11,760
+included with hive distribution
+
+00:04:10,239 --> 00:04:13,680
+hive server tool will pass those queries
+
+00:04:11,760 --> 00:04:15,360
+and compile them and might also contact
+
+00:04:13,680 --> 00:04:16,880
+the meta store the metastar is the data
+
+00:04:15,360 --> 00:04:18,720
+catalog the cluster containing
+
+00:04:16,880 --> 00:04:20,239
+a metadata information about the tables
+
+00:04:18,720 --> 00:04:22,079
+and column column statistics
+
+00:04:20,239 --> 00:04:24,479
+that help the optimization of the query
+
+00:04:22,079 --> 00:04:26,560
+plan after compiling the queries you
+
+00:04:24,479 --> 00:04:28,400
+will create a dac of executable tasks
+
+00:04:26,560 --> 00:04:30,160
+that will be submitted to the em
+
+00:04:28,400 --> 00:04:31,759
+the aem is part of the query coordinator
+
+00:04:30,160 --> 00:04:33,360
+agency you can see here we have a few
+
+00:04:31,759 --> 00:04:35,520
+coordinators in this
+
+00:04:33,360 --> 00:04:36,960
+cluster in this hadoop cluster
+
+00:04:35,520 --> 00:04:38,320
+coordinator will be responsible for the
+
+00:04:36,960 --> 00:04:40,080
+execution of the query
+
+00:04:38,320 --> 00:04:42,000
+and also returning the results back to
+
+00:04:40,080 --> 00:04:44,720
+the user for the execution part it will
+
+00:04:42,000 --> 00:04:45,680
+submit the tasks the work to each llap
+
+00:04:44,720 --> 00:04:47,440
+daemon
+
+00:04:45,680 --> 00:04:49,360
+and within the led demon we have a bunch
+
+00:04:47,440 --> 00:04:50,080
+of exciters running those tasks in
+
+00:04:49,360 --> 00:04:51,600
+parallel
+
+00:04:50,080 --> 00:04:53,680
+those tasks might also retrieve some
+
+00:04:51,600 --> 00:04:55,520
+data depending on the execution from
+
+00:04:53,680 --> 00:04:57,520
+the storage layer the storage layer can
+
+00:04:55,520 --> 00:05:00,320
+be anything from hdfs an
+
+00:04:57,520 --> 00:05:00,720
+objector like s3 or any external engine
+
+00:05:00,320 --> 00:05:04,320
+like
+
+00:05:00,720 --> 00:05:06,560
+apache draid so if we zoom in a bit on
+
+00:05:04,320 --> 00:05:07,919
+the llp demon anatomy to see how the
+
+00:05:06,560 --> 00:05:09,919
+actual execution happens
+
+00:05:07,919 --> 00:05:11,680
+we have the query coordinators agent on
+
+00:05:09,919 --> 00:05:12,560
+the left which are outside of the led
+
+00:05:11,680 --> 00:05:14,720
+modules of course
+
+00:05:12,560 --> 00:05:16,080
+they submit the tasks to the world cube
+
+00:05:14,720 --> 00:05:18,000
+and those tasks are
+
+00:05:16,080 --> 00:05:19,600
+known in hive as query fragments those
+
+00:05:18,000 --> 00:05:20,560
+query fragments are pretty much a fancy
+
+00:05:19,600 --> 00:05:22,560
+word of saying
+
+00:05:20,560 --> 00:05:25,440
+one or more operators other part of a
+
+00:05:22,560 --> 00:05:27,759
+single query and they run together
+
+00:05:25,440 --> 00:05:30,240
+those fragments enter the work queue and
+
+00:05:27,759 --> 00:05:31,919
+we have a priority within that worldview
+
+00:05:30,240 --> 00:05:33,600
+with some smartness built in it the
+
+00:05:31,919 --> 00:05:35,440
+smartness prioritizes
+
+00:05:33,600 --> 00:05:37,199
+these fragments based on the expected
+
+00:05:35,440 --> 00:05:39,360
+runtime so shorter
+
+00:05:37,199 --> 00:05:40,880
+runtime fragments will always be higher
+
+00:05:39,360 --> 00:05:42,800
+priority because we assume
+
+00:05:40,880 --> 00:05:44,800
+that those fragments are more sensitive
+
+00:05:42,800 --> 00:05:46,400
+to latency
+
+00:05:44,800 --> 00:05:48,000
+then an execution component we have a
+
+00:05:46,400 --> 00:05:49,759
+bunch of accelerators that
+
+00:05:48,000 --> 00:05:51,520
+are in parallel pulling fragments from
+
+00:05:49,759 --> 00:05:53,120
+that you and whenever they're done
+
+00:05:51,520 --> 00:05:54,960
+they will pull another fragment another
+
+00:05:53,120 --> 00:05:56,400
+fragment until there is no more work to
+
+00:05:54,960 --> 00:05:58,560
+be done
+
+00:05:56,400 --> 00:06:00,400
+then on the right side we have um the io
+
+00:05:58,560 --> 00:06:03,600
+layer consisting of the iotu
+
+00:06:00,400 --> 00:06:07,120
+and the io elevator layer or component
+
+00:06:03,600 --> 00:06:10,240
+its um io request is given a synchronous
+
+00:06:07,120 --> 00:06:11,680
+iot and then the io elevator
+
+00:06:10,240 --> 00:06:13,600
+component will initialize the
+
+00:06:11,680 --> 00:06:15,120
+appropriate leader for its request
+
+00:06:13,600 --> 00:06:17,440
+for the particular data format we're
+
+00:06:15,120 --> 00:06:18,080
+reading data from and then it might also
+
+00:06:17,440 --> 00:06:19,600
+contact
+
+00:06:18,080 --> 00:06:22,960
+the data storage layer to retrieve the
+
+00:06:19,600 --> 00:06:24,319
+data um from s3 or from hdfs
+
+00:06:22,960 --> 00:06:25,919
+and because this can be an expensive
+
+00:06:24,319 --> 00:06:26,319
+step retrieving data from an external
+
+00:06:25,919 --> 00:06:28,160
+layer
+
+00:06:26,319 --> 00:06:30,000
+we also have an optional data caching
+
+00:06:28,160 --> 00:06:30,639
+layer this data casting layer is pretty
+
+00:06:30,000 --> 00:06:32,479
+much
+
+00:06:30,639 --> 00:06:34,240
+a read through cast and whenever we
+
+00:06:32,479 --> 00:06:34,560
+retrieve some data the ilevator can
+
+00:06:34,240 --> 00:06:36,560
+check
+
+00:06:34,560 --> 00:06:38,880
+if the data is already there within the
+
+00:06:36,560 --> 00:06:40,160
+cast we will decompress it and give it
+
+00:06:38,880 --> 00:06:41,919
+back to the execution
+
+00:06:40,160 --> 00:06:44,000
+engine without going to the external
+
+00:06:41,919 --> 00:06:44,960
+layer which is the expensive step i
+
+00:06:44,000 --> 00:06:47,919
+mentioned
+
+00:06:44,960 --> 00:06:48,800
+of course this data cast is fine-grained
+
+00:06:47,919 --> 00:06:50,160
+and compact
+
+00:06:48,800 --> 00:06:51,759
+it's fine-grained because we keep
+
+00:06:50,160 --> 00:06:53,599
+columns and draw groups that were
+
+00:06:51,759 --> 00:06:54,160
+recently accessed so we don't keep whole
+
+00:06:53,599 --> 00:06:55,680
+files
+
+00:06:54,160 --> 00:06:57,759
+we keep pro groups which works really
+
+00:06:55,680 --> 00:06:59,199
+really well with columnar data formats
+
+00:06:57,759 --> 00:07:01,599
+as we'll see later on
+
+00:06:59,199 --> 00:07:03,039
+and it's compact because we store data
+
+00:07:01,599 --> 00:07:05,199
+encoded to minimize the memory for
+
+00:07:03,039 --> 00:07:08,639
+between so we don't store just raw data
+
+00:07:05,199 --> 00:07:08,639
+we store them and code it there
+
+00:07:08,880 --> 00:07:11,199
+now for the remaining of the
+
+00:07:09,759 --> 00:07:12,800
+presentation we're going to split it in
+
+00:07:11,199 --> 00:07:14,560
+two parts uh since we have two
+
+00:07:12,800 --> 00:07:15,919
+optimizations we're gonna talk on it's
+
+00:07:14,560 --> 00:07:17,919
+a semi-reduction in laser
+
+00:07:15,919 --> 00:07:19,599
+materialization after talking
+
+00:07:17,919 --> 00:07:21,120
+a bit about about data pruning and
+
+00:07:19,599 --> 00:07:22,800
+filtering optimization
+
+00:07:21,120 --> 00:07:24,400
+so now handing over to my colleague
+
+00:07:22,800 --> 00:07:26,880
+someone is that it's going to take over
+
+00:07:24,400 --> 00:07:26,880
+from here
+
+00:07:27,280 --> 00:07:31,919
+so hello guys thanks for my side as well
+
+00:07:30,560 --> 00:07:35,280
+for joining
+
+00:07:31,919 --> 00:07:37,360
+so as far as said
+
+00:07:35,280 --> 00:07:39,759
+let me get straight to the point of the
+
+00:07:37,360 --> 00:07:43,680
+today's talk which is uh
+
+00:07:39,759 --> 00:07:46,479
+pruning data as early as possible
+
+00:07:43,680 --> 00:07:47,280
+so we are going to see together how is
+
+00:07:46,479 --> 00:07:50,400
+this done
+
+00:07:47,280 --> 00:07:53,199
+and why we are doing it so there are
+
+00:07:50,400 --> 00:07:56,479
+many optimizations and techniques to
+
+00:07:53,199 --> 00:07:59,800
+prune data early and among those
+
+00:07:56,479 --> 00:08:01,199
+it is a semi-reduction and late
+
+00:07:59,800 --> 00:08:04,639
+materialization
+
+00:08:01,199 --> 00:08:06,960
+that we are going to see today
+
+00:08:04,639 --> 00:08:09,520
+and why we are doing this because the
+
+00:08:06,960 --> 00:08:12,400
+sooner that we prune the data
+
+00:08:09,520 --> 00:08:13,440
+the more cheap the cheaper would be the
+
+00:08:12,400 --> 00:08:16,400
+operations uh
+
+00:08:13,440 --> 00:08:17,280
+afterwards so we can reduce memory from
+
+00:08:16,400 --> 00:08:19,599
+footprint
+
+00:08:17,280 --> 00:08:21,840
+uh this can network io and we can also
+
+00:08:19,599 --> 00:08:24,879
+save the cpu segments
+
+00:08:21,840 --> 00:08:28,160
+but uh let's make all this a bit more
+
+00:08:24,879 --> 00:08:28,960
+concrete so let's take a specific
+
+00:08:28,160 --> 00:08:32,800
+example
+
+00:08:28,960 --> 00:08:36,080
+so this sql query asks for uh
+
+00:08:32,800 --> 00:08:38,719
+the products that were returned
+
+00:08:36,080 --> 00:08:40,800
+due to the fact that the customer found
+
+00:08:38,719 --> 00:08:42,640
+a better price in another store
+
+00:08:40,800 --> 00:08:44,399
+and all for all this we are going to
+
+00:08:42,640 --> 00:08:47,440
+return the net loss
+
+00:08:44,399 --> 00:08:48,640
+for its product so the query plan is
+
+00:08:47,440 --> 00:08:51,519
+quite straightforward
+
+00:08:48,640 --> 00:08:54,160
+we are have a scan of two relations the
+
+00:08:51,519 --> 00:08:56,720
+story terms which is the fact table
+
+00:08:54,160 --> 00:08:58,480
+and the reason relation which is the
+
+00:08:56,720 --> 00:09:01,519
+dimension table
+
+00:08:58,480 --> 00:09:05,360
+we perform a join on the reason
+
+00:09:01,519 --> 00:09:08,000
+surrogate key on both sides
+
+00:09:05,360 --> 00:09:10,480
+we compute the result and then we apply
+
+00:09:08,000 --> 00:09:13,200
+a filter on the recent description
+
+00:09:10,480 --> 00:09:14,080
+based on the specific condition and
+
+00:09:13,200 --> 00:09:16,000
+finally
+
+00:09:14,080 --> 00:09:18,080
+we are going we are going to project
+
+00:09:16,000 --> 00:09:22,080
+only the things relevant to our
+
+00:09:18,080 --> 00:09:24,399
+result which is the net loss column
+
+00:09:22,080 --> 00:09:26,800
+now just a bit of notation with all
+
+00:09:24,399 --> 00:09:29,440
+these boxes that appear here
+
+00:09:26,800 --> 00:09:31,200
+yeah for every horizontal uh set of
+
+00:09:29,440 --> 00:09:34,240
+boxes we have a tuple
+
+00:09:31,200 --> 00:09:37,279
+so a row and the vertical boxes
+
+00:09:34,240 --> 00:09:39,600
+denote columns
+
+00:09:37,279 --> 00:09:41,200
+so let's let's start applying
+
+00:09:39,600 --> 00:09:43,680
+optimizations
+
+00:09:41,200 --> 00:09:44,240
+for pruning data one very very well
+
+00:09:43,680 --> 00:09:46,160
+known
+
+00:09:44,240 --> 00:09:47,279
+and quietly used widely used
+
+00:09:46,160 --> 00:09:50,080
+optimization
+
+00:09:47,279 --> 00:09:51,920
+is filter push down so in this case we
+
+00:09:50,080 --> 00:09:54,800
+are trying to push the filters
+
+00:09:51,920 --> 00:09:55,600
+as close to the bottom as possible in
+
+00:09:54,800 --> 00:09:59,440
+this case
+
+00:09:55,600 --> 00:10:03,120
+the filter depicted here can be
+
+00:09:59,440 --> 00:10:04,399
+can go below the join and what this has
+
+00:10:03,120 --> 00:10:07,680
+as an effect
+
+00:10:04,399 --> 00:10:09,040
+is that as you can observe here if we
+
+00:10:07,680 --> 00:10:13,279
+perform the filter
+
+00:10:09,040 --> 00:10:15,600
+and then we join this side with this
+
+00:10:13,279 --> 00:10:16,959
+then the result of the join is much
+
+00:10:15,600 --> 00:10:21,120
+smaller than this
+
+00:10:16,959 --> 00:10:22,560
+huge block of tuples that appear here
+
+00:10:21,120 --> 00:10:25,040
+just a small thing that they forgot to
+
+00:10:22,560 --> 00:10:27,120
+mention is that the number
+
+00:10:25,040 --> 00:10:29,440
+of rows that appears here it's just
+
+00:10:27,120 --> 00:10:31,519
+proportional to the amount of data
+
+00:10:29,440 --> 00:10:32,800
+that in the result of the join or in the
+
+00:10:31,519 --> 00:10:35,920
+size of the relation
+
+00:10:32,800 --> 00:10:37,760
+so it's not entirely accurate with the
+
+00:10:35,920 --> 00:10:38,880
+actual number of rows so we don't have
+
+00:10:37,760 --> 00:10:41,920
+only nine
+
+00:10:38,880 --> 00:10:44,160
+for the for instance here
+
+00:10:41,920 --> 00:10:46,000
+now let's see another very very common
+
+00:10:44,160 --> 00:10:49,360
+uh optimization that is also
+
+00:10:46,000 --> 00:10:50,880
+widely used is what is called project
+
+00:10:49,360 --> 00:10:53,760
+push down
+
+00:10:50,880 --> 00:10:56,720
+so if you notice here the result of the
+
+00:10:53,760 --> 00:10:59,839
+query needs only the net loss column
+
+00:10:56,720 --> 00:11:00,959
+so it is not important to bring back
+
+00:10:59,839 --> 00:11:03,519
+everything
+
+00:11:00,959 --> 00:11:04,560
+every column after the join but we can
+
+00:11:03,519 --> 00:11:08,000
+remove those
+
+00:11:04,560 --> 00:11:09,839
+that are not needed concretely
+
+00:11:08,000 --> 00:11:11,120
+here we are going to keep only the
+
+00:11:09,839 --> 00:11:13,200
+reason zero gate key
+
+00:11:11,120 --> 00:11:14,160
+and the net loss coming from the storage
+
+00:11:13,200 --> 00:11:17,279
+relation
+
+00:11:14,160 --> 00:11:18,480
+because we need reason for the
+
+00:11:17,279 --> 00:11:21,200
+performing the join
+
+00:11:18,480 --> 00:11:23,120
+and net loss for the result same goes
+
+00:11:21,200 --> 00:11:26,320
+for the other side
+
+00:11:23,120 --> 00:11:27,600
+and in the end here we have the same
+
+00:11:26,320 --> 00:11:30,160
+number of tuples
+
+00:11:27,600 --> 00:11:30,720
+but if you see we have only two columns
+
+00:11:30,160 --> 00:11:33,360
+so
+
+00:11:30,720 --> 00:11:34,000
+the tuples are much much thinner and
+
+00:11:33,360 --> 00:11:36,399
+again
+
+00:11:34,000 --> 00:11:39,920
+this leads to less data less cpu less
+
+00:11:36,399 --> 00:11:39,920
+memory etcetera etcetera etcetera
+
+00:11:40,160 --> 00:11:43,680
+now let's talk about another
+
+00:11:41,600 --> 00:11:47,200
+optimization which is a bit
+
+00:11:43,680 --> 00:11:50,480
+less known but also or very important
+
+00:11:47,200 --> 00:11:53,360
+and it's called semi-reduction
+
+00:11:50,480 --> 00:11:55,120
+so many people may have observed already
+
+00:11:53,360 --> 00:11:59,760
+that what happens here is that
+
+00:11:55,120 --> 00:12:02,959
+we are using the right side of the join
+
+00:11:59,760 --> 00:12:04,399
+just to reduce or prune
+
+00:12:02,959 --> 00:12:07,839
+the results of the left side of the
+
+00:12:04,399 --> 00:12:09,440
+joint because in the end
+
+00:12:07,839 --> 00:12:11,519
+the columns that appear on the right
+
+00:12:09,440 --> 00:12:14,800
+side are not used
+
+00:12:11,519 --> 00:12:18,079
+in the result so
+
+00:12:14,800 --> 00:12:19,040
+what happens is what this operator does
+
+00:12:18,079 --> 00:12:22,560
+the semi-join
+
+00:12:19,040 --> 00:12:26,160
+is exactly this so basically
+
+00:12:22,560 --> 00:12:27,760
+we are only using the results from the
+
+00:12:26,160 --> 00:12:29,360
+left side of the join
+
+00:12:27,760 --> 00:12:30,800
+and the right side is used only from
+
+00:12:29,360 --> 00:12:33,680
+pruning the data
+
+00:12:30,800 --> 00:12:36,560
+and essentially this uh result of the
+
+00:12:33,680 --> 00:12:40,399
+join is again thinner so we are sending
+
+00:12:36,560 --> 00:12:40,399
+less data to the operators that follow
+
+00:12:41,600 --> 00:12:48,000
+another very powerful optimization is
+
+00:12:44,880 --> 00:12:50,560
+late materialization so
+
+00:12:48,000 --> 00:12:52,079
+till now we assume that when we get the
+
+00:12:50,560 --> 00:12:54,240
+result from the scans
+
+00:12:52,079 --> 00:12:55,279
+so here for example for the store
+
+00:12:54,240 --> 00:12:57,920
+returns
+
+00:12:55,279 --> 00:12:59,200
+we have tuples that are materialized
+
+00:12:57,920 --> 00:13:02,639
+decoded
+
+00:12:59,200 --> 00:13:05,920
+and uncompressed and they are in memory
+
+00:13:02,639 --> 00:13:07,920
+but this is not necessarily necessary
+
+00:13:05,920 --> 00:13:11,120
+because as we have since here
+
+00:13:07,920 --> 00:13:12,560
+we need only two columns to propagate
+
+00:13:11,120 --> 00:13:15,200
+further
+
+00:13:12,560 --> 00:13:16,079
+so instead of decoding and decompressing
+
+00:13:15,200 --> 00:13:18,480
+everything
+
+00:13:16,079 --> 00:13:20,320
+we just load from the disk the whole
+
+00:13:18,480 --> 00:13:23,360
+block of bytes
+
+00:13:20,320 --> 00:13:24,720
+compressed and encoded and then we
+
+00:13:23,360 --> 00:13:26,720
+decompressed at the code
+
+00:13:24,720 --> 00:13:29,680
+all the things that we need so in this
+
+00:13:26,720 --> 00:13:32,320
+case it will be only this column here
+
+00:13:29,680 --> 00:13:34,240
+and the net loss column here and same
+
+00:13:32,320 --> 00:13:36,320
+goes for the other side
+
+00:13:34,240 --> 00:13:38,000
+so this is another optimization that we
+
+00:13:36,320 --> 00:13:40,240
+are going to see later on today
+
+00:13:38,000 --> 00:13:42,880
+which is called late materialization
+
+00:13:40,240 --> 00:13:46,399
+this because we materialize data
+
+00:13:42,880 --> 00:13:49,760
+when it's really necessary
+
+00:13:46,399 --> 00:13:51,440
+now if you put all this together and
+
+00:13:49,760 --> 00:13:53,519
+something that should be all uh
+
+00:13:51,440 --> 00:13:56,160
+straightforward uh till now
+
+00:13:53,519 --> 00:13:58,240
+is that from the baseline that we didn't
+
+00:13:56,160 --> 00:14:00,160
+perform any data pruning
+
+00:13:58,240 --> 00:14:01,519
+till the end that we performed all the
+
+00:14:00,160 --> 00:14:05,440
+optimization
+
+00:14:01,519 --> 00:14:07,680
+on the right side of the slide
+
+00:14:05,440 --> 00:14:10,079
+the game is significant the performance
+
+00:14:07,680 --> 00:14:14,240
+gauge is significant
+
+00:14:10,079 --> 00:14:18,000
+if we squeeze all these boxes together
+
+00:14:14,240 --> 00:14:20,800
+then the game becomes much more evident
+
+00:14:18,000 --> 00:14:22,240
+where here we have significantly less
+
+00:14:20,800 --> 00:14:24,720
+data
+
+00:14:22,240 --> 00:14:26,399
+so point to keep is that pruning data
+
+00:14:24,720 --> 00:14:28,839
+point that i want you to keep
+
+00:14:26,399 --> 00:14:30,480
+is that pruning data early is very
+
+00:14:28,839 --> 00:14:33,279
+important
+
+00:14:30,480 --> 00:14:34,639
+so let's talk about a bit more about
+
+00:14:33,279 --> 00:14:36,959
+semi-ign reduction
+
+00:14:34,639 --> 00:14:39,360
+and in particular how is this done in
+
+00:14:36,959 --> 00:14:41,519
+hive
+
+00:14:39,360 --> 00:14:43,519
+you might have seen this optimization
+
+00:14:41,519 --> 00:14:47,040
+with some other names
+
+00:14:43,519 --> 00:14:48,720
+namely invisible join selective join
+
+00:14:47,040 --> 00:14:51,040
+push down
+
+00:14:48,720 --> 00:14:52,480
+or otherwise sideways information
+
+00:14:51,040 --> 00:14:55,199
+passing
+
+00:14:52,480 --> 00:14:56,560
+no matter how you call it the behavior
+
+00:14:55,199 --> 00:15:00,399
+is the same
+
+00:14:56,560 --> 00:15:03,279
+between the semi-join and the reduced
+
+00:15:00,399 --> 00:15:04,480
+join all the operators will treat less
+
+00:15:03,279 --> 00:15:08,240
+data
+
+00:15:04,480 --> 00:15:12,240
+and as a result we will have a
+
+00:15:08,240 --> 00:15:14,399
+lesser network and this io we will gain
+
+00:15:12,240 --> 00:15:17,199
+cpu cycles and will decrease the memory
+
+00:15:14,399 --> 00:15:17,199
+from footprint
+
+00:15:18,399 --> 00:15:22,079
+now let's take a slightly more
+
+00:15:20,000 --> 00:15:24,639
+complicated query just to have
+
+00:15:22,079 --> 00:15:26,079
+a concrete example and have some
+
+00:15:24,639 --> 00:15:27,920
+concrete numbers
+
+00:15:26,079 --> 00:15:29,440
+i don't want you to stay a bit a lot on
+
+00:15:27,920 --> 00:15:31,040
+the query
+
+00:15:29,440 --> 00:15:32,480
+because it is there you can find it
+
+00:15:31,040 --> 00:15:36,000
+afterwards in the slides
+
+00:15:32,480 --> 00:15:37,759
+but notice that we have quite a
+
+00:15:36,000 --> 00:15:39,440
+many operations we have aggregates we
+
+00:15:37,759 --> 00:15:43,120
+have sorting and we have
+
+00:15:39,440 --> 00:15:45,920
+uh two joints and filtering
+
+00:15:43,120 --> 00:15:47,440
+so for the semitone reduction i will
+
+00:15:45,920 --> 00:15:49,920
+simplify with the example
+
+00:15:47,440 --> 00:15:51,440
+so that we don't get lost so let's just
+
+00:15:49,920 --> 00:15:54,720
+call all this part
+
+00:15:51,440 --> 00:15:56,079
+supplement a and all the part after the
+
+00:15:54,720 --> 00:15:59,440
+join
+
+00:15:56,079 --> 00:16:01,279
+uh supplement b so that we focus
+
+00:15:59,440 --> 00:16:04,959
+only on the part that's really really
+
+00:16:01,279 --> 00:16:07,279
+relevant for the semi-reduction
+
+00:16:04,959 --> 00:16:08,160
+so instead of boxes now we'll talk with
+
+00:16:07,279 --> 00:16:10,240
+a bit
+
+00:16:08,160 --> 00:16:11,279
+with numbers and these numbers are
+
+00:16:10,240 --> 00:16:14,399
+taking are
+
+00:16:11,279 --> 00:16:17,519
+accurate complete correct numbers from
+
+00:16:14,399 --> 00:16:20,880
+tpcds data set but a very very
+
+00:16:17,519 --> 00:16:24,720
+small scale factor so from the
+
+00:16:20,880 --> 00:16:28,160
+fact table we have around 2 million rows
+
+00:16:24,720 --> 00:16:31,040
+and from the dimension tables or
+
+00:16:28,160 --> 00:16:34,480
+on the subplane a we have 8 000 apples
+
+00:16:31,040 --> 00:16:36,720
+and the result is also 8 000 tuples
+
+00:16:34,480 --> 00:16:38,800
+so what happens as we said we are in
+
+00:16:36,720 --> 00:16:41,440
+hive and in a distributed setting
+
+00:16:38,800 --> 00:16:42,720
+so let's make the example more uh
+
+00:16:41,440 --> 00:16:45,839
+appropriate for it
+
+00:16:42,720 --> 00:16:46,480
+let's assume that all the data for the
+
+00:16:45,839 --> 00:16:50,399
+store
+
+00:16:46,480 --> 00:16:53,759
+sales fact table are located in node one
+
+00:16:50,399 --> 00:16:56,480
+and the data for uh supplement a
+
+00:16:53,759 --> 00:16:59,040
+are node to node two and let's assume
+
+00:16:56,480 --> 00:17:01,920
+that the join is performed in node three
+
+00:16:59,040 --> 00:17:04,400
+again this is a very very simplified
+
+00:17:01,920 --> 00:17:07,439
+simplistic uh
+
+00:17:04,400 --> 00:17:07,839
+example since what happens in practice
+
+00:17:07,439 --> 00:17:09,360
+that
+
+00:17:07,839 --> 00:17:11,439
+normally the data are distributed in
+
+00:17:09,360 --> 00:17:13,360
+various nodes but just to show
+
+00:17:11,439 --> 00:17:14,079
+concretely the benefit of the semi joint
+
+00:17:13,360 --> 00:17:16,839
+reduction
+
+00:17:14,079 --> 00:17:18,559
+we are going to use a very very simple
+
+00:17:16,839 --> 00:17:21,199
+case
+
+00:17:18,559 --> 00:17:23,120
+now if we go from the number of tuples
+
+00:17:21,199 --> 00:17:24,880
+to the size of the relation
+
+00:17:23,120 --> 00:17:26,559
+we are going to notice that we are
+
+00:17:24,880 --> 00:17:29,200
+sending from node 1
+
+00:17:26,559 --> 00:17:30,320
+to node 3 to perform the join around 46
+
+00:17:29,200 --> 00:17:33,280
+megabytes
+
+00:17:30,320 --> 00:17:34,240
+and from the other side a few kilobytes
+
+00:17:33,280 --> 00:17:38,080
+and then the rest
+
+00:17:34,240 --> 00:17:40,559
+to the rest of the operators but
+
+00:17:38,080 --> 00:17:42,559
+comparing this number with this we would
+
+00:17:40,559 --> 00:17:46,240
+like to if possible
+
+00:17:42,559 --> 00:17:49,840
+to reduce this uh this number
+
+00:17:46,240 --> 00:17:51,360
+this 46 megabytes and as you guessed
+
+00:17:49,840 --> 00:17:53,760
+since we are talking about
+
+00:17:51,360 --> 00:17:54,880
+semi zone reduction we are going to
+
+00:17:53,760 --> 00:17:58,400
+perform this
+
+00:17:54,880 --> 00:18:00,080
+using a semi join so the condition of
+
+00:17:58,400 --> 00:18:03,039
+the semi joint is exactly the same
+
+00:18:00,080 --> 00:18:04,400
+with the inner join but as we said the
+
+00:18:03,039 --> 00:18:07,600
+semi-join
+
+00:18:04,400 --> 00:18:09,520
+will keep only the tuples from the from
+
+00:18:07,600 --> 00:18:10,799
+this relation from the left relation
+
+00:18:09,520 --> 00:18:13,039
+and we are going to use the right
+
+00:18:10,799 --> 00:18:16,000
+relation only
+
+00:18:13,039 --> 00:18:17,039
+for pruning data so we are going to send
+
+00:18:16,000 --> 00:18:20,320
+relation
+
+00:18:17,039 --> 00:18:22,480
+a or subplan a to the other side just to
+
+00:18:20,320 --> 00:18:25,440
+reduce the number of tuples
+
+00:18:22,480 --> 00:18:26,000
+coming from the stored sales table and
+
+00:18:25,440 --> 00:18:27,600
+so far
+
+00:18:26,000 --> 00:18:29,679
+this is what happens so from the two
+
+00:18:27,600 --> 00:18:33,200
+million top two meter couples
+
+00:18:29,679 --> 00:18:36,480
+we drop down to the 8 000 and
+
+00:18:33,200 --> 00:18:39,200
+assuming that the semi join is performed
+
+00:18:36,480 --> 00:18:40,880
+on the same node with the scan what
+
+00:18:39,200 --> 00:18:44,000
+happens in terms of traffic
+
+00:18:40,880 --> 00:18:47,200
+is that we managed to drop the
+
+00:18:44,000 --> 00:18:47,200
+46 megabytes
+
+00:18:47,679 --> 00:18:53,520
+sorry the 46 megabytes
+
+00:18:50,720 --> 00:18:54,640
+to only a few hundred kilobytes and
+
+00:18:53,520 --> 00:18:57,280
+putting things
+
+00:18:54,640 --> 00:18:58,080
+side to side in terms of total network
+
+00:18:57,280 --> 00:19:00,400
+traffic
+
+00:18:58,080 --> 00:19:01,600
+with the semi join we have around 400
+
+00:19:00,400 --> 00:19:03,919
+kilobytes
+
+00:19:01,600 --> 00:19:05,039
+and without the semi join we are in 46
+
+00:19:03,919 --> 00:19:08,320
+megabytes
+
+00:19:05,039 --> 00:19:09,440
+so the difference in io is two orders of
+
+00:19:08,320 --> 00:19:12,000
+magnitude
+
+00:19:09,440 --> 00:19:12,720
+and same goes although we talked about
+
+00:19:12,000 --> 00:19:16,640
+io
+
+00:19:12,720 --> 00:19:20,080
+the same goes for cpu and
+
+00:19:16,640 --> 00:19:23,039
+memory now
+
+00:19:20,080 --> 00:19:25,360
+let's go a bit more concretely how it is
+
+00:19:23,039 --> 00:19:27,600
+done in hive
+
+00:19:25,360 --> 00:19:28,799
+it is done in two steps so we don't have
+
+00:19:27,600 --> 00:19:31,760
+a semi joint here
+
+00:19:28,799 --> 00:19:33,440
+but we have an aggregation and a filter
+
+00:19:31,760 --> 00:19:36,640
+so for the aggregation
+
+00:19:33,440 --> 00:19:38,320
+we compute the minimum and maximum
+
+00:19:36,640 --> 00:19:40,559
+for each column participating in the
+
+00:19:38,320 --> 00:19:43,440
+join and then
+
+00:19:40,559 --> 00:19:44,799
+we create a blue filter with all the
+
+00:19:43,440 --> 00:19:47,360
+values
+
+00:19:44,799 --> 00:19:49,679
+with the with the hash of the columns
+
+00:19:47,360 --> 00:19:52,400
+participating in the join
+
+00:19:49,679 --> 00:19:54,480
+so here the blue filter is actually our
+
+00:19:52,400 --> 00:19:57,919
+summary that is going to be used
+
+00:19:54,480 --> 00:20:00,720
+to perform the semi join and on the
+
+00:19:57,919 --> 00:20:01,760
+side of the fact table the filter looks
+
+00:20:00,720 --> 00:20:05,360
+like this
+
+00:20:01,760 --> 00:20:08,400
+so we have for each column a conjunction
+
+00:20:05,360 --> 00:20:10,320
+that between predicate that verifies
+
+00:20:08,400 --> 00:20:13,440
+that the column value is between the min
+
+00:20:10,320 --> 00:20:16,240
+and max coming from the aggregate
+
+00:20:13,440 --> 00:20:18,159
+and then after we verify the between
+
+00:20:16,240 --> 00:20:22,159
+condition for both columns
+
+00:20:18,159 --> 00:20:25,200
+we perform a lookup in the bloom filter
+
+00:20:22,159 --> 00:20:26,400
+so this is why it's called also sideways
+
+00:20:25,200 --> 00:20:28,640
+information passing
+
+00:20:26,400 --> 00:20:31,039
+because we are passing things from the
+
+00:20:28,640 --> 00:20:34,400
+right side sideways
+
+00:20:31,039 --> 00:20:38,080
+to the left side and what
+
+00:20:34,400 --> 00:20:41,280
+happened what we gain with by performing
+
+00:20:38,080 --> 00:20:43,679
+the bloom filter semi join is that
+
+00:20:41,280 --> 00:20:44,880
+we managed to decrease even more the
+
+00:20:43,679 --> 00:20:48,080
+size
+
+00:20:44,880 --> 00:20:50,320
+of uh the data
+
+00:20:48,080 --> 00:20:51,360
+that are propagated from node 2 to node
+
+00:20:50,320 --> 00:20:53,200
+1.
+
+00:20:51,360 --> 00:20:55,919
+so instead of sending the whole relation
+
+00:20:53,200 --> 00:20:58,799
+and sending in this case 64 kilobytes
+
+00:20:55,919 --> 00:21:00,559
+we are sending in the end only 9
+
+00:20:58,799 --> 00:21:03,120
+kilobytes which is
+
+00:21:00,559 --> 00:21:03,600
+actually mostly the size of the semi
+
+00:21:03,120 --> 00:21:05,679
+joint
+
+00:21:03,600 --> 00:21:07,760
+of the blue finger so which is the size
+
+00:21:05,679 --> 00:21:10,080
+of the blue filter
+
+00:21:07,760 --> 00:21:11,440
+and just a small note we are talking
+
+00:21:10,080 --> 00:21:13,120
+about blue filter
+
+00:21:11,440 --> 00:21:15,520
+so we are talking about the
+
+00:21:13,120 --> 00:21:18,720
+probabilistic data structure
+
+00:21:15,520 --> 00:21:21,120
+so in the end we may have
+
+00:21:18,720 --> 00:21:22,000
+false positives that are propagated from
+
+00:21:21,120 --> 00:21:24,799
+round one
+
+00:21:22,000 --> 00:21:26,480
+not three but by choosing an appropriate
+
+00:21:24,799 --> 00:21:30,000
+size from a blue filter
+
+00:21:26,480 --> 00:21:31,760
+the probability can be can be really the
+
+00:21:30,000 --> 00:21:33,520
+probability of having false positive
+
+00:21:31,760 --> 00:21:35,200
+can be really small and rather
+
+00:21:33,520 --> 00:21:37,200
+insignificant
+
+00:21:35,200 --> 00:21:38,240
+so by performing a bloom filter
+
+00:21:37,200 --> 00:21:41,360
+semi-joint
+
+00:21:38,240 --> 00:21:44,799
+we reduced even more the cost
+
+00:21:41,360 --> 00:21:47,600
+uh the total i o cost
+
+00:21:44,799 --> 00:21:48,880
+and essentially if we have if because we
+
+00:21:47,600 --> 00:21:51,039
+prune data early
+
+00:21:48,880 --> 00:21:54,000
+we reduce the cpu and memory of the
+
+00:21:51,039 --> 00:21:54,000
+falling operators
+
+00:21:55,360 --> 00:21:59,840
+now just a small a quick overview of how
+
+00:21:58,159 --> 00:22:02,720
+it is done in five
+
+00:21:59,840 --> 00:22:04,240
+basically it is divided into four phases
+
+00:22:02,720 --> 00:22:08,000
+the first phase creates some
+
+00:22:04,240 --> 00:22:11,440
+synthetic predicates on the side of the
+
+00:22:08,000 --> 00:22:14,480
+fact table then this synthetic predicate
+
+00:22:11,440 --> 00:22:16,480
+is expanded to create the semi-joined
+
+00:22:14,480 --> 00:22:20,000
+branches
+
+00:22:16,480 --> 00:22:22,159
+and afterwards because
+
+00:22:20,000 --> 00:22:23,039
+we have only single column semi-joined
+
+00:22:22,159 --> 00:22:26,559
+branches
+
+00:22:23,039 --> 00:22:29,600
+we have a phase that merges this multi
+
+00:22:26,559 --> 00:22:32,799
+this single column semi-reducers
+
+00:22:29,600 --> 00:22:36,000
+to multi-column ones improving mainly
+
+00:22:32,799 --> 00:22:38,320
+improving the
+
+00:22:36,000 --> 00:22:39,039
+the accuracy of the bloom filter and
+
+00:22:38,320 --> 00:22:41,440
+this
+
+00:22:39,039 --> 00:22:42,960
+third phase is actually quite recent so
+
+00:22:41,440 --> 00:22:46,240
+it has been introduced in this
+
+00:22:42,960 --> 00:22:48,000
+uh zera issues mentioned here and it's
+
+00:22:46,240 --> 00:22:49,520
+been only two months that it's uh on
+
+00:22:48,000 --> 00:22:51,919
+hive master
+
+00:22:49,520 --> 00:22:53,280
+and last because we are introducing
+
+00:22:51,919 --> 00:22:55,440
+optimizations
+
+00:22:53,280 --> 00:22:57,360
+reduces aggressively there is a last
+
+00:22:55,440 --> 00:23:02,640
+phase that tries to remove
+
+00:22:57,360 --> 00:23:05,679
+based on cost and other factors
+
+00:23:02,640 --> 00:23:08,960
+so apart from that i have some slides
+
+00:23:05,679 --> 00:23:11,840
+at the end of the presentation really
+
+00:23:08,960 --> 00:23:13,120
+an example shows how this works but
+
+00:23:11,840 --> 00:23:16,320
+since we are not have
+
+00:23:13,120 --> 00:23:18,400
+much time i will now pass to
+
+00:23:16,320 --> 00:23:21,440
+my colleague panos to talk to you about
+
+00:23:18,400 --> 00:23:24,480
+lace materialization
+
+00:23:21,440 --> 00:23:25,919
+thanks amateus so let's move to the
+
+00:23:24,480 --> 00:23:27,760
+second feature that we're gonna
+
+00:23:25,919 --> 00:23:28,960
+talk about today which is a laser
+
+00:23:27,760 --> 00:23:30,480
+materialization
+
+00:23:28,960 --> 00:23:32,640
+it has also some other names that you
+
+00:23:30,480 --> 00:23:34,640
+might be aware it's also known as raw
+
+00:23:32,640 --> 00:23:37,120
+level filtering or lazy decoding
+
+00:23:34,640 --> 00:23:39,440
+or even probe the code as we call it um
+
+00:23:37,120 --> 00:23:41,039
+on apache hive
+
+00:23:39,440 --> 00:23:43,039
+the goal of this feature is to save cpu
+
+00:23:41,039 --> 00:23:44,159
+cycles and reduce memory locations by
+
+00:23:43,039 --> 00:23:46,080
+actually avoiding
+
+00:23:44,159 --> 00:23:47,600
+a materializing or decoding rows that
+
+00:23:46,080 --> 00:23:49,120
+are not going to be needed down the line
+
+00:23:47,600 --> 00:23:50,640
+for the validation of the remaining of
+
+00:23:49,120 --> 00:23:51,679
+the query or for the remaining of the
+
+00:23:50,640 --> 00:23:53,600
+expressions
+
+00:23:51,679 --> 00:23:56,480
+and lazy materialization is an important
+
+00:23:53,600 --> 00:23:58,559
+feature because even when we have
+
+00:23:56,480 --> 00:24:00,480
+optimization such as semi-join reduction
+
+00:23:58,559 --> 00:24:03,200
+we might we filter as much data as
+
+00:24:00,480 --> 00:24:05,919
+possible we can still end up decoding
+
+00:24:03,200 --> 00:24:07,440
+more data than we actually need and the
+
+00:24:05,919 --> 00:24:08,720
+reason for that is partly because of the
+
+00:24:07,440 --> 00:24:10,720
+way columnar formats such
+
+00:24:08,720 --> 00:24:12,000
+as orc or pythia store information in
+
+00:24:10,720 --> 00:24:14,240
+indexes
+
+00:24:12,000 --> 00:24:16,000
+for instance in org data is organized in
+
+00:24:14,240 --> 00:24:16,960
+tribes and within stripe we have a
+
+00:24:16,000 --> 00:24:19,039
+number of row groups
+
+00:24:16,960 --> 00:24:21,360
+story metadata indexes per thousands of
+
+00:24:19,039 --> 00:24:24,159
+rows so that by default is 10 000 rows
+
+00:24:21,360 --> 00:24:25,760
+the problem here is that as a row group
+
+00:24:24,159 --> 00:24:26,480
+is the finest level of indexing we have
+
+00:24:25,760 --> 00:24:28,400
+in org
+
+00:24:26,480 --> 00:24:30,159
+even when we have just a few keys that
+
+00:24:28,400 --> 00:24:32,080
+match within a single row group
+
+00:24:30,159 --> 00:24:34,000
+we have to read the code and push down
+
+00:24:32,080 --> 00:24:34,960
+the pipeline all thousands of rows
+
+00:24:34,000 --> 00:24:36,720
+across columns
+
+00:24:34,960 --> 00:24:38,799
+for that particular row group and this
+
+00:24:36,720 --> 00:24:41,120
+is just a waste of resources
+
+00:24:38,799 --> 00:24:42,320
+to give you an example we run query 55
+
+00:24:41,120 --> 00:24:45,360
+from tpcds
+
+00:24:42,320 --> 00:24:46,480
+on 10 terabytes of data which is a low
+
+00:24:45,360 --> 00:24:47,760
+selectivity query
+
+00:24:46,480 --> 00:24:50,799
+and as you can see in the figure on the
+
+00:24:47,760 --> 00:24:52,799
+x-axis we have the selected draw groups
+
+00:24:50,799 --> 00:24:54,159
+for the particular table on the y-axis
+
+00:24:52,799 --> 00:24:54,880
+you have the density number which is
+
+00:24:54,159 --> 00:24:58,240
+pretty much
+
+00:24:54,880 --> 00:24:59,520
+the number of matching keys per program
+
+00:24:58,240 --> 00:25:00,720
+and as you can observe as you can
+
+00:24:59,520 --> 00:25:02,320
+observe in this figure even though we
+
+00:25:00,720 --> 00:25:02,799
+have a low number of matching keys in
+
+00:25:02,320 --> 00:25:05,200
+general
+
+00:25:02,799 --> 00:25:07,200
+or in total all row groups were selected
+
+00:25:05,200 --> 00:25:09,279
+because these keys these matching keys
+
+00:25:07,200 --> 00:25:10,640
+were distributed across row groups and
+
+00:25:09,279 --> 00:25:13,520
+this can happen a lot
+
+00:25:10,640 --> 00:25:14,880
+in reality in fact we found out that for
+
+00:25:13,520 --> 00:25:16,880
+this particular query this low
+
+00:25:14,880 --> 00:25:18,400
+selectivity query we spend almost 27
+
+00:25:16,880 --> 00:25:20,640
+percent of cpu time
+
+00:25:18,400 --> 00:25:22,240
+on the code batch method this decode but
+
+00:25:20,640 --> 00:25:24,080
+method is taking row groups
+
+00:25:22,240 --> 00:25:26,240
+decoding them and pushes them as column
+
+00:25:24,080 --> 00:25:28,880
+vectors down the execution pipeline
+
+00:25:26,240 --> 00:25:29,360
+the worst part about this is that even
+
+00:25:28,880 --> 00:25:31,840
+after
+
+00:25:29,360 --> 00:25:32,720
+doing all this work most of the rows are
+
+00:25:31,840 --> 00:25:33,919
+in these
+
+00:25:32,720 --> 00:25:36,000
+vector batteries will be dropped
+
+00:25:33,919 --> 00:25:38,960
+eventually because we have only a few
+
+00:25:36,000 --> 00:25:40,640
+matching keys in those vector bytes and
+
+00:25:38,960 --> 00:25:42,480
+to understand why this is the case and
+
+00:25:40,640 --> 00:25:44,880
+why this happens we have to understand
+
+00:25:42,480 --> 00:25:46,000
+how data is organized within files with
+
+00:25:44,880 --> 00:25:48,480
+the org format
+
+00:25:46,000 --> 00:25:49,279
+or in a similar manner to other columnar
+
+00:25:48,480 --> 00:25:51,600
+formats
+
+00:25:49,279 --> 00:25:53,600
+so each org file contains a group of
+
+00:25:51,600 --> 00:25:55,039
+groups of raw data called stripes
+
+00:25:53,600 --> 00:25:57,600
+and at the end of its file we have the
+
+00:25:55,039 --> 00:25:59,200
+file footer the file folder contains the
+
+00:25:57,600 --> 00:26:00,960
+metadata of the file
+
+00:25:59,200 --> 00:26:02,640
+pretty much file level statistics like
+
+00:26:00,960 --> 00:26:05,039
+the file schema
+
+00:26:02,640 --> 00:26:06,880
+et cetera we have strap information such
+
+00:26:05,039 --> 00:26:07,760
+as rows column type column aggregation
+
+00:26:06,880 --> 00:26:09,360
+statistics
+
+00:26:07,760 --> 00:26:11,120
+and more importantly the location of the
+
+00:26:09,360 --> 00:26:12,480
+stripes and at the end at the very
+
+00:26:11,120 --> 00:26:15,039
+bottom we have the postscript
+
+00:26:12,480 --> 00:26:16,000
+which contains the compression details
+
+00:26:15,039 --> 00:26:17,520
+buffer size and
+
+00:26:16,000 --> 00:26:19,840
+information how to read the remaining of
+
+00:26:17,520 --> 00:26:21,840
+the file so in our creator that wants to
+
+00:26:19,840 --> 00:26:23,679
+read a particular file we'll have to we
+
+00:26:21,840 --> 00:26:25,360
+will have to read first the postscript
+
+00:26:23,679 --> 00:26:26,799
+then the file footer and then it can
+
+00:26:25,360 --> 00:26:28,159
+directly point to the location of the
+
+00:26:26,799 --> 00:26:31,200
+stripes within that file
+
+00:26:28,159 --> 00:26:33,360
+draw stripes contain the actual data
+
+00:26:31,200 --> 00:26:35,039
+with some metadata on top organized in
+
+00:26:33,360 --> 00:26:35,600
+columns as it's a columnar format of
+
+00:26:35,039 --> 00:26:36,960
+course
+
+00:26:35,600 --> 00:26:39,120
+and as you can see here in the future we
+
+00:26:36,960 --> 00:26:40,640
+have a few stripes and from top to
+
+00:26:39,120 --> 00:26:41,520
+bottom within its right we have the
+
+00:26:40,640 --> 00:26:43,440
+index data
+
+00:26:41,520 --> 00:26:45,760
+with green we have the row data with
+
+00:26:43,440 --> 00:26:46,799
+blue and we have the stripe footer with
+
+00:26:45,760 --> 00:26:48,400
+red
+
+00:26:46,799 --> 00:26:50,320
+the stripe footer contains a list of
+
+00:26:48,400 --> 00:26:52,559
+column streams and the locations
+
+00:26:50,320 --> 00:26:54,400
+column streams point to row data which
+
+00:26:52,559 --> 00:26:55,679
+is in blue that are the actual data used
+
+00:26:54,400 --> 00:26:58,159
+in table scans and
+
+00:26:55,679 --> 00:26:59,440
+query answering and we also have some
+
+00:26:58,159 --> 00:27:00,640
+information about the each column
+
+00:26:59,440 --> 00:27:03,679
+encoding so by default
+
+00:27:00,640 --> 00:27:05,919
+every column is encoded in org
+
+00:27:03,679 --> 00:27:07,840
+at the top we have the index data the
+
+00:27:05,919 --> 00:27:09,440
+index data contain offsets that enable
+
+00:27:07,840 --> 00:27:10,159
+seeking to the right row group within a
+
+00:27:09,440 --> 00:27:11,840
+column
+
+00:27:10,159 --> 00:27:14,000
+and we have statistics like the minimum
+
+00:27:11,840 --> 00:27:15,840
+the maximum and some values of each
+
+00:27:14,000 --> 00:27:17,520
+column per row group
+
+00:27:15,840 --> 00:27:19,679
+this row group size is of course
+
+00:27:17,520 --> 00:27:21,520
+configurable by default is 10000 rows
+
+00:27:19,679 --> 00:27:23,440
+but we can configure it to be less to be
+
+00:27:21,520 --> 00:27:24,080
+more fine-grained or more to be less
+
+00:27:23,440 --> 00:27:25,440
+fine-grained
+
+00:27:24,080 --> 00:27:27,279
+but of course as you understand there is
+
+00:27:25,440 --> 00:27:28,960
+a trade-off here between the raw group
+
+00:27:27,279 --> 00:27:30,000
+size and the metadata size so we don't
+
+00:27:28,960 --> 00:27:32,880
+want to go
+
+00:27:30,000 --> 00:27:34,880
+too low and all these indexes i
+
+00:27:32,880 --> 00:27:36,640
+mentioned like the file level indexes
+
+00:27:34,880 --> 00:27:39,039
+stripe level indexes and draw group
+
+00:27:36,640 --> 00:27:40,960
+indexes actually enable us to
+
+00:27:39,039 --> 00:27:42,559
+get only the raw groups that are of
+
+00:27:40,960 --> 00:27:44,240
+interest for answering the query that
+
+00:27:42,559 --> 00:27:47,039
+we're interested at
+
+00:27:44,240 --> 00:27:48,559
+so um extrusion engine such as hive and
+
+00:27:47,039 --> 00:27:50,720
+of course spark and other execution
+
+00:27:48,559 --> 00:27:52,320
+is leverage those indexes and calibrate
+
+00:27:50,720 --> 00:27:54,960
+them by using these simplified
+
+00:27:52,320 --> 00:27:57,039
+expressions called servicing hive
+
+00:27:54,960 --> 00:27:58,320
+these sharks are supported by orc the
+
+00:27:57,039 --> 00:28:00,159
+orc reader itself
+
+00:27:58,320 --> 00:28:01,760
+and they actually restrict the number of
+
+00:28:00,159 --> 00:28:02,559
+roads that are returned to the execution
+
+00:28:01,760 --> 00:28:04,240
+engine
+
+00:28:02,559 --> 00:28:05,600
+and because there are simplified filters
+
+00:28:04,240 --> 00:28:06,799
+in reality they have their own
+
+00:28:05,600 --> 00:28:09,039
+limitations
+
+00:28:06,799 --> 00:28:10,559
+first of all they can't they cannot
+
+00:28:09,039 --> 00:28:11,679
+support udfs or columns with
+
+00:28:10,559 --> 00:28:13,840
+relationships
+
+00:28:11,679 --> 00:28:16,159
+like um the example we have below and as
+
+00:28:13,840 --> 00:28:18,159
+you understand we can only eliminate
+
+00:28:16,159 --> 00:28:19,679
+at the file level at the type level or
+
+00:28:18,159 --> 00:28:21,360
+at the row group level which is the
+
+00:28:19,679 --> 00:28:24,240
+finest level of indexing we have
+
+00:28:21,360 --> 00:28:25,919
+on org and this means however that even
+
+00:28:24,240 --> 00:28:27,760
+for a simple
+
+00:28:25,919 --> 00:28:29,360
+expression like below where we project
+
+00:28:27,760 --> 00:28:32,159
+three columns and we apply a more
+
+00:28:29,360 --> 00:28:34,720
+detailed filter one of them on x in this
+
+00:28:32,159 --> 00:28:36,399
+particular case we will have to decode
+
+00:28:34,720 --> 00:28:37,520
+all the row groups across all these
+
+00:28:36,399 --> 00:28:39,679
+columns like x y
+
+00:28:37,520 --> 00:28:41,440
+and z and then the process engine itself
+
+00:28:39,679 --> 00:28:44,480
+will have to do the filtering afterwards
+
+00:28:41,440 --> 00:28:45,919
+which can be pretty expensive in reality
+
+00:28:44,480 --> 00:28:48,159
+and this is one of the many practical
+
+00:28:45,919 --> 00:28:50,799
+cases that require a more fine
+
+00:28:48,159 --> 00:28:52,720
+grained filtering mechanism for uh
+
+00:28:50,799 --> 00:28:54,559
+storage formats like orc
+
+00:28:52,720 --> 00:28:56,080
+and this is exactly what we did with orc
+
+00:28:54,559 --> 00:28:58,480
+577 so
+
+00:28:56,080 --> 00:28:59,840
+this is how we enabled fine-grained
+
+00:28:58,480 --> 00:29:02,000
+level filtering for work
+
+00:28:59,840 --> 00:29:03,520
+by reading a subset of the columns and
+
+00:29:02,000 --> 00:29:05,520
+applying a more detailed filter
+
+00:29:03,520 --> 00:29:07,279
+afterwards and using this information as
+
+00:29:05,520 --> 00:29:08,960
+we'll see in the steps below
+
+00:29:07,279 --> 00:29:10,799
+so this filtering mechanism works in
+
+00:29:08,960 --> 00:29:12,320
+three steps the first step we
+
+00:29:10,799 --> 00:29:14,000
+expand early the columns that we apply
+
+00:29:12,320 --> 00:29:14,480
+the filter on in this case we're going
+
+00:29:14,000 --> 00:29:16,559
+to lead
+
+00:29:14,480 --> 00:29:17,520
+totally column x and all the rows from
+
+00:29:16,559 --> 00:29:18,880
+that column
+
+00:29:17,520 --> 00:29:20,320
+on the second step we're going to apply
+
+00:29:18,880 --> 00:29:22,000
+the filter by picking up the rows that
+
+00:29:20,320 --> 00:29:24,000
+are passing that filter
+
+00:29:22,000 --> 00:29:25,520
+and we can do that by setting a select
+
+00:29:24,000 --> 00:29:27,520
+array within each column vector
+
+00:29:25,520 --> 00:29:28,640
+keeping track of the rows that actually
+
+00:29:27,520 --> 00:29:30,159
+match
+
+00:29:28,640 --> 00:29:31,760
+and on the third step and final step
+
+00:29:30,159 --> 00:29:33,679
+we're going to use the selected array
+
+00:29:31,760 --> 00:29:35,279
+to read and decode only the rows that
+
+00:29:33,679 --> 00:29:36,399
+satisfy the filter from the remaining of
+
+00:29:35,279 --> 00:29:40,080
+the columns
+
+00:29:36,399 --> 00:29:41,840
+being y and z and instead of reading
+
+00:29:40,080 --> 00:29:43,039
+thousands of unneeded rows which is the
+
+00:29:41,840 --> 00:29:44,960
+default case we're going to
+
+00:29:43,039 --> 00:29:46,159
+end up reading only the few call of
+
+00:29:44,960 --> 00:29:49,279
+euros at maths
+
+00:29:46,159 --> 00:29:51,120
+and in our example and uh to give you an
+
+00:29:49,279 --> 00:29:52,480
+idea of the benefit we get with this row
+
+00:29:51,120 --> 00:29:54,720
+level filtering mechanism
+
+00:29:52,480 --> 00:29:56,880
+we extended the benchmark given with um
+
+00:29:54,720 --> 00:29:59,120
+org which is using real data sets such
+
+00:29:56,880 --> 00:30:01,360
+as taxi cells and github data sets
+
+00:29:59,120 --> 00:30:02,640
+and projects a number of columns so as
+
+00:30:01,360 --> 00:30:04,159
+you can see on the x axis we're playing
+
+00:30:02,640 --> 00:30:06,159
+with the selectivity we increase it
+
+00:30:04,159 --> 00:30:07,600
+from one percent to 100 percent and on
+
+00:30:06,159 --> 00:30:08,720
+the y-axis you have the run time it
+
+00:30:07,600 --> 00:30:10,960
+takes to project those
+
+00:30:08,720 --> 00:30:12,159
+so for this particular a graph here we
+
+00:30:10,960 --> 00:30:14,399
+use a cell data set
+
+00:30:12,159 --> 00:30:16,000
+we projected 20 columns we apply the
+
+00:30:14,399 --> 00:30:17,760
+more
+
+00:30:16,000 --> 00:30:19,440
+restrictive filter to one of them and as
+
+00:30:17,760 --> 00:30:20,080
+you can see for one percent selectivity
+
+00:30:19,440 --> 00:30:23,360
+we have
+
+00:30:20,080 --> 00:30:27,279
+56 percent in runtime while selecting 10
+
+00:30:23,360 --> 00:30:30,080
+has 44 degrees uh 44 degrees in runtime
+
+00:30:27,279 --> 00:30:31,120
+so pretty impressive um in general as i
+
+00:30:30,080 --> 00:30:33,840
+said you take away here
+
+00:30:31,120 --> 00:30:35,679
+is what we found out is that it's always
+
+00:30:33,840 --> 00:30:36,640
+beneficial to filter all those data as
+
+00:30:35,679 --> 00:30:38,640
+early as possible
+
+00:30:36,640 --> 00:30:40,480
+to end up with less data down the
+
+00:30:38,640 --> 00:30:42,720
+pipeline in your execution
+
+00:30:40,480 --> 00:30:44,480
+engine so this is what you can get out
+
+00:30:42,720 --> 00:30:46,880
+of this feature
+
+00:30:44,480 --> 00:30:47,520
+to implement this feature we had to
+
+00:30:46,880 --> 00:30:48,799
+extend
+
+00:30:47,520 --> 00:30:50,240
+introduce the filter context which is
+
+00:30:48,799 --> 00:30:50,799
+pretty much the selected array that i
+
+00:30:50,240 --> 00:30:52,880
+told you
+
+00:30:50,799 --> 00:30:53,919
+as part of this hive jira and we also
+
+00:30:52,880 --> 00:30:55,520
+have to extend um
+
+00:30:53,919 --> 00:30:57,679
+the orc reader logic with this new
+
+00:30:55,520 --> 00:30:59,279
+option this new option takes um
+
+00:30:57,679 --> 00:31:00,799
+the column names that are going to be
+
+00:30:59,279 --> 00:31:02,640
+expanded and a filter
+
+00:31:00,799 --> 00:31:04,399
+the filter is a callback pretty much
+
+00:31:02,640 --> 00:31:06,159
+that can implement any kind of logic
+
+00:31:04,399 --> 00:31:07,440
+and current to implement this logic on
+
+00:31:06,159 --> 00:31:09,760
+hive itself
+
+00:31:07,440 --> 00:31:11,600
+and the new work reader works in three
+
+00:31:09,760 --> 00:31:13,519
+steps as i mentioned early expand
+
+00:31:11,600 --> 00:31:15,600
+evaluate the callback and then decode
+
+00:31:13,519 --> 00:31:18,799
+only the rows that are
+
+00:31:15,600 --> 00:31:20,240
+out of interest and then
+
+00:31:18,799 --> 00:31:21,760
+more importantly for us hype can
+
+00:31:20,240 --> 00:31:22,559
+directly benefit from this low level
+
+00:31:21,760 --> 00:31:24,640
+filter
+
+00:31:22,559 --> 00:31:26,240
+mechanism that is implemented on org and
+
+00:31:24,640 --> 00:31:28,240
+when scanning and filtering data
+
+00:31:26,240 --> 00:31:29,679
+and without going into too many details
+
+00:31:28,240 --> 00:31:31,519
+about this query here we have
+
+00:31:29,679 --> 00:31:33,360
+a catalog sales fact table and we have
+
+00:31:31,519 --> 00:31:35,519
+dimension table on the right side
+
+00:31:33,360 --> 00:31:36,559
+where we apply a more detailed filter on
+
+00:31:35,519 --> 00:31:39,200
+two columns
+
+00:31:36,559 --> 00:31:40,240
+and what you can take from is that
+
+00:31:39,200 --> 00:31:42,559
+instead of decoding
+
+00:31:40,240 --> 00:31:45,200
+all one million rows on the right side
+
+00:31:42,559 --> 00:31:46,640
+across all three columns
+
+00:31:45,200 --> 00:31:48,399
+and then apply the filter on the third
+
+00:31:46,640 --> 00:31:50,080
+step what you can do is you can early
+
+00:31:48,399 --> 00:31:52,159
+decode the filter column
+
+00:31:50,080 --> 00:31:53,120
+which are two out of these three columns
+
+00:31:52,159 --> 00:31:55,039
+and then um
+
+00:31:53,120 --> 00:31:56,320
+decode the remaining of the columns only
+
+00:31:55,039 --> 00:31:58,399
+for this um
+
+00:31:56,320 --> 00:31:59,760
+only for the ones that satisfy the
+
+00:31:58,399 --> 00:32:01,679
+filter so in this case
+
+00:31:59,760 --> 00:32:03,279
+instead of decoding 1 million data sda
+
+00:32:01,679 --> 00:32:04,480
+rows we're going to decode 8 000 of
+
+00:32:03,279 --> 00:32:05,919
+those rows
+
+00:32:04,480 --> 00:32:07,840
+and this is what we call static low
+
+00:32:05,919 --> 00:32:08,240
+level filtering height we also have a
+
+00:32:07,840 --> 00:32:09,919
+more
+
+00:32:08,240 --> 00:32:12,159
+advanced dynamic row level filtering
+
+00:32:09,919 --> 00:32:15,039
+mechanism that actually works with
+
+00:32:12,159 --> 00:32:16,320
+within map joint tasks and again without
+
+00:32:15,039 --> 00:32:18,240
+going into much digital
+
+00:32:16,320 --> 00:32:19,679
+uh those tasks use the broadcast table
+
+00:32:18,240 --> 00:32:21,679
+pro on the streaming side
+
+00:32:19,679 --> 00:32:23,919
+to decode only the matching rows from
+
+00:32:21,679 --> 00:32:28,159
+the secondary columns on the fact table
+
+00:32:23,919 --> 00:32:30,880
+so in this case um it's a item sk column
+
+00:32:28,159 --> 00:32:32,159
+and feel free to check out the latest
+
+00:32:30,880 --> 00:32:34,159
+hive source code
+
+00:32:32,159 --> 00:32:35,760
+enabled optimization the pro the code
+
+00:32:34,159 --> 00:32:38,080
+optimization and you can
+
+00:32:35,760 --> 00:32:40,559
+find a few query plans and you can see
+
+00:32:38,080 --> 00:32:43,200
+how this optimization kicks in
+
+00:32:40,559 --> 00:32:44,559
+and since we have some time i'm gonna
+
+00:32:43,200 --> 00:32:47,360
+show you
+
+00:32:44,559 --> 00:32:49,039
+a little demo that i just prepared so
+
+00:32:47,360 --> 00:32:53,039
+let me share
+
+00:32:49,039 --> 00:32:53,039
+my other tab to see
+
+00:32:53,519 --> 00:32:58,159
+yeah so what we have here i hope you can
+
+00:32:57,200 --> 00:33:00,480
+see my screen
+
+00:32:58,159 --> 00:33:01,519
+well what we have here is um the data
+
+00:33:00,480 --> 00:33:03,840
+analytics studio
+
+00:33:01,519 --> 00:33:05,760
+platform and and i just run two very
+
+00:33:03,840 --> 00:33:08,880
+same queries so this is query
+
+00:33:05,760 --> 00:33:10,000
+43 from dpcds benchmark and both those
+
+00:33:08,880 --> 00:33:13,279
+queries are run
+
+00:33:10,000 --> 00:33:15,840
+on 10 terabytes on azure on
+
+00:33:13,279 --> 00:33:16,320
+using forex editors if i'm not mistaken
+
+00:33:15,840 --> 00:33:18,559
+uh
+
+00:33:16,320 --> 00:33:20,159
+and query a is with optimization the
+
+00:33:18,559 --> 00:33:22,640
+probably code optimization enabled
+
+00:33:20,159 --> 00:33:24,399
+and query b is the optimization disabled
+
+00:33:22,640 --> 00:33:26,799
+so if you don't believe me yeah this is
+
+00:33:24,399 --> 00:33:28,880
+a difference here so the one
+
+00:33:26,799 --> 00:33:30,799
+the flag is false and the other is true
+
+00:33:28,880 --> 00:33:31,840
+the plan itself is exactly the same as
+
+00:33:30,799 --> 00:33:34,799
+you can see here
+
+00:33:31,840 --> 00:33:36,480
+but um there is one slight difference on
+
+00:33:34,799 --> 00:33:36,960
+the store cells which is the fact table
+
+00:33:36,480 --> 00:33:38,640
+scan
+
+00:33:36,960 --> 00:33:40,880
+you can see we have the protocol details
+
+00:33:38,640 --> 00:33:43,440
+here it's actually using
+
+00:33:40,880 --> 00:33:44,799
+the hash table that is propagated to
+
+00:33:43,440 --> 00:33:48,559
+filter out
+
+00:33:44,799 --> 00:33:50,159
+as less rows as possible while um
+
+00:33:48,559 --> 00:33:52,159
+on the second query with the
+
+00:33:50,159 --> 00:33:55,919
+optimization disabled we don't have that
+
+00:33:52,159 --> 00:33:57,600
+there and even for this simple query
+
+00:33:55,919 --> 00:33:59,120
+um you can see that we have a huge
+
+00:33:57,600 --> 00:34:00,640
+difference in runtime so
+
+00:33:59,120 --> 00:34:03,840
+the optimized version with property
+
+00:34:00,640 --> 00:34:06,320
+called enabled runs in 55 seconds
+
+00:34:03,840 --> 00:34:08,000
+uh with optimization disabled runs in
+
+00:34:06,320 --> 00:34:11,280
+one minute and 50 seconds
+
+00:34:08,000 --> 00:34:12,800
+and um of course you can check the plans
+
+00:34:11,280 --> 00:34:13,359
+here and you can check the data flow and
+
+00:34:12,800 --> 00:34:15,440
+everything
+
+00:34:13,359 --> 00:34:16,720
+but if you die if you dive a bit deeper
+
+00:34:15,440 --> 00:34:18,159
+you will see that the main
+
+00:34:16,720 --> 00:34:20,320
+difference is the on the number of
+
+00:34:18,159 --> 00:34:21,760
+decoded draws so in the optimized
+
+00:34:20,320 --> 00:34:24,639
+version we have
+
+00:34:21,760 --> 00:34:25,599
+two billion rows decoded in total and on
+
+00:34:24,639 --> 00:34:27,760
+the second
+
+00:34:25,599 --> 00:34:29,760
+with optimization disabled we have five
+
+00:34:27,760 --> 00:34:32,879
+and a half billion rows
+
+00:34:29,760 --> 00:34:36,399
+um we still have some
+
+00:34:32,879 --> 00:34:39,119
+time so i'm gonna just
+
+00:34:36,399 --> 00:34:41,040
+switch to my final slide which is gonna
+
+00:34:39,119 --> 00:34:44,159
+be
+
+00:34:41,040 --> 00:34:45,839
+um this slide that
+
+00:34:44,159 --> 00:34:47,359
+i just want to mention that this is not
+
+00:34:45,839 --> 00:34:48,399
+a single person's effort is just a
+
+00:34:47,359 --> 00:34:50,240
+community effort
+
+00:34:48,399 --> 00:34:52,480
+and the community has done a lot of work
+
+00:34:50,240 --> 00:34:54,079
+moving hive from what it was like a bad
+
+00:34:52,480 --> 00:34:55,919
+processing engine to interactive
+
+00:34:54,079 --> 00:34:57,520
+and the system as it is today can thrive
+
+00:34:55,919 --> 00:34:59,440
+in many other environments
+
+00:34:57,520 --> 00:35:01,119
+that's now that's why we are now working
+
+00:34:59,440 --> 00:35:02,000
+on hiv on the cloud and kubernetes has
+
+00:35:01,119 --> 00:35:03,760
+cloudera
+
+00:35:02,000 --> 00:35:05,200
+and we have long running kubernetes
+
+00:35:03,760 --> 00:35:06,880
+cluster with your data playing shared
+
+00:35:05,200 --> 00:35:10,000
+services like data catalog
+
+00:35:06,880 --> 00:35:11,680
+and then we can have um uh ephemeral
+
+00:35:10,000 --> 00:35:12,720
+clusters with high server during levy
+
+00:35:11,680 --> 00:35:14,480
+demo to submit
+
+00:35:12,720 --> 00:35:15,920
+queries and of course we have a lot of
+
+00:35:14,480 --> 00:35:16,640
+nice features like elastic computer
+
+00:35:15,920 --> 00:35:18,880
+resources
+
+00:35:16,640 --> 00:35:20,400
+sport instances multiple versions of
+
+00:35:18,880 --> 00:35:23,040
+hive etc etc
+
+00:35:20,400 --> 00:35:24,079
+and feel free to check out the cdp
+
+00:35:23,040 --> 00:35:27,440
+platform where we
+
+00:35:24,079 --> 00:35:30,400
+can provide those services both for
+
+00:35:27,440 --> 00:35:33,599
+private cloud and for public cloud and
+
+00:35:30,400 --> 00:35:37,839
+with that i would like to conclude and
+
+00:35:33,599 --> 00:35:37,839
+happy to take any questions
+
+00:35:42,400 --> 00:35:45,599
+i see panels that there is a question
+
+00:35:44,240 --> 00:35:49,280
+about uh
+
+00:35:45,599 --> 00:35:51,200
+legitimacy materialization yeah yeah
+
+00:35:49,280 --> 00:35:52,400
+cut it so easily materialization
+
+00:35:51,200 --> 00:35:56,160
+possible for
+
+00:35:52,400 --> 00:35:58,960
+if your table is stored in parque
+
+00:35:56,160 --> 00:36:00,240
+good question so by default um this lazy
+
+00:35:58,960 --> 00:36:02,320
+materialization
+
+00:36:00,240 --> 00:36:03,359
+mechanism is implemented on work um
+
+00:36:02,320 --> 00:36:06,240
+similar
+
+00:36:03,359 --> 00:36:06,720
+uh ideas can be ported to parque and
+
+00:36:06,240 --> 00:36:08,240
+this is
+
+00:36:06,720 --> 00:36:10,400
+something that we have been discussing
+
+00:36:08,240 --> 00:36:11,040
+to do in parque but we currently haven't
+
+00:36:10,400 --> 00:36:14,880
+done that
+
+00:36:11,040 --> 00:36:16,960
+however in hive itself all the
+
+00:36:14,880 --> 00:36:19,200
+ac tables are going to be stored in org
+
+00:36:16,960 --> 00:36:20,079
+so if for any reason you do a conversion
+
+00:36:19,200 --> 00:36:22,160
+for example
+
+00:36:20,079 --> 00:36:24,079
+from reading part here data and storing
+
+00:36:22,160 --> 00:36:25,680
+them as managed tables
+
+00:36:24,079 --> 00:36:26,560
+by default it's going to be nork so by
+
+00:36:25,680 --> 00:36:28,400
+default you're going to get these
+
+00:36:26,560 --> 00:36:30,079
+optimizations out of the box
+
+00:36:28,400 --> 00:36:32,400
+uh if you're going to store if you're
+
+00:36:30,079 --> 00:36:33,839
+going to query um external tables uh on
+
+00:36:32,400 --> 00:36:36,400
+parque the answer is no
+
+00:36:33,839 --> 00:36:37,440
+but if you port and you move your data
+
+00:36:36,400 --> 00:36:42,240
+internally
+
+00:36:37,440 --> 00:36:44,000
+you're going to have this out of the box
+
+00:36:42,240 --> 00:36:47,599
+but the idea is applied there as well
+
+00:36:44,000 --> 00:36:47,599
+from a research point of view let's say
+
+00:36:50,720 --> 00:36:55,839
+any other questions guys somebody
+
+00:36:57,839 --> 00:37:06,160
+okay here is another one
+
+00:37:00,880 --> 00:37:06,160
+will this be llap only or also cdh5
+
+00:37:06,640 --> 00:37:11,680
+do you want to talk about your um
+
+00:37:09,520 --> 00:37:13,200
+semi-zone reduction i can i can't
+
+00:37:11,680 --> 00:37:16,400
+answer about the last materialization
+
+00:37:13,200 --> 00:37:20,560
+feature um so for laser materialization
+
+00:37:16,400 --> 00:37:22,240
+um the static part um
+
+00:37:20,560 --> 00:37:23,599
+so for this modernization the static
+
+00:37:22,240 --> 00:37:27,359
+static row level filtering
+
+00:37:23,599 --> 00:37:29,520
+um can be it can be
+
+00:37:27,359 --> 00:37:31,440
+supported on non-lap and lip
+
+00:37:29,520 --> 00:37:33,440
+environments but the dynamic
+
+00:37:31,440 --> 00:37:34,640
+part that i mentioned with with um the
+
+00:37:33,440 --> 00:37:38,640
+hash table push down
+
+00:37:34,640 --> 00:37:41,119
+is actually only on lap um yeah but
+
+00:37:38,640 --> 00:37:42,240
+it's a it's um you can try it out on cdp
+
+00:37:41,119 --> 00:37:44,720
+public if you want
+
+00:37:42,240 --> 00:37:46,240
+i'm not sure about gtp5 i have to check
+
+00:37:44,720 --> 00:37:46,720
+this if you if you're gonna port that
+
+00:37:46,240 --> 00:37:51,839
+there
+
+00:37:46,720 --> 00:37:51,839
+currently it's not there
+
+00:38:00,400 --> 00:38:04,880
+the major reduction is a good question
+
+00:38:03,280 --> 00:38:07,760
+if it makes sense uh
+
+00:38:04,880 --> 00:38:08,560
+it'll not network speeds normally i mean
+
+00:38:07,760 --> 00:38:12,320
+as i said
+
+00:38:08,560 --> 00:38:15,119
+i saw the examples that uh that you gain
+
+00:38:12,320 --> 00:38:16,720
+a network io but in practice uh it's not
+
+00:38:15,119 --> 00:38:19,359
+only network io
+
+00:38:16,720 --> 00:38:21,359
+the fact is that if between the scan and
+
+00:38:19,359 --> 00:38:24,480
+the join that you are reducing
+
+00:38:21,359 --> 00:38:26,880
+there can be many operators then
+
+00:38:24,480 --> 00:38:27,520
+instead of only saving the network io
+
+00:38:26,880 --> 00:38:30,000
+you save
+
+00:38:27,520 --> 00:38:30,640
+save also the additional processing cpu
+
+00:38:30,000 --> 00:38:34,000
+memory
+
+00:38:30,640 --> 00:38:34,400
+and whatever else comes with it for any
+
+00:38:34,000 --> 00:38:36,640
+all
+
+00:38:34,400 --> 00:38:38,320
+of the operators in the middle so if you
+
+00:38:36,640 --> 00:38:41,440
+check uh also
+
+00:38:38,320 --> 00:38:42,640
+articles about uh with i think you'll
+
+00:38:41,440 --> 00:38:45,520
+find it mostly with
+
+00:38:42,640 --> 00:38:46,960
+the name selective joint push down you
+
+00:38:45,520 --> 00:38:49,520
+will see concrete examples
+
+00:38:46,960 --> 00:38:50,240
+and i actually this is why in some cases
+
+00:38:49,520 --> 00:38:53,359
+it can apply
+
+00:38:50,240 --> 00:38:54,160
+also to centralized systems because the
+
+00:38:53,359 --> 00:38:55,839
+big
+
+00:38:54,160 --> 00:38:57,680
+difference you can see it with a slow
+
+00:38:55,839 --> 00:38:59,280
+network so with
+
+00:38:57,680 --> 00:39:01,359
+with a slow network you can easily see
+
+00:38:59,280 --> 00:39:03,119
+the difference but it can also matter
+
+00:39:01,359 --> 00:39:04,880
+if even if it is a centralized setting
+
+00:39:03,119 --> 00:39:08,960
+and there is no
+
+00:39:04,880 --> 00:39:08,960
+even node network io
+
+00:39:11,119 --> 00:39:16,160
+i believe we're running out of time um
+
+00:39:14,640 --> 00:39:17,520
+just letting you know guys that feel
+
+00:39:16,160 --> 00:39:19,680
+free to reach out afterwards we'll be
+
+00:39:17,520 --> 00:39:22,160
+around and we're gonna upload the slides
+
+00:39:19,680 --> 00:39:23,599
+um yeah but feel free to reach out we
+
+00:39:22,160 --> 00:39:27,839
+are available and
+
+00:39:23,599 --> 00:39:33,200
+thanks for for staying with
+
+00:39:27,839 --> 00:39:33,200
+a lot guys for being here see you again
+
+00:39:40,839 --> 00:39:43,839
+soon
+
+00:40:00,240 --> 00:40:02,320
+
+YouTube URL: https://www.youtube.com/watch?v=P5Q5GZheAEk
+
+

@@ -1,0 +1,2545 @@
+Title: How Netflix Manages Version Upgrades of Cassandra at Scale
+Publication date: 2020-10-21
+Playlist: ApacheCon @Home 2020: Cassandra
+Description: 
+	How Netflix Manages Version Upgrades of Cassandra at Scale
+Sumanth Pasupuleti
+
+A presentation from ApacheCon @Home 2020
+https://apachecon.com/acah2020/
+
+We at Netflix have about 70% of our fleet on Apache Cassandra 2.1, while the remaining 30% is on 3.0. We have embarked on a multi quarter task of upgrading our 2.1 fleet to 3.0, as part of which we are doing several kinds of verification overarching both correctness and performance. It is a known issue that cross version streaming is not supported in Cassandra. To work around this, we've also developed a version agnostic upgrade mechanism using our desire based automation, to avoid needing to do cross version streaming. Through this approach, we can tolerate loosing a node while the upgrade is in progress and the cluster is in mixed mode of major versions. As part of this talk, I would like to elaborate on what kinds of verification we are doing as well as the upgrade mechanism we have developed to avoid cross version streaming.
+
+Sumanth Pasupuleti is a Senior Software Engineer at Netflix, focusing on innovating and operating at scale, both caching and persistent datastore solutions like EVCache and Cassandra, offered as a platform within Netflix.
+Captions: 
+	00:00:06,420 --> 00:00:10,640
+[Music]
+
+00:00:14,160 --> 00:00:17,230
+[Music]
+
+00:00:26,560 --> 00:00:31,840
+i guess we can get started
+
+00:00:39,440 --> 00:00:44,320
+hello everyone great to meet you all
+
+00:00:42,320 --> 00:00:47,039
+although in a virtual environment
+
+00:00:44,320 --> 00:00:48,160
+first up thanks to all the organizers of
+
+00:00:47,039 --> 00:00:50,079
+apache con
+
+00:00:48,160 --> 00:00:51,520
+for being able to organize this event
+
+00:00:50,079 --> 00:00:54,800
+despite the challenges from
+
+00:00:51,520 --> 00:00:57,440
+the pandemic i'm suman pascuality
+
+00:00:54,800 --> 00:00:58,640
+a senior software engineer at netflix
+
+00:00:57,440 --> 00:01:01,039
+primarily working on
+
+00:00:58,640 --> 00:01:04,719
+persistent stores like cassandra and
+
+00:01:01,039 --> 00:01:04,719
+caching stores like ev cash
+
+00:01:06,080 --> 00:01:09,280
+i'm going to talk about cassandra
+
+00:01:07,760 --> 00:01:11,520
+upgrades today
+
+00:01:09,280 --> 00:01:13,520
+we will start by looking at what apache
+
+00:01:11,520 --> 00:01:14,560
+cassandra versions are available out
+
+00:01:13,520 --> 00:01:16,400
+there
+
+00:01:14,560 --> 00:01:17,680
+what is the landscape of cassandra at
+
+00:01:16,400 --> 00:01:19,600
+netflix
+
+00:01:17,680 --> 00:01:21,920
+what specific upgrade we are currently
+
+00:01:19,600 --> 00:01:23,600
+dealing with at netflix
+
+00:01:21,920 --> 00:01:24,960
+different upgrade validation steps we
+
+00:01:23,600 --> 00:01:27,040
+are using
+
+00:01:24,960 --> 00:01:28,159
+and finally the upgrade orchestration
+
+00:01:27,040 --> 00:01:30,640
+that we developed
+
+00:01:28,159 --> 00:01:33,840
+to oversee the upgrade while taking care
+
+00:01:30,640 --> 00:01:36,000
+of some of the sharp edges
+
+00:01:33,840 --> 00:01:38,159
+let me do a quick switch over and kick
+
+00:01:36,000 --> 00:01:39,200
+off a three-upgrade on a 2-1 cassandra
+
+00:01:38,159 --> 00:01:41,119
+cluster
+
+00:01:39,200 --> 00:01:42,560
+i do not expect the upgrade to complete
+
+00:01:41,119 --> 00:01:44,799
+by end of the session
+
+00:01:42,560 --> 00:01:46,479
+but the intention is to show you how the
+
+00:01:44,799 --> 00:01:49,280
+upgrade is performed in practice
+
+00:01:46,479 --> 00:01:50,399
+here at netflix i request your patience
+
+00:01:49,280 --> 00:01:55,840
+as i switch between
+
+00:01:50,399 --> 00:01:55,840
+a couple of windows here
+
+00:01:58,960 --> 00:02:02,079
+so this is uh the cluster that we are
+
+00:02:01,200 --> 00:02:04,320
+going to upgrade
+
+00:02:02,079 --> 00:02:05,439
+this is a three node two one cassandra
+
+00:02:04,320 --> 00:02:08,959
+cluster
+
+00:02:05,439 --> 00:02:10,640
+spread across three racks and this tool
+
+00:02:08,959 --> 00:02:12,560
+is called spinnaker
+
+00:02:10,640 --> 00:02:14,160
+this is what we use for interacting with
+
+00:02:12,560 --> 00:02:18,000
+our cloud instances
+
+00:02:14,160 --> 00:02:18,000
+and this is also our ci cd tool
+
+00:02:18,400 --> 00:02:21,840
+now let me kick off a three upgrade on
+
+00:02:20,959 --> 00:02:25,360
+this cluster
+
+00:02:21,840 --> 00:02:25,360
+using this jenkins job
+
+00:02:34,319 --> 00:02:40,080
+so seems like it kicked off the pipeline
+
+00:02:36,800 --> 00:02:40,080
+that should upgrade the cluster
+
+00:02:44,160 --> 00:02:48,560
+let me skip the wait uh as we make
+
+00:02:47,519 --> 00:02:50,319
+progress on the talk
+
+00:02:48,560 --> 00:02:52,480
+i'll i'll walk you through the steps
+
+00:02:50,319 --> 00:02:54,800
+that are involved in the pipeline
+
+00:02:52,480 --> 00:02:55,920
+but for now uh let me also share the
+
+00:02:54,800 --> 00:02:58,480
+terminal to see
+
+00:02:55,920 --> 00:03:05,840
+what versions of cassandra the notes are
+
+00:02:58,480 --> 00:03:05,840
+actually running currently on
+
+00:03:14,159 --> 00:03:17,280
+so this script is going to run no tool
+
+00:03:16,480 --> 00:03:19,280
+version
+
+00:03:17,280 --> 00:03:21,360
+on all the three nodes of the cluster
+
+00:03:19,280 --> 00:03:23,040
+and report back the version
+
+00:03:21,360 --> 00:03:26,560
+so as you can see all the three nodes
+
+00:03:23,040 --> 00:03:26,560
+are running to 119.
+
+00:03:27,840 --> 00:03:33,840
+now let me share the presentation again
+
+00:03:45,680 --> 00:03:49,360
+so uh before we go further a quick
+
+00:03:48,319 --> 00:03:51,840
+basics around
+
+00:03:49,360 --> 00:03:53,760
+why and what of an upgrade why do we
+
+00:03:51,840 --> 00:03:56,560
+essentially uh upgrade
+
+00:03:53,760 --> 00:03:57,920
+upgrades give us new features bug fixes
+
+00:03:56,560 --> 00:04:00,959
+security fixes
+
+00:03:57,920 --> 00:04:02,720
+or we may need more capacity
+
+00:04:00,959 --> 00:04:04,640
+to accommodate increased load by an
+
+00:04:02,720 --> 00:04:06,720
+application
+
+00:04:04,640 --> 00:04:07,840
+coming to what we upgrade in case of a
+
+00:04:06,720 --> 00:04:10,159
+software change
+
+00:04:07,840 --> 00:04:10,959
+we may upgrade operating system
+
+00:04:10,159 --> 00:04:13,519
+cassandra
+
+00:04:10,959 --> 00:04:14,239
+or the sidecar in case of a hardware
+
+00:04:13,519 --> 00:04:15,920
+change
+
+00:04:14,239 --> 00:04:18,479
+we may be changing the instance type as
+
+00:04:15,920 --> 00:04:18,479
+an example
+
+00:04:19,040 --> 00:04:22,240
+let us take a quick look at what
+
+00:04:20,639 --> 00:04:24,960
+versions of apache cassandra
+
+00:04:22,240 --> 00:04:24,960
+are available
+
+00:04:27,520 --> 00:04:34,160
+the minimum supported version is 2.2
+
+00:04:30,560 --> 00:04:38,240
+followed by 3.0 3.11
+
+00:04:34,160 --> 00:04:38,240
+and 4o which is currently in beta
+
+00:04:38,479 --> 00:04:41,759
+at netflix we are taking the upgrade
+
+00:04:40,639 --> 00:04:44,479
+path from
+
+00:04:41,759 --> 00:04:47,040
+two one to three year followed by three
+
+00:04:44,479 --> 00:04:47,040
+to four oh
+
+00:04:47,600 --> 00:04:52,320
+upgrades offer applications with awesome
+
+00:04:49,919 --> 00:04:55,919
+features at each step of the upgrade
+
+00:04:52,320 --> 00:04:57,600
+for example trio and photo offer
+
+00:04:55,919 --> 00:05:00,800
+some of i've listed some of the features
+
+00:04:57,600 --> 00:05:00,800
+that three and four offer
+
+00:05:02,800 --> 00:05:08,479
+now let us take a quick look at the
+
+00:05:04,479 --> 00:05:08,479
+landscape of cassandra at netflix
+
+00:05:09,520 --> 00:05:13,919
+here is a quick snapshot of state of
+
+00:05:10,960 --> 00:05:15,039
+affairs 37 percent of our fleet is on
+
+00:05:13,919 --> 00:05:18,080
+3-0
+
+00:05:15,039 --> 00:05:20,639
+while 63 percent is on 2-1
+
+00:05:18,080 --> 00:05:21,120
+the 37 percent 3-0 clusters not just
+
+00:05:20,639 --> 00:05:23,600
+include
+
+00:05:21,120 --> 00:05:25,680
+newly created theo clusters but also
+
+00:05:23,600 --> 00:05:26,880
+clusters that we have upgraded from 2 1
+
+00:05:25,680 --> 00:05:28,320
+to 3 0
+
+00:05:26,880 --> 00:05:29,840
+through which we had a lot of learnings
+
+00:05:28,320 --> 00:05:31,840
+that i'm going to share with you in the
+
+00:05:29,840 --> 00:05:33,520
+next few slides
+
+00:05:31,840 --> 00:05:35,840
+as you can see we are pretty heavy on
+
+00:05:33,520 --> 00:05:36,400
+2-1 and are looking forward to shed that
+
+00:05:35,840 --> 00:05:38,800
+debt
+
+00:05:36,400 --> 00:05:40,240
+as we pave towards 3-0 which is then
+
+00:05:38,800 --> 00:05:42,080
+going to set us up well for
+
+00:05:40,240 --> 00:05:44,560
+upgrading to the most awaited version
+
+00:05:42,080 --> 00:05:44,560
+40.
+
+00:05:48,320 --> 00:05:51,680
+coming to cassandra version upgrades
+
+00:05:50,560 --> 00:05:53,520
+generally speaking
+
+00:05:51,680 --> 00:05:55,199
+version upgrades are done by replacing
+
+00:05:53,520 --> 00:05:57,199
+instances or nodes
+
+00:05:55,199 --> 00:05:58,319
+that have older version of cassandra
+
+00:05:57,199 --> 00:06:00,400
+with the ones that have
+
+00:05:58,319 --> 00:06:01,919
+newer versions of cassandra a rolling
+
+00:06:00,400 --> 00:06:04,080
+upgrade essentially
+
+00:06:01,919 --> 00:06:05,280
+cassandra being a distributed system
+
+00:06:04,080 --> 00:06:07,600
+with no concept of
+
+00:06:05,280 --> 00:06:10,639
+leaders and followers gives us this
+
+00:06:07,600 --> 00:06:12,400
+flexibility of doing a rolling upgrade
+
+00:06:10,639 --> 00:06:14,639
+depending on the replication factor
+
+00:06:12,400 --> 00:06:16,479
+which is typically three
+
+00:06:14,639 --> 00:06:18,000
+we tend to take only one of the replicas
+
+00:06:16,479 --> 00:06:20,319
+down at a time
+
+00:06:18,000 --> 00:06:22,240
+in order to continue to be available
+
+00:06:20,319 --> 00:06:25,840
+which is typically being able to serve
+
+00:06:22,240 --> 00:06:28,080
+local column requests upgrades can be
+
+00:06:25,840 --> 00:06:30,240
+broadly categorized into two kinds
+
+00:06:28,080 --> 00:06:31,520
+major version upgrade and minor version
+
+00:06:30,240 --> 00:06:33,199
+upgrade
+
+00:06:31,520 --> 00:06:35,360
+minor version upgrades are typically
+
+00:06:33,199 --> 00:06:37,440
+less adventurous less interesting
+
+00:06:35,360 --> 00:06:39,039
+and quite straightforward so let's talk
+
+00:06:37,440 --> 00:06:40,639
+about major version upgrades
+
+00:06:39,039 --> 00:06:42,319
+by taking a look at some of the
+
+00:06:40,639 --> 00:06:46,639
+challenges we have with them
+
+00:06:42,319 --> 00:06:46,639
+taking two one to three upgrade as an
+
+00:06:46,840 --> 00:06:49,840
+example
+
+00:06:48,319 --> 00:06:51,680
+here are some of the challenges with
+
+00:06:49,840 --> 00:06:53,199
+2-1-3 upgrade
+
+00:06:51,680 --> 00:06:55,039
+there is no support for cross-version
+
+00:06:53,199 --> 00:06:57,199
+streaming what i mean by this
+
+00:06:55,039 --> 00:06:58,880
+is let us say there is a 2-1 cassandra
+
+00:06:57,199 --> 00:07:00,960
+cluster and you start upgrading the
+
+00:06:58,880 --> 00:07:02,800
+cluster to 3-0
+
+00:07:00,960 --> 00:07:04,400
+now during the course of the upgrade
+
+00:07:02,800 --> 00:07:06,880
+where some nodes are on 2 1
+
+00:07:04,400 --> 00:07:08,960
+and some nodes are on 3 0 let us say a
+
+00:07:06,880 --> 00:07:10,800
+node gets terminated
+
+00:07:08,960 --> 00:07:14,720
+now the replacement node may come up as
+
+00:07:10,800 --> 00:07:16,639
+3 0 but might have its neighbors as to 1
+
+00:07:14,720 --> 00:07:18,080
+which from which it will need to stream
+
+00:07:16,639 --> 00:07:20,479
+the data
+
+00:07:18,080 --> 00:07:21,759
+in this scenario given that there is no
+
+00:07:20,479 --> 00:07:24,880
+support for cross-streaming
+
+00:07:21,759 --> 00:07:25,440
+uh cross-version streaming or in other
+
+00:07:24,880 --> 00:07:27,039
+words
+
+00:07:25,440 --> 00:07:29,360
+since streaming protocols are not
+
+00:07:27,039 --> 00:07:31,759
+compatible between two one and trio
+
+00:07:29,360 --> 00:07:33,759
+the replacement node may not be able to
+
+00:07:31,759 --> 00:07:35,520
+successfully stream from the neighbors
+
+00:07:33,759 --> 00:07:37,280
+which then means it will not be able to
+
+00:07:35,520 --> 00:07:40,800
+join the ring successfully
+
+00:07:37,280 --> 00:07:42,800
+posing availability risks
+
+00:07:40,800 --> 00:07:44,639
+for the same reasons that streaming is
+
+00:07:42,800 --> 00:07:46,639
+not cross version compatible
+
+00:07:44,639 --> 00:07:48,560
+repairs may not work while the cluster
+
+00:07:46,639 --> 00:07:50,240
+is in mixed version mode as well
+
+00:07:48,560 --> 00:07:52,400
+so it will be good to make sure you do
+
+00:07:50,240 --> 00:07:53,360
+not start the repair while upgrade is in
+
+00:07:52,400 --> 00:07:56,800
+progress
+
+00:07:53,360 --> 00:07:58,639
+to avoid doing any wasteful work
+
+00:07:56,800 --> 00:08:00,319
+other challenges are storage engine
+
+00:07:58,639 --> 00:08:02,720
+change in 2-1
+
+00:08:00,319 --> 00:08:03,599
+storage engine is thrift centric whereas
+
+00:08:02,720 --> 00:08:06,720
+in 3-0
+
+00:08:03,599 --> 00:08:07,919
+storage engine is secure centric now
+
+00:08:06,720 --> 00:08:10,160
+this is a big change
+
+00:08:07,919 --> 00:08:13,199
+especially for netflix being an early
+
+00:08:10,160 --> 00:08:16,000
+adopter of cassandra right from 0.7
+
+00:08:13,199 --> 00:08:17,360
+and being on both thrift and sql and so
+
+00:08:16,000 --> 00:08:19,759
+we need to validate that
+
+00:08:17,360 --> 00:08:21,919
+3o is able to accommodate our 21 data
+
+00:08:19,759 --> 00:08:21,919
+set
+
+00:08:23,440 --> 00:08:26,560
+if schema changes are performed during
+
+00:08:25,280 --> 00:08:28,240
+the upgrade
+
+00:08:26,560 --> 00:08:30,000
+cluster would get into a state of schema
+
+00:08:28,240 --> 00:08:31,840
+disagreement which means
+
+00:08:30,000 --> 00:08:33,519
+not all nodes would agree on a single
+
+00:08:31,840 --> 00:08:35,200
+schema version
+
+00:08:33,519 --> 00:08:37,200
+this can then result in failure of
+
+00:08:35,200 --> 00:08:38,159
+operations that assume the new schema
+
+00:08:37,200 --> 00:08:39,760
+change
+
+00:08:38,159 --> 00:08:41,599
+so it is recommended not to do any
+
+00:08:39,760 --> 00:08:44,320
+schema changes while the cluster is
+
+00:08:41,599 --> 00:08:44,320
+being upgraded
+
+00:08:44,720 --> 00:08:48,160
+another challenge can be with respect to
+
+00:08:46,320 --> 00:08:49,839
+features for instance
+
+00:08:48,160 --> 00:08:52,080
+two one does not have time window
+
+00:08:49,839 --> 00:08:54,560
+compaction strategy out of the box
+
+00:08:52,080 --> 00:08:56,240
+so we at netflix use twcs through
+
+00:08:54,560 --> 00:08:59,360
+jeffchesa jar
+
+00:08:56,240 --> 00:09:01,440
+now trio offers twcs out of the box so
+
+00:08:59,360 --> 00:09:02,959
+the namespace isn't exactly the same as
+
+00:09:01,440 --> 00:09:04,800
+in two one jar
+
+00:09:02,959 --> 00:09:06,399
+so we ended up writing a container class
+
+00:09:04,800 --> 00:09:08,160
+kind of thing for 3o
+
+00:09:06,399 --> 00:09:09,519
+that has the same name space as the two
+
+00:09:08,160 --> 00:09:14,080
+one jar
+
+00:09:09,519 --> 00:09:14,080
+but internally calls trio twcs
+
+00:09:15,360 --> 00:09:18,640
+then there are also configuration
+
+00:09:16,880 --> 00:09:19,920
+changes which is quite common between
+
+00:09:18,640 --> 00:09:22,720
+major versions
+
+00:09:19,920 --> 00:09:24,160
+for example in 2-1 there is only warning
+
+00:09:22,720 --> 00:09:26,800
+threshold for batch size
+
+00:09:24,160 --> 00:09:28,720
+whereas in 3-0 there is fail threshold
+
+00:09:26,800 --> 00:09:31,040
+so let us say you have an application
+
+00:09:28,720 --> 00:09:32,880
+writing big batches to 2-1 once you
+
+00:09:31,040 --> 00:09:34,560
+upgrade the cluster to 3-0
+
+00:09:32,880 --> 00:09:35,600
+if you do not set the correct fail
+
+00:09:34,560 --> 00:09:37,519
+threshold to accommodate the
+
+00:09:35,600 --> 00:09:39,200
+application's batching criteria
+
+00:09:37,519 --> 00:09:41,680
+the application may incur downtime which
+
+00:09:39,200 --> 00:09:44,240
+would be pretty unfortunate
+
+00:09:41,680 --> 00:09:46,480
+this list is not exhausted by any means
+
+00:09:44,240 --> 00:09:48,240
+but the intention is to give you an idea
+
+00:09:46,480 --> 00:09:51,839
+of why major version upgrades can be
+
+00:09:48,240 --> 00:09:51,839
+quite complicated
+
+00:09:55,760 --> 00:09:59,600
+given that we have seen how challenging
+
+00:09:57,600 --> 00:10:01,440
+major version upgrades can be
+
+00:09:59,600 --> 00:10:03,200
+you must be wondering if we lose sleep
+
+00:10:01,440 --> 00:10:04,399
+over it we do
+
+00:10:03,200 --> 00:10:06,399
+but not because of the upgrade
+
+00:10:04,399 --> 00:10:08,240
+challenges but because of the awesome
+
+00:10:06,399 --> 00:10:11,920
+content that netflix has
+
+00:10:08,240 --> 00:10:15,279
+that we end up binge watching support
+
+00:10:11,920 --> 00:10:16,399
+of as a data platform team now let us
+
+00:10:15,279 --> 00:10:18,480
+take a quick look at
+
+00:10:16,399 --> 00:10:20,560
+what kind of validations we are doing to
+
+00:10:18,480 --> 00:10:23,440
+make sure such a major version upgrade
+
+00:10:20,560 --> 00:10:23,440
+is safe to perform
+
+00:10:26,480 --> 00:10:30,560
+now there can be a bit of an overlap
+
+00:10:28,480 --> 00:10:32,320
+among these validation techniques
+
+00:10:30,560 --> 00:10:33,680
+the goal though is to ensure all of
+
+00:10:32,320 --> 00:10:36,320
+these together to have
+
+00:10:33,680 --> 00:10:36,720
+as much coverage as possible to give us
+
+00:10:36,320 --> 00:10:39,440
+the
+
+00:10:36,720 --> 00:10:40,000
+confidence first is the performance
+
+00:10:39,440 --> 00:10:42,320
+testing
+
+00:10:40,000 --> 00:10:44,000
+to make sure there's no regression in
+
+00:10:42,320 --> 00:10:46,240
+read or write latencies
+
+00:10:44,000 --> 00:10:47,040
+and then correctness testing using the
+
+00:10:46,240 --> 00:10:48,880
+read path
+
+00:10:47,040 --> 00:10:50,800
+read write path and reading access
+
+00:10:48,880 --> 00:10:52,480
+tables directly
+
+00:10:50,800 --> 00:10:54,720
+by assist reading assistant directly
+
+00:10:52,480 --> 00:10:57,519
+what i mean by what i mean is
+
+00:10:54,720 --> 00:10:59,839
+not using the driver but using the
+
+00:10:57,519 --> 00:11:01,519
+stable reader apis
+
+00:10:59,839 --> 00:11:04,240
+and finally verifying access stable
+
+00:11:01,519 --> 00:11:04,240
+upgrade process
+
+00:11:04,320 --> 00:11:07,519
+before we deep dive into each one of
+
+00:11:06,079 --> 00:11:09,279
+these verifications
+
+00:11:07,519 --> 00:11:10,720
+let us take a quick look at cassandra
+
+00:11:09,279 --> 00:11:12,720
+ecosystem at netflix
+
+00:11:10,720 --> 00:11:15,839
+which we take massive advantage of for
+
+00:11:12,720 --> 00:11:15,839
+each of the verifications
+
+00:11:18,240 --> 00:11:22,959
+for pretty much every cassandra cluster
+
+00:11:20,240 --> 00:11:25,120
+we have at netflix
+
+00:11:22,959 --> 00:11:26,640
+we back up its data on a regular basis
+
+00:11:25,120 --> 00:11:29,200
+to s3
+
+00:11:26,640 --> 00:11:30,480
+a couple of notes about our backups they
+
+00:11:29,200 --> 00:11:32,480
+are incremental in nature
+
+00:11:30,480 --> 00:11:34,160
+in the sense we only upload access
+
+00:11:32,480 --> 00:11:34,959
+tables that have not already been
+
+00:11:34,160 --> 00:11:38,079
+uploaded
+
+00:11:34,959 --> 00:11:40,160
+making them very efficient we take full
+
+00:11:38,079 --> 00:11:41,519
+snapshots typically every six hours
+
+00:11:40,160 --> 00:11:45,200
+which includes a flash
+
+00:11:41,519 --> 00:11:47,519
+and incrementals every 10 minutes or so
+
+00:11:45,200 --> 00:11:49,200
+coming back to the ecosystem given that
+
+00:11:47,519 --> 00:11:51,440
+our backups are in s3
+
+00:11:49,200 --> 00:11:53,519
+in addition to the highly important
+
+00:11:51,440 --> 00:11:54,959
+disaster recovery purposes
+
+00:11:53,519 --> 00:11:57,519
+there are a couple of components that
+
+00:11:54,959 --> 00:11:59,839
+take advantage of these backups
+
+00:11:57,519 --> 00:12:01,680
+one is we can restore the data into a
+
+00:11:59,839 --> 00:12:03,600
+different cassandra cluster
+
+00:12:01,680 --> 00:12:04,800
+for running any tests or debugging by
+
+00:12:03,600 --> 00:12:07,200
+the application
+
+00:12:04,800 --> 00:12:08,320
+and second is we have a component called
+
+00:12:07,200 --> 00:12:10,320
+caspactor
+
+00:12:08,320 --> 00:12:11,360
+that reads access tables from the s3
+
+00:12:10,320 --> 00:12:14,399
+backup
+
+00:12:11,360 --> 00:12:16,480
+and loads them into a hive which is then
+
+00:12:14,399 --> 00:12:18,880
+consumed by our analytical tools
+
+00:12:16,480 --> 00:12:21,440
+to produce critical analytics for
+
+00:12:18,880 --> 00:12:21,440
+netflix
+
+00:12:23,120 --> 00:12:26,320
+now that we have looked at what a
+
+00:12:24,639 --> 00:12:27,440
+cassandra ecosystem looks like on a very
+
+00:12:26,320 --> 00:12:29,440
+high level
+
+00:12:27,440 --> 00:12:30,560
+let us take a look at uh each upgrade
+
+00:12:29,440 --> 00:12:33,600
+validation technique
+
+00:12:30,560 --> 00:12:34,240
+in detail as well uh as well as any
+
+00:12:33,600 --> 00:12:36,839
+learnings
+
+00:12:34,240 --> 00:12:38,079
+we've had from each of the validation
+
+00:12:36,839 --> 00:12:40,880
+techniques
+
+00:12:38,079 --> 00:12:43,040
+first is the performance testing we do
+
+00:12:40,880 --> 00:12:45,519
+two kinds of validation here
+
+00:12:43,040 --> 00:12:46,720
+we set up two different clusters two one
+
+00:12:45,519 --> 00:12:49,360
+and three o
+
+00:12:46,720 --> 00:12:51,120
+and we put them under equal traffic load
+
+00:12:49,360 --> 00:12:52,959
+from ndbench
+
+00:12:51,120 --> 00:12:54,399
+we then subject both the clusters
+
+00:12:52,959 --> 00:12:57,040
+through cycles of repairs
+
+00:12:54,399 --> 00:12:58,880
+compactions terminations and compare
+
+00:12:57,040 --> 00:13:01,920
+their performance
+
+00:12:58,880 --> 00:13:03,519
+a couple of notes about indie bench it
+
+00:13:01,920 --> 00:13:04,240
+is a benchmarking tool we developed at
+
+00:13:03,519 --> 00:13:06,399
+netflix
+
+00:13:04,240 --> 00:13:08,079
+which is open sourced and we use it
+
+00:13:06,399 --> 00:13:08,800
+extensively not just a benchmark
+
+00:13:08,079 --> 00:13:11,040
+cassandra
+
+00:13:08,800 --> 00:13:12,160
+but other data source as well it's
+
+00:13:11,040 --> 00:13:15,760
+pretty easy to extend
+
+00:13:12,160 --> 00:13:15,760
+thanks to its plugable architecture
+
+00:13:15,920 --> 00:13:20,639
+the second kind of performance testing
+
+00:13:17,760 --> 00:13:22,880
+we do is by taking the 21 cluster
+
+00:13:20,639 --> 00:13:25,360
+starting read write load against it and
+
+00:13:22,880 --> 00:13:28,560
+then we start upgrading the cluster
+
+00:13:25,360 --> 00:13:29,360
+to 3o we then take a look at the latency
+
+00:13:28,560 --> 00:13:31,680
+metrics
+
+00:13:29,360 --> 00:13:32,399
+during the upgrade as well as after the
+
+00:13:31,680 --> 00:13:37,120
+upgrade
+
+00:13:32,399 --> 00:13:37,120
+to make sure there is no uh regression
+
+00:13:39,920 --> 00:13:44,480
+now coming to data verification using
+
+00:13:41,920 --> 00:13:44,480
+the read path
+
+00:13:44,720 --> 00:13:48,480
+so let's say we have a two one
+
+00:13:46,000 --> 00:13:52,079
+production cluster
+
+00:13:48,480 --> 00:13:54,639
+and its backups are present in s3 now
+
+00:13:52,079 --> 00:13:55,680
+we restored that backup into a two one
+
+00:13:54,639 --> 00:13:56,880
+test cluster
+
+00:13:55,680 --> 00:13:59,040
+created for the purpose of this
+
+00:13:56,880 --> 00:14:02,079
+validation we then
+
+00:13:59,040 --> 00:14:03,199
+take backup of its data into s3 which we
+
+00:14:02,079 --> 00:14:05,680
+then restore
+
+00:14:03,199 --> 00:14:07,680
+to a trio test cluster again created for
+
+00:14:05,680 --> 00:14:09,760
+this validation purpose
+
+00:14:07,680 --> 00:14:11,120
+you may wonder why we take a backup of
+
+00:14:09,760 --> 00:14:13,920
+the 21 test cluster
+
+00:14:11,120 --> 00:14:15,839
+and instead we could use uh you know the
+
+00:14:13,920 --> 00:14:18,000
+backup of the prod cluster and restore
+
+00:14:15,839 --> 00:14:20,240
+for restore to 3o
+
+00:14:18,000 --> 00:14:21,440
+now since 21 protection cluster is
+
+00:14:20,240 --> 00:14:22,800
+receiving live traffic
+
+00:14:21,440 --> 00:14:24,720
+there could be incrementals that keep
+
+00:14:22,800 --> 00:14:26,639
+getting uploaded which may
+
+00:14:24,720 --> 00:14:28,480
+end up causing data differences between
+
+00:14:26,639 --> 00:14:29,519
+the two one test cluster and theo test
+
+00:14:28,480 --> 00:14:32,000
+cluster
+
+00:14:29,519 --> 00:14:33,440
+whereas using this this technique we we
+
+00:14:32,000 --> 00:14:35,120
+have a good confidence that
+
+00:14:33,440 --> 00:14:36,639
+the two one test cluster and the trio
+
+00:14:35,120 --> 00:14:38,800
+test cluster should have exactly the
+
+00:14:36,639 --> 00:14:42,399
+same data
+
+00:14:38,800 --> 00:14:44,240
+then we have a thrift or sql differ
+
+00:14:42,399 --> 00:14:46,399
+that essentially reads all the rows from
+
+00:14:44,240 --> 00:14:48,160
+to one cluster and make sure the rows
+
+00:14:46,399 --> 00:14:51,760
+are also present in 3o cluster
+
+00:14:48,160 --> 00:14:51,760
+and also the the rows match
+
+00:14:54,560 --> 00:14:58,079
+using this technique we discovered an
+
+00:14:56,320 --> 00:15:01,680
+issue around lowercase column
+
+00:14:58,079 --> 00:15:04,000
+with codes in 2-1 if you create a table
+
+00:15:01,680 --> 00:15:05,519
+with a column name that matches to a
+
+00:15:04,000 --> 00:15:07,120
+reserved keyword
+
+00:15:05,519 --> 00:15:09,519
+let's say entries and entries is a
+
+00:15:07,120 --> 00:15:10,880
+reserved keyword to i think index map
+
+00:15:09,519 --> 00:15:13,760
+entries
+
+00:15:10,880 --> 00:15:15,360
+two 21 wraps that column name in quotes
+
+00:15:13,760 --> 00:15:16,079
+now two one allows to query for that
+
+00:15:15,360 --> 00:15:17,519
+column name
+
+00:15:16,079 --> 00:15:19,920
+even if the query does not include
+
+00:15:17,519 --> 00:15:22,000
+quotes for the column name
+
+00:15:19,920 --> 00:15:23,839
+now when you upgrade the cluster to 30
+
+00:15:22,000 --> 00:15:25,440
+the same query would fail
+
+00:15:23,839 --> 00:15:28,079
+since it does not include the codes and
+
+00:15:25,440 --> 00:15:30,000
+trio expects explicit quotes
+
+00:15:28,079 --> 00:15:32,000
+now through your behavior is if you use
+
+00:15:30,000 --> 00:15:33,920
+any keywords in the column names
+
+00:15:32,000 --> 00:15:35,680
+trio would fail that request instead of
+
+00:15:33,920 --> 00:15:38,639
+wrapping it with codes
+
+00:15:35,680 --> 00:15:39,600
+which makes sense in our particular
+
+00:15:38,639 --> 00:15:41,519
+situation
+
+00:15:39,600 --> 00:15:43,279
+the application team was flexible enough
+
+00:15:41,519 --> 00:15:46,959
+to move to a different column name
+
+00:15:43,279 --> 00:15:49,759
+that does not collide with any
+
+00:15:46,959 --> 00:15:49,759
+result keywords
+
+00:15:52,639 --> 00:15:56,560
+coming to data verification using read
+
+00:15:54,720 --> 00:15:58,639
+write part
+
+00:15:56,560 --> 00:16:00,320
+so we use andy bench here and as i said
+
+00:15:58,639 --> 00:16:03,040
+it's pretty pluggable
+
+00:16:00,320 --> 00:16:03,839
+so we wrote a new plugin to verify for
+
+00:16:03,040 --> 00:16:06,639
+any corruptions
+
+00:16:03,839 --> 00:16:07,120
+during the upgrade now in the right path
+
+00:16:06,639 --> 00:16:10,240
+of
+
+00:16:07,120 --> 00:16:13,360
+bench it generates a random string of
+
+00:16:10,240 --> 00:16:16,480
+a pre-configured length k
+
+00:16:13,360 --> 00:16:18,959
+the utf-8 encoded
+
+00:16:16,480 --> 00:16:19,920
+we calculate the check sum which is 4
+
+00:16:18,959 --> 00:16:21,440
+bytes
+
+00:16:19,920 --> 00:16:24,240
+and we append this check sum to the
+
+00:16:21,440 --> 00:16:24,240
+original value
+
+00:16:24,399 --> 00:16:29,440
+then the base64 encoded and write to
+
+00:16:26,880 --> 00:16:29,440
+cassandra
+
+00:16:29,920 --> 00:16:38,160
+now on the read path of any
+
+00:16:33,440 --> 00:16:39,600
+value from cassandra base64 decoded
+
+00:16:38,160 --> 00:16:42,000
+given that we know that the last four
+
+00:16:39,600 --> 00:16:44,000
+bytes are checksum we extract the value
+
+00:16:42,000 --> 00:16:46,160
+and the checksum components
+
+00:16:44,000 --> 00:16:47,920
+and then we calculate the checksum from
+
+00:16:46,160 --> 00:16:50,000
+the value component
+
+00:16:47,920 --> 00:16:51,759
+and then we compare the calculated
+
+00:16:50,000 --> 00:16:52,880
+checksum with the section that we read
+
+00:16:51,759 --> 00:16:54,800
+from the data store
+
+00:16:52,880 --> 00:16:56,639
+to make sure the indeed match if they do
+
+00:16:54,800 --> 00:17:04,559
+not match it's pro it's a potential sign
+
+00:16:56,639 --> 00:17:06,559
+of correction
+
+00:17:04,559 --> 00:17:08,720
+now data verification by reading ss
+
+00:17:06,559 --> 00:17:11,600
+tables
+
+00:17:08,720 --> 00:17:13,280
+we have seen so far how we set up you
+
+00:17:11,600 --> 00:17:14,079
+know two one test cluster and three or
+
+00:17:13,280 --> 00:17:19,120
+test cluster
+
+00:17:14,079 --> 00:17:22,079
+that should have the same data
+
+00:17:19,120 --> 00:17:24,079
+we kick off sstable upgrade as part of
+
+00:17:22,079 --> 00:17:26,240
+our automation
+
+00:17:24,079 --> 00:17:27,600
+this is to uh aggressively convert all
+
+00:17:26,240 --> 00:17:30,640
+the two one access tables
+
+00:17:27,600 --> 00:17:31,360
+to three voices tables and then we kick
+
+00:17:30,640 --> 00:17:33,520
+off a backup
+
+00:17:31,360 --> 00:17:35,840
+that packs up this three assistable data
+
+00:17:33,520 --> 00:17:38,240
+into s3
+
+00:17:35,840 --> 00:17:39,280
+then we do a cast packer pull that
+
+00:17:38,240 --> 00:17:42,160
+essentially loads
+
+00:17:39,280 --> 00:17:42,480
+the to one assistable data from s3 into
+
+00:17:42,160 --> 00:17:45,520
+a
+
+00:17:42,480 --> 00:17:47,039
+data frame in hive and then we do
+
+00:17:45,520 --> 00:17:49,360
+another cast factor pull
+
+00:17:47,039 --> 00:17:50,960
+to read the three ss tables from s3 and
+
+00:17:49,360 --> 00:17:52,160
+load them into a different data frame in
+
+00:17:50,960 --> 00:17:54,400
+hive
+
+00:17:52,160 --> 00:17:55,679
+and then we have a type differ that
+
+00:17:54,400 --> 00:17:58,640
+essentially
+
+00:17:55,679 --> 00:17:59,360
+uh does uh i mean compares the two data
+
+00:17:58,640 --> 00:18:01,840
+frames
+
+00:17:59,360 --> 00:18:01,840
+and
+
+00:18:05,919 --> 00:18:09,200
+we found two corruption issues thus far
+
+00:18:07,760 --> 00:18:11,280
+using this technique
+
+00:18:09,200 --> 00:18:12,480
+one is resolved and one is being worked
+
+00:18:11,280 --> 00:18:14,240
+upon
+
+00:18:12,480 --> 00:18:16,080
+let me share more details on the
+
+00:18:14,240 --> 00:18:18,480
+resolved issue
+
+00:18:16,080 --> 00:18:20,400
+the problem was caused by the fact that
+
+00:18:18,480 --> 00:18:23,360
+cql created dense tables
+
+00:18:20,400 --> 00:18:25,120
+had a hidden empty type column this
+
+00:18:23,360 --> 00:18:27,039
+column is accessible through thrift
+
+00:18:25,120 --> 00:18:28,720
+and it is possible to write key value
+
+00:18:27,039 --> 00:18:31,120
+paste to it
+
+00:18:28,720 --> 00:18:32,720
+now when upgraded to 30 format it is
+
+00:18:31,120 --> 00:18:35,600
+written as a fixed size column
+
+00:18:32,720 --> 00:18:36,000
+of size 0 and whatever data this column
+
+00:18:35,600 --> 00:18:39,679
+had
+
+00:18:36,000 --> 00:18:41,120
+is also written now in the read path
+
+00:18:39,679 --> 00:18:43,200
+the reader knows that the size in the
+
+00:18:41,120 --> 00:18:44,720
+column is zero so it doesn't bother to
+
+00:18:43,200 --> 00:18:46,559
+read the bytes because it doesn't expect
+
+00:18:44,720 --> 00:18:48,320
+to have any value
+
+00:18:46,559 --> 00:18:49,600
+and thereby doesn't move the pointer as
+
+00:18:48,320 --> 00:18:51,679
+well
+
+00:18:49,600 --> 00:18:52,880
+now in the subsequent read that wants to
+
+00:18:51,679 --> 00:18:55,280
+read the next column
+
+00:18:52,880 --> 00:18:56,640
+it will end up reading the value against
+
+00:18:55,280 --> 00:18:59,440
+the empty column instead
+
+00:18:56,640 --> 00:18:59,440
+leading to corruption
+
+00:19:01,840 --> 00:19:05,679
+before we actually look at the upgrade
+
+00:19:03,760 --> 00:19:07,360
+orchestration that we've developed
+
+00:19:05,679 --> 00:19:09,039
+let us take a quick look at how we
+
+00:19:07,360 --> 00:19:12,160
+perform different kinds of cassandra
+
+00:19:09,039 --> 00:19:12,160
+upgrades at netflix
+
+00:19:16,559 --> 00:19:20,720
+we perform two kinds of upgrades in
+
+00:19:18,960 --> 00:19:25,039
+place and out of place
+
+00:19:20,720 --> 00:19:27,039
+which we also call replacements
+
+00:19:25,039 --> 00:19:28,080
+we typically use in-place upgrades when
+
+00:19:27,039 --> 00:19:30,160
+there is a need for
+
+00:19:28,080 --> 00:19:31,760
+software change on the instance two one
+
+00:19:30,160 --> 00:19:33,200
+two three cassandra upgrade is a good
+
+00:19:31,760 --> 00:19:34,880
+example
+
+00:19:33,200 --> 00:19:36,720
+on a very high level here is the
+
+00:19:34,880 --> 00:19:39,919
+sequence of steps we perform
+
+00:19:36,720 --> 00:19:41,919
+as part of an in-place upgrade we reboot
+
+00:19:39,919 --> 00:19:42,960
+the instance into an in-memory operating
+
+00:19:41,919 --> 00:19:44,640
+system
+
+00:19:42,960 --> 00:19:46,000
+the in-memory operating system then
+
+00:19:44,640 --> 00:19:48,000
+downloads the new image
+
+00:19:46,000 --> 00:19:51,360
+let's see that contains cassandra 3-0
+
+00:19:48,000 --> 00:19:52,880
+from s3 and writes to the root volume
+
+00:19:51,360 --> 00:19:55,360
+we then do a second reboot of the
+
+00:19:52,880 --> 00:19:56,960
+instance to now boot into the new
+
+00:19:55,360 --> 00:19:59,360
+operating system that we downloaded to
+
+00:19:56,960 --> 00:20:00,799
+the root volume
+
+00:19:59,360 --> 00:20:03,440
+you can find more details about this
+
+00:20:00,799 --> 00:20:04,000
+technique uh using the github link that
+
+00:20:03,440 --> 00:20:07,840
+i've
+
+00:20:04,000 --> 00:20:07,840
+put i put on the slide
+
+00:20:10,000 --> 00:20:13,120
+the second kind of upgrade we do is out
+
+00:20:12,080 --> 00:20:14,799
+of place upgrades
+
+00:20:13,120 --> 00:20:16,400
+which are useful in scenarios where
+
+00:20:14,799 --> 00:20:19,039
+there is a need for hardware change
+
+00:20:16,400 --> 00:20:21,840
+or in case of a scheduled termination of
+
+00:20:19,039 --> 00:20:21,840
+an instance
+
+00:20:22,080 --> 00:20:26,320
+let us take an example where we have a
+
+00:20:24,000 --> 00:20:29,360
+cluster that has notes of type
+
+00:20:26,320 --> 00:20:31,760
+i3 extra large now assuming
+
+00:20:29,360 --> 00:20:33,280
+application team is anticipating
+
+00:20:31,760 --> 00:20:34,799
+increase in load
+
+00:20:33,280 --> 00:20:36,480
+we decide to increase the capacity on
+
+00:20:34,799 --> 00:20:38,799
+the cluster in this case
+
+00:20:36,480 --> 00:20:40,400
+by changing the instance type to say i3
+
+00:20:38,799 --> 00:20:42,320
+4x
+
+00:20:40,400 --> 00:20:45,039
+so we launch a new instance with the new
+
+00:20:42,320 --> 00:20:47,200
+type that is i34 extra large
+
+00:20:45,039 --> 00:20:48,080
+we initiate a fresh new backup on the
+
+00:20:47,200 --> 00:20:50,480
+current instance
+
+00:20:48,080 --> 00:20:52,720
+to make sure all the most recent data is
+
+00:20:50,480 --> 00:20:55,120
+uploaded into s3
+
+00:20:52,720 --> 00:20:56,400
+we then restore that backup onto the new
+
+00:20:55,120 --> 00:20:59,679
+instance
+
+00:20:56,400 --> 00:21:00,640
+and copy any remaining delta from the
+
+00:20:59,679 --> 00:21:02,559
+current instance
+
+00:21:00,640 --> 00:21:05,039
+to the new instance that is not part of
+
+00:21:02,559 --> 00:21:05,039
+the backup
+
+00:21:05,120 --> 00:21:09,600
+one relevant note for trio upgrade is we
+
+00:21:07,919 --> 00:21:10,720
+have to make sure we do not perform this
+
+00:21:09,600 --> 00:21:12,559
+copy of files
+
+00:21:10,720 --> 00:21:15,360
+if the new instance to be launched is to
+
+00:21:12,559 --> 00:21:17,120
+one and if the current instance is 3o
+
+00:21:15,360 --> 00:21:18,799
+because 2 1 cannot read trivenesses
+
+00:21:17,120 --> 00:21:20,720
+tables
+
+00:21:18,799 --> 00:21:24,159
+as we do the upgrade walkthrough you'll
+
+00:21:20,720 --> 00:21:24,159
+understand why we even have this
+
+00:21:28,840 --> 00:21:31,360
+scenario
+
+00:21:30,240 --> 00:21:35,200
+let us take a look at some of the
+
+00:21:31,360 --> 00:21:35,200
+highlights of our cassandra upgrade work
+
+00:21:36,960 --> 00:21:40,559
+if you look at the code enhancements we
+
+00:21:39,360 --> 00:21:41,520
+have patched the range streamer in
+
+00:21:40,559 --> 00:21:43,360
+cassandra
+
+00:21:41,520 --> 00:21:45,520
+to pick and choose the same version
+
+00:21:43,360 --> 00:21:45,919
+neighbor this is to handle the case
+
+00:21:45,520 --> 00:21:48,240
+where
+
+00:21:45,919 --> 00:21:51,600
+the neighbors are on different versions
+
+00:21:48,240 --> 00:21:51,600
+during the course of the upgrade
+
+00:21:51,760 --> 00:21:55,600
+also when a new trio node is launched
+
+00:21:53,679 --> 00:21:56,960
+into the cluster for the first time as
+
+00:21:55,600 --> 00:21:58,640
+part of the upgrade
+
+00:21:56,960 --> 00:22:00,400
+we alter its replicated system key
+
+00:21:58,640 --> 00:22:02,960
+spaces from simple strategy
+
+00:22:00,400 --> 00:22:04,320
+to network topology strategy to ensure
+
+00:22:02,960 --> 00:22:07,520
+no bootstrapping issues
+
+00:22:04,320 --> 00:22:09,679
+in case of future terminations
+
+00:22:07,520 --> 00:22:12,000
+also since the default partitioner has
+
+00:22:09,679 --> 00:22:14,640
+changed from random partitioner into 1
+
+00:22:12,000 --> 00:22:18,080
+to moment 3 in 3o we have to set it
+
+00:22:14,640 --> 00:22:18,080
+explicitly for trio nodes
+
+00:22:18,799 --> 00:22:22,240
+coming to operational enhancements we
+
+00:22:21,120 --> 00:22:23,679
+heavily rely on
+
+00:22:22,240 --> 00:22:25,520
+in-place upgrade technique that i
+
+00:22:23,679 --> 00:22:27,840
+mentioned earlier
+
+00:22:25,520 --> 00:22:29,200
+our upgrade orchestration is such that a
+
+00:22:27,840 --> 00:22:30,880
+same version neighbor
+
+00:22:29,200 --> 00:22:32,640
+is guaranteed in the course of the
+
+00:22:30,880 --> 00:22:35,440
+upgrade always
+
+00:22:32,640 --> 00:22:37,440
+we also rely on having the flexibility
+
+00:22:35,440 --> 00:22:38,880
+to choose different cassandra image for
+
+00:22:37,440 --> 00:22:40,559
+existing instance
+
+00:22:38,880 --> 00:22:42,320
+and a different cassandra image for a
+
+00:22:40,559 --> 00:22:44,640
+new instance
+
+00:22:42,320 --> 00:22:46,240
+most importantly we believe this upgrade
+
+00:22:44,640 --> 00:22:50,159
+technique should work just fine for
+
+00:22:46,240 --> 00:22:50,159
+future upgrades like 3040.
+
+00:22:53,440 --> 00:22:57,840
+now let us do a walkthrough of a three
+
+00:22:55,360 --> 00:22:59,280
+node cassandra cluster
+
+00:22:57,840 --> 00:23:01,520
+where we upgrade it from two one to
+
+00:22:59,280 --> 00:23:01,520
+three
+
+00:23:03,440 --> 00:23:07,440
+the first column indicates tracks across
+
+00:23:06,080 --> 00:23:08,799
+which instances of the cluster are
+
+00:23:07,440 --> 00:23:11,200
+placed
+
+00:23:08,799 --> 00:23:13,360
+second column indicates version of
+
+00:23:11,200 --> 00:23:14,880
+cassandra running on current instances
+
+00:23:13,360 --> 00:23:18,080
+of the cluster
+
+00:23:14,880 --> 00:23:18,080
+the third column indicates
+
+00:23:18,640 --> 00:23:24,640
+it's launched in case of a termination
+
+00:23:22,640 --> 00:23:27,360
+as you can see we have a three node
+
+00:23:24,640 --> 00:23:29,600
+cassandra cluster running on two one
+
+00:23:27,360 --> 00:23:31,360
+with one node in each rack and let us
+
+00:23:29,600 --> 00:23:33,840
+assume it's running with a replication
+
+00:23:31,360 --> 00:23:36,000
+factor of three
+
+00:23:33,840 --> 00:23:37,039
+as i walk you through each upgrade step
+
+00:23:36,000 --> 00:23:39,840
+i will also discuss
+
+00:23:37,039 --> 00:23:40,640
+different termination scenarios and we
+
+00:23:39,840 --> 00:23:43,120
+will see how
+
+00:23:40,640 --> 00:23:44,880
+we always ensure there is actually at
+
+00:23:43,120 --> 00:23:47,520
+least one neighbor in the same version
+
+00:23:44,880 --> 00:23:47,520
+to stream from
+
+00:23:47,760 --> 00:23:53,600
+so the first step is to upgrade rack1
+
+00:23:51,679 --> 00:23:55,279
+now let us see if if a termination
+
+00:23:53,600 --> 00:23:57,919
+happens in rack 1
+
+00:23:55,279 --> 00:23:58,799
+we end up launching a new 2 1 node that
+
+00:23:57,919 --> 00:24:02,240
+can stream from
+
+00:23:58,799 --> 00:24:03,279
+either rack 2 or rack 3. similarly if a
+
+00:24:02,240 --> 00:24:05,840
+termination happens
+
+00:24:03,279 --> 00:24:07,520
+in rack 2 or rack 3 we end up launching
+
+00:24:05,840 --> 00:24:10,080
+a new 2 1 nor
+
+00:24:07,520 --> 00:24:12,559
+that can stream from either rack 2 or
+
+00:24:10,080 --> 00:24:12,559
+rack 3.
+
+00:24:13,520 --> 00:24:17,440
+the next step is to change the new
+
+00:24:15,120 --> 00:24:20,799
+instance version of rack 2 and rack 3
+
+00:24:17,440 --> 00:24:21,840
+to 3 0. now if a termination happens in
+
+00:24:20,799 --> 00:24:24,000
+rack 1
+
+00:24:21,840 --> 00:24:26,000
+we launch a new 2 1 node that can stream
+
+00:24:24,000 --> 00:24:27,919
+from rack 2 or rack 3
+
+00:24:26,000 --> 00:24:30,559
+and if a termination happens in rack 2
+
+00:24:27,919 --> 00:24:33,919
+or rack 3 we launch a new 3-0 node
+
+00:24:30,559 --> 00:24:33,919
+that can stream from rack1
+
+00:24:35,919 --> 00:24:39,440
+now we upgrade rack2
+
+00:24:39,600 --> 00:24:42,640
+now again if a termination happens in
+
+00:24:41,919 --> 00:24:44,880
+rack1
+
+00:24:42,640 --> 00:24:46,640
+we launch a new 21 node that can stream
+
+00:24:44,880 --> 00:24:48,720
+from rack 3
+
+00:24:46,640 --> 00:24:50,960
+and if a termination happens in rack 2
+
+00:24:48,720 --> 00:24:54,480
+or rack 3 we launch a 3 0 node
+
+00:24:50,960 --> 00:24:54,480
+that can stream from rack 1.
+
+00:24:55,919 --> 00:25:02,240
+the next step is to change the new
+
+00:24:57,840 --> 00:25:04,559
+instance version of rack 1 to 30
+
+00:25:02,240 --> 00:25:07,039
+and if a termination happens in any of
+
+00:25:04,559 --> 00:25:09,760
+the racks rack 1 rack 2 or rack 3
+
+00:25:07,039 --> 00:25:14,400
+we end up launching a new 3-0 node that
+
+00:25:09,760 --> 00:25:17,600
+can stream from rack 1 or rack 2.
+
+00:25:14,400 --> 00:25:21,520
+as a final step of the upgrade
+
+00:25:17,600 --> 00:25:23,520
+we upgrade rack 3 instances to 3o
+
+00:25:21,520 --> 00:25:25,039
+and similar to previous scenario any
+
+00:25:23,520 --> 00:25:27,200
+termination that happens
+
+00:25:25,039 --> 00:25:29,600
+across any of the racks they would end
+
+00:25:27,200 --> 00:25:31,279
+up launching a new 3-0 node
+
+00:25:29,600 --> 00:25:33,440
+that can stream from black one or rack
+
+00:25:31,279 --> 00:25:43,360
+to or even rack 3 depending on where the
+
+00:25:33,440 --> 00:25:45,840
+upgrade is on rack 3.
+
+00:25:43,360 --> 00:25:47,039
+now before we go to the summary let us
+
+00:25:45,840 --> 00:25:49,679
+take a quick look at the upgrade
+
+00:25:47,039 --> 00:25:51,600
+pipeline again
+
+00:25:49,679 --> 00:25:52,960
+and let and i'll probably talk about a
+
+00:25:51,600 --> 00:25:53,840
+few steps that we may not have
+
+00:25:52,960 --> 00:25:56,960
+necessarily
+
+00:25:53,840 --> 00:25:59,760
+talked about in the slides so
+
+00:25:56,960 --> 00:26:01,600
+at the beginning of the upgrade for some
+
+00:25:59,760 --> 00:26:02,799
+of the critical clusters
+
+00:26:01,600 --> 00:26:05,279
+we sent a notification to the
+
+00:26:02,799 --> 00:26:08,400
+application team saying
+
+00:26:05,279 --> 00:26:11,440
+we are scheduling an upgrade within so
+
+00:26:08,400 --> 00:26:13,760
+so much time and we we
+
+00:26:11,440 --> 00:26:16,720
+encourage the application team to to
+
+00:26:13,760 --> 00:26:18,400
+refrain from making any schema changes
+
+00:26:16,720 --> 00:26:20,240
+now the application team can always come
+
+00:26:18,400 --> 00:26:20,960
+back to us saying hey we have a planned
+
+00:26:20,240 --> 00:26:23,120
+up
+
+00:26:20,960 --> 00:26:26,799
+schema change and in which case we will
+
+00:26:23,120 --> 00:26:26,799
+probably reschedule the upgrade
+
+00:26:26,880 --> 00:26:30,559
+and this is about setting the partition
+
+00:26:28,880 --> 00:26:32,400
+override that i was talking about
+
+00:26:30,559 --> 00:26:34,159
+because the default partitioner has
+
+00:26:32,400 --> 00:26:38,400
+changed
+
+00:26:34,159 --> 00:26:41,200
+here is where we upgrade the first track
+
+00:26:38,400 --> 00:26:42,720
+here is where we are altering the
+
+00:26:41,200 --> 00:26:46,080
+replicated system key spaces
+
+00:26:42,720 --> 00:26:46,080
+to network topology strategy
+
+00:26:46,159 --> 00:26:50,960
+uh this is where we are upgrading the
+
+00:26:48,880 --> 00:26:52,480
+second rack
+
+00:26:50,960 --> 00:26:54,240
+here is where we are changing the
+
+00:26:52,480 --> 00:26:56,000
+version that the replacement should come
+
+00:26:54,240 --> 00:26:58,799
+up with
+
+00:26:56,000 --> 00:26:59,840
+this is the step where we upgrade rack 3
+
+00:26:58,799 --> 00:27:01,919
+and finally
+
+00:26:59,840 --> 00:27:03,600
+once the upgrade is complete we send an
+
+00:27:01,919 --> 00:27:06,799
+email notification again to the
+
+00:27:03,600 --> 00:27:09,120
+application team saying upgrade is
+
+00:27:06,799 --> 00:27:09,120
+complete
+
+00:27:09,279 --> 00:27:16,320
+let us also take a look at the
+
+00:27:13,120 --> 00:27:19,440
+cassandra version
+
+00:27:16,320 --> 00:27:20,080
+on the upgraded nodes so i'm going to
+
+00:27:19,440 --> 00:27:34,000
+switch the
+
+00:27:20,080 --> 00:27:39,039
+windows again
+
+00:27:34,000 --> 00:27:39,039
+so let us do a node tool version on the
+
+00:27:46,840 --> 00:27:51,840
+nodes
+
+00:27:48,880 --> 00:27:52,799
+so as you can see one instance is on 3-0
+
+00:27:51,840 --> 00:27:54,960
+already
+
+00:27:52,799 --> 00:28:03,840
+and two instances are 2-1 that are yet
+
+00:27:54,960 --> 00:28:03,840
+to be upgraded
+
+00:28:17,520 --> 00:28:22,799
+summarizing the talk we looked at why
+
+00:28:19,760 --> 00:28:24,880
+major version upgrades can be handful
+
+00:28:22,799 --> 00:28:26,320
+what validation we do for a major
+
+00:28:24,880 --> 00:28:28,240
+version upgrade
+
+00:28:26,320 --> 00:28:30,000
+and we also looked at how we orchestrate
+
+00:28:28,240 --> 00:28:31,559
+an upgrade that can be applied to
+
+00:28:30,000 --> 00:28:35,440
+different kinds of upgrade
+
+00:28:31,559 --> 00:28:36,480
+b21230 or 3040 while being resilient to
+
+00:28:35,440 --> 00:28:38,559
+terminations
+
+00:28:36,480 --> 00:28:40,799
+so long as they happen on a single rack
+
+00:28:38,559 --> 00:28:44,240
+at a time
+
+00:28:40,799 --> 00:28:46,320
+thank you now
+
+00:28:44,240 --> 00:28:59,840
+i will look at any questions that you
+
+00:28:46,320 --> 00:28:59,840
+may have
+
+00:29:03,679 --> 00:29:10,799
+no questions uh i'm missing it right
+
+00:29:06,960 --> 00:29:15,520
+how specific is the s3 flash to s3
+
+00:29:10,799 --> 00:29:17,440
+and aws uh
+
+00:29:15,520 --> 00:29:18,960
+to be fair i i don't think i have enough
+
+00:29:17,440 --> 00:29:22,000
+expertise to answer this question
+
+00:29:18,960 --> 00:29:22,480
+uh a couple of uh engineers joey and
+
+00:29:22,000 --> 00:29:25,520
+josh
+
+00:29:22,480 --> 00:29:26,559
+are have written this too but i would
+
+00:29:25,520 --> 00:29:29,360
+strongly
+
+00:29:26,559 --> 00:29:41,840
+recommend looking at the github link to
+
+00:29:29,360 --> 00:29:41,840
+get an idea
+
+00:30:11,200 --> 00:30:16,080
+now uh so the question is have you guys
+
+00:30:13,039 --> 00:30:19,360
+moved from uh thrift-based drivers
+
+00:30:16,080 --> 00:30:22,000
+uh so we are we are pretty
+
+00:30:19,360 --> 00:30:23,440
+heavy still but we have cql as well so
+
+00:30:22,000 --> 00:30:26,080
+for the cql clusters
+
+00:30:23,440 --> 00:30:26,880
+we are using anias which is a wrapper
+
+00:30:26,080 --> 00:30:30,480
+around uh
+
+00:30:26,880 --> 00:30:34,080
+data the java driver uh
+
+00:30:30,480 --> 00:30:36,240
+now for thrift clusters we use asgenics
+
+00:30:34,080 --> 00:30:38,880
+and we are still using gastronics thrift
+
+00:30:36,240 --> 00:30:38,880
+driver for them
+
+00:30:40,960 --> 00:30:51,840
+i hope that answers your question
+
+00:31:14,080 --> 00:31:24,880
+so uh yeah i mean we have a few clusters
+
+00:31:19,039 --> 00:31:24,880
+running the ephemeral disk and a few on
+
+00:31:30,840 --> 00:31:33,919
+ebs
+
+00:31:32,000 --> 00:31:36,080
+the next question is do you for the
+
+00:31:33,919 --> 00:31:37,919
+upgrade walkthrough do you need
+
+00:31:36,080 --> 00:31:41,360
+as many nodes as there are in the
+
+00:31:37,919 --> 00:31:47,519
+cluster to perform the upgrade
+
+00:31:41,360 --> 00:31:50,240
+in new nodes
+
+00:31:47,519 --> 00:31:51,120
+uh raymond i'm not sure if i understand
+
+00:31:50,240 --> 00:31:53,519
+the question
+
+00:31:51,120 --> 00:31:53,519
+correct
+
+00:31:58,840 --> 00:32:05,279
+so oh i see so so
+
+00:32:02,559 --> 00:32:06,640
+uh i think it's like how many new nodes
+
+00:32:05,279 --> 00:32:10,000
+do you need at a time
+
+00:32:06,640 --> 00:32:10,000
+compared to the size of the cluster
+
+00:32:10,240 --> 00:32:14,320
+it depends on how many nodes you would
+
+00:32:12,240 --> 00:32:17,760
+want to maintain at the same time
+
+00:32:14,320 --> 00:32:19,360
+so in our case so we typically have our
+
+00:32:17,760 --> 00:32:22,640
+clustered across three racks
+
+00:32:19,360 --> 00:32:23,760
+and we perform the upgrade at one rack
+
+00:32:22,640 --> 00:32:26,960
+at a time
+
+00:32:23,760 --> 00:32:29,200
+and we in protection we are currently
+
+00:32:26,960 --> 00:32:30,880
+maintaining or doing a parallel upgrade
+
+00:32:29,200 --> 00:32:32,000
+on two nodes at a time in a single rack
+
+00:32:30,880 --> 00:32:33,679
+so
+
+00:32:32,000 --> 00:32:35,200
+we will need in that case we will need
+
+00:32:33,679 --> 00:32:38,480
+two new nodes
+
+00:32:35,200 --> 00:32:38,480
+at most at the same time
+
+00:32:40,559 --> 00:32:44,640
+so the higher the parallelism uh you do
+
+00:32:42,960 --> 00:32:46,399
+the upgrade the higher the number of new
+
+00:32:44,640 --> 00:32:57,840
+nodes that you will need
+
+00:32:46,399 --> 00:32:57,840
+so yeah
+
+00:33:08,840 --> 00:33:11,840
+foreign
+
+00:33:19,600 --> 00:33:24,320
+so uh paul's question is no new nodes
+
+00:33:22,559 --> 00:33:25,760
+for out of place upgrade sorry new nodes
+
+00:33:24,320 --> 00:33:27,600
+for out of place upgrade and no new
+
+00:33:25,760 --> 00:33:30,320
+nodes for input upgrade that's correct
+
+00:33:27,600 --> 00:33:31,360
+so uh we do not launch new nodes for in
+
+00:33:30,320 --> 00:33:34,880
+place update so
+
+00:33:31,360 --> 00:33:35,360
+we expect uh almost like high ninety
+
+00:33:34,880 --> 00:33:38,720
+percent
+
+00:33:35,360 --> 00:33:40,960
+of the upgrade uh 2 3 0 to happen
+
+00:33:38,720 --> 00:33:42,480
+without requiring new nodes
+
+00:33:40,960 --> 00:33:44,559
+because we do in place upgrade and
+
+00:33:42,480 --> 00:33:46,399
+that's the fastest because we don't lose
+
+00:33:44,559 --> 00:33:49,679
+data
+
+00:33:46,399 --> 00:33:52,640
+it's only in case of a termination
+
+00:33:49,679 --> 00:33:53,600
+that we will end up launching new nodes
+
+00:33:52,640 --> 00:33:57,600
+and even for that
+
+00:33:53,600 --> 00:34:01,440
+as i have shown we try to leverage
+
+00:33:57,600 --> 00:34:01,440
+s3 as much as possible for fast data
+
+00:34:04,840 --> 00:34:07,840
+transfer
+
+00:34:16,000 --> 00:34:20,480
+while i wait for okay while i wait for
+
+00:34:18,000 --> 00:34:21,679
+new questions uh
+
+00:34:20,480 --> 00:34:24,159
+i think for the benefit of the talk i
+
+00:34:21,679 --> 00:34:26,079
+should probably repeat uh
+
+00:34:24,159 --> 00:34:27,919
+joey's answer to one of the questions so
+
+00:34:26,079 --> 00:34:30,879
+the question was uh how specific is the
+
+00:34:27,919 --> 00:34:32,720
+s3 flash bootloader to s3 and aws
+
+00:34:30,879 --> 00:34:35,679
+joey responded that the technique is
+
+00:34:32,720 --> 00:34:37,679
+general the implementation is specific
+
+00:34:35,679 --> 00:34:49,839
+it's basically a live cd that can boot
+
+00:34:37,679 --> 00:34:49,839
+from a blob store
+
+00:35:14,320 --> 00:35:18,000
+how do you ensure that someone doesn't
+
+00:35:16,480 --> 00:35:18,800
+so dinesh is asking how do you ensure
+
+00:35:18,000 --> 00:35:21,200
+that someone
+
+00:35:18,800 --> 00:35:22,320
+uh doesn't accidentally boot a malicious
+
+00:35:21,200 --> 00:35:25,760
+image
+
+00:35:22,320 --> 00:35:29,440
+so we have a pretty uh tight
+
+00:35:25,760 --> 00:35:31,440
+uh s3 boundaries uh in fact
+
+00:35:29,440 --> 00:35:32,720
+we ensure that uh every cassandra
+
+00:35:31,440 --> 00:35:36,480
+cluster has its own
+
+00:35:32,720 --> 00:35:38,960
+instance profile so uh
+
+00:35:36,480 --> 00:35:40,240
+so s3 itself uh has very tight
+
+00:35:38,960 --> 00:35:42,720
+boundaries and
+
+00:35:40,240 --> 00:35:43,599
+the cluster is also uh pretty bounded in
+
+00:35:42,720 --> 00:35:47,359
+terms of
+
+00:35:43,599 --> 00:35:48,960
+what s3 it can access so
+
+00:35:47,359 --> 00:35:52,640
+we have that way we have pretty good
+
+00:35:48,960 --> 00:35:59,839
+control on what we have in s3
+
+00:35:52,640 --> 00:35:59,839
+if that answers your question
+
+00:36:18,800 --> 00:36:27,839
+i think we have four minutes more before
+
+00:36:21,839 --> 00:36:27,839
+the next session starts so
+
+00:36:38,839 --> 00:36:41,839
+okay
+
+00:36:57,680 --> 00:37:09,839
+any other questions
+
+00:37:15,839 --> 00:37:23,839
+all right i assume there are no more
+
+00:37:17,520 --> 00:37:23,839
+questions uh so thank you
+
+00:37:48,560 --> 00:37:50,640
+
+YouTube URL: https://www.youtube.com/watch?v=8QV2Mc-1s64
+
+

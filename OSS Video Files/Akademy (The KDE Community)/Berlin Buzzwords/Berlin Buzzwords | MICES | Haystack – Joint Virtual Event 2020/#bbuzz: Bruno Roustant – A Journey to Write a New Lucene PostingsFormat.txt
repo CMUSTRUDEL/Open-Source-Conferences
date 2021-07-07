@@ -1,0 +1,1139 @@
+Title: #bbuzz: Bruno Roustant – A Journey to Write a New Lucene PostingsFormat
+Publication date: 2020-07-07
+Playlist: Berlin Buzzwords | MICES | Haystack – Joint Virtual Event 2020
+Description: 
+	More: https://berlinbuzzwords.de/session/journey-write-new-lucene-postingsformat
+
+Some hard technical challenges are better solved by changing the foundations. We had a use case of searching many fields with strong constraints on memory and performance. We needed a massive number of fields to support field level security at scale and open the path to machine learned ranking models.
+
+A custom PostingsFormat allowed for a solution with greater efficiencies than our prior solution. We developed a new Lucene PostingsFormat called UniformSplit, we deployed it at a very large scale, and we open-sourced it. We learned a lot during the journey, especially about micro-benchmarking, java memory consumption, compact data representation and high performance Lucene indices.
+
+This presentation is a good medium to share what we learned with step backwards, the learnings on the Lucene mechanisms, the tips and the pitfalls we encountered. And as we continued the development, we will share the latest works and production measures.
+Captions: 
+	00:00:08,900 --> 00:00:15,650
+hello I am no stone search engineer has
+
+00:00:12,660 --> 00:00:19,050
+set socks and listen Scirocco meter
+
+00:00:15,650 --> 00:00:21,869
+today I will talk about listen posting
+
+00:00:19,050 --> 00:00:23,119
+format and the journey we had to write a
+
+00:00:21,869 --> 00:00:27,179
+new one
+
+00:00:23,119 --> 00:00:30,029
+what is the posting format it's the
+
+00:00:27,179 --> 00:00:33,840
+structure and format of the listen
+
+00:00:30,029 --> 00:00:38,100
+inverted index it's a low-level code a
+
+00:00:33,840 --> 00:00:43,590
+foundation why did we need a new posting
+
+00:00:38,100 --> 00:00:46,380
+poet it's all about new challenges of a
+
+00:00:43,590 --> 00:00:49,560
+massive number of field at scale so
+
+00:00:46,380 --> 00:00:56,130
+let's have an overview of our journey to
+
+00:00:49,560 --> 00:00:59,640
+solve them and share our experience here
+
+00:00:56,130 --> 00:01:02,130
+is the agenda on the left the agenda
+
+00:00:59,640 --> 00:01:06,659
+sections and on the right the journey
+
+00:01:02,130 --> 00:01:10,799
+map each agenda section corresponds to a
+
+00:01:06,659 --> 00:01:13,880
+line in the map the white bullets on the
+
+00:01:10,799 --> 00:01:17,180
+map represent challenges and solutions
+
+00:01:13,880 --> 00:01:21,570
+while the orange triangles represent
+
+00:01:17,180 --> 00:01:24,360
+issues and obstacles that's a big
+
+00:01:21,570 --> 00:01:28,229
+journey filled with challenges issues
+
+00:01:24,360 --> 00:01:31,620
+and solutions let's start by putting
+
+00:01:28,229 --> 00:01:36,000
+some contexts and by describing the
+
+00:01:31,620 --> 00:01:38,940
+challenges Salesforce search is a search
+
+00:01:36,000 --> 00:01:43,170
+as a platform in a highly multi-tenant
+
+00:01:38,940 --> 00:01:46,440
+context at scale on the right we can
+
+00:01:43,170 --> 00:01:49,440
+have an idea of the scale on top of that
+
+00:01:46,440 --> 00:01:53,909
+we want to search a massive number of
+
+00:01:49,440 --> 00:01:58,890
+fields up to 150 fields for nearly all
+
+00:01:53,909 --> 00:02:02,850
+queries why because the documents are
+
+00:01:58,890 --> 00:02:07,140
+highly structured and diverse we enforce
+
+00:02:02,850 --> 00:02:09,509
+dynamic field level security one user
+
+00:02:07,140 --> 00:02:14,159
+may not be authorized to search all
+
+00:02:09,509 --> 00:02:17,819
+fields we also improve the relevancy by
+
+00:02:14,159 --> 00:02:20,959
+learning models which apply boosts per
+
+00:02:17,819 --> 00:02:20,959
+individual field
+
+00:02:21,580 --> 00:02:29,750
+so we have challenging constraints mm
+
+00:02:26,960 --> 00:02:34,280
+online charts pass or a node while
+
+00:02:29,750 --> 00:02:36,920
+searching more than 150 fields our first
+
+00:02:34,280 --> 00:02:41,060
+approach was obviously to use the
+
+00:02:36,920 --> 00:02:44,210
+standard listen index we benchmarked it
+
+00:02:41,060 --> 00:02:49,310
+with our production data shape and scale
+
+00:02:44,210 --> 00:02:52,460
+and as anticipated it failed the node
+
+00:02:49,310 --> 00:02:55,820
+went quickly out of memory with terrible
+
+00:02:52,460 --> 00:02:57,220
+research query throughput before
+
+00:02:55,820 --> 00:02:59,650
+explaining the details
+
+00:02:57,220 --> 00:03:05,750
+let's look directly at the journey
+
+00:02:59,650 --> 00:03:08,000
+outcome given the constraints we
+
+00:03:05,750 --> 00:03:11,960
+developed a new recent posting format
+
+00:03:08,000 --> 00:03:14,690
+called uniform split it is designed to
+
+00:03:11,960 --> 00:03:17,030
+be simple and extensible the base
+
+00:03:14,690 --> 00:03:20,290
+version follows the posting format API
+
+00:03:17,030 --> 00:03:23,870
+and a regular field index approach and
+
+00:03:20,290 --> 00:03:26,810
+an extension called Shelton's makes it
+
+00:03:23,870 --> 00:03:30,200
+possible to store and access efficiently
+
+00:03:26,810 --> 00:03:33,520
+a massive number of fields we did a
+
+00:03:30,200 --> 00:03:36,020
+performance campaign we fixed issues and
+
+00:03:33,520 --> 00:03:39,709
+eventually the performance and memory
+
+00:03:36,020 --> 00:03:42,230
+are good except for spell check fuzzy
+
+00:03:39,709 --> 00:03:47,840
+queries we will explain that in a moment
+
+00:03:42,230 --> 00:03:51,860
+I would like to thank boss 1 Camilo
+
+00:03:47,840 --> 00:03:57,590
+Villegas do one and David smiley who
+
+00:03:51,860 --> 00:03:59,780
+contribute to this project now let's
+
+00:03:57,590 --> 00:04:05,510
+come back to the journey map to get more
+
+00:03:59,780 --> 00:04:09,680
+details so we have seen that we had very
+
+00:04:05,510 --> 00:04:13,040
+challenging constraint this is the first
+
+00:04:09,680 --> 00:04:16,400
+line of the map then we started to
+
+00:04:13,040 --> 00:04:19,120
+investigate solutions we needed a
+
+00:04:16,400 --> 00:04:25,700
+solution to reduce memory usage and
+
+00:04:19,120 --> 00:04:28,669
+increase query throughput our main
+
+00:04:25,700 --> 00:04:31,130
+challenge was to reduce memory usage not
+
+00:04:28,669 --> 00:04:32,389
+a small issue a serious out of memory
+
+00:04:31,130 --> 00:04:34,909
+break
+
+00:04:32,389 --> 00:04:38,090
+here is the structure of the Rossini
+
+00:04:34,909 --> 00:04:41,180
+inductive index on the left you can see
+
+00:04:38,090 --> 00:04:44,810
+the index layers and the order from top
+
+00:04:41,180 --> 00:04:47,930
+to bottom on the right the index
+
+00:04:44,810 --> 00:04:51,949
+structures corresponding to each index
+
+00:04:47,930 --> 00:04:56,900
+layer let's say we search the term big
+
+00:04:51,949 --> 00:05:00,439
+in the title field the recent index will
+
+00:04:56,900 --> 00:05:05,419
+get the title the term dictionary for
+
+00:05:00,439 --> 00:05:09,620
+the title field then it will seek the
+
+00:05:05,419 --> 00:05:11,930
+term big in the dictionary then
+
+00:05:09,620 --> 00:05:16,990
+depending on the query it will gather
+
+00:05:11,930 --> 00:05:20,659
+more data from the postings and payload
+
+00:05:16,990 --> 00:05:22,819
+such as the ideas of documents
+
+00:05:20,659 --> 00:05:27,919
+containing the term and the positions of
+
+00:05:22,819 --> 00:05:31,340
+the term in each document in our context
+
+00:05:27,919 --> 00:05:35,900
+we had a big memory issue because we
+
+00:05:31,340 --> 00:05:40,430
+have 150 fields so 150 dictionary trees
+
+00:05:35,900 --> 00:05:43,729
+in memory actually with loosing 8 the
+
+00:05:40,430 --> 00:05:47,839
+dictionary is now kept on disk and not
+
+00:05:43,729 --> 00:05:50,330
+in memory this is called FST of it even
+
+00:05:47,839 --> 00:05:54,039
+if this may not be a memory issue
+
+00:05:50,330 --> 00:05:57,560
+anymore it becomes a disk access issue
+
+00:05:54,039 --> 00:06:01,930
+because there are so many blocks to load
+
+00:05:57,560 --> 00:06:01,930
+for a single query with so many fields
+
+00:06:02,650 --> 00:06:09,080
+so to solve the memory and performance
+
+00:06:05,270 --> 00:06:13,159
+issues the idea is to swap the index
+
+00:06:09,080 --> 00:06:17,330
+layers between fields and terms and we
+
+00:06:13,159 --> 00:06:20,960
+are we are going to do that now here we
+
+00:06:17,330 --> 00:06:23,990
+swap on the Left the terms becomes the
+
+00:06:20,960 --> 00:06:27,439
+first layer the fields becomes the
+
+00:06:23,990 --> 00:06:32,029
+second layer the field information is
+
+00:06:27,439 --> 00:06:34,789
+now stored per term in the index when we
+
+00:06:32,029 --> 00:06:40,339
+seek the term big we now look at the
+
+00:06:34,789 --> 00:06:40,790
+field information in the dictionary this
+
+00:06:40,339 --> 00:06:44,060
+has
+
+00:06:40,790 --> 00:06:48,580
+two advantages first we share the terms
+
+00:06:44,060 --> 00:06:53,390
+of all fields in the single prefix tree
+
+00:06:48,580 --> 00:06:58,430
+this is very compact compared to the 150
+
+00:06:53,390 --> 00:07:00,980
+prefix trees we had before second our
+
+00:06:58,430 --> 00:07:05,510
+use case is to search the same query in
+
+00:07:00,980 --> 00:07:10,010
+all 150 fields this is a recent
+
+00:07:05,510 --> 00:07:12,410
+disjunction max query in our example we
+
+00:07:10,010 --> 00:07:17,000
+searched the term B in three fields
+
+00:07:12,410 --> 00:07:19,430
+title auto and body so now it becomes
+
+00:07:17,000 --> 00:07:23,330
+possible to seek only ones the term
+
+00:07:19,430 --> 00:07:26,630
+perfect tree we search once but we can
+
+00:07:23,330 --> 00:07:30,050
+cache the datums data for all fields and
+
+00:07:26,630 --> 00:07:37,340
+serve it for all of our field doing only
+
+00:07:30,050 --> 00:07:40,880
+one index Ruka so we have the solution
+
+00:07:37,340 --> 00:07:45,020
+to swap the fields and terms layers to
+
+00:07:40,880 --> 00:07:47,240
+share terms between field but actually
+
+00:07:45,020 --> 00:07:52,070
+there are various ways to implement that
+
+00:07:47,240 --> 00:07:55,280
+we explore them we implemented initially
+
+00:07:52,070 --> 00:07:59,960
+a virtual fields layer wrapping the rest
+
+00:07:55,280 --> 00:08:04,430
+in standard block tree it works but it's
+
+00:07:59,960 --> 00:08:08,380
+a trick with limitations we skipped
+
+00:08:04,430 --> 00:08:11,480
+other options we even missed one
+
+00:08:08,380 --> 00:08:14,570
+eventually we decided to design a new
+
+00:08:11,480 --> 00:08:17,620
+posting format not only a specific to us
+
+00:08:14,570 --> 00:08:24,830
+key to our use case but that could be
+
+00:08:17,620 --> 00:08:27,290
+shared to the community so we were going
+
+00:08:24,830 --> 00:08:30,620
+to design a new posting format this is a
+
+00:08:27,290 --> 00:08:34,750
+complex work we had to have clear goals
+
+00:08:30,620 --> 00:08:37,790
+and focus on them and we knew we had to
+
+00:08:34,750 --> 00:08:39,890
+prepare to compromises because the
+
+00:08:37,790 --> 00:08:43,070
+existing standard posting format is
+
+00:08:39,890 --> 00:08:45,470
+highly optimized we took the opportunity
+
+00:08:43,070 --> 00:08:51,400
+of an internship to explore
+
+00:08:45,470 --> 00:08:51,400
+possibilities we brainstormed and
+
+00:08:51,430 --> 00:08:59,500
+coming back to the Johnny map we saw the
+
+00:08:56,230 --> 00:09:03,730
+challenges and the issues on memory and
+
+00:08:59,500 --> 00:09:07,120
+performances we saw the investigations
+
+00:09:03,730 --> 00:09:09,430
+and the Chatham's principle now we are
+
+00:09:07,120 --> 00:09:12,850
+going to explore the recent posting
+
+00:09:09,430 --> 00:09:18,910
+format API before looking at the detail
+
+00:09:12,850 --> 00:09:21,400
+of the new posting format first what is
+
+00:09:18,910 --> 00:09:25,000
+the posting for that it's the way we
+
+00:09:21,400 --> 00:09:27,220
+store the investing index in listen we
+
+00:09:25,000 --> 00:09:31,300
+get the posting format from the codec
+
+00:09:27,220 --> 00:09:34,690
+the codec is composed of multiple parts
+
+00:09:31,300 --> 00:09:38,170
+of the listen index such as posting
+
+00:09:34,690 --> 00:09:43,360
+format but also dog values format stored
+
+00:09:38,170 --> 00:09:48,910
+field format and others we will focus on
+
+00:09:43,360 --> 00:09:52,950
+the posting format API only the posting
+
+00:09:48,910 --> 00:09:56,080
+format API is layer 2 it provides both
+
+00:09:52,950 --> 00:09:59,770
+fields consumer to write the English
+
+00:09:56,080 --> 00:10:04,300
+index and a field producer to read it
+
+00:09:59,770 --> 00:10:07,510
+and search it for a given field the
+
+00:10:04,300 --> 00:10:11,230
+fields producer provides terms instances
+
+00:10:07,510 --> 00:10:17,020
+which gives access to the terms in a
+
+00:10:11,230 --> 00:10:21,100
+given field field dictionary let's take
+
+00:10:17,020 --> 00:10:24,460
+an example if we search the term big in
+
+00:10:21,100 --> 00:10:28,180
+the field title we access the fields
+
+00:10:24,460 --> 00:10:31,740
+producer and we get the terms instance
+
+00:10:28,180 --> 00:10:34,830
+colors corresponding to the field title
+
+00:10:31,740 --> 00:10:38,200
+then each time we need to seek or
+
+00:10:34,830 --> 00:10:44,590
+iterate through the terms of the fields
+
+00:10:38,200 --> 00:10:47,860
+we create a stateful damson you tamson
+
+00:10:44,590 --> 00:10:53,730
+'m allows us to browse the index and see
+
+00:10:47,860 --> 00:10:59,080
+the term big we access the term prefix
+
+00:10:53,730 --> 00:11:01,930
+corresponding to the field then we go
+
+00:10:59,080 --> 00:11:04,560
+through the tree and we get the
+
+00:11:01,930 --> 00:11:10,170
+corresponding term block to
+
+00:11:04,560 --> 00:11:13,320
+look for the search term from there we
+
+00:11:10,170 --> 00:11:15,150
+can further access the posting permit we
+
+00:11:13,320 --> 00:11:19,730
+access the document list position
+
+00:11:15,150 --> 00:11:19,730
+payloads depending on the query needs
+
+00:11:20,720 --> 00:11:27,900
+coming back to our new posting format we
+
+00:11:24,660 --> 00:11:29,210
+want to swap the field inside the terms
+
+00:11:27,900 --> 00:11:32,970
+dictionary
+
+00:11:29,210 --> 00:11:41,460
+this will be the shared terms uniform
+
+00:11:32,970 --> 00:11:44,250
+speed extension actually we have to
+
+00:11:41,460 --> 00:11:49,560
+design a new posting format up to terms
+
+00:11:44,250 --> 00:11:52,710
+in the purple part here we can still
+
+00:11:49,560 --> 00:11:55,950
+reuse a big building block the postings
+
+00:11:52,710 --> 00:12:00,589
+annum which manages the postings and
+
+00:11:55,950 --> 00:12:00,589
+payloads this is the green part here
+
+00:12:01,640 --> 00:12:09,080
+okay we knew which API we had to
+
+00:12:06,060 --> 00:12:16,200
+implement next step was to think about
+
+00:12:09,080 --> 00:12:19,740
+the design of this new posting format so
+
+00:12:16,200 --> 00:12:23,970
+what is uniform split it's a technique
+
+00:12:19,740 --> 00:12:27,540
+to write the inverted index inductive
+
+00:12:23,970 --> 00:12:34,020
+index is composable of blocks of terms
+
+00:12:27,540 --> 00:12:37,410
+to split the search efficiently standard
+
+00:12:34,020 --> 00:12:41,640
+blocked rebuilds the blocks based on the
+
+00:12:37,410 --> 00:12:44,040
+common prefixes of the terms uniform
+
+00:12:41,640 --> 00:12:48,060
+split builds the blocks by targeting a
+
+00:12:44,040 --> 00:12:54,540
+uniform block size the number of terms
+
+00:12:48,060 --> 00:12:57,150
+in a block to access those blocks we map
+
+00:12:54,540 --> 00:13:02,459
+the blocks with an efficient and very
+
+00:12:57,150 --> 00:13:06,060
+compact data structure the listen FST we
+
+00:13:02,459 --> 00:13:09,600
+call block key the first term of each
+
+00:13:06,060 --> 00:13:11,540
+each block and we store the block keys
+
+00:13:09,600 --> 00:13:16,360
+in the FST
+
+00:13:11,540 --> 00:13:18,790
+as we put uniformly the blocks
+
+00:13:16,360 --> 00:13:27,040
+get a minimal number of blocks so the
+
+00:13:18,790 --> 00:13:30,250
+FST size is minimized actually we don't
+
+00:13:27,040 --> 00:13:33,430
+need the full term to distinguish a term
+
+00:13:30,250 --> 00:13:36,029
+from its previous we can take the
+
+00:13:33,430 --> 00:13:40,600
+minimal disk we distinguish in prefix
+
+00:13:36,029 --> 00:13:44,529
+MDP instead for the same functionality
+
+00:13:40,600 --> 00:13:49,209
+we can store block keys MDP instead of
+
+00:13:44,529 --> 00:13:56,110
+the full term this reduces the FST
+
+00:13:49,209 --> 00:14:01,180
+footprint however sometimes we can still
+
+00:13:56,110 --> 00:14:03,790
+have long block keys MDP so there is a
+
+00:14:01,180 --> 00:14:07,440
+good chance to find a smaller NDP within
+
+00:14:03,790 --> 00:14:11,230
+the neighborhoods here in the example
+
+00:14:07,440 --> 00:14:15,000
+instead of taking five as the key of the
+
+00:14:11,230 --> 00:14:19,420
+third block we can select the term field
+
+00:14:15,000 --> 00:14:24,190
+just before because it's MDP is smaller
+
+00:14:19,420 --> 00:14:27,850
+f so we further optimize by selecting
+
+00:14:24,190 --> 00:14:32,709
+the local optimal block keys with the
+
+00:14:27,850 --> 00:14:35,500
+shortest MDP by looking at the FST on
+
+00:14:32,709 --> 00:14:43,680
+the left we can see it holds less and
+
+00:14:35,500 --> 00:14:46,690
+less data when we access a block we scan
+
+00:14:43,680 --> 00:14:49,630
+sequentially the terms in the block this
+
+00:14:46,690 --> 00:14:54,399
+means we can encode incrementally the
+
+00:14:49,630 --> 00:14:57,390
+terms in the block on the right we see
+
+00:14:54,399 --> 00:15:00,660
+the incremental encoding of the terms
+
+00:14:57,390 --> 00:15:03,880
+this reduces the disk footprint and
+
+00:15:00,660 --> 00:15:11,440
+speeds up both the block loading and
+
+00:15:03,880 --> 00:15:14,079
+terms matching and last but not least we
+
+00:15:11,440 --> 00:15:17,079
+start by first comparing with the middle
+
+00:15:14,079 --> 00:15:19,860
+term in the block and we jump directly
+
+00:15:17,079 --> 00:15:23,380
+there if the term we look for is after
+
+00:15:19,860 --> 00:15:26,589
+this is like a first step of a binary
+
+00:15:23,380 --> 00:15:28,720
+search inside the block dividing by two
+
+00:15:26,589 --> 00:15:31,319
+the number of terms we have to scan
+
+00:15:28,720 --> 00:15:31,319
+sequential
+
+00:15:31,650 --> 00:15:41,500
+so this is all the optimization for the
+
+00:15:36,340 --> 00:15:45,820
+uniform split principle at that point of
+
+00:15:41,500 --> 00:15:49,330
+the journey we had our goals and design
+
+00:15:45,820 --> 00:15:55,510
+defined we started to implement our new
+
+00:15:49,330 --> 00:15:58,240
+posting format we implemented a base
+
+00:15:55,510 --> 00:16:02,230
+version of uniform split with the
+
+00:15:58,240 --> 00:16:03,970
+regular index layers ordering fills
+
+00:16:02,230 --> 00:16:08,500
+first and terms
+
+00:16:03,970 --> 00:16:11,140
+second this uniform split base was
+
+00:16:08,500 --> 00:16:15,160
+extensible so we could continue with an
+
+00:16:11,140 --> 00:16:18,970
+extension for the shuttle principal with
+
+00:16:15,160 --> 00:16:26,770
+the index layer swapped terms first and
+
+00:16:18,970 --> 00:16:30,070
+field second the extensibility allows
+
+00:16:26,770 --> 00:16:36,160
+other extensions not necessarily
+
+00:16:30,070 --> 00:16:39,240
+specific to our use case eventually we
+
+00:16:36,160 --> 00:16:42,670
+implemented to posting formats one base
+
+00:16:39,240 --> 00:16:46,210
+for general purpose and low memory
+
+00:16:42,670 --> 00:16:48,550
+footprint and an extension to support
+
+00:16:46,210 --> 00:16:55,530
+efficiently a massive number of fields
+
+00:16:48,550 --> 00:16:58,780
+still extensible itself a world test
+
+00:16:55,530 --> 00:17:01,030
+what about test implementing to new
+
+00:16:58,780 --> 00:17:05,260
+posting format must require a huge
+
+00:17:01,030 --> 00:17:07,569
+testing effort actually no we didn't
+
+00:17:05,260 --> 00:17:11,230
+have to do much on this side hopefully
+
+00:17:07,569 --> 00:17:14,650
+we could leverage the awesome listen
+
+00:17:11,230 --> 00:17:17,380
+randomized test framework those tests
+
+00:17:14,650 --> 00:17:21,670
+are testing a lot of Corner K is an
+
+00:17:17,380 --> 00:17:30,280
+extreme usage and you can configure them
+
+00:17:21,670 --> 00:17:32,770
+to run your code good we had the two
+
+00:17:30,280 --> 00:17:35,710
+implementations well tested then of
+
+00:17:32,770 --> 00:17:39,370
+course we need we needed to benchmark
+
+00:17:35,710 --> 00:17:42,520
+the performance as we can see the
+
+00:17:39,370 --> 00:17:45,900
+performance was going to be a journey in
+
+00:17:42,520 --> 00:17:49,650
+we found multiple challenges to address
+
+00:17:45,900 --> 00:17:51,480
+let's see the difference between being
+
+00:17:49,650 --> 00:17:54,330
+functionally complete and
+
+00:17:51,480 --> 00:17:57,820
+production-ready
+
+00:17:54,330 --> 00:18:01,630
+the first version worked already seen
+
+00:17:57,820 --> 00:18:08,290
+test passed and the shared extension
+
+00:18:01,630 --> 00:18:11,980
+also worked we started to benchmark with
+
+00:18:08,290 --> 00:18:13,960
+a first micro benchmark in dude we
+
+00:18:11,980 --> 00:18:17,620
+didn't want to invest too much at this
+
+00:18:13,960 --> 00:18:22,690
+stage this benchmarking has limitation
+
+00:18:17,620 --> 00:18:25,840
+and it only guided us on some choices we
+
+00:18:22,690 --> 00:18:28,600
+confirmed them in the next stages we
+
+00:18:25,840 --> 00:18:31,660
+focused our goals on some specific
+
+00:18:28,600 --> 00:18:34,120
+queries at this stage we didn't have the
+
+00:18:31,660 --> 00:18:39,460
+right data volume but the performance
+
+00:18:34,120 --> 00:18:42,490
+results were encouraging for the next
+
+00:18:39,460 --> 00:18:45,700
+stage we leveraged the listen until
+
+00:18:42,490 --> 00:18:50,710
+benchmarking commonly used in the scene
+
+00:18:45,700 --> 00:18:53,410
+to compare codecs it when it benchmarks
+
+00:18:50,710 --> 00:18:58,600
+a wide variety of queries for values
+
+00:18:53,410 --> 00:19:01,390
+index Isis and actually we immediately
+
+00:18:58,600 --> 00:19:04,540
+discovered that the short-term extension
+
+00:19:01,390 --> 00:19:07,930
+had serious performance issues when
+
+00:19:04,540 --> 00:19:12,490
+building index when merging the index
+
+00:19:07,930 --> 00:19:18,720
+Iran segment so we customized the merge
+
+00:19:12,490 --> 00:19:18,720
+method and the performance when good
+
+00:19:20,810 --> 00:19:27,760
+running multiple benchmark we found also
+
+00:19:24,760 --> 00:19:32,840
+problems with the memory allocation and
+
+00:19:27,760 --> 00:19:35,120
+garbage garbage collection time we had
+
+00:19:32,840 --> 00:19:39,710
+to review the object allocations and
+
+00:19:35,120 --> 00:19:43,570
+reuse we changed some objects to become
+
+00:19:39,710 --> 00:19:46,910
+mutable we also reviewed the lambda and
+
+00:19:43,570 --> 00:19:51,520
+Java stream code that can lead to
+
+00:19:46,910 --> 00:19:55,600
+unanticipated object allocations and
+
+00:19:51,520 --> 00:19:55,600
+finally GC went good
+
+00:19:56,530 --> 00:20:02,780
+finally we could compare uniform split
+
+00:19:59,960 --> 00:20:07,190
+with the recent standard block tree post
+
+00:20:02,780 --> 00:20:09,950
+in fact the speed for many term or
+
+00:20:07,190 --> 00:20:11,080
+phrase queries was good for uniform
+
+00:20:09,950 --> 00:20:15,170
+split
+
+00:20:11,080 --> 00:20:17,360
+notice how the index size impacts the
+
+00:20:15,170 --> 00:20:22,310
+relative importance of the posting
+
+00:20:17,360 --> 00:20:25,160
+format in the lookup speed but with this
+
+00:20:22,310 --> 00:20:28,310
+benchmark we discovered we add a serious
+
+00:20:25,160 --> 00:20:32,980
+performance issues with the spell check
+
+00:20:28,310 --> 00:20:37,130
+or further queries we investigate we
+
+00:20:32,980 --> 00:20:40,250
+investigated way actually
+
+00:20:37,130 --> 00:20:44,030
+the investigation and fixes spanned over
+
+00:20:40,250 --> 00:20:46,760
+several Maltese we customized the term
+
+00:20:44,030 --> 00:20:50,000
+intersect method which is called by
+
+00:20:46,760 --> 00:20:53,770
+queries such as prefix wildcard spell
+
+00:20:50,000 --> 00:20:56,630
+check fuzzy queries after two
+
+00:20:53,770 --> 00:21:00,410
+unsatisfying attempts the third one gave
+
+00:20:56,630 --> 00:21:05,810
+nice improvement available now since
+
+00:21:00,410 --> 00:21:07,250
+recent 8.5 however it's still below blog
+
+00:21:05,810 --> 00:21:12,160
+3 for fuzzy queries
+
+00:21:07,250 --> 00:21:12,160
+this is a compromise we had to make
+
+00:21:13,090 --> 00:21:18,650
+resonated benchmarks a wide variety of
+
+00:21:16,040 --> 00:21:22,640
+queries but it doesn't measure memory
+
+00:21:18,650 --> 00:21:28,060
+GC or disk the last step was to go to
+
+00:21:22,640 --> 00:21:28,060
+shadow experiments and real productions
+
+00:21:30,509 --> 00:21:36,759
+the final version of uniform split in
+
+00:21:33,850 --> 00:21:41,380
+projection includes an additional cash
+
+00:21:36,759 --> 00:21:45,000
+at posting format level driven by query
+
+00:21:41,380 --> 00:21:50,289
+hints it is adapted to our use case
+
+00:21:45,000 --> 00:21:53,769
+queries and data shape when we compared
+
+00:21:50,289 --> 00:21:56,409
+the performance in production we could
+
+00:21:53,769 --> 00:22:01,320
+see impressive gains compared to the
+
+00:21:56,409 --> 00:22:05,679
+standard individual field approach and
+
+00:22:01,320 --> 00:22:07,450
+we could see significant gain compared
+
+00:22:05,679 --> 00:22:11,049
+to the virtual field layer
+
+00:22:07,450 --> 00:22:20,769
+approach including a very important
+
+00:22:11,049 --> 00:22:24,460
+saving on garbage collection activity as
+
+00:22:20,769 --> 00:22:30,190
+a conclusion what did we learn from this
+
+00:22:24,460 --> 00:22:33,490
+journey what was the outcome about
+
+00:22:30,190 --> 00:22:36,429
+posting formats we learned a lot first
+
+00:22:33,490 --> 00:22:39,539
+they are also a posting format not only
+
+00:22:36,429 --> 00:22:43,899
+the standard block tree they are all
+
+00:22:39,539 --> 00:22:46,919
+with dedicated use case there is a
+
+00:22:43,899 --> 00:22:49,690
+perfect posting format to combine them
+
+00:22:46,919 --> 00:22:52,559
+second you don't have to write
+
+00:22:49,690 --> 00:22:56,789
+everything from scratch there are many
+
+00:22:52,559 --> 00:23:01,750
+existing components to reuse the other
+
+00:22:56,789 --> 00:23:04,899
+the recent test routes are extensive the
+
+00:23:01,750 --> 00:23:08,519
+test if what is actually light and there
+
+00:23:04,899 --> 00:23:13,059
+is also the reason until benchmarking
+
+00:23:08,519 --> 00:23:19,600
+finally it's good to discuss early with
+
+00:23:13,059 --> 00:23:21,850
+the community to get feedback so there
+
+00:23:19,600 --> 00:23:24,419
+is a new posting format called uniform
+
+00:23:21,850 --> 00:23:29,220
+split it's a good candidate for
+
+00:23:24,419 --> 00:23:32,529
+extension and customization it has a
+
+00:23:29,220 --> 00:23:37,990
+short-term extension to support massive
+
+00:23:32,529 --> 00:23:41,200
+number of fields efficiently uniform
+
+00:23:37,990 --> 00:23:43,310
+split is efficient for most queries less
+
+00:23:41,200 --> 00:23:47,100
+for
+
+00:23:43,310 --> 00:23:49,890
+we combined boss uniform split and
+
+00:23:47,100 --> 00:23:54,980
+Brooktree with a per field botany
+
+00:23:49,890 --> 00:23:54,980
+posting format - under fuzzy queries
+
+00:23:56,510 --> 00:24:00,620
+that's it thank you
+
+00:24:05,810 --> 00:24:07,870
+
+YouTube URL: https://www.youtube.com/watch?v=av0yQY3pklA
+
+

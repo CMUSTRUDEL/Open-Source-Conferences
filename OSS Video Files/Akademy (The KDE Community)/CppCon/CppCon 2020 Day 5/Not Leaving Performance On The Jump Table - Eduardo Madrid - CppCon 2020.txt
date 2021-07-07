@@ -1,0 +1,5114 @@
+Title: Not Leaving Performance On The Jump Table - Eduardo Madrid - CppCon 2020
+Publication date: 2020-10-04
+Playlist: CppCon 2020 Day 5
+Description: 
+	https://cppcon.org/
+https://github.com/CppCon/CppCon2020
+---
+In this laptop I will use to talk to you, std::function is measured to have, for normal use cases, a latency overhead of over 79% for dispatching compared to just using function pointers. Our colleagues at Facebook improve in folly::Function by over 14%, however the open source Zoo libraries’ implementations I will talk to you about improves upon folly’s at least another 24% (35% over libc++) while at the same time dramatically reducing the object code size and allowing lots of practical features being proposed for what Arthur O’Dwyer calls “the design space of std::function“, all with top performance. When I report these findings colleagues have a hard time believing them, the presumption is by this time we should know well how to implement this with nearly theoretical maximum performance; then I must be wrong, my implementation has got to be severely flawed in some way... yet this library is used extensively in a mobile app that has over 200 million daily active users, in Android, iOS, and Windows, Mac OS X apps.
+
+The improvements come from performance oversights that indeed have lasted for decades, once I tell you what they are, together with simple yet rigorous benchmarks and compiler explorer links, you will have no trouble to understand the improvements and realizing there are general principles we could learn from. That’s what this presentation is about.
+
+Improving std::function is just the tip of the iceberg, when it comes to dispatching to behavior specified at runtime, there are many performance mistakes concerning the design of callbacks, event subscription/publishing mechanisms, and even the very language supports runtime polymorphism in a way that is very hostile to performance, among other problems. I hope to tell you all about the solutions we have found for these problems in the presentation “Type Erasing The Pains Of Runtime Polymorphism”, here we will focus exclusively on attaining nearly maximal performance while dispatching to runtime specified user code.
+
+The techniques to be discussed are not processor architecture specific but general, directly applicable to components such as std::function, std::variant, their hybrids, throwing exceptions, error handling, the visitor design pattern, and the whole of runtime polymorphism. Furthermore, the examples are from real life improvements.
+
+---
+https://github.com/thecppzoo/thecppzoo.github.io
+
+Eduardo has been working for many years on financial technologies, automated trading in particular, and other areas where performance challenges can be solved in C++. He contributes to open source projects and teaches advanced courses on Software Engineering with emphasis in Generic Programming
+
+---
+Streamed & Edited by Digital Medium Ltd - events.digital-medium.co.uk
+events@digital-medium.co.uk
+Captions: 
+	00:00:09,840 --> 00:00:14,240
+welcome friends from the conference
+
+00:00:11,759 --> 00:00:16,320
+uh my name is eduardo madrid i am a tech
+
+00:00:14,240 --> 00:00:18,160
+leader camera platform at the company
+
+00:00:16,320 --> 00:00:21,840
+that makes a snapchat that is a
+
+00:00:18,160 --> 00:00:24,320
+snap incorporated and has a promised
+
+00:00:21,840 --> 00:00:25,439
+i am going to be talking to you about
+
+00:00:24,320 --> 00:00:29,279
+some
+
+00:00:25,439 --> 00:00:31,840
+general techniques that will let you
+
+00:00:29,279 --> 00:00:33,040
+not avoid leaving performance on the job
+
+00:00:31,840 --> 00:00:36,480
+table
+
+00:00:33,040 --> 00:00:39,360
+um i will introduce myself because
+
+00:00:36,480 --> 00:00:41,840
+in these slides um there are going to be
+
+00:00:39,360 --> 00:00:44,559
+many links to material that
+
+00:00:41,840 --> 00:00:46,399
+is very useful to understand this
+
+00:00:44,559 --> 00:00:47,280
+presentation better it is complementary
+
+00:00:46,399 --> 00:00:49,760
+material
+
+00:00:47,280 --> 00:00:51,680
+and i had to mention these things
+
+00:00:49,760 --> 00:00:55,360
+because they are important in
+
+00:00:51,680 --> 00:00:57,600
+the way of introducing myself i have
+
+00:00:55,360 --> 00:00:58,559
+been working at the snapchat has i just
+
+00:00:57,600 --> 00:01:02,160
+said
+
+00:00:58,559 --> 00:01:04,960
+if i did a presentation on 2016
+
+00:01:02,160 --> 00:01:06,640
+that is like a precursor to this one in
+
+00:01:04,960 --> 00:01:10,159
+the sense that uh
+
+00:01:06,640 --> 00:01:13,200
+back in the day i worked on how to
+
+00:01:10,159 --> 00:01:15,520
+implement protocols that generate events
+
+00:01:13,200 --> 00:01:18,320
+this is the presentation that deals with
+
+00:01:15,520 --> 00:01:21,280
+how to consume events
+
+00:01:18,320 --> 00:01:22,880
+um there is a presentation that goes
+
+00:01:21,280 --> 00:01:23,840
+into more detail than what i can do
+
+00:01:22,880 --> 00:01:26,240
+today
+
+00:01:23,840 --> 00:01:27,360
+on several mechanisms the slides are
+
+00:01:26,240 --> 00:01:30,320
+available
+
+00:01:27,360 --> 00:01:33,680
+this was the chicago simplest users
+
+00:01:30,320 --> 00:01:33,680
+group in 2017
+
+00:01:33,920 --> 00:01:38,479
+i also presented last year at cppcon
+
+00:01:36,960 --> 00:01:40,240
+there is a material that you might
+
+00:01:38,479 --> 00:01:41,920
+consider interesting which is how to
+
+00:01:40,240 --> 00:01:44,479
+improve exception throwing
+
+00:01:41,920 --> 00:01:46,079
+that i did with a co-worker and friend
+
+00:01:44,479 --> 00:01:49,680
+suman and manti at
+
+00:01:46,079 --> 00:01:51,600
+london c plus plus earlier in the year
+
+00:01:49,680 --> 00:01:53,360
+i used to work in financial technologies
+
+00:01:51,600 --> 00:01:57,040
+and automated trading
+
+00:01:53,360 --> 00:01:58,479
+so that is an area that is very heavy on
+
+00:01:57,040 --> 00:02:02,079
+performance
+
+00:01:58,479 --> 00:02:04,320
+and i got to
+
+00:02:02,079 --> 00:02:05,520
+be able to exercise many different
+
+00:02:04,320 --> 00:02:09,840
+programming techniques
+
+00:02:05,520 --> 00:02:12,800
+that have informed what i am doing today
+
+00:02:09,840 --> 00:02:13,680
+okay the work that i'm telling you today
+
+00:02:12,800 --> 00:02:17,280
+about
+
+00:02:13,680 --> 00:02:19,920
+uh is exclusively about the performance
+
+00:02:17,280 --> 00:02:22,160
+aspect we don't have time for anything
+
+00:02:19,920 --> 00:02:22,160
+else
+
+00:02:22,239 --> 00:02:25,520
+you might find me on twitter however i
+
+00:02:25,200 --> 00:02:29,040
+do
+
+00:02:25,520 --> 00:02:30,400
+tend to take uh technical disagreements
+
+00:02:29,040 --> 00:02:32,000
+to the extreme
+
+00:02:30,400 --> 00:02:33,680
+because i really want to learn from the
+
+00:02:32,000 --> 00:02:37,440
+people that i interact with and
+
+00:02:33,680 --> 00:02:40,480
+sometimes that
+
+00:02:37,440 --> 00:02:45,200
+creates a polemics that
+
+00:02:40,480 --> 00:02:45,200
+are not very nice but
+
+00:02:46,080 --> 00:02:53,040
+be sure that i really want just
+
+00:02:49,440 --> 00:02:56,160
+to be able to learn and
+
+00:02:53,040 --> 00:02:58,319
+that's why i am so intense okay
+
+00:02:56,160 --> 00:03:00,879
+don't live in performance on the job
+
+00:02:58,319 --> 00:03:04,400
+table what is the job table
+
+00:03:00,879 --> 00:03:04,720
+well you know what we're trying to do is
+
+00:03:04,400 --> 00:03:07,360
+to
+
+00:03:04,720 --> 00:03:08,800
+be able to specify behavior that we
+
+00:03:07,360 --> 00:03:09,599
+don't know when we're compiling the
+
+00:03:08,800 --> 00:03:12,560
+program
+
+00:03:09,599 --> 00:03:14,080
+that at runtime that behavior is going
+
+00:03:12,560 --> 00:03:17,120
+to be activated or not
+
+00:03:14,080 --> 00:03:19,760
+so this has got to be a way to map
+
+00:03:17,120 --> 00:03:20,800
+the data that the application has when
+
+00:03:19,760 --> 00:03:22,319
+it is running
+
+00:03:20,800 --> 00:03:23,920
+to what is the behavior that is going to
+
+00:03:22,319 --> 00:03:26,480
+be executed
+
+00:03:23,920 --> 00:03:29,280
+in c plus plus unfortunately we cannot
+
+00:03:26,480 --> 00:03:31,680
+create a true jump table
+
+00:03:29,280 --> 00:03:32,799
+but we have the resource of the function
+
+00:03:31,680 --> 00:03:35,120
+pointer
+
+00:03:32,799 --> 00:03:36,400
+so the function pointer are a piece of
+
+00:03:35,120 --> 00:03:40,159
+data that
+
+00:03:36,400 --> 00:03:44,560
+we can use to refer to behaviors um
+
+00:03:40,159 --> 00:03:47,599
+that is a very important when you do
+
+00:03:44,560 --> 00:03:49,599
+things like event dispatching or
+
+00:03:47,599 --> 00:03:50,640
+dynamic dispatch which is the mechanism
+
+00:03:49,599 --> 00:03:54,799
+that activates
+
+00:03:50,640 --> 00:03:58,159
+the the the correct a virtual overload
+
+00:03:54,799 --> 00:04:01,200
+of uh an interface defined
+
+00:03:58,159 --> 00:04:02,720
+with uh the inheritance and the keyword
+
+00:04:01,200 --> 00:04:05,360
+virtual
+
+00:04:02,720 --> 00:04:07,040
+okay in the assembler this becomes an
+
+00:04:05,360 --> 00:04:11,040
+indirect jump
+
+00:04:07,040 --> 00:04:12,720
+and um it can be an indirection like a
+
+00:04:11,040 --> 00:04:16,160
+caller function pointer or
+
+00:04:12,720 --> 00:04:18,799
+jump into a table so just uh to warm up
+
+00:04:16,160 --> 00:04:19,199
+let us do something really easy which is
+
+00:04:18,799 --> 00:04:22,160
+uh
+
+00:04:19,199 --> 00:04:24,160
+to see how it looks in the in the
+
+00:04:22,160 --> 00:04:28,080
+compiler explorer
+
+00:04:24,160 --> 00:04:32,800
+um what we see here i hope that the the
+
+00:04:28,080 --> 00:04:36,160
+font size is a big enough um
+
+00:04:32,800 --> 00:04:39,680
+what i have here is a is
+
+00:04:36,160 --> 00:04:41,199
+some toy example of perhaps a game that
+
+00:04:39,680 --> 00:04:44,720
+has sprites
+
+00:04:41,199 --> 00:04:47,680
+and there are also objects and
+
+00:04:44,720 --> 00:04:49,120
+this will be an example of collisions so
+
+00:04:47,680 --> 00:04:52,320
+we have an object
+
+00:04:49,120 --> 00:04:53,199
+and the object has a field type that
+
+00:04:52,320 --> 00:04:55,360
+tells
+
+00:04:53,199 --> 00:04:57,280
+what is the type of object and whether
+
+00:04:55,360 --> 00:04:58,160
+it's a bullet a torpedo spaceship or an
+
+00:04:57,280 --> 00:05:00,639
+asteroid
+
+00:04:58,160 --> 00:05:01,440
+the normal technique is to use a switch
+
+00:05:00,639 --> 00:05:04,000
+on that
+
+00:05:01,440 --> 00:05:04,880
+a bunch of cases and the translation to
+
+00:05:04,000 --> 00:05:08,320
+assembler is
+
+00:05:04,880 --> 00:05:11,840
+you can see here that the
+
+00:05:08,320 --> 00:05:15,280
+the execution is going to jump to
+
+00:05:11,840 --> 00:05:18,479
+a position in a table um eight times
+
+00:05:15,280 --> 00:05:22,080
+the value of uh this register which is
+
+00:05:18,479 --> 00:05:25,680
+uh probably the representation of
+
+00:05:22,080 --> 00:05:27,600
+the sprite type and here are the targets
+
+00:05:25,680 --> 00:05:29,280
+that correspond precisely with the
+
+00:05:27,600 --> 00:05:31,520
+functions that we're going to be calling
+
+00:05:29,280 --> 00:05:34,800
+okay
+
+00:05:31,520 --> 00:05:38,160
+so this is expensive because uh
+
+00:05:34,800 --> 00:05:39,280
+the processor i'm not even talking about
+
+00:05:38,160 --> 00:05:42,479
+the compiler but
+
+00:05:39,280 --> 00:05:44,479
+the microprocessor itself doesn't know
+
+00:05:42,479 --> 00:05:46,960
+where it is jumping to it needs to have
+
+00:05:44,479 --> 00:05:51,199
+a computation to be able to determine
+
+00:05:46,960 --> 00:05:53,840
+where it's going to land and uh here
+
+00:05:51,199 --> 00:05:55,919
+these these kind of things are expensive
+
+00:05:53,840 --> 00:05:59,680
+so you want to minimize
+
+00:05:55,919 --> 00:05:59,680
+the this kind of indirections
+
+00:06:04,840 --> 00:06:10,160
+um
+
+00:06:07,840 --> 00:06:11,600
+well uh what are the objectives for this
+
+00:06:10,160 --> 00:06:13,840
+presentation
+
+00:06:11,600 --> 00:06:16,160
+general principles to achieve maximal
+
+00:06:13,840 --> 00:06:21,360
+performance of event dispatching
+
+00:06:16,160 --> 00:06:24,560
+and object-oriented dynamic activation
+
+00:06:21,360 --> 00:06:26,479
+so we're going to also see um how to
+
+00:06:24,560 --> 00:06:28,560
+improve over a standard function because
+
+00:06:26,479 --> 00:06:30,240
+so
+
+00:06:28,560 --> 00:06:32,240
+there are plenty of lessons that we can
+
+00:06:30,240 --> 00:06:33,680
+learn from the mistakes made in a
+
+00:06:32,240 --> 00:06:36,400
+standard function
+
+00:06:33,680 --> 00:06:37,600
+and hopefully if the time allows for it
+
+00:06:36,400 --> 00:06:40,720
+how to avoid the
+
+00:06:37,600 --> 00:06:44,560
+defective benchmarking
+
+00:06:40,720 --> 00:06:44,960
+okay um if we have a little bit more
+
+00:06:44,560 --> 00:06:46,240
+time
+
+00:06:44,960 --> 00:06:48,000
+then perhaps i'm going to be able to
+
+00:06:46,240 --> 00:06:51,280
+share with you a few
+
+00:06:48,000 --> 00:06:52,720
+more advanced concepts that i have
+
+00:06:51,280 --> 00:06:55,039
+that i hope are going to be interesting
+
+00:06:52,720 --> 00:06:56,960
+to you okay
+
+00:06:55,039 --> 00:06:58,479
+um the outline is going to be very
+
+00:06:56,960 --> 00:06:59,759
+simple we're going to be talking about
+
+00:06:58,479 --> 00:07:00,720
+event processing and runtime
+
+00:06:59,759 --> 00:07:03,919
+polymorphism
+
+00:07:00,720 --> 00:07:06,720
+what is the relationship and
+
+00:07:03,919 --> 00:07:08,479
+how to do good event processing
+
+00:07:06,720 --> 00:07:09,840
+infrastructure to achieve better
+
+00:07:08,479 --> 00:07:13,520
+performance
+
+00:07:09,840 --> 00:07:16,400
+and the next thing is going to be
+
+00:07:13,520 --> 00:07:18,160
+how to bind event handlers with the
+
+00:07:16,400 --> 00:07:21,599
+execution context
+
+00:07:18,160 --> 00:07:24,479
+with many different choices
+
+00:07:21,599 --> 00:07:25,520
+and the implications of following any of
+
+00:07:24,479 --> 00:07:29,759
+them
+
+00:07:25,520 --> 00:07:32,880
+okay what is event processing
+
+00:07:29,759 --> 00:07:36,000
+we need three components okay
+
+00:07:32,880 --> 00:07:38,400
+we need to specify a behavior in
+
+00:07:36,000 --> 00:07:41,680
+simplest like i said we cannot
+
+00:07:38,400 --> 00:07:44,080
+do the equivalent of a switch statement
+
+00:07:41,680 --> 00:07:45,680
+but we can have something like an array
+
+00:07:44,080 --> 00:07:48,000
+of function pointers or function
+
+00:07:45,680 --> 00:07:49,599
+pointers in general so
+
+00:07:48,000 --> 00:07:53,280
+the only option that the language allows
+
+00:07:49,599 --> 00:07:53,280
+us is a
+
+00:07:53,599 --> 00:08:01,039
+change using a function
+
+00:07:58,479 --> 00:08:02,240
+we need to inform the behavior of what
+
+00:08:01,039 --> 00:08:04,800
+happened
+
+00:08:02,240 --> 00:08:05,520
+what what is the event and we represent
+
+00:08:04,800 --> 00:08:07,759
+the events with
+
+00:08:05,520 --> 00:08:09,599
+call signatures the call signature
+
+00:08:07,759 --> 00:08:11,520
+contains all of the arguments
+
+00:08:09,599 --> 00:08:13,759
+that or the arguments are precisely the
+
+00:08:11,520 --> 00:08:15,520
+description of the event
+
+00:08:13,759 --> 00:08:17,199
+and we need to be maintaining a
+
+00:08:15,520 --> 00:08:18,720
+conscious execution for the event
+
+00:08:17,199 --> 00:08:21,599
+handlers
+
+00:08:18,720 --> 00:08:24,479
+um just uh again this is just warm up
+
+00:08:21,599 --> 00:08:26,960
+this is probably not necessary because
+
+00:08:24,479 --> 00:08:29,520
+i requested that the audience would have
+
+00:08:26,960 --> 00:08:32,959
+at least an intermediate level
+
+00:08:29,520 --> 00:08:33,760
+but um i think that uh it is a good idea
+
+00:08:32,959 --> 00:08:35,919
+for us to
+
+00:08:33,760 --> 00:08:37,120
+get in sync so let's go over a very
+
+00:08:35,919 --> 00:08:40,240
+simple example
+
+00:08:37,120 --> 00:08:41,360
+let's say that we're working on a
+
+00:08:40,240 --> 00:08:43,680
+strategy
+
+00:08:41,360 --> 00:08:45,760
+on the automated trading space it's
+
+00:08:43,680 --> 00:08:48,480
+going to be receiving
+
+00:08:45,760 --> 00:08:48,959
+market messages from the exchange
+
+00:08:48,480 --> 00:08:51,279
+through
+
+00:08:48,959 --> 00:08:52,640
+a component in software that is
+
+00:08:51,279 --> 00:08:55,920
+typically called the
+
+00:08:52,640 --> 00:08:57,600
+feed the market data feed and
+
+00:08:55,920 --> 00:08:59,600
+let's say for example that the event at
+
+00:08:57,600 --> 00:09:03,279
+hand is that there is a new order to buy
+
+00:08:59,600 --> 00:09:05,920
+apple at 125
+
+00:09:03,279 --> 00:09:07,360
+for a quantity of 100 shares so that
+
+00:09:05,920 --> 00:09:09,440
+will be the event
+
+00:09:07,360 --> 00:09:11,920
+the trading strategy is precisely the
+
+00:09:09,440 --> 00:09:14,000
+the the the state of the
+
+00:09:11,920 --> 00:09:15,040
+uh trading strategy is the context of
+
+00:09:14,000 --> 00:09:17,279
+execution
+
+00:09:15,040 --> 00:09:18,880
+and what that strategy does when it
+
+00:09:17,279 --> 00:09:20,160
+receives this kind of messages is the
+
+00:09:18,880 --> 00:09:22,880
+behavior
+
+00:09:20,160 --> 00:09:25,040
+again this is very trivial very simple
+
+00:09:22,880 --> 00:09:28,000
+probably not necessary
+
+00:09:25,040 --> 00:09:29,279
+um but then we also give an opportunity
+
+00:09:28,000 --> 00:09:32,240
+for the stragglers to
+
+00:09:29,279 --> 00:09:33,440
+to join our room um let's talk about a
+
+00:09:32,240 --> 00:09:36,080
+toy trading system
+
+00:09:33,440 --> 00:09:37,519
+you can describe the quotes the the
+
+00:09:36,080 --> 00:09:39,680
+messages that are going to be coming
+
+00:09:37,519 --> 00:09:42,399
+from that market data feed
+
+00:09:39,680 --> 00:09:43,120
+using a field that is for example a code
+
+00:09:42,399 --> 00:09:46,480
+type
+
+00:09:43,120 --> 00:09:49,279
+and to not complicate things more um
+
+00:09:46,480 --> 00:09:51,440
+let's say that they are just composed of
+
+00:09:49,279 --> 00:09:52,800
+trades the indication that a match has
+
+00:09:51,440 --> 00:09:55,839
+happened
+
+00:09:52,800 --> 00:09:59,120
+bids offers to buy or asks
+
+00:09:55,839 --> 00:10:01,600
+offers to sell okay
+
+00:09:59,120 --> 00:10:03,440
+we can also define that encapsulation
+
+00:10:01,600 --> 00:10:06,720
+into a quote type
+
+00:10:03,440 --> 00:10:09,519
+and the code type will have
+
+00:10:06,720 --> 00:10:11,279
+the typically the id of the instrument
+
+00:10:09,519 --> 00:10:14,640
+involved in the order
+
+00:10:11,279 --> 00:10:18,000
+um the price might be represented as a
+
+00:10:14,640 --> 00:10:20,560
+text or a
+
+00:10:18,000 --> 00:10:21,120
+multiples of the minimum increment and
+
+00:10:20,560 --> 00:10:23,680
+we use
+
+00:10:21,120 --> 00:10:25,440
+integrals because uh we don't want to go
+
+00:10:23,680 --> 00:10:26,079
+through the performance penalty of using
+
+00:10:25,440 --> 00:10:30,079
+the
+
+00:10:26,079 --> 00:10:34,480
+the floating point units uh the quantity
+
+00:10:30,079 --> 00:10:37,839
+and some extra details okay
+
+00:10:34,480 --> 00:10:39,519
+um let's give you just one snack of
+
+00:10:37,839 --> 00:10:41,120
+the kind of recommendations that i am
+
+00:10:39,519 --> 00:10:43,040
+going to be uh
+
+00:10:41,120 --> 00:10:44,399
+trying to give you this is again very
+
+00:10:43,040 --> 00:10:46,399
+basic but uh
+
+00:10:44,399 --> 00:10:48,399
+it happens so often that uh i chose to
+
+00:10:46,399 --> 00:10:51,440
+mention it
+
+00:10:48,399 --> 00:10:55,279
+if you choose to represent
+
+00:10:51,440 --> 00:10:58,000
+um a trading strategy has uh
+
+00:10:55,279 --> 00:10:59,279
+has an object-oriented interface i see
+
+00:10:58,000 --> 00:11:02,880
+this mistake happen
+
+00:10:59,279 --> 00:11:08,000
+very very often which is
+
+00:11:02,880 --> 00:11:11,120
+to get the consumers of the event
+
+00:11:08,000 --> 00:11:14,240
+consume the raw event this is a design
+
+00:11:11,120 --> 00:11:17,519
+error what is the design error that
+
+00:11:14,240 --> 00:11:20,959
+rather than giving to users the
+
+00:11:17,519 --> 00:11:22,959
+raw event you should classify
+
+00:11:20,959 --> 00:11:26,000
+to the most specific type that makes
+
+00:11:22,959 --> 00:11:29,200
+sense for your application domain
+
+00:11:26,000 --> 00:11:30,560
+so resident processing quotes to then
+
+00:11:29,200 --> 00:11:33,839
+have to classify them
+
+00:11:30,560 --> 00:11:36,320
+inside the user's code that does
+
+00:11:33,839 --> 00:11:36,959
+the trading system to whether it is a
+
+00:11:36,320 --> 00:11:40,800
+trade
+
+00:11:36,959 --> 00:11:43,040
+a bid or an ask just deliver the actual
+
+00:11:40,800 --> 00:11:45,040
+most specific type for example in this
+
+00:11:43,040 --> 00:11:49,519
+case just the trade
+
+00:11:45,040 --> 00:11:53,200
+and in this way you can avoid
+
+00:11:49,519 --> 00:11:56,160
+replication of effort and wasteful
+
+00:11:53,200 --> 00:11:56,800
+execution because in this particular
+
+00:11:56,160 --> 00:11:59,839
+example
+
+00:11:56,800 --> 00:12:02,399
+if you deliver the most specific
+
+00:11:59,839 --> 00:12:03,760
+event type then the classification is
+
+00:12:02,399 --> 00:12:07,040
+only done
+
+00:12:03,760 --> 00:12:11,120
+once by the programmer and once by the
+
+00:12:07,040 --> 00:12:13,600
+actual execution also the
+
+00:12:11,120 --> 00:12:15,200
+the idea is that you should give an
+
+00:12:13,600 --> 00:12:15,920
+opportunity for the people who can do
+
+00:12:15,200 --> 00:12:18,320
+the most
+
+00:12:15,920 --> 00:12:20,000
+aggressive optimizations to just do them
+
+00:12:18,320 --> 00:12:21,120
+a feed programmer will be in a better
+
+00:12:20,000 --> 00:12:24,320
+position to
+
+00:12:21,120 --> 00:12:25,519
+optimize the delivery of messages than a
+
+00:12:24,320 --> 00:12:30,880
+strategy
+
+00:12:25,519 --> 00:12:30,880
+programmer this might be solo
+
+00:12:31,680 --> 00:12:36,720
+and this also allows more specific
+
+00:12:34,320 --> 00:12:38,079
+subscriptions
+
+00:12:36,720 --> 00:12:40,000
+like for example there might be a
+
+00:12:38,079 --> 00:12:40,800
+trading strategy that is only interested
+
+00:12:40,000 --> 00:12:44,800
+in
+
+00:12:40,800 --> 00:12:44,800
+buying shares okay
+
+00:12:45,120 --> 00:12:50,720
+there is a relationship between
+
+00:12:48,160 --> 00:12:51,839
+event processing and runtime
+
+00:12:50,720 --> 00:12:54,959
+polymerization
+
+00:12:51,839 --> 00:12:58,160
+understood has a calling
+
+00:12:54,959 --> 00:12:59,600
+a function that i have a polymorphic
+
+00:12:58,160 --> 00:13:03,279
+nature
+
+00:12:59,600 --> 00:13:05,760
+um in this particular case
+
+00:13:03,279 --> 00:13:07,279
+we need to be able from having an object
+
+00:13:05,760 --> 00:13:09,279
+be able to determine
+
+00:13:07,279 --> 00:13:10,480
+what is the upper base behavior so how
+
+00:13:09,279 --> 00:13:14,240
+to refer to
+
+00:13:10,480 --> 00:13:16,560
+to to the polymorphic behavior um
+
+00:13:14,240 --> 00:13:18,160
+the message in obvious organization is
+
+00:13:16,560 --> 00:13:20,480
+just a call signature
+
+00:13:18,160 --> 00:13:21,839
+and we also need to have the object that
+
+00:13:20,480 --> 00:13:24,160
+is going to be receiving the message
+
+00:13:21,839 --> 00:13:27,360
+right the the recipient
+
+00:13:24,160 --> 00:13:29,519
+of the message well the concept of
+
+00:13:27,360 --> 00:13:32,480
+message passing in object orientation is
+
+00:13:29,519 --> 00:13:35,920
+very similar to event processing
+
+00:13:32,480 --> 00:13:38,160
+okay um the
+
+00:13:35,920 --> 00:13:39,839
+normal implementation of the mechanism
+
+00:13:38,160 --> 00:13:42,000
+of um
+
+00:13:39,839 --> 00:13:44,399
+runtime polymorphism in c plus plus is
+
+00:13:42,000 --> 00:13:46,399
+using a virtual table
+
+00:13:44,399 --> 00:13:48,560
+so when you have something like this a
+
+00:13:46,399 --> 00:13:52,480
+very simple piece of code
+
+00:13:48,560 --> 00:13:52,480
+let us see it in the compiler explorer
+
+00:13:55,680 --> 00:14:00,399
+what you're going to be seeing is that
+
+00:13:58,880 --> 00:14:02,480
+first you have to resolve one
+
+00:14:00,399 --> 00:14:05,839
+indirection you
+
+00:14:02,480 --> 00:14:08,160
+inspect the so
+
+00:14:05,839 --> 00:14:10,000
+what you what uh this code is receiving
+
+00:14:08,160 --> 00:14:12,480
+is a pointer
+
+00:14:10,000 --> 00:14:13,760
+that will be the pointer to to the
+
+00:14:12,480 --> 00:14:18,320
+actual
+
+00:14:13,760 --> 00:14:18,320
+object drawable and
+
+00:14:18,480 --> 00:14:23,040
+it has the first member of that object
+
+00:14:21,920 --> 00:14:25,440
+there is going to be
+
+00:14:23,040 --> 00:14:27,199
+another pointer that is going to be the
+
+00:14:25,440 --> 00:14:29,279
+virtual table pointer
+
+00:14:27,199 --> 00:14:30,320
+so in this particular line what you're
+
+00:14:29,279 --> 00:14:33,519
+doing is to load
+
+00:14:30,320 --> 00:14:35,519
+the virtual table pointer and then
+
+00:14:33,519 --> 00:14:37,199
+you compute an offset into the virtual
+
+00:14:35,519 --> 00:14:41,040
+table pointer it's going to tell you
+
+00:14:37,199 --> 00:14:42,160
+exactly what the actual function that
+
+00:14:41,040 --> 00:14:44,079
+you have to call
+
+00:14:42,160 --> 00:14:45,279
+to do the drawing in this particular
+
+00:14:44,079 --> 00:14:47,519
+example uh
+
+00:14:45,279 --> 00:14:48,959
+is gonna be and now that you know what
+
+00:14:47,519 --> 00:14:50,560
+is uh
+
+00:14:48,959 --> 00:14:52,160
+the address where you're going to you
+
+00:14:50,560 --> 00:14:54,399
+jump there oh
+
+00:14:52,160 --> 00:14:54,399
+okay
+
+00:14:55,279 --> 00:15:02,480
+so um in object orientation
+
+00:14:59,199 --> 00:15:05,519
+a concept that is truly important
+
+00:15:02,480 --> 00:15:07,040
+uh arises and is the basis of all of
+
+00:15:05,519 --> 00:15:07,839
+what i'm going to be talking to you
+
+00:15:07,040 --> 00:15:10,480
+about
+
+00:15:07,839 --> 00:15:10,880
+which is the concept of subtyping okay
+
+00:15:10,480 --> 00:15:12,880
+but
+
+00:15:10,880 --> 00:15:15,600
+i am not referring to subtyping
+
+00:15:12,880 --> 00:15:19,920
+understood as a subclassing
+
+00:15:15,600 --> 00:15:23,040
+but the concept of subtitling
+
+00:15:19,920 --> 00:15:25,440
+understood has in this very famous paper
+
+00:15:23,040 --> 00:15:27,920
+by barbara liskov
+
+00:15:25,440 --> 00:15:31,360
+that we now commonly refer to as daily
+
+00:15:27,920 --> 00:15:33,600
+scope substitution principle a subtype
+
+00:15:31,360 --> 00:15:35,839
+so something is a subtype so a concept
+
+00:15:33,600 --> 00:15:38,880
+is a subtype if all of the
+
+00:15:35,839 --> 00:15:41,519
+elements that belong to that concept it
+
+00:15:38,880 --> 00:15:43,040
+can be substituted uh
+
+00:15:41,519 --> 00:15:44,959
+can be substituted and the problem will
+
+00:15:43,040 --> 00:15:46,959
+continue to work fine
+
+00:15:44,959 --> 00:15:48,880
+that is the essence of the scope
+
+00:15:46,959 --> 00:15:51,199
+substitution principle
+
+00:15:48,880 --> 00:15:52,839
+and the good news is that uh the
+
+00:15:51,199 --> 00:15:56,079
+colleague claus
+
+00:15:52,839 --> 00:15:57,680
+eagleberger he gave a fantastically
+
+00:15:56,079 --> 00:15:59,519
+good presentation about the solid
+
+00:15:57,680 --> 00:16:01,040
+principles earlier in the conference and
+
+00:15:59,519 --> 00:16:03,600
+i wholeheartedly recommend
+
+00:16:01,040 --> 00:16:04,639
+you guys to watch it at your convenience
+
+00:16:03,600 --> 00:16:07,360
+because
+
+00:16:04,639 --> 00:16:08,639
+um it's probably going to be helpful to
+
+00:16:07,360 --> 00:16:11,839
+understand
+
+00:16:08,639 --> 00:16:14,880
+the the more theoretical and um
+
+00:16:11,839 --> 00:16:19,680
+important basis for
+
+00:16:14,880 --> 00:16:22,160
+in the the important basis for
+
+00:16:19,680 --> 00:16:23,759
+the work that i am presenting to you
+
+00:16:22,160 --> 00:16:26,880
+okay
+
+00:16:23,759 --> 00:16:29,920
+what we are trying to do is to improve
+
+00:16:26,880 --> 00:16:31,920
+support for subtyping relationships
+
+00:16:29,920 --> 00:16:34,639
+especially those that are hard with
+
+00:16:31,920 --> 00:16:36,880
+classical object orientation
+
+00:16:34,639 --> 00:16:38,399
+and a secondary objective but the one
+
+00:16:36,880 --> 00:16:39,360
+that i have the time budget to talk
+
+00:16:38,399 --> 00:16:41,759
+today about
+
+00:16:39,360 --> 00:16:42,800
+is to grow back on the performance
+
+00:16:41,759 --> 00:16:46,000
+penalties
+
+00:16:42,800 --> 00:16:47,120
+of supporting subtyping i know that this
+
+00:16:46,000 --> 00:16:49,920
+sounds theoretical
+
+00:16:47,120 --> 00:16:51,120
+but believe me uh this is what we are
+
+00:16:49,920 --> 00:16:54,560
+really trying to do and
+
+00:16:51,120 --> 00:16:56,880
+if we understand it uh clearly
+
+00:16:54,560 --> 00:16:58,160
+we're gonna have a better chance of uh
+
+00:16:56,880 --> 00:17:01,680
+succeeding at it
+
+00:16:58,160 --> 00:17:04,400
+but let's go back to
+
+00:17:01,680 --> 00:17:05,280
+the mapping between a runtime
+
+00:17:04,400 --> 00:17:08,400
+polymorphism
+
+00:17:05,280 --> 00:17:11,199
+and even processing well a message
+
+00:17:08,400 --> 00:17:12,720
+through a call signature is an event a
+
+00:17:11,199 --> 00:17:15,919
+method
+
+00:17:12,720 --> 00:17:17,280
+refers to a behavior or it is an event
+
+00:17:15,919 --> 00:17:20,720
+under logic
+
+00:17:17,280 --> 00:17:23,520
+an object it has a context of execution
+
+00:17:20,720 --> 00:17:24,000
+an object has a state which is the same
+
+00:17:23,520 --> 00:17:28,400
+as a
+
+00:17:24,000 --> 00:17:28,400
+different handler state so
+
+00:17:28,480 --> 00:17:34,080
+in i would proceed that um
+
+00:17:32,000 --> 00:17:35,120
+this is an opinion that allows me to
+
+00:17:34,080 --> 00:17:38,240
+explain things uh
+
+00:17:35,120 --> 00:17:41,280
+easier i think that uh
+
+00:17:38,240 --> 00:17:43,600
+all of uh dynamic dispatch
+
+00:17:41,280 --> 00:17:44,720
+on classical object orientation are
+
+00:17:43,600 --> 00:17:47,520
+specific
+
+00:17:44,720 --> 00:17:49,520
+cases of event processing so if we study
+
+00:17:47,520 --> 00:17:52,960
+just event processing
+
+00:17:49,520 --> 00:17:57,039
+we are going to accomplish also studying
+
+00:17:52,960 --> 00:18:01,120
+uh runtime polymorphism in general okay
+
+00:17:57,039 --> 00:18:04,080
+um now
+
+00:18:01,120 --> 00:18:04,960
+the really important thing is that uh
+
+00:18:04,080 --> 00:18:08,000
+you want
+
+00:18:04,960 --> 00:18:09,919
+to be able to maintain for
+
+00:18:08,000 --> 00:18:12,080
+event processing the context of
+
+00:18:09,919 --> 00:18:15,360
+execution of the event handlers
+
+00:18:12,080 --> 00:18:15,919
+you need to maintain their state if you
+
+00:18:15,360 --> 00:18:19,520
+use
+
+00:18:15,919 --> 00:18:21,679
+classical object orientation then uh
+
+00:18:19,520 --> 00:18:23,280
+you need to create those objects on the
+
+00:18:21,679 --> 00:18:25,280
+heap typically because
+
+00:18:23,280 --> 00:18:26,880
+you cannot have polymorphic local
+
+00:18:25,280 --> 00:18:30,240
+variables and
+
+00:18:26,880 --> 00:18:31,440
+or polymorphic members what you can have
+
+00:18:30,240 --> 00:18:35,360
+are
+
+00:18:31,440 --> 00:18:37,200
+local pointers to polymorphic types or
+
+00:18:35,360 --> 00:18:39,360
+members that are pointers or references
+
+00:18:37,200 --> 00:18:42,720
+to polymorphic types
+
+00:18:39,360 --> 00:18:44,960
+and that's a big problem because
+
+00:18:42,720 --> 00:18:45,840
+you are not directly holding a valid you
+
+00:18:44,960 --> 00:18:47,679
+are
+
+00:18:45,840 --> 00:18:50,080
+actually managing a pointer and then you
+
+00:18:47,679 --> 00:18:51,120
+can use a unique pointer or a share
+
+00:18:50,080 --> 00:18:54,880
+pointer or
+
+00:18:51,120 --> 00:18:58,000
+something else but this introduces
+
+00:18:54,880 --> 00:18:59,280
+complications um another thing is how
+
+00:18:58,000 --> 00:19:02,640
+you're going to be binding
+
+00:18:59,280 --> 00:19:04,960
+the behaviors with uh their
+
+00:19:02,640 --> 00:19:07,280
+context of execution or state well you
+
+00:19:04,960 --> 00:19:09,679
+can use global variables you can use
+
+00:19:07,280 --> 00:19:10,960
+any form of shared state in more general
+
+00:19:09,679 --> 00:19:13,440
+terms
+
+00:19:10,960 --> 00:19:14,799
+and this is complicated and tricky and
+
+00:19:13,440 --> 00:19:18,960
+we will see
+
+00:19:14,799 --> 00:19:21,520
+why this is important very soon okay
+
+00:19:18,960 --> 00:19:23,360
+if the variability of the different
+
+00:19:21,520 --> 00:19:25,039
+types that are going to be polymorphic
+
+00:19:23,360 --> 00:19:26,400
+is bounded that you know what is the
+
+00:19:25,039 --> 00:19:29,520
+complete set of
+
+00:19:26,400 --> 00:19:32,400
+uh of types that uh
+
+00:19:29,520 --> 00:19:33,679
+it might be participating into the
+
+00:19:32,400 --> 00:19:35,919
+runtime polymorphism
+
+00:19:33,679 --> 00:19:37,440
+then you can use a component such as
+
+00:19:35,919 --> 00:19:41,200
+variant
+
+00:19:37,440 --> 00:19:44,480
+or if you don't have that luxury
+
+00:19:41,200 --> 00:19:47,919
+they and you had to use something more g
+
+00:19:44,480 --> 00:19:51,280
+in a rule and uh type ratio could be
+
+00:19:47,919 --> 00:19:53,120
+uh a choice and uh type pressure is
+
+00:19:51,280 --> 00:19:55,039
+if you can think mentally if you don't
+
+00:19:53,120 --> 00:19:58,160
+understand the concept yet
+
+00:19:55,039 --> 00:20:00,720
+think about the start function
+
+00:19:58,160 --> 00:20:02,159
+okay this is the last thing that i'm
+
+00:20:00,720 --> 00:20:04,799
+going to be talking about
+
+00:20:02,159 --> 00:20:05,679
+events infrastructure how should it help
+
+00:20:04,799 --> 00:20:08,240
+more than
+
+00:20:05,679 --> 00:20:10,159
+the specific callback design the the
+
+00:20:08,240 --> 00:20:13,679
+design of the call signatures and
+
+00:20:10,159 --> 00:20:16,080
+and uh intricacies
+
+00:20:13,679 --> 00:20:17,200
+well you should be able to factor as
+
+00:20:16,080 --> 00:20:19,360
+much as you can of
+
+00:20:17,200 --> 00:20:20,559
+out of user code into infrastructure
+
+00:20:19,360 --> 00:20:23,679
+code
+
+00:20:20,559 --> 00:20:26,240
+and that's one example
+
+00:20:23,679 --> 00:20:29,039
+here that we mentioned before of event
+
+00:20:26,240 --> 00:20:29,039
+classification
+
+00:20:29,120 --> 00:20:34,159
+you also need to deal with the
+
+00:20:30,640 --> 00:20:36,240
+maintenance of the state
+
+00:20:34,159 --> 00:20:37,760
+uh something desirable would be
+
+00:20:36,240 --> 00:20:40,159
+programming interface insulation and
+
+00:20:37,760 --> 00:20:43,120
+normalization
+
+00:20:40,159 --> 00:20:44,159
+and to reduce the boilerplate however
+
+00:20:43,120 --> 00:20:47,120
+there is a problem
+
+00:20:44,159 --> 00:20:48,320
+i do not have enough time to cover all
+
+00:20:47,120 --> 00:20:50,320
+of the aspects that i think are
+
+00:20:48,320 --> 00:20:52,640
+interesting
+
+00:20:50,320 --> 00:20:54,480
+and uh this is something that introduces
+
+00:20:52,640 --> 00:20:57,520
+quite a lot of anxiety
+
+00:20:54,480 --> 00:21:00,080
+so what you see in my in my bitmoji
+
+00:20:57,520 --> 00:21:02,559
+graphic is the opposite of how i feel
+
+00:21:00,080 --> 00:21:04,720
+i feel that the lack of time rather than
+
+00:21:02,559 --> 00:21:08,799
+allowing me to chill and relax
+
+00:21:04,720 --> 00:21:10,720
+um keeps me very very anxious but uh
+
+00:21:08,799 --> 00:21:11,919
+well i try to use this big pony has
+
+00:21:10,720 --> 00:21:13,679
+inspiration to
+
+00:21:11,919 --> 00:21:14,799
+let go of the things that i want to
+
+00:21:13,679 --> 00:21:16,720
+share with you but i don't have the
+
+00:21:14,799 --> 00:21:20,480
+opportunity to
+
+00:21:16,720 --> 00:21:23,760
+okay now uh
+
+00:21:20,480 --> 00:21:25,760
+let us get into the subject matter
+
+00:21:23,760 --> 00:21:29,280
+quicker
+
+00:21:25,760 --> 00:21:30,559
+the general case we're gonna on a first
+
+00:21:29,280 --> 00:21:34,159
+approximation
+
+00:21:30,559 --> 00:21:38,320
+use a novice oriented interface to
+
+00:21:34,159 --> 00:21:39,919
+model the polymorphic behaviors that we
+
+00:21:38,320 --> 00:21:41,919
+want okay
+
+00:21:39,919 --> 00:21:43,760
+and we know what this implies we use
+
+00:21:41,919 --> 00:21:46,320
+inheritance we need to
+
+00:21:43,760 --> 00:21:48,720
+never forget to make the destructors
+
+00:21:46,320 --> 00:21:52,000
+also polymorphic or virtual
+
+00:21:48,720 --> 00:21:52,400
+but very quickly we end up facing very
+
+00:21:52,000 --> 00:21:55,360
+hard
+
+00:21:52,400 --> 00:21:57,520
+problems to solve like for example how
+
+00:21:55,360 --> 00:22:00,480
+are you going to be doing the copying
+
+00:21:57,520 --> 00:22:01,840
+because now there are two different uh
+
+00:22:00,480 --> 00:22:05,039
+ways to do the copy
+
+00:22:01,840 --> 00:22:08,400
+you you can just copy the the pointer
+
+00:22:05,039 --> 00:22:11,440
+or create a new object
+
+00:22:08,400 --> 00:22:16,320
+cloning it and referring to that
+
+00:22:11,440 --> 00:22:18,240
+new object when you do a copy
+
+00:22:16,320 --> 00:22:21,280
+equality is something hard to implement
+
+00:22:18,240 --> 00:22:23,520
+in a runtime polymorphic because
+
+00:22:21,280 --> 00:22:24,720
+the cardinality of the arguments for
+
+00:22:23,520 --> 00:22:27,600
+equality is two
+
+00:22:24,720 --> 00:22:28,799
+not one so you have to have something
+
+00:22:27,600 --> 00:22:32,480
+that is polymorphic
+
+00:22:28,799 --> 00:22:33,440
+in both sides and uh then you have to
+
+00:22:32,480 --> 00:22:35,679
+maintain
+
+00:22:33,440 --> 00:22:37,520
+uh the value how you're gonna do it
+
+00:22:35,679 --> 00:22:38,320
+unique pointer share pointer some other
+
+00:22:37,520 --> 00:22:41,600
+method
+
+00:22:38,320 --> 00:22:44,640
+some other mechanism
+
+00:22:41,600 --> 00:22:47,200
+there is i i can
+
+00:22:44,640 --> 00:22:49,840
+i can talk for days on the problems of
+
+00:22:47,200 --> 00:22:52,400
+uh obligatory entity interfaces
+
+00:22:49,840 --> 00:22:53,280
+fortunately i have something to refer to
+
+00:22:52,400 --> 00:22:56,240
+which is a
+
+00:22:53,280 --> 00:22:57,039
+great resource and it only takes 25
+
+00:22:56,240 --> 00:22:59,840
+minutes
+
+00:22:57,039 --> 00:23:00,799
+uh it is this presentation classic many
+
+00:22:59,840 --> 00:23:02,960
+years ago
+
+00:23:00,799 --> 00:23:04,640
+by sean parent inheritance is the base
+
+00:23:02,960 --> 00:23:08,240
+class of evil
+
+00:23:04,640 --> 00:23:12,080
+i need to recap what are the horrors
+
+00:23:08,240 --> 00:23:13,280
+that uh using uh obviously interfaces
+
+00:23:12,080 --> 00:23:15,120
+have
+
+00:23:13,280 --> 00:23:16,799
+it well they have awful performance and
+
+00:23:15,120 --> 00:23:18,400
+i can prove this to you because
+
+00:23:16,799 --> 00:23:20,640
+at the very end of the presentation i'm
+
+00:23:18,400 --> 00:23:22,400
+gonna show you how i can accomplish
+
+00:23:20,640 --> 00:23:25,120
+runtime polymorphism with better
+
+00:23:22,400 --> 00:23:27,679
+performance slightly better performance
+
+00:23:25,120 --> 00:23:28,559
+and sometimes substantially much better
+
+00:23:27,679 --> 00:23:31,280
+in others
+
+00:23:28,559 --> 00:23:32,000
+than uh the intrinsic mechanism in the
+
+00:23:31,280 --> 00:23:35,200
+language for
+
+00:23:32,000 --> 00:23:38,320
+runtime polymorphism
+
+00:23:35,200 --> 00:23:41,279
+um the real problem from the
+
+00:23:38,320 --> 00:23:42,960
+perspective of modeling is that uh the
+
+00:23:41,279 --> 00:23:44,080
+obvious orientation interfaces are
+
+00:23:42,960 --> 00:23:47,200
+intrusive
+
+00:23:44,080 --> 00:23:51,360
+you can have perfectly great types
+
+00:23:47,200 --> 00:23:55,360
+that are already working and they have a
+
+00:23:51,360 --> 00:23:58,559
+a very good functionality and
+
+00:23:55,360 --> 00:24:00,720
+testing and they're just perfect
+
+00:23:58,559 --> 00:24:02,640
+but because they don't inherit from
+
+00:24:00,720 --> 00:24:05,679
+their correct base class
+
+00:24:02,640 --> 00:24:08,720
+you need to wrap them and well
+
+00:24:05,679 --> 00:24:09,760
+that introduces a big problem uh another
+
+00:24:08,720 --> 00:24:12,960
+issue is that uh
+
+00:24:09,760 --> 00:24:14,880
+the um the
+
+00:24:12,960 --> 00:24:17,039
+the situation that you find yourself in
+
+00:24:14,880 --> 00:24:19,279
+is that uh this is take it or leave it
+
+00:24:17,039 --> 00:24:20,240
+this is how the language itself is
+
+00:24:19,279 --> 00:24:23,600
+specified
+
+00:24:20,240 --> 00:24:26,320
+and you cannot change
+
+00:24:23,600 --> 00:24:27,520
+any any detail there there are no
+
+00:24:26,320 --> 00:24:28,720
+choices that you can make like for
+
+00:24:27,520 --> 00:24:33,279
+example you cannot
+
+00:24:28,720 --> 00:24:35,279
+design a different virtual table
+
+00:24:33,279 --> 00:24:36,400
+in which the things are organized in a
+
+00:24:35,279 --> 00:24:39,520
+different way to
+
+00:24:36,400 --> 00:24:40,159
+accomplish your goals i already
+
+00:24:39,520 --> 00:24:41,760
+mentioned that
+
+00:24:40,159 --> 00:24:43,440
+you cannot have polymorphic local
+
+00:24:41,760 --> 00:24:46,320
+variables
+
+00:24:43,440 --> 00:24:47,840
+and the reason is that the compiler
+
+00:24:46,320 --> 00:24:50,720
+doesn't know what is the
+
+00:24:47,840 --> 00:24:52,320
+the the size of the actual
+
+00:24:50,720 --> 00:24:56,400
+implementation
+
+00:24:52,320 --> 00:24:59,440
+and there are no ways to to
+
+00:24:56,400 --> 00:25:01,679
+specify the ranges either so that's a
+
+00:24:59,440 --> 00:25:02,960
+really annoying but uh that's the way it
+
+00:25:01,679 --> 00:25:06,559
+is
+
+00:25:02,960 --> 00:25:08,880
+okay um
+
+00:25:06,559 --> 00:25:10,720
+so the problem is that when you wrap
+
+00:25:08,880 --> 00:25:12,720
+perfectly good types
+
+00:25:10,720 --> 00:25:14,159
+into an objective interface they get
+
+00:25:12,720 --> 00:25:17,279
+polluted with
+
+00:25:14,159 --> 00:25:17,279
+referential semantics
+
+00:25:17,840 --> 00:25:21,440
+they change the memory layout by
+
+00:25:19,440 --> 00:25:23,919
+inserting the visual table pointer so
+
+00:25:21,440 --> 00:25:25,440
+it has a number of implications that are
+
+00:25:23,919 --> 00:25:28,480
+all very nasty
+
+00:25:25,440 --> 00:25:30,400
+and these things lead to error-prone
+
+00:25:28,480 --> 00:25:32,799
+busy words you already had
+
+00:25:30,400 --> 00:25:33,520
+very good types why do you need to wrap
+
+00:25:32,799 --> 00:25:37,600
+them
+
+00:25:33,520 --> 00:25:41,279
+so that's very annoying okay
+
+00:25:37,600 --> 00:25:44,080
+so uh inheritance and virtual member
+
+00:25:41,279 --> 00:25:46,640
+overrides cannot have local member
+
+00:25:44,080 --> 00:25:49,039
+variables
+
+00:25:46,640 --> 00:25:50,880
+allocations are super expensive they
+
+00:25:49,039 --> 00:25:54,080
+introduce one in direction
+
+00:25:50,880 --> 00:25:56,880
+that is performance hostile they
+
+00:25:54,080 --> 00:25:59,440
+worsen the memory locality the the data
+
+00:25:56,880 --> 00:26:01,760
+is always spread out in memory
+
+00:25:59,440 --> 00:26:03,039
+they also become a big incentive to use
+
+00:26:01,760 --> 00:26:05,760
+a shared state
+
+00:26:03,039 --> 00:26:07,840
+more than otherwise and that this
+
+00:26:05,760 --> 00:26:10,559
+disables local reasoning
+
+00:26:07,840 --> 00:26:12,880
+which is not bad not not good at all
+
+00:26:10,559 --> 00:26:12,880
+okay
+
+00:26:16,720 --> 00:26:20,880
+the indication something that i already
+
+00:26:18,240 --> 00:26:24,559
+mentioned um one thing that people
+
+00:26:20,880 --> 00:26:28,159
+don't quite er realizes
+
+00:26:24,559 --> 00:26:31,600
+is uh this part that
+
+00:26:28,159 --> 00:26:34,320
+the use of uh
+
+00:26:31,600 --> 00:26:36,799
+referential semantics forced by
+
+00:26:34,320 --> 00:26:40,400
+polymorphic interfaces
+
+00:26:36,799 --> 00:26:43,120
+may change things that uh where
+
+00:26:40,400 --> 00:26:44,320
+no except through them that uh we're
+
+00:26:43,120 --> 00:26:47,600
+just going to work
+
+00:26:44,320 --> 00:26:50,640
+fine into things
+
+00:26:47,600 --> 00:26:55,279
+that now can fail because
+
+00:26:50,640 --> 00:26:57,200
+a hip allocation might be involved well
+
+00:26:55,279 --> 00:26:59,279
+this difference exacerbates the
+
+00:26:57,200 --> 00:27:01,200
+performance and binary size penalties of
+
+00:26:59,279 --> 00:27:02,720
+using exceptions
+
+00:27:01,200 --> 00:27:04,640
+there is also the possibility of an
+
+00:27:02,720 --> 00:27:06,960
+error so
+
+00:27:04,640 --> 00:27:08,640
+the responsible programmers have more
+
+00:27:06,960 --> 00:27:11,279
+work to do
+
+00:27:08,640 --> 00:27:15,440
+i also mentioned that the memory
+
+00:27:11,279 --> 00:27:15,440
+locality and fragmentation get worse
+
+00:27:15,760 --> 00:27:21,600
+also the use of
+
+00:27:18,880 --> 00:27:22,399
+virtual overrides doms massive amounts
+
+00:27:21,600 --> 00:27:25,919
+of things that
+
+00:27:22,399 --> 00:27:29,440
+can only be described as crap into the
+
+00:27:25,919 --> 00:27:32,480
+binary size the object code size
+
+00:27:29,440 --> 00:27:36,320
+that are the the standard type infos
+
+00:27:32,480 --> 00:27:38,720
+from those artifacts in the middle that
+
+00:27:36,320 --> 00:27:39,679
+are not really useful and the the the
+
+00:27:38,720 --> 00:27:42,480
+interfaces for
+
+00:27:39,679 --> 00:27:43,440
+run type type information are not not
+
+00:27:42,480 --> 00:27:45,679
+good at all
+
+00:27:43,440 --> 00:27:46,640
+but you still have to pay the full price
+
+00:27:45,679 --> 00:27:50,240
+for them which is
+
+00:27:46,640 --> 00:27:54,000
+quite annoying okay
+
+00:27:50,240 --> 00:27:55,919
+another thing is that a inheritance
+
+00:27:54,000 --> 00:27:57,120
+only supports one type of typing
+
+00:27:55,919 --> 00:28:01,120
+relationship
+
+00:27:57,120 --> 00:28:02,880
+which is monophyletic subtyping
+
+00:28:01,120 --> 00:28:04,399
+this is the first time that i have done
+
+00:28:02,880 --> 00:28:09,679
+in the public forum
+
+00:28:04,399 --> 00:28:12,799
+the the introduction of this jargon
+
+00:28:09,679 --> 00:28:13,600
+um monophyletic is the only one
+
+00:28:12,799 --> 00:28:16,080
+supported
+
+00:28:13,600 --> 00:28:17,200
+but there are also paraphiletic and
+
+00:28:16,080 --> 00:28:19,840
+polypheletic
+
+00:28:17,200 --> 00:28:21,840
+i will explain to them i explained them
+
+00:28:19,840 --> 00:28:25,039
+at the very end of the presentation if
+
+00:28:21,840 --> 00:28:28,320
+there is the opportunity but
+
+00:28:25,039 --> 00:28:29,679
+this is really a very important thing to
+
+00:28:28,320 --> 00:28:32,960
+bear in mind
+
+00:28:29,679 --> 00:28:34,240
+it's just that uh here
+
+00:28:32,960 --> 00:28:37,120
+if we want to concentrate on the
+
+00:28:34,240 --> 00:28:40,559
+performance we had to skip a few things
+
+00:28:37,120 --> 00:28:42,880
+um i have prepared a presentation um
+
+00:28:40,559 --> 00:28:44,640
+it is called type erration depends of
+
+00:28:42,880 --> 00:28:48,720
+runtime polymorphism
+
+00:28:44,640 --> 00:28:51,600
+to really explain these things but alas
+
+00:28:48,720 --> 00:28:53,120
+i have not gotten accepted yet i make
+
+00:28:51,600 --> 00:28:56,080
+some claims there that
+
+00:28:53,120 --> 00:28:56,480
+are unbelievable and because they are
+
+00:28:56,080 --> 00:28:58,399
+well
+
+00:28:56,480 --> 00:29:00,320
+the complex things but everything is
+
+00:28:58,399 --> 00:29:03,360
+absolutely true
+
+00:29:00,320 --> 00:29:05,440
+so i am individual cycle that uh i
+
+00:29:03,360 --> 00:29:06,559
+have material that i want to share that
+
+00:29:05,440 --> 00:29:10,480
+is unbelievable
+
+00:29:06,559 --> 00:29:13,350
+but true and uh i need to
+
+00:29:10,480 --> 00:29:14,720
+be able to convince more people that um
+
+00:29:13,350 --> 00:29:16,000
+[Music]
+
+00:29:14,720 --> 00:29:18,000
+i should give the opportunity i should
+
+00:29:16,000 --> 00:29:21,120
+get the opportunity because uh
+
+00:29:18,000 --> 00:29:21,440
+then i deliver and people get surprised
+
+00:29:21,120 --> 00:29:24,240
+and
+
+00:29:21,440 --> 00:29:25,120
+i get more opportunities but that is a
+
+00:29:24,240 --> 00:29:27,520
+process that takes
+
+00:29:25,120 --> 00:29:28,240
+years apparently and where we're doing
+
+00:29:27,520 --> 00:29:31,679
+it
+
+00:29:28,240 --> 00:29:33,120
+but keep on the look for this name
+
+00:29:31,679 --> 00:29:34,720
+type erasing the pains of runtime
+
+00:29:33,120 --> 00:29:36,000
+polymorphism because it's probably going
+
+00:29:34,720 --> 00:29:39,120
+to be my best
+
+00:29:36,000 --> 00:29:41,679
+my most important presentation ever
+
+00:29:39,120 --> 00:29:43,039
+okay i would like you to start the
+
+00:29:41,679 --> 00:29:48,320
+programming yourself about
+
+00:29:43,039 --> 00:29:51,600
+using inheritance for subtyping
+
+00:29:48,320 --> 00:29:53,760
+okay now um let us
+
+00:29:51,600 --> 00:29:55,440
+move on there are better ways of doing
+
+00:29:53,760 --> 00:29:58,559
+this er
+
+00:29:55,440 --> 00:29:59,360
+some needs of polymorphism like for
+
+00:29:58,559 --> 00:30:01,919
+example
+
+00:29:59,360 --> 00:30:04,000
+using the type ratio component of a
+
+00:30:01,919 --> 00:30:08,720
+standard function
+
+00:30:04,000 --> 00:30:10,559
+which is a problem the performance of a
+
+00:30:08,720 --> 00:30:13,120
+common implementations of a standard
+
+00:30:10,559 --> 00:30:15,919
+function are very bad
+
+00:30:13,120 --> 00:30:17,039
+and standard function itself has
+
+00:30:15,919 --> 00:30:19,679
+gigantic
+
+00:30:17,039 --> 00:30:21,600
+design mistakes so we're going to start
+
+00:30:19,679 --> 00:30:26,240
+talking about them
+
+00:30:21,600 --> 00:30:29,440
+okay so just to introduce the problems
+
+00:30:26,240 --> 00:30:32,559
+um let us see a
+
+00:30:29,440 --> 00:30:34,960
+standard function has implemented in
+
+00:30:32,559 --> 00:30:36,960
+the standard implementation for the
+
+00:30:34,960 --> 00:30:39,279
+compiler gcc
+
+00:30:36,960 --> 00:30:41,440
+well this code is a very simple maybe i
+
+00:30:39,279 --> 00:30:44,080
+should uh just open it in the
+
+00:30:41,440 --> 00:30:44,559
+compiler explorer and talk to you about
+
+00:30:44,080 --> 00:30:48,000
+it
+
+00:30:44,559 --> 00:30:50,240
+in the compiler explorer this guy
+
+00:30:48,000 --> 00:30:51,520
+i'm going by the way this is just the
+
+00:30:50,240 --> 00:30:54,640
+generated
+
+00:30:51,520 --> 00:30:58,240
+a code with um clangs
+
+00:30:54,640 --> 00:31:02,880
+or llbms standard library
+
+00:30:58,240 --> 00:31:02,880
+and at a glance we can see that it is
+
+00:31:03,200 --> 00:31:08,960
+similar um not particularly good
+
+00:31:06,320 --> 00:31:10,559
+uh so we're gonna forget about this for
+
+00:31:08,960 --> 00:31:13,760
+a moment
+
+00:31:10,559 --> 00:31:16,640
+but um you have a
+
+00:31:13,760 --> 00:31:18,240
+call signature okay this is uh the
+
+00:31:16,640 --> 00:31:21,760
+return type is void and uh
+
+00:31:18,240 --> 00:31:24,799
+it has these um arguments
+
+00:31:21,760 --> 00:31:25,600
+and uh we defined the order consumer to
+
+00:31:24,799 --> 00:31:28,880
+be
+
+00:31:25,600 --> 00:31:32,159
+a standard function of that
+
+00:31:28,880 --> 00:31:35,279
+that signature okay
+
+00:31:32,159 --> 00:31:36,159
+so what is the translation when you do
+
+00:31:35,279 --> 00:31:39,600
+something like
+
+00:31:36,159 --> 00:31:40,480
+invoking that order consumer with a set
+
+00:31:39,600 --> 00:31:43,600
+of arguments
+
+00:31:40,480 --> 00:31:44,880
+okay so all we're doing here is to
+
+00:31:43,600 --> 00:31:49,679
+forward
+
+00:31:44,880 --> 00:31:49,679
+the arguments that get passed in
+
+00:31:50,080 --> 00:31:55,039
+these arguments forward these arguments
+
+00:31:52,399 --> 00:31:58,159
+to the actual target that resides inside
+
+00:31:55,039 --> 00:32:01,200
+the order consumer
+
+00:31:58,159 --> 00:32:04,480
+okay well the um
+
+00:32:01,200 --> 00:32:07,120
+assembler generated is uh this
+
+00:32:04,480 --> 00:32:08,640
+and i think this is absolutely not
+
+00:32:07,120 --> 00:32:11,039
+acceptable
+
+00:32:08,640 --> 00:32:12,000
+because again all that we're doing is to
+
+00:32:11,039 --> 00:32:14,799
+forward
+
+00:32:12,000 --> 00:32:16,080
+parameters that we already have to the
+
+00:32:14,799 --> 00:32:20,000
+target
+
+00:32:16,080 --> 00:32:21,679
+okay um if we try to understand a little
+
+00:32:20,000 --> 00:32:24,640
+bit of what's going on there
+
+00:32:21,679 --> 00:32:26,320
+uh there is a jump on equal here so what
+
+00:32:24,640 --> 00:32:29,760
+it is happening is that this thing
+
+00:32:26,320 --> 00:32:31,440
+is comparing some internal
+
+00:32:29,760 --> 00:32:33,120
+data member that might be a null
+
+00:32:31,440 --> 00:32:35,120
+typically the null pointer
+
+00:32:33,120 --> 00:32:38,399
+and if it is the new pointer it's going
+
+00:32:35,120 --> 00:32:41,440
+to call a throw function call
+
+00:32:38,399 --> 00:32:44,720
+and if not
+
+00:32:41,440 --> 00:32:47,120
+then the execution continues and ends up
+
+00:32:44,720 --> 00:32:47,120
+calling
+
+00:32:47,600 --> 00:32:55,440
+something at the offset of 24 bytes
+
+00:32:51,760 --> 00:32:57,039
+after the beginning of some object
+
+00:32:55,440 --> 00:32:58,720
+uh well that's the way that uh
+
+00:32:57,039 --> 00:33:01,760
+presumably is going to activate
+
+00:32:58,720 --> 00:33:06,320
+uh the target i know that he will so
+
+00:33:01,760 --> 00:33:06,320
+um i know that that's what happens
+
+00:33:07,760 --> 00:33:14,720
+so um the only useful word that we have
+
+00:33:11,840 --> 00:33:17,760
+is what i have highlighted in jello
+
+00:33:14,720 --> 00:33:21,519
+but there is a lot of garbage
+
+00:33:17,760 --> 00:33:25,760
+dubious code in the object code
+
+00:33:21,519 --> 00:33:28,320
+and these jump on equal and the call
+
+00:33:25,760 --> 00:33:30,320
+throwback function call that i think we
+
+00:33:28,320 --> 00:33:34,720
+can completely eliminate
+
+00:33:30,320 --> 00:33:34,720
+for the call site so
+
+00:33:35,440 --> 00:33:40,640
+let's try to read this slide from the
+
+00:33:37,679 --> 00:33:40,640
+bottom to the top
+
+00:33:40,720 --> 00:33:42,960
+so
+
+00:33:47,440 --> 00:33:53,679
+so we begin the order consumer is a su
+
+00:33:50,960 --> 00:33:55,840
+function but this function has two
+
+00:33:53,679 --> 00:33:58,320
+arguments it requires a type erasure
+
+00:33:55,840 --> 00:34:01,760
+provider
+
+00:33:58,320 --> 00:34:03,440
+and uh a signature the signature is the
+
+00:34:01,760 --> 00:34:05,039
+same thing that we had before
+
+00:34:03,440 --> 00:34:06,880
+now what is the type erasure provided
+
+00:34:05,039 --> 00:34:11,040
+this type ratio provided is
+
+00:34:06,880 --> 00:34:13,359
+something that i call any container
+
+00:34:11,040 --> 00:34:14,079
+on something that is a template argument
+
+00:34:13,359 --> 00:34:16,720
+called
+
+00:34:14,079 --> 00:34:17,280
+normal policy what is a policy well you
+
+00:34:16,720 --> 00:34:20,399
+use the
+
+00:34:17,280 --> 00:34:24,639
+policy builder protocol in the
+
+00:34:20,399 --> 00:34:27,040
+the the temperature framework and um
+
+00:34:24,639 --> 00:34:28,720
+this means an array of two way pointers
+
+00:34:27,040 --> 00:34:31,119
+so i can tell you what this means is
+
+00:34:28,720 --> 00:34:32,079
+that uh the local buffer to hold that
+
+00:34:31,119 --> 00:34:34,879
+and the state
+
+00:34:32,079 --> 00:34:36,879
+of the target is going to be up to two
+
+00:34:34,879 --> 00:34:40,240
+uh void pointers so we have a
+
+00:34:36,879 --> 00:34:41,679
+16 bytes of budget available to store
+
+00:34:40,240 --> 00:34:44,879
+things locally and
+
+00:34:41,679 --> 00:34:46,800
+if uh those 16 bytes are not enough then
+
+00:34:44,879 --> 00:34:48,399
+we're just gonna put there the pointer
+
+00:34:46,800 --> 00:34:50,000
+to something on the heap
+
+00:34:48,399 --> 00:34:51,520
+but hopefully we're going to be reducing
+
+00:34:50,000 --> 00:34:52,000
+drastically the amount of allocations
+
+00:34:51,520 --> 00:34:55,440
+because
+
+00:34:52,000 --> 00:34:59,280
+we are at least indicated the
+
+00:34:55,440 --> 00:35:03,280
+boundaries to when are we going to have
+
+00:34:59,280 --> 00:35:06,000
+um uh what is the the
+
+00:35:03,280 --> 00:35:07,359
+bounds for the the sizes of uh the
+
+00:35:06,000 --> 00:35:08,320
+arguments that we're gonna be able to
+
+00:35:07,359 --> 00:35:11,440
+hold locally
+
+00:35:08,320 --> 00:35:14,400
+and this also respects a line okay
+
+00:35:11,440 --> 00:35:14,720
+a policy also takes something that uh we
+
+00:35:14,400 --> 00:35:17,119
+call
+
+00:35:14,720 --> 00:35:19,280
+affordances which is the set of
+
+00:35:17,119 --> 00:35:22,640
+capabilities that uh
+
+00:35:19,280 --> 00:35:24,480
+the any container will be able to do
+
+00:35:22,640 --> 00:35:25,680
+and what are those capabilities in this
+
+00:35:24,480 --> 00:35:27,839
+particular example
+
+00:35:25,680 --> 00:35:28,960
+uh it's gonna be normally destructible
+
+00:35:27,839 --> 00:35:31,920
+normally copyable
+
+00:35:28,960 --> 00:35:33,200
+nor sorry normally movable normally
+
+00:35:31,920 --> 00:35:34,880
+copyable
+
+00:35:33,200 --> 00:35:37,040
+and is also going to have the normal
+
+00:35:34,880 --> 00:35:40,400
+rgti so
+
+00:35:37,040 --> 00:35:42,480
+this thing with this policy very very
+
+00:35:40,400 --> 00:35:44,320
+closely resembles
+
+00:35:42,480 --> 00:35:46,480
+the standard function as a matter of
+
+00:35:44,320 --> 00:35:49,680
+fact i have several code bases
+
+00:35:46,480 --> 00:35:53,680
+in different employers or or past
+
+00:35:49,680 --> 00:35:56,480
+employers and my current employer that
+
+00:35:53,680 --> 00:35:58,960
+use this has a replacement a drop-in
+
+00:35:56,480 --> 00:36:01,440
+replacement for a standard function
+
+00:35:58,960 --> 00:36:02,480
+and i don't get reports of any kind of
+
+00:36:01,440 --> 00:36:06,079
+problems
+
+00:36:02,480 --> 00:36:09,119
+or actually seldom reports
+
+00:36:06,079 --> 00:36:12,400
+for issues it's mostly
+
+00:36:09,119 --> 00:36:12,640
+uh tight differences because the design
+
+00:36:12,400 --> 00:36:15,920
+is
+
+00:36:12,640 --> 00:36:19,440
+slightly different it's better okay
+
+00:36:15,920 --> 00:36:22,560
+so let me show you what happens when
+
+00:36:19,440 --> 00:36:24,240
+we use a a standard function
+
+00:36:22,560 --> 00:36:25,599
+sorry subfunction instead of a standard
+
+00:36:24,240 --> 00:36:29,040
+function
+
+00:36:25,599 --> 00:36:32,560
+this is all of the assembler
+
+00:36:29,040 --> 00:36:33,359
+so let me do live the substitution so
+
+00:36:32,560 --> 00:36:37,599
+that
+
+00:36:33,359 --> 00:36:41,040
+i can drive home for you the difference
+
+00:36:37,599 --> 00:36:44,960
+so what i am doing now is to go back
+
+00:36:41,040 --> 00:36:44,960
+to using the standard function
+
+00:36:51,520 --> 00:36:57,440
+oh yes
+
+00:36:55,040 --> 00:36:57,440
+um
+
+00:37:02,720 --> 00:37:08,560
+so there is a
+
+00:37:05,760 --> 00:37:09,200
+that is using the standard function all
+
+00:37:08,560 --> 00:37:12,320
+the crap
+
+00:37:09,200 --> 00:37:12,320
+that we saw before
+
+00:37:20,839 --> 00:37:23,839
+and
+
+00:37:24,079 --> 00:37:30,160
+this is the equivalent using the the
+
+00:37:27,200 --> 00:37:31,280
+the pseudo type eraser framework okay i
+
+00:37:30,160 --> 00:37:36,160
+hope that you see that
+
+00:37:31,280 --> 00:37:39,359
+the difference is quite dramatic
+
+00:37:36,160 --> 00:37:42,720
+um i'm going to return to
+
+00:37:39,359 --> 00:37:43,599
+showing you more demonstrations like i
+
+00:37:42,720 --> 00:37:47,359
+just did
+
+00:37:43,599 --> 00:37:48,400
+um but uh i want to
+
+00:37:47,359 --> 00:37:51,280
+make sure that i'm going to have the
+
+00:37:48,400 --> 00:37:53,119
+time to tell you very important things
+
+00:37:51,280 --> 00:37:55,440
+and i think i'm going to be able to do
+
+00:37:53,119 --> 00:37:55,440
+it but
+
+00:37:56,880 --> 00:38:00,720
+momentarily what i'm going to i am going
+
+00:38:00,160 --> 00:38:04,960
+to do
+
+00:38:00,720 --> 00:38:09,119
+is to show you how to
+
+00:38:04,960 --> 00:38:12,160
+er what happens when
+
+00:38:09,119 --> 00:38:14,800
+you jump here okay because you might be
+
+00:38:12,160 --> 00:38:16,320
+thinking well perhaps on what we are
+
+00:38:14,800 --> 00:38:19,040
+able to see here
+
+00:38:16,320 --> 00:38:20,880
+uh it is very short but um there might
+
+00:38:19,040 --> 00:38:21,359
+be a lot of inefficiencies on the other
+
+00:38:20,880 --> 00:38:24,560
+side
+
+00:38:21,359 --> 00:38:25,760
+well it's not the case um so i'm gonna
+
+00:38:24,560 --> 00:38:29,200
+be able to do this
+
+00:38:25,760 --> 00:38:31,440
+very easily because i am going to create
+
+00:38:29,200 --> 00:38:34,560
+a function that returns
+
+00:38:31,440 --> 00:38:34,560
+an order consumer
+
+00:38:36,240 --> 00:38:44,640
+and what i'm going to do is to just take
+
+00:38:40,000 --> 00:38:44,640
+a pointer to a function that has that
+
+00:38:44,839 --> 00:38:47,839
+signature
+
+00:38:51,920 --> 00:38:55,200
+this is not different to what you would
+
+00:38:53,599 --> 00:38:58,839
+do with
+
+00:38:55,200 --> 00:39:00,720
+the normal component of the standard
+
+00:38:58,839 --> 00:39:03,599
+function and
+
+00:39:00,720 --> 00:39:03,599
+look what we get
+
+00:39:04,800 --> 00:39:11,839
+in make what we're putting
+
+00:39:08,240 --> 00:39:16,079
+at the return value is
+
+00:39:11,839 --> 00:39:19,040
+this thing and if you see
+
+00:39:16,079 --> 00:39:20,079
+uh rdi is where we're building the the
+
+00:39:19,040 --> 00:39:22,800
+um
+
+00:39:20,079 --> 00:39:23,200
+the the object and what we're doing
+
+00:39:22,800 --> 00:39:27,520
+there
+
+00:39:23,200 --> 00:39:29,839
+is to put this symbol
+
+00:39:27,520 --> 00:39:29,839
+function
+
+00:39:31,119 --> 00:39:34,079
+so destroy
+
+00:39:35,119 --> 00:39:44,320
+this scrolling is going to be faster
+
+00:39:38,800 --> 00:39:46,400
+invoke target invoke target
+
+00:39:44,320 --> 00:39:48,880
+and what is invoke target will invoke
+
+00:39:46,400 --> 00:39:48,880
+target
+
+00:39:50,720 --> 00:39:53,040
+um
+
+00:39:55,359 --> 00:40:00,000
+is at the very top and uh what it does
+
+00:39:58,960 --> 00:40:02,000
+is to just
+
+00:40:00,000 --> 00:40:03,119
+jump to that function pointer in
+
+00:40:02,000 --> 00:40:05,520
+particular
+
+00:40:03,119 --> 00:40:06,160
+so what i have shown you is that i'm not
+
+00:40:05,520 --> 00:40:10,079
+cheating
+
+00:40:06,160 --> 00:40:13,119
+the the the work is truly
+
+00:40:10,079 --> 00:40:16,160
+minimal both in the
+
+00:40:13,119 --> 00:40:19,280
+part of uh
+
+00:40:16,160 --> 00:40:20,960
+what uh the compiler inserts to jump
+
+00:40:19,280 --> 00:40:24,160
+into the trampoline
+
+00:40:20,960 --> 00:40:29,599
+and the part of from the trampoline
+
+00:40:24,160 --> 00:40:29,599
+to the target specified by the user
+
+00:40:34,960 --> 00:40:43,119
+okay let me show you a benchmarking
+
+00:40:38,800 --> 00:40:45,520
+catch too er
+
+00:40:43,119 --> 00:40:47,119
+is i'm going to show you the the source
+
+00:40:45,520 --> 00:40:50,319
+code momentarily but uh
+
+00:40:47,119 --> 00:40:52,960
+let us just run that guy i am going to
+
+00:40:50,319 --> 00:40:54,400
+make this bigger so that people can see
+
+00:40:52,960 --> 00:40:58,000
+actually that's not what i meant what i
+
+00:40:54,400 --> 00:40:58,000
+meant is a large font
+
+00:40:59,920 --> 00:41:06,640
+and what this thing is going to be doing
+
+00:41:03,599 --> 00:41:07,359
+is to measure the speed of execution
+
+00:41:06,640 --> 00:41:11,119
+with different
+
+00:41:07,359 --> 00:41:14,720
+levels of entropy so
+
+00:41:11,119 --> 00:41:17,680
+what uh this benchmark is doing is to
+
+00:41:14,720 --> 00:41:18,319
+to call alternatively in a random way so
+
+00:41:17,680 --> 00:41:20,640
+that
+
+00:41:18,319 --> 00:41:23,200
+the branch processing units of the
+
+00:41:20,640 --> 00:41:25,839
+microprocessor cannot predict
+
+00:41:23,200 --> 00:41:26,880
+uh where the the execution is going to
+
+00:41:25,839 --> 00:41:29,760
+be next
+
+00:41:26,880 --> 00:41:31,520
+or not most of the time between two
+
+00:41:29,760 --> 00:41:35,359
+targets they're going to be doing a
+
+00:41:31,520 --> 00:41:37,520
+different work and they have to execute
+
+00:41:35,359 --> 00:41:39,359
+invocations multiple thousands of
+
+00:41:37,520 --> 00:41:43,040
+invocations to
+
+00:41:39,359 --> 00:41:45,119
+either of both targets and that these
+
+00:41:43,040 --> 00:41:48,720
+are the results that we get okay
+
+00:41:45,119 --> 00:41:51,530
+so in the case of uh
+
+00:41:48,720 --> 00:41:52,640
+sue um
+
+00:41:51,530 --> 00:41:55,760
+[Music]
+
+00:41:52,640 --> 00:41:58,560
+actually let's start with uh the plane
+
+00:41:55,760 --> 00:41:59,280
+function pointer the plane function
+
+00:41:58,560 --> 00:42:02,640
+pointer
+
+00:41:59,280 --> 00:42:06,560
+takes about 46 microseconds
+
+00:42:02,640 --> 00:42:09,520
+and to do this on the average however
+
+00:42:06,560 --> 00:42:10,960
+uh the standard library takes about uh
+
+00:42:09,520 --> 00:42:14,160
+81 82
+
+00:42:10,960 --> 00:42:14,960
+microseconds probably 86 microseconds
+
+00:42:14,160 --> 00:42:20,000
+this is just
+
+00:42:14,960 --> 00:42:20,000
+repeated and
+
+00:42:20,400 --> 00:42:26,880
+the su function takes a compared to
+
+00:42:23,599 --> 00:42:29,280
+the function pointer it's some overhead
+
+00:42:26,880 --> 00:42:30,880
+of a few percentage points but it's not
+
+00:42:29,280 --> 00:42:34,000
+so far
+
+00:42:30,880 --> 00:42:37,200
+so this is with a maximum entropy
+
+00:42:34,000 --> 00:42:39,839
+like uh the the two targets uh
+
+00:42:37,200 --> 00:42:41,599
+are going to be switching randomly uh
+
+00:42:39,839 --> 00:42:43,280
+most often
+
+00:42:41,599 --> 00:42:46,000
+so that is the hardest for the branch
+
+00:42:43,280 --> 00:42:49,040
+predictor so i am basically disabling
+
+00:42:46,000 --> 00:42:51,599
+the performance uh inefficiencies hiding
+
+00:42:49,040 --> 00:42:54,800
+capabilities of the microprocessor
+
+00:42:51,599 --> 00:42:55,760
+and we're seeing that the function is
+
+00:42:54,800 --> 00:42:59,440
+very close
+
+00:42:55,760 --> 00:42:59,920
+to to using the the the function pointer
+
+00:42:59,440 --> 00:43:02,319
+which
+
+00:42:59,920 --> 00:43:04,319
+as i explained before is the theoretical
+
+00:43:02,319 --> 00:43:08,319
+best
+
+00:43:04,319 --> 00:43:09,280
+um and using standard function has quite
+
+00:43:08,319 --> 00:43:12,079
+a substantial
+
+00:43:09,280 --> 00:43:13,359
+uh penalty about 70 percent or something
+
+00:43:12,079 --> 00:43:17,280
+there about
+
+00:43:13,359 --> 00:43:20,640
+now let us skip to when the pattern of
+
+00:43:17,280 --> 00:43:21,200
+calling is far less random like there is
+
+00:43:20,640 --> 00:43:25,440
+a
+
+00:43:21,200 --> 00:43:29,200
+random switch only once in 256 uh
+
+00:43:25,440 --> 00:43:33,040
+invocations and now
+
+00:43:29,200 --> 00:43:34,640
+um we see that uh
+
+00:43:33,040 --> 00:43:36,240
+because the things are far more
+
+00:43:34,640 --> 00:43:39,200
+predictable
+
+00:43:36,240 --> 00:43:41,520
+um they saw function that has an
+
+00:43:39,200 --> 00:43:42,319
+inherent performance penalty of a double
+
+00:43:41,520 --> 00:43:44,400
+call because
+
+00:43:42,319 --> 00:43:45,760
+that's inherent that you cannot do a
+
+00:43:44,400 --> 00:43:49,119
+trampoline that
+
+00:43:45,760 --> 00:43:51,680
+doesn't jump twice um
+
+00:43:49,119 --> 00:43:52,640
+doesn't have enough opportunity to hide
+
+00:43:51,680 --> 00:43:56,400
+that performance
+
+00:43:52,640 --> 00:44:00,000
+penalty so it doesn't look as good as
+
+00:43:56,400 --> 00:44:03,280
+the function pointer but
+
+00:44:00,000 --> 00:44:05,760
+the the the
+
+00:44:03,280 --> 00:44:08,079
+the ways in which there are no ways to
+
+00:44:05,760 --> 00:44:11,119
+hide the inefficiencies
+
+00:44:08,079 --> 00:44:12,480
+reveal surface how truly inefficient the
+
+00:44:11,119 --> 00:44:15,920
+standard function is
+
+00:44:12,480 --> 00:44:18,880
+which is three times it has worse has uh
+
+00:44:15,920 --> 00:44:22,960
+using a function a plane function point
+
+00:44:18,880 --> 00:44:27,839
+okay i think i have a link
+
+00:44:22,960 --> 00:44:30,240
+to the code
+
+00:44:27,839 --> 00:44:30,880
+so this is publicly available when you
+
+00:44:30,240 --> 00:44:32,880
+receive these
+
+00:44:30,880 --> 00:44:34,480
+slides which i hope is going to be very
+
+00:44:32,880 --> 00:44:39,680
+soon you're going to be able to
+
+00:44:34,480 --> 00:44:42,240
+look at those things on your own and
+
+00:44:39,680 --> 00:44:42,800
+what i am doing is uh to call this
+
+00:44:42,240 --> 00:44:45,920
+function
+
+00:44:42,800 --> 00:44:49,280
+evaluate um
+
+00:44:45,920 --> 00:44:51,280
+a number of reiterations on a collection
+
+00:44:49,280 --> 00:44:54,960
+so it's a double traversal
+
+00:44:51,280 --> 00:44:58,640
+and here's the executable
+
+00:44:54,960 --> 00:45:00,800
+and this executable
+
+00:44:58,640 --> 00:45:02,400
+might be either function one or function
+
+00:45:00,800 --> 00:45:05,920
+two
+
+00:45:02,400 --> 00:45:09,960
+and the way that um
+
+00:45:05,920 --> 00:45:13,440
+these guys are generated
+
+00:45:09,960 --> 00:45:16,839
+is in generate functions
+
+00:45:13,440 --> 00:45:20,240
+which uses a
+
+00:45:16,839 --> 00:45:23,280
+random and a distribution
+
+00:45:20,240 --> 00:45:26,560
+that varies from between uh
+
+00:45:23,280 --> 00:45:29,760
+1 and 256 and
+
+00:45:26,560 --> 00:45:32,880
+it's gonna insert
+
+00:45:29,760 --> 00:45:35,839
+either one depending on the the
+
+00:45:32,880 --> 00:45:39,920
+distribution value right
+
+00:45:35,839 --> 00:45:44,160
+so all i wanted to to to tell you about
+
+00:45:39,920 --> 00:45:47,760
+these particular benchmarks uh is that
+
+00:45:44,160 --> 00:45:50,640
+the entropy is truly important
+
+00:45:47,760 --> 00:45:51,599
+the the the performance looks completely
+
+00:45:50,640 --> 00:45:54,000
+different
+
+00:45:51,599 --> 00:45:55,839
+if uh you use something that is very
+
+00:45:54,000 --> 00:45:58,160
+easy for the branch processing
+
+00:45:55,839 --> 00:45:59,599
+to predict in the microprocessor versus
+
+00:45:58,160 --> 00:46:02,800
+something that
+
+00:45:59,599 --> 00:46:02,800
+that is not okay
+
+00:46:03,119 --> 00:46:06,720
+how such a big improvement was
+
+00:46:04,800 --> 00:46:09,680
+accomplished okay
+
+00:46:06,720 --> 00:46:11,280
+well there is the saying of that there
+
+00:46:09,680 --> 00:46:13,920
+is no free launch right so
+
+00:46:11,280 --> 00:46:15,040
+something weird happened here because it
+
+00:46:13,920 --> 00:46:17,599
+seems that it's just
+
+00:46:15,040 --> 00:46:18,720
+superior well the thing the thing is
+
+00:46:17,599 --> 00:46:21,359
+that uh
+
+00:46:18,720 --> 00:46:23,119
+there are multi-decade performance
+
+00:46:21,359 --> 00:46:24,400
+oversights that are detected and
+
+00:46:23,119 --> 00:46:27,040
+corrected
+
+00:46:24,400 --> 00:46:28,880
+so to explain what's what where those
+
+00:46:27,040 --> 00:46:32,000
+performance oversights i can
+
+00:46:28,880 --> 00:46:33,839
+just rely on the wonderful work of my
+
+00:46:32,000 --> 00:46:37,200
+colleagues at facebook
+
+00:46:33,839 --> 00:46:39,520
+that uh noticed what i told them
+
+00:46:37,200 --> 00:46:42,079
+at cppcon last year which by the way
+
+00:46:39,520 --> 00:46:47,599
+shows how important it is to participate
+
+00:46:42,079 --> 00:46:47,599
+in um in um conventions
+
+00:46:47,680 --> 00:46:53,839
+and uh if you see here uh
+
+00:46:50,720 --> 00:46:57,440
+i am even credited with uh
+
+00:46:53,839 --> 00:47:00,079
+that improvement like uh here
+
+00:46:57,440 --> 00:47:01,760
+they they check on the history of a
+
+00:47:00,079 --> 00:47:04,560
+previous component that i have improved
+
+00:47:01,760 --> 00:47:06,880
+upon but uh it continues to be usable
+
+00:47:04,560 --> 00:47:08,640
+the same ideas were also present in any
+
+00:47:06,880 --> 00:47:12,240
+level
+
+00:47:08,640 --> 00:47:15,520
+and this is where they are explaining
+
+00:47:12,240 --> 00:47:20,160
+uh the extreme differences that uh
+
+00:47:15,520 --> 00:47:23,359
+for example uh in check four
+
+00:47:20,160 --> 00:47:26,079
+uh in uh folly function used to be
+
+00:47:23,359 --> 00:47:28,000
+this cogen and after they applied the
+
+00:47:26,079 --> 00:47:31,839
+technique that i showed
+
+00:47:28,000 --> 00:47:35,359
+um it is only these uh
+
+00:47:31,839 --> 00:47:38,680
+generated uh code genes so
+
+00:47:35,359 --> 00:47:40,400
+they have um
+
+00:47:38,680 --> 00:47:44,720
+[Music]
+
+00:47:40,400 --> 00:47:48,079
+put in practice some of the techniques
+
+00:47:44,720 --> 00:47:48,880
+and what are they well if you look at
+
+00:47:48,079 --> 00:47:51,920
+these uh
+
+00:47:48,880 --> 00:47:54,079
+um one of them is that
+
+00:47:51,920 --> 00:47:55,280
+they were putting the trampoline address
+
+00:47:54,079 --> 00:47:58,319
+as the first argument
+
+00:47:55,280 --> 00:48:01,119
+in between the
+
+00:47:58,319 --> 00:48:01,920
+the user activation of the trampoline
+
+00:48:01,119 --> 00:48:04,839
+and
+
+00:48:01,920 --> 00:48:06,400
+the activation of the target by the
+
+00:48:04,839 --> 00:48:08,480
+trampoline so
+
+00:48:06,400 --> 00:48:10,079
+rather than being it the first argument
+
+00:48:08,480 --> 00:48:11,520
+they are now using it as the last
+
+00:48:10,079 --> 00:48:13,440
+argument
+
+00:48:11,520 --> 00:48:15,839
+and rather than just using perfect
+
+00:48:13,440 --> 00:48:17,839
+forwarding they are now
+
+00:48:15,839 --> 00:48:19,599
+doing something smarter which is to use
+
+00:48:17,839 --> 00:48:23,760
+call arcs that
+
+00:48:19,599 --> 00:48:27,839
+in reality is a
+
+00:48:23,760 --> 00:48:30,640
+if it is on a trivial value then
+
+00:48:27,839 --> 00:48:32,800
+use it as it is and if not then use a
+
+00:48:30,640 --> 00:48:36,240
+forward in reference
+
+00:48:32,800 --> 00:48:38,800
+okay i can explain that better but uh
+
+00:48:36,240 --> 00:48:40,079
+and uh you can see that in this uh
+
+00:48:38,800 --> 00:48:42,319
+change set
+
+00:48:40,079 --> 00:48:44,079
+that's why they keep uh repeating by the
+
+00:48:42,319 --> 00:48:46,640
+way again this is uh
+
+00:48:44,079 --> 00:48:49,040
+the public facebook follow uh github
+
+00:48:46,640 --> 00:48:51,440
+repository so you can verify this on
+
+00:48:49,040 --> 00:48:51,440
+your own
+
+00:48:52,079 --> 00:48:54,400
+um
+
+00:48:56,400 --> 00:48:59,680
+i'm going to paint this better but i
+
+00:48:58,079 --> 00:49:02,079
+just wanted to mention uh
+
+00:48:59,680 --> 00:49:04,079
+just another thing more the last time i
+
+00:49:02,079 --> 00:49:06,079
+checked earlier today
+
+00:49:04,079 --> 00:49:07,839
+they still have this conditional
+
+00:49:06,079 --> 00:49:12,240
+definition
+
+00:49:07,839 --> 00:49:15,920
+the conditional compilation proviso
+
+00:49:12,240 --> 00:49:16,480
+which is that if they are you compiling
+
+00:49:15,920 --> 00:49:20,640
+on their
+
+00:49:16,480 --> 00:49:23,440
+microsoft uh uh mscc
+
+00:49:20,640 --> 00:49:24,640
+then they're gonna use uh the old style
+
+00:49:23,440 --> 00:49:26,079
+and inefficient
+
+00:49:24,640 --> 00:49:28,240
+way of passing the arguments in the
+
+00:49:26,079 --> 00:49:31,680
+trampoline and if not then
+
+00:49:28,240 --> 00:49:35,200
+they feel confident about using the the
+
+00:49:31,680 --> 00:49:39,680
+the optimized uh argument passing
+
+00:49:35,200 --> 00:49:42,839
+well um i am proud to say that uh
+
+00:49:39,680 --> 00:49:44,640
+su-function delivers all the goods in
+
+00:49:42,839 --> 00:49:46,640
+windows
+
+00:49:44,640 --> 00:49:49,119
+has been delivering it from the very
+
+00:49:46,640 --> 00:49:49,119
+beginning
+
+00:49:49,359 --> 00:49:52,400
+something that takes me a lot of time is
+
+00:49:51,359 --> 00:49:55,119
+to make sure that
+
+00:49:52,400 --> 00:49:59,040
+things work in windows but yeah they do
+
+00:49:55,119 --> 00:50:01,920
+work in windows okay
+
+00:49:59,040 --> 00:50:04,000
+so what are the improvements that were
+
+00:50:01,920 --> 00:50:07,520
+incorporated in foley
+
+00:50:04,000 --> 00:50:10,800
+number one you don't
+
+00:50:07,520 --> 00:50:12,960
+check for the null pointer you don't
+
+00:50:10,800 --> 00:50:14,000
+pay for that by making sure that you
+
+00:50:12,960 --> 00:50:16,079
+initialize
+
+00:50:14,000 --> 00:50:18,480
+something valid in the first place
+
+00:50:16,079 --> 00:50:20,960
+that's so important
+
+00:50:18,480 --> 00:50:22,480
+and there's repeating remember that
+
+00:50:20,960 --> 00:50:25,520
+alexander is
+
+00:50:22,480 --> 00:50:28,000
+in the seminal work that he did on on
+
+00:50:25,520 --> 00:50:29,359
+elements of programming he says very
+
+00:50:28,000 --> 00:50:32,400
+explicitly
+
+00:50:29,359 --> 00:50:33,920
+that uh if you default construct
+
+00:50:32,400 --> 00:50:35,119
+something that is just partially
+
+00:50:33,920 --> 00:50:38,160
+initialized
+
+00:50:35,119 --> 00:50:40,640
+it is in a meta state
+
+00:50:38,160 --> 00:50:42,400
+not properly initialized that is a code
+
+00:50:40,640 --> 00:50:45,520
+smell
+
+00:50:42,400 --> 00:50:49,040
+okay um i have had a
+
+00:50:45,520 --> 00:50:51,359
+an argument that this does tie
+
+00:50:49,040 --> 00:50:52,960
+precious branch predictor resources so
+
+00:50:51,359 --> 00:50:54,000
+you don't see a performance penalty
+
+00:50:52,960 --> 00:50:57,520
+directly
+
+00:50:54,000 --> 00:50:58,400
+because uh um you are not going to be
+
+00:50:57,520 --> 00:51:01,440
+calling
+
+00:50:58,400 --> 00:51:04,240
+an empty trampoline in in your code
+
+00:51:01,440 --> 00:51:06,000
+so the the conditional check is always
+
+00:51:04,240 --> 00:51:08,720
+false for null
+
+00:51:06,000 --> 00:51:09,280
+but there is a conditional check there
+
+00:51:08,720 --> 00:51:11,680
+so
+
+00:51:09,280 --> 00:51:13,280
+the the branch predictor resources that
+
+00:51:11,680 --> 00:51:14,079
+you would be able to use for something
+
+00:51:13,280 --> 00:51:16,000
+else
+
+00:51:14,079 --> 00:51:17,599
+are being used there and that can
+
+00:51:16,000 --> 00:51:18,400
+introduce also the problem of fall
+
+00:51:17,599 --> 00:51:20,960
+sharing
+
+00:51:18,400 --> 00:51:22,079
+for the branch predictor slot etc but
+
+00:51:20,960 --> 00:51:24,880
+this is very difficult
+
+00:51:22,079 --> 00:51:25,920
+to measure so i haven't been able to to
+
+00:51:24,880 --> 00:51:29,119
+to come up with a
+
+00:51:25,920 --> 00:51:31,599
+a good uh test to surface
+
+00:51:29,119 --> 00:51:33,839
+but i know that it happens and and i
+
+00:51:31,599 --> 00:51:36,240
+know that it is important
+
+00:51:33,839 --> 00:51:37,839
+i will give you a brain check on that
+
+00:51:36,240 --> 00:51:41,119
+okay
+
+00:51:37,839 --> 00:51:43,040
+so another thing that you
+
+00:51:41,119 --> 00:51:45,200
+must avoid is to mess with the user
+
+00:51:43,040 --> 00:51:46,640
+types turning them into references for
+
+00:51:45,200 --> 00:51:47,839
+no good reason even if you want to
+
+00:51:46,640 --> 00:51:50,720
+forward them
+
+00:51:47,839 --> 00:51:52,319
+so we refer to this as a better than
+
+00:51:50,720 --> 00:51:54,880
+perfect forwarding
+
+00:51:52,319 --> 00:51:56,720
+in uh samantha numant is a nice
+
+00:51:54,880 --> 00:51:57,839
+presentation on how to improve in
+
+00:51:56,720 --> 00:52:00,079
+section throwing
+
+00:51:57,839 --> 00:52:01,760
+at least in this year okay so you can
+
+00:52:00,079 --> 00:52:05,280
+either go to the video link
+
+00:52:01,760 --> 00:52:08,400
+here or to the step three
+
+00:52:05,280 --> 00:52:09,280
+and another thing that is so obvious do
+
+00:52:08,400 --> 00:52:12,079
+not change
+
+00:52:09,280 --> 00:52:13,599
+the application binary interface order
+
+00:52:12,079 --> 00:52:16,800
+of the parameter
+
+00:52:13,599 --> 00:52:18,800
+so remember that if you call
+
+00:52:16,800 --> 00:52:20,559
+an instance member function that is
+
+00:52:18,800 --> 00:52:22,640
+opaque to the compiler
+
+00:52:20,559 --> 00:52:23,839
+that this argument is going to be
+
+00:52:22,640 --> 00:52:25,920
+implicitly be
+
+00:52:23,839 --> 00:52:27,599
+put as a the very beginning of the
+
+00:52:25,920 --> 00:52:30,839
+parameter list
+
+00:52:27,599 --> 00:52:34,160
+so that makes a a very big performance
+
+00:52:30,839 --> 00:52:38,319
+disadvantage okay
+
+00:52:34,160 --> 00:52:40,240
+so more of the design lessons here
+
+00:52:38,319 --> 00:52:41,760
+i think the standard function is not the
+
+00:52:40,240 --> 00:52:46,079
+correct name
+
+00:52:41,760 --> 00:52:48,720
+uh because you know even myself
+
+00:52:46,079 --> 00:52:49,680
+years ago when i was not able to
+
+00:52:48,720 --> 00:52:52,559
+implement
+
+00:52:49,680 --> 00:52:54,160
+equivalence to a standard function i
+
+00:52:52,559 --> 00:52:54,880
+used to see standard function as
+
+00:52:54,160 --> 00:52:58,079
+something
+
+00:52:54,880 --> 00:53:01,599
+kind of magical that somehow somehow
+
+00:52:58,079 --> 00:53:03,359
+it became it itself became the target
+
+00:53:01,599 --> 00:53:05,280
+that i was giving to it
+
+00:53:03,359 --> 00:53:07,200
+well nothing magical happens my
+
+00:53:05,280 --> 00:53:09,200
+implementation for example uses
+
+00:53:07,200 --> 00:53:12,640
+portable c plus plus that's one of the
+
+00:53:09,200 --> 00:53:12,640
+reasons why it works in windows
+
+00:53:12,839 --> 00:53:15,839
+um
+
+00:53:16,079 --> 00:53:21,520
+so what it is actually is a
+
+00:53:19,119 --> 00:53:23,839
+trampoline it's something that you you
+
+00:53:21,520 --> 00:53:25,839
+jump to the trampoline with intention of
+
+00:53:23,839 --> 00:53:29,760
+not staying on that trampoline but
+
+00:53:25,839 --> 00:53:32,960
+to the trampolining will will will
+
+00:53:29,760 --> 00:53:33,760
+take you to somewhere else well i call
+
+00:53:32,960 --> 00:53:36,000
+that
+
+00:53:33,760 --> 00:53:38,960
+a double call or the trampoline
+
+00:53:36,000 --> 00:53:42,079
+compression and release phases
+
+00:53:38,960 --> 00:53:44,160
+so if
+
+00:53:42,079 --> 00:53:46,720
+the standard function would still be
+
+00:53:44,160 --> 00:53:49,760
+called trampoline then it would be clear
+
+00:53:46,720 --> 00:53:53,280
+that uh there is a double call and uh
+
+00:53:49,760 --> 00:53:55,359
+that would hopefully make the users
+
+00:53:53,280 --> 00:53:56,960
+think twice about using expensive to
+
+00:53:55,359 --> 00:54:00,480
+copy types in the
+
+00:53:56,960 --> 00:54:02,960
+in the whole arguments and
+
+00:54:00,480 --> 00:54:03,760
+hopefully that would prevent a mistake
+
+00:54:02,960 --> 00:54:07,520
+that uh
+
+00:54:03,760 --> 00:54:10,960
+developers may make that uh
+
+00:54:07,520 --> 00:54:13,200
+they might privilege the case
+
+00:54:10,960 --> 00:54:15,280
+of not introducing a performance penalty
+
+00:54:13,200 --> 00:54:18,400
+when the argument is uh
+
+00:54:15,280 --> 00:54:19,760
+expensive to copy by using uh forwarding
+
+00:54:18,400 --> 00:54:22,960
+references
+
+00:54:19,760 --> 00:54:26,880
+when you shouldn't
+
+00:54:22,960 --> 00:54:28,559
+okay um i just touched on something that
+
+00:54:26,880 --> 00:54:30,480
+is important
+
+00:54:28,559 --> 00:54:32,559
+please pay attention because this is
+
+00:54:30,480 --> 00:54:37,680
+something essential
+
+00:54:32,559 --> 00:54:42,000
+um there are two different cases
+
+00:54:37,680 --> 00:54:44,720
+that uh function pointers refer to
+
+00:54:42,000 --> 00:54:45,040
+one has an instance member function that
+
+00:54:44,720 --> 00:54:48,000
+has
+
+00:54:45,040 --> 00:54:48,559
+a at this so a call signature can have
+
+00:54:48,000 --> 00:54:53,280
+two
+
+00:54:48,559 --> 00:54:54,640
+abi cases
+
+00:54:53,280 --> 00:54:57,520
+something that is an instance member
+
+00:54:54,640 --> 00:55:00,559
+function with a dis pointer
+
+00:54:57,520 --> 00:55:02,319
+or a non-instance member function and
+
+00:55:00,559 --> 00:55:03,359
+the difference again is that one has the
+
+00:55:02,319 --> 00:55:05,599
+this parameter
+
+00:55:03,359 --> 00:55:06,480
+at the beginning and the other doesn't
+
+00:55:05,599 --> 00:55:08,640
+so
+
+00:55:06,480 --> 00:55:09,760
+if you mix the two the consequences that
+
+00:55:08,640 --> 00:55:11,200
+you're going to be shifting
+
+00:55:09,760 --> 00:55:12,880
+the whole argument at least and on
+
+00:55:11,200 --> 00:55:13,440
+shifting the whole argument at least in
+
+00:55:12,880 --> 00:55:17,200
+between
+
+00:55:13,440 --> 00:55:20,480
+trampling compression and release so
+
+00:55:17,200 --> 00:55:23,680
+you can prevent that problem
+
+00:55:20,480 --> 00:55:26,480
+as a user by leaving a courtesy
+
+00:55:23,680 --> 00:55:27,359
+parameter of void pointer as the first
+
+00:55:26,480 --> 00:55:29,920
+argument
+
+00:55:27,359 --> 00:55:30,720
+so that is in case something needs that
+
+00:55:29,920 --> 00:55:34,000
+for this
+
+00:55:30,720 --> 00:55:37,599
+pointer to be able to use it
+
+00:55:34,000 --> 00:55:40,079
+and as an infrastructure maker you put
+
+00:55:37,599 --> 00:55:41,520
+your trampoline at the very end of the
+
+00:55:40,079 --> 00:55:45,359
+argument list
+
+00:55:41,520 --> 00:55:48,640
+in that case if everything becomes
+
+00:55:45,359 --> 00:55:51,599
+a um a tail called
+
+00:55:48,640 --> 00:55:53,119
+no extra work is going to be needed okay
+
+00:55:51,599 --> 00:55:57,040
+yeah i am going to
+
+00:55:53,119 --> 00:55:59,760
+stop a moment and i'm going to check the
+
+00:55:57,040 --> 00:56:00,160
+the remote platform because i want to
+
+00:55:59,760 --> 00:56:17,839
+see
+
+00:56:00,160 --> 00:56:17,839
+if um there are questions
+
+00:56:20,799 --> 00:56:24,960
+okay what work are the strenuous
+
+00:56:23,280 --> 00:56:27,280
+operations in the standard function
+
+00:56:24,960 --> 00:56:28,960
+version doing exactly i just went over
+
+00:56:27,280 --> 00:56:30,720
+it thank you
+
+00:56:28,960 --> 00:56:32,880
+how one spot that those instructions are
+
+00:56:30,720 --> 00:56:34,319
+in fact unnecessary and so performance
+
+00:56:32,880 --> 00:56:37,839
+hit
+
+00:56:34,319 --> 00:56:37,839
+okay um
+
+00:56:39,200 --> 00:56:44,480
+yes this is uh possible to incorporate
+
+00:56:42,000 --> 00:56:47,760
+into the standard library
+
+00:56:44,480 --> 00:56:50,720
+um i have not attempted to
+
+00:56:47,760 --> 00:56:52,720
+submit a proposal because the evolution
+
+00:56:50,720 --> 00:56:54,160
+of a standard function
+
+00:56:52,720 --> 00:56:56,079
+in the standard library is something
+
+00:56:54,160 --> 00:56:58,610
+that i do not
+
+00:56:56,079 --> 00:57:01,689
+quite agree with
+
+00:56:58,610 --> 00:57:01,689
+[Music]
+
+00:57:02,480 --> 00:57:08,640
+yes phil nash i will do
+
+00:57:05,520 --> 00:57:11,040
+my attempts to explain how to type erase
+
+00:57:08,640 --> 00:57:13,599
+the paints of runtime polymorphism
+
+00:57:11,040 --> 00:57:15,920
+at any opportunity that i have available
+
+00:57:13,599 --> 00:57:15,920
+thank you
+
+00:57:18,559 --> 00:57:27,839
+hey yes i am going to be showing um
+
+00:57:21,680 --> 00:57:30,960
+things that sue can do or not later on
+
+00:57:27,839 --> 00:57:31,920
+yes i have measured the standard
+
+00:57:30,960 --> 00:57:33,599
+function and
+
+00:57:31,920 --> 00:57:36,000
+subfunction and many other
+
+00:57:33,599 --> 00:57:40,720
+implementations pretty extensively
+
+00:57:36,000 --> 00:57:43,359
+and it is comprehensively superior
+
+00:57:40,720 --> 00:57:44,640
+i just don't have the time to share more
+
+00:57:43,359 --> 00:57:47,200
+important uh
+
+00:57:44,640 --> 00:57:47,680
+things with you okay i understand that i
+
+00:57:47,200 --> 00:57:50,480
+have
+
+00:57:47,680 --> 00:57:51,839
+probably about uh 10 more minutes of
+
+00:57:50,480 --> 00:57:55,440
+presentation time
+
+00:57:51,839 --> 00:58:00,000
+so i'm going to continue until i get
+
+00:57:55,440 --> 00:58:02,720
+the plug um out
+
+00:58:00,000 --> 00:58:05,839
+we're close to to to the ending as you
+
+00:58:02,720 --> 00:58:08,079
+can see there are not many slides
+
+00:58:05,839 --> 00:58:10,000
+um thank you for the questions i think
+
+00:58:08,079 --> 00:58:13,359
+uh they were awesome
+
+00:58:10,000 --> 00:58:15,599
+um uh fortunately i i was
+
+00:58:13,359 --> 00:58:16,400
+presenting and uh giving the answer
+
+00:58:15,599 --> 00:58:18,799
+anticipated
+
+00:58:16,400 --> 00:58:20,480
+so we were not on a parallel
+
+00:58:18,799 --> 00:58:21,440
+synchronized state of mind with my
+
+00:58:20,480 --> 00:58:24,640
+audience and that's
+
+00:58:21,440 --> 00:58:28,079
+amazing thank you very much okay
+
+00:58:24,640 --> 00:58:29,599
+more more things to learn so
+
+00:58:28,079 --> 00:58:31,839
+pointer to instant member function are
+
+00:58:29,599 --> 00:58:35,040
+static or standalone functions are
+
+00:58:31,839 --> 00:58:36,880
+fundamentally different
+
+00:58:35,040 --> 00:58:39,440
+a wrapper to call an instance member
+
+00:58:36,880 --> 00:58:41,680
+function is one extreme direction period
+
+00:58:39,440 --> 00:58:42,799
+the different types they work
+
+00:58:41,680 --> 00:58:46,960
+differently
+
+00:58:42,799 --> 00:58:51,359
+do not introduce that uh indirection
+
+00:58:46,960 --> 00:58:53,280
+then another problem of using the
+
+00:58:51,359 --> 00:58:55,200
+instance member function pointers
+
+00:58:53,280 --> 00:58:56,960
+or instance member functions in general
+
+00:58:55,200 --> 00:58:58,400
+is that they prevent you from following
+
+00:58:56,960 --> 00:59:01,440
+the last advice of
+
+00:58:58,400 --> 00:59:05,200
+of of using your artifacts at the very
+
+00:59:01,440 --> 00:59:08,480
+end of the parameter list by the way
+
+00:59:05,200 --> 00:59:11,760
+uh years ago i have uh i have been
+
+00:59:08,480 --> 00:59:14,559
+submitting variations of this
+
+00:59:11,760 --> 00:59:15,119
+uh presentation proposal many times
+
+00:59:14,559 --> 00:59:17,440
+people
+
+00:59:15,119 --> 00:59:20,319
+the reviewers would not believe that the
+
+00:59:17,440 --> 00:59:22,079
+performance difference would be so big
+
+00:59:20,319 --> 00:59:24,240
+and the reviewers of my presentation
+
+00:59:22,079 --> 00:59:25,280
+proposed would think that what i say
+
+00:59:24,240 --> 00:59:28,480
+that the
+
+00:59:25,280 --> 00:59:31,599
+the order of the arguments
+
+00:59:28,480 --> 00:59:34,799
+doesn't really make a general
+
+00:59:31,599 --> 00:59:37,520
+difference but well um
+
+00:59:34,799 --> 00:59:39,839
+that is just the way it is so one thing
+
+00:59:37,520 --> 00:59:44,079
+that is truly important to remember is
+
+00:59:39,839 --> 00:59:45,280
+when the the the calling is opaque to
+
+00:59:44,079 --> 00:59:49,760
+the compiler
+
+00:59:45,280 --> 00:59:52,720
+because you have to do the opposite
+
+00:59:49,760 --> 00:59:54,079
+when the actual call is not open to the
+
+00:59:52,720 --> 00:59:56,319
+compiler
+
+00:59:54,079 --> 00:59:57,680
+um unfortunately i don't have the time
+
+00:59:56,319 --> 01:00:01,760
+budget to well
+
+00:59:57,680 --> 01:00:06,000
+uh let help so it's just a very tiny
+
+01:00:01,760 --> 01:00:11,040
+uh um performance uh a penalty
+
+01:00:06,000 --> 01:00:14,720
+so in um in a previous version of
+
+01:00:11,040 --> 01:00:15,200
+a zoo function if i call something like
+
+01:00:14,720 --> 01:00:19,599
+a
+
+01:00:15,200 --> 01:00:23,040
+type i would have this um
+
+01:00:19,599 --> 01:00:26,240
+assembler and it is using a conditional
+
+01:00:23,040 --> 01:00:27,280
+uh move equal so i i am bothered because
+
+01:00:26,240 --> 01:00:29,760
+it should be just a
+
+01:00:27,280 --> 01:00:32,799
+detail call right as a matter of fact in
+
+01:00:29,760 --> 01:00:32,799
+the corrected version
+
+01:00:41,599 --> 01:00:46,400
+in the corrected version it should be
+
+01:00:43,119 --> 01:00:46,400
+just uh the um
+
+01:00:47,200 --> 01:00:50,079
+the the
+
+01:00:51,200 --> 01:00:57,839
+tail call
+
+01:01:00,880 --> 01:01:05,040
+uh well almost you first need to repeat
+
+01:01:04,319 --> 01:01:06,960
+what is the
+
+01:01:05,040 --> 01:01:08,640
+the the address that you're gonna be
+
+01:01:06,960 --> 01:01:11,040
+jumping to and uh
+
+01:01:08,640 --> 01:01:12,319
+then you jump to that address so that's
+
+01:01:11,040 --> 01:01:15,520
+the corrected one
+
+01:01:12,319 --> 01:01:18,720
+but it used to be like this and
+
+01:01:15,520 --> 01:01:22,400
+uh wow the difference
+
+01:01:18,720 --> 01:01:24,400
+it was just what i show in this
+
+01:01:22,400 --> 01:01:25,599
+slide no time to explain it so i'm gonna
+
+01:01:24,400 --> 01:01:29,280
+move on
+
+01:01:25,599 --> 01:01:30,559
+okay type ratio affordances affordances
+
+01:01:29,280 --> 01:01:34,480
+are the capabilities of
+
+01:01:30,559 --> 01:01:36,960
+uh what a typical team can do okay
+
+01:01:34,480 --> 01:01:38,720
+the world's authorities on uh
+
+01:01:36,960 --> 01:01:40,559
+affordances
+
+01:01:38,720 --> 01:01:42,880
+is the person who introduced the term
+
+01:01:40,559 --> 01:01:45,200
+arthur of wire
+
+01:01:42,880 --> 01:01:47,040
+he wrote a very important article which
+
+01:01:45,200 --> 01:01:48,799
+is the space of the sign choices for
+
+01:01:47,040 --> 01:01:52,559
+standard function
+
+01:01:48,799 --> 01:01:55,599
+i have good news any container
+
+01:01:52,559 --> 01:01:58,720
+either the version any callable or or or
+
+01:01:55,599 --> 01:02:02,160
+function or the ad hoc
+
+01:01:58,720 --> 01:02:02,160
+that i sometimes create
+
+01:02:02,799 --> 01:02:06,960
+it has i think the most powerful tools
+
+01:02:05,039 --> 01:02:09,599
+for defining affordances
+
+01:02:06,960 --> 01:02:11,039
+in particularly the laws expressing
+
+01:02:09,599 --> 01:02:14,319
+trivially
+
+01:02:11,039 --> 01:02:14,960
+all of the proposals that oddwyer
+
+01:02:14,319 --> 01:02:18,160
+mentions
+
+01:02:14,960 --> 01:02:18,160
+and so much more
+
+01:02:18,880 --> 01:02:24,000
+another everything with optimal
+
+01:02:22,240 --> 01:02:25,760
+performance like uh
+
+01:02:24,000 --> 01:02:27,520
+you can see the generated assembler and
+
+01:02:25,760 --> 01:02:31,680
+you see wow
+
+01:02:27,520 --> 01:02:31,680
+i think that it cannot be done better
+
+01:02:31,920 --> 01:02:35,119
+i would really really love to talk about
+
+01:02:34,559 --> 01:02:37,280
+uh
+
+01:02:35,119 --> 01:02:39,920
+the part of how to define affordances in
+
+01:02:37,280 --> 01:02:43,359
+the suit operation framework but alas
+
+01:02:39,920 --> 01:02:47,119
+again i do not have the time so um
+
+01:02:43,359 --> 01:02:48,799
+the anxiety is uh extreme
+
+01:02:47,119 --> 01:02:50,559
+but i want to show you something truly
+
+01:02:48,799 --> 01:02:53,920
+important that
+
+01:02:50,559 --> 01:02:54,559
+i have something that uh i think the su
+
+01:02:53,920 --> 01:02:57,039
+function
+
+01:02:54,559 --> 01:02:59,119
+or the soul type erasure framework is
+
+01:02:57,039 --> 01:03:03,839
+the only one that has this
+
+01:02:59,119 --> 01:03:03,839
+capability let me show you
+
+01:03:04,960 --> 01:03:09,039
+okay so the only difference that we're
+
+01:03:08,160 --> 01:03:12,960
+going to have of
+
+01:03:09,039 --> 01:03:17,839
+consequence is that now order consumer
+
+01:03:12,960 --> 01:03:17,839
+is not copyable and it doesn't have rtti
+
+01:03:18,400 --> 01:03:25,200
+and we are going to define look at this
+
+01:03:22,799 --> 01:03:27,119
+and any container that is going to use
+
+01:03:25,200 --> 01:03:30,880
+has its policy
+
+01:03:27,119 --> 01:03:32,799
+a derived table policy that brings in
+
+01:03:30,880 --> 01:03:33,599
+the whole over the consumer that i had
+
+01:03:32,799 --> 01:03:38,240
+before
+
+01:03:33,599 --> 01:03:44,079
+and introduces introduces
+
+01:03:38,240 --> 01:03:47,680
+the affordance of copyability so
+
+01:03:44,079 --> 01:03:50,559
+uh invoke consumer oh actually i have uh
+
+01:03:47,680 --> 01:03:52,799
+to make a change here i got the assembly
+
+01:03:50,559 --> 01:03:54,160
+that i wanted but uh the slide is wrong
+
+01:03:52,799 --> 01:03:58,559
+and this is the second time because in
+
+01:03:54,160 --> 01:04:01,839
+the trial run i did the same mistake
+
+01:03:58,559 --> 01:04:05,039
+okay this is not going to compile
+
+01:04:01,839 --> 01:04:08,319
+and the solution is to
+
+01:04:05,039 --> 01:04:09,839
+put the guy here all right so what is it
+
+01:04:08,319 --> 01:04:12,720
+that i am doing here
+
+01:04:09,839 --> 01:04:14,799
+i am using as the last argument a copy
+
+01:04:12,720 --> 01:04:18,720
+of all order consumer
+
+01:04:14,799 --> 01:04:20,960
+and that binds to invoke consumer
+
+01:04:18,720 --> 01:04:22,559
+to the position of the ordered consumer
+
+01:04:20,960 --> 01:04:23,760
+which is the move on the equivalent the
+
+01:04:22,559 --> 01:04:26,880
+move only equivalent
+
+01:04:23,760 --> 01:04:29,680
+so the
+
+01:04:26,880 --> 01:04:30,880
+type ratio framework achieves
+
+01:04:29,680 --> 01:04:34,559
+compatibility
+
+01:04:30,880 --> 01:04:38,319
+at the level of preferences
+
+01:04:34,559 --> 01:04:40,559
+you have the equivalent of a base class
+
+01:04:38,319 --> 01:04:42,799
+which is under consumer
+
+01:04:40,559 --> 01:04:44,400
+and uh the equivalent of a derived class
+
+01:04:42,799 --> 01:04:48,000
+which is a copy will
+
+01:04:44,400 --> 01:04:51,119
+order consumer but mind you
+
+01:04:48,000 --> 01:04:55,119
+this is not a
+
+01:04:51,119 --> 01:04:56,319
+a subclass this is like a a subclass of
+
+01:04:55,119 --> 01:04:59,760
+subclasses
+
+01:04:56,319 --> 01:05:01,039
+so it is a a higher order of uh
+
+01:04:59,760 --> 01:05:04,400
+subtyping
+
+01:05:01,039 --> 01:05:07,440
+because order consumer is already
+
+01:05:04,400 --> 01:05:10,079
+not a particular type but a a subtype
+
+01:05:07,440 --> 01:05:13,280
+a concept that encompasses things that
+
+01:05:10,079 --> 01:05:16,480
+can be called with this signature
+
+01:05:13,280 --> 01:05:19,520
+and uh copyable ordered consumers
+
+01:05:16,480 --> 01:05:23,440
+are that's it and many more things
+
+01:05:19,520 --> 01:05:26,799
+that can be used on other consumers so
+
+01:05:23,440 --> 01:05:26,799
+just a real quick
+
+01:05:34,839 --> 01:05:37,839
+note
+
+01:05:38,880 --> 01:05:47,680
+this should work so
+
+01:05:42,240 --> 01:05:51,839
+er a uh another consumer is not copyable
+
+01:05:47,680 --> 01:05:51,839
+but i can do this
+
+01:05:58,400 --> 01:06:02,319
+and we can also i guess
+
+01:06:03,599 --> 01:06:08,240
+to emphasize that he know what value
+
+01:06:06,480 --> 01:06:19,839
+trickery
+
+01:06:08,240 --> 01:06:19,839
+is happening there
+
+01:06:24,559 --> 01:06:28,319
+or the consumer can be copied and
+
+01:06:26,400 --> 01:06:29,760
+assigned and all those things but again
+
+01:06:28,319 --> 01:06:32,480
+i don't have time to
+
+01:06:29,760 --> 01:06:33,920
+to go over all over that minutiae as
+
+01:06:32,480 --> 01:06:36,079
+usual
+
+01:06:33,920 --> 01:06:37,440
+no performance penalty that is not
+
+01:06:36,079 --> 01:06:41,039
+inherent
+
+01:06:37,440 --> 01:06:45,359
+again i think this is the only framework
+
+01:06:41,039 --> 01:06:49,119
+that has a that advanced characteristic
+
+01:06:45,359 --> 01:06:50,960
+okay so why is a standard function a bad
+
+01:06:49,119 --> 01:06:52,319
+design in my opinion and by the way i
+
+01:06:50,960 --> 01:06:54,640
+don't need to be apologetic to
+
+01:06:52,319 --> 01:06:56,000
+douglas mcgregor and the geniuses that
+
+01:06:54,640 --> 01:06:58,799
+that
+
+01:06:56,000 --> 01:07:00,079
+gave these components to us it has
+
+01:06:58,799 --> 01:07:02,880
+happened 20
+
+01:07:00,079 --> 01:07:04,400
+elapsed uh 20 years so we are able to do
+
+01:07:02,880 --> 01:07:08,240
+better now
+
+01:07:04,400 --> 01:07:10,799
+okay the name um uh
+
+01:07:08,240 --> 01:07:12,799
+i i have said that it's a trampoline but
+
+01:07:10,799 --> 01:07:14,079
+the real problem is that it violates the
+
+01:07:12,799 --> 01:07:16,960
+single responsibility
+
+01:07:14,079 --> 01:07:19,359
+principle it does type erasure it has an
+
+01:07:16,960 --> 01:07:21,680
+affordance of callability
+
+01:07:19,359 --> 01:07:23,280
+but because it does uh follows the
+
+01:07:21,680 --> 01:07:24,960
+operation and it's not configurable
+
+01:07:23,280 --> 01:07:28,559
+because it does everything
+
+01:07:24,960 --> 01:07:30,079
+in a in a related way then
+
+01:07:28,559 --> 01:07:31,839
+if you have a lambda for example that
+
+01:07:30,079 --> 01:07:33,520
+has a capture that is not copyable you
+
+01:07:31,839 --> 01:07:37,039
+can reduce a standard function
+
+01:07:33,520 --> 01:07:37,039
+with a non-copyable lambda
+
+01:07:38,000 --> 01:07:41,599
+you cannot say hey i want the the this
+
+01:07:41,039 --> 01:07:45,920
+size
+
+01:07:41,599 --> 01:07:49,119
+for uh the the local buffer
+
+01:07:45,920 --> 01:07:50,720
+or some other size so a real quick size
+
+01:07:49,119 --> 01:07:54,839
+of
+
+01:07:50,720 --> 01:07:57,760
+auto size oc is a
+
+01:07:54,839 --> 01:08:02,880
+size of
+
+01:07:57,760 --> 01:08:02,880
+over their consumer
+
+01:08:03,839 --> 01:08:11,200
+um so there is a
+
+01:08:07,200 --> 01:08:13,440
+size of 40 and uh um because i know
+
+01:08:11,200 --> 01:08:16,080
+how to play with this so if i change
+
+01:08:13,440 --> 01:08:20,560
+this and i reduce
+
+01:08:16,080 --> 01:08:24,400
+from three void pointers to only one
+
+01:08:20,560 --> 01:08:26,239
+then uh it's going to be a 32 just like
+
+01:08:24,400 --> 01:08:29,440
+i expected
+
+01:08:26,239 --> 01:08:33,199
+so i can make it uh the size of a cache
+
+01:08:29,440 --> 01:08:33,199
+line for example 64 bytes
+
+01:08:33,279 --> 01:08:38,000
+so um you cannot even configure
+
+01:08:36,159 --> 01:08:42,799
+something has elemental has uh
+
+01:08:38,000 --> 01:08:46,719
+the the size of the internal buffer
+
+01:08:42,799 --> 01:08:49,839
+again not honoring the
+
+01:08:46,719 --> 01:08:52,159
+single responsibility principle okay
+
+01:08:49,839 --> 01:08:54,480
+uh why so better because he has a
+
+01:08:52,159 --> 01:08:58,560
+stronger theory
+
+01:08:54,480 --> 01:09:03,120
+i am very proud of this component okay
+
+01:08:58,560 --> 01:09:06,159
+so um there is a less general case
+
+01:09:03,120 --> 01:09:09,279
+which is the bounded variability
+
+01:09:06,159 --> 01:09:09,759
+when you know all the types uh mathias
+
+01:09:09,279 --> 01:09:11,359
+push
+
+01:09:09,759 --> 01:09:13,279
+is your guy please check on his
+
+01:09:11,359 --> 01:09:14,719
+presentations or any of the conferences
+
+01:09:13,279 --> 01:09:17,839
+of importance
+
+01:09:14,719 --> 01:09:22,239
+but again variant implementations
+
+01:09:17,839 --> 01:09:23,920
+do suck and now it is not a
+
+01:09:22,239 --> 01:09:25,359
+obvious performance it takes on the part
+
+01:09:23,920 --> 01:09:28,560
+of the developers
+
+01:09:25,359 --> 01:09:30,000
+but uh harder things that the compilers
+
+01:09:28,560 --> 01:09:31,040
+and the language are not able to do
+
+01:09:30,000 --> 01:09:34,319
+today
+
+01:09:31,040 --> 01:09:37,279
+but we at uh
+
+01:09:34,319 --> 01:09:39,120
+snap we have found workarounds that are
+
+01:09:37,279 --> 01:09:40,719
+truly
+
+01:09:39,120 --> 01:09:42,480
+working and that's a bonus that i have
+
+01:09:40,719 --> 01:09:45,600
+if i have the time to
+
+01:09:42,480 --> 01:09:46,000
+to to show you but again i'm gonna just
+
+01:09:45,600 --> 01:09:50,000
+uh
+
+01:09:46,000 --> 01:09:53,359
+swap to remo because i think that um
+
+01:09:50,000 --> 01:09:55,160
+i am in the margins of the
+
+01:09:53,359 --> 01:09:58,310
+the time for the presentation
+
+01:09:55,160 --> 01:09:58,310
+[Music]
+
+01:09:59,840 --> 01:10:02,960
+but there is not a place to get more
+
+01:10:02,239 --> 01:10:06,640
+detailed
+
+01:10:02,960 --> 01:10:09,840
+info about this except the materials
+
+01:10:06,640 --> 01:10:12,159
+that i am linking to you with okay
+
+01:10:09,840 --> 01:10:14,560
+you will see a couple of important links
+
+01:10:12,159 --> 01:10:17,360
+coming up in the presentation
+
+01:10:14,560 --> 01:10:18,480
+and why is the material not available
+
+01:10:17,360 --> 01:10:21,920
+well
+
+01:10:18,480 --> 01:10:24,640
+it is a complication that uh i work
+
+01:10:21,920 --> 01:10:26,320
+for my employer snap and uh probably i
+
+01:10:24,640 --> 01:10:29,760
+have my very best ideas
+
+01:10:26,320 --> 01:10:32,880
+while inside a snap but i had to ask for
+
+01:10:29,760 --> 01:10:36,400
+authorization to make a public version
+
+01:10:32,880 --> 01:10:37,040
+of those improvements and another thing
+
+01:10:36,400 --> 01:10:39,440
+is that
+
+01:10:37,040 --> 01:10:41,440
+if you see the evolution in time this
+
+01:10:39,440 --> 01:10:42,080
+has changed dramatically especially
+
+01:10:41,440 --> 01:10:45,280
+since
+
+01:10:42,080 --> 01:10:48,159
+i have had the um
+
+01:10:45,280 --> 01:10:48,880
+the great help of uh my co-workers at
+
+01:10:48,159 --> 01:10:51,199
+snap
+
+01:10:48,880 --> 01:10:53,840
+that have been truly inspiring for me to
+
+01:10:51,199 --> 01:10:57,120
+continue working on these teams
+
+01:10:53,840 --> 01:10:57,600
+so this is changing on a fundamental
+
+01:10:57,120 --> 01:11:00,000
+level
+
+01:10:57,600 --> 01:11:00,719
+like uh what i am going to do is to
+
+01:11:00,000 --> 01:11:03,760
+introduce
+
+01:11:00,719 --> 01:11:06,880
+the concept of casper ashman's um
+
+01:11:03,760 --> 01:11:08,000
+crtp sandwich to the implementation of
+
+01:11:06,880 --> 01:11:09,280
+affordance sets
+
+01:11:08,000 --> 01:11:11,040
+and i think that's going to be a very
+
+01:11:09,280 --> 01:11:13,040
+significant improvement
+
+01:11:11,040 --> 01:11:14,239
+so things are going to be here changing
+
+01:11:13,040 --> 01:11:17,360
+so i am
+
+01:11:14,239 --> 01:11:21,520
+actually running far ahead of uh
+
+01:11:17,360 --> 01:11:22,560
+a settled uh um set of components that i
+
+01:11:21,520 --> 01:11:24,239
+can tell people use
+
+01:11:22,560 --> 01:11:26,239
+these because i'm not going to be
+
+01:11:24,239 --> 01:11:27,840
+changing them
+
+01:11:26,239 --> 01:11:30,159
+i think that people are going to be
+
+01:11:27,840 --> 01:11:31,360
+interested in using the very best that i
+
+01:11:30,159 --> 01:11:33,199
+have and the very best
+
+01:11:31,360 --> 01:11:34,400
+leading edge and they had to talk to me
+
+01:11:33,199 --> 01:11:38,080
+personally
+
+01:11:34,400 --> 01:11:41,199
+sorry okay
+
+01:11:38,080 --> 01:11:43,120
+bonus section i know i am so great we
+
+01:11:41,199 --> 01:11:44,640
+actually are out of time unfortunately
+
+01:11:43,120 --> 01:11:46,239
+we're gonna have to cut off here and
+
+01:11:44,640 --> 01:11:46,640
+have people follow up with you after the
+
+01:11:46,239 --> 01:11:49,920
+con
+
+01:11:46,640 --> 01:11:52,719
+or after the talk okay uh yeah
+
+01:11:49,920 --> 01:11:54,719
+that's uh perfectly all right um it has
+
+01:11:52,719 --> 01:11:57,120
+been a pleasure to
+
+01:11:54,719 --> 01:11:58,719
+share all these things with you guys and
+
+01:11:57,120 --> 01:12:01,520
+um i'm gonna be available
+
+01:11:58,719 --> 01:12:02,960
+for social interactions uh during the
+
+01:12:01,520 --> 01:12:06,080
+rest of the conference today
+
+01:12:02,960 --> 01:12:09,280
+and uh probably you can
+
+01:12:06,080 --> 01:12:12,719
+follow me on twitter
+
+01:12:09,280 --> 01:12:15,840
+okay um i'm gonna stop the
+
+01:12:12,719 --> 01:12:16,800
+recording on my side and thank you very
+
+01:12:15,840 --> 01:12:23,840
+much for
+
+01:12:16,800 --> 01:12:23,840
+for your attention
+
+01:12:38,640 --> 01:12:40,719
+
+YouTube URL: https://www.youtube.com/watch?v=e8SyxB3_mnw
+
+

@@ -1,0 +1,4472 @@
+Title: CppCon 2018: Bob Steagall “Fast Conversion From UTF-8 with C++, DFAs, and SSE Intrinsics”
+Publication date: 2018-10-11
+Playlist: CppCon 2018
+Description: 
+	http://CppCon.org
+—
+Presentation Slides, PDFs, Source Code and other presenter materials are available at: https://github.com/CppCon/CppCon2018
+—
+UTF-8 is taking on an increasingly important role in text processing. Many applications require the conversion of UTF-8 to UTF-16 or UTF-32, but typical conversion algorithms are sub-optimal. This talk will describe a fast, correct, DFA-based approach to UTF-8 conversion that requires only three simple lookup tables and a small amount of straightforward C++ code. 
+
+We'll begin with a quick review UTF-8 and its relation to UTF-16 and UTF-32, as well as the concept of code units and code points. Next, we'll look at the layout of bits within a UTF-8 byte sequence, and from that, show a simple algorithm for converting from UTF-8 to UTF-32. Along the way will be a definition of overlong and invalid byte sequences. Following that will be a discussion of how to construct a DFA to perform the same operations as the simple algorithm. We'll then look at code for the DFA traversal underlying the basic conversion algorithm, and how to gain an additional performance boost by using SSE intrinsics. 
+
+Finally, we'll compare the performance of this approach to several commonly-available implementations on Windows and Linux, and show how it's possible to do significantly faster conversions.
+— 
+Bob Steagall, KEWB Computing
+CppCon Poster Chair
+
+I've been working in C++ since discovering the second edition of The C++ Programming Language in a college bookstore in 1992. The majority of my career has been spent in medical imaging, where I led teams building applications for functional MRI and CT-based cardiac visualization. After a brief detour through the world of DNS and analytics, I'm now working in the area of distributed stream processing. I'm a relatively new member of the C++ Standardization Committee, and launched a blog earlier this year to write about C++ and related topics. I hold BS and MS degrees in Physics, and I'm an avid cyclist when weather permits.
+—
+Videos Filmed & Edited by Bash Films: http://www.BashFilms.com
+Captions: 
+	00:00:00,409 --> 00:00:05,269
+good morning everybody my name is Bob
+
+00:00:02,720 --> 00:00:06,590
+steagle and I'm here to talk about a
+
+00:00:05,269 --> 00:00:09,080
+little bit of code that I've been
+
+00:00:06,590 --> 00:00:11,450
+working on over the last year or so for
+
+00:00:09,080 --> 00:00:15,860
+for performing fast conversion from
+
+00:00:11,450 --> 00:00:18,680
+utf-8 use a C++ it uses a little DFA
+
+00:00:15,860 --> 00:00:21,740
+that I rolled up rolled together and it
+
+00:00:18,680 --> 00:00:26,449
+uses SSE intrinsics for some speed in in
+
+00:00:21,740 --> 00:00:28,670
+certain cases I started working on this
+
+00:00:26,449 --> 00:00:31,149
+problem because I was under the delusion
+
+00:00:28,670 --> 00:00:34,460
+that I wanted to write a JSON parser and
+
+00:00:31,149 --> 00:00:35,899
+part of writing a compliant JSON parser
+
+00:00:34,460 --> 00:00:39,440
+is that I have to be able to handle
+
+00:00:35,899 --> 00:00:43,550
+utf-8 and as part of that I discovered
+
+00:00:39,440 --> 00:00:45,649
+that utf-8 in order to find code points
+
+00:00:43,550 --> 00:00:46,729
+you have to convert it to utf-32 and I
+
+00:00:45,649 --> 00:00:49,370
+didn't really know what either one of
+
+00:00:46,729 --> 00:00:51,679
+those were so I wrote something that was
+
+00:00:49,370 --> 00:00:53,479
+very simple and it was somewhat slow and
+
+00:00:51,679 --> 00:00:54,920
+I looked at the problem and realized hey
+
+00:00:53,479 --> 00:00:57,859
+maybe I can make something a little bit
+
+00:00:54,920 --> 00:01:00,469
+faster so this is the story of how I did
+
+00:00:57,859 --> 00:01:04,460
+this I got some pretty good results and
+
+00:01:00,469 --> 00:01:06,740
+I'm here to share them with you so I'd
+
+00:01:04,460 --> 00:01:08,450
+like to begin with a few definitions to
+
+00:01:06,740 --> 00:01:09,980
+frame the discussion and frame so that
+
+00:01:08,450 --> 00:01:13,700
+you'll understand the code were about to
+
+00:01:09,980 --> 00:01:15,320
+see I'm going to show you probably more
+
+00:01:13,700 --> 00:01:16,970
+code than you usually see in one of
+
+00:01:15,320 --> 00:01:20,840
+these presentations but I promise you
+
+00:01:16,970 --> 00:01:25,280
+it's all very simple code I'll talk
+
+00:01:20,840 --> 00:01:27,620
+briefly about what utf-8 is we'll do a
+
+00:01:25,280 --> 00:01:31,220
+context switch and talk a little bit
+
+00:01:27,620 --> 00:01:34,370
+about what a DFA is then we'll talk
+
+00:01:31,220 --> 00:01:38,240
+about how one can use a DFA to recognize
+
+00:01:34,370 --> 00:01:40,820
+utf-8 we'll talk about the code that I
+
+00:01:38,240 --> 00:01:45,290
+wrote I'll show you some performance
+
+00:01:40,820 --> 00:01:48,230
+measurements and then finally I'd like
+
+00:01:45,290 --> 00:01:50,510
+to say that I am by no stretch of the
+
+00:01:48,230 --> 00:01:52,280
+imagination a Unicode expert so don't
+
+00:01:50,510 --> 00:01:55,130
+ask me any Unicode questions because I
+
+00:01:52,280 --> 00:01:56,479
+won't be able to answer them I approach
+
+00:01:55,130 --> 00:01:58,670
+this from the perspective of an
+
+00:01:56,479 --> 00:02:01,850
+algorithm problem I would like to
+
+00:01:58,670 --> 00:02:03,890
+convert a stream of bytes to a 32-bit
+
+00:02:01,850 --> 00:02:06,860
+unsigned integer according to some rules
+
+00:02:03,890 --> 00:02:08,780
+and how can I do that as quickly as
+
+00:02:06,860 --> 00:02:10,909
+possible and anything outside that
+
+00:02:08,780 --> 00:02:12,269
+context I was not really super
+
+00:02:10,909 --> 00:02:15,250
+interested in
+
+00:02:12,269 --> 00:02:18,129
+so some definitions what's a code unit a
+
+00:02:15,250 --> 00:02:21,129
+code unit is a single indivisible
+
+00:02:18,129 --> 00:02:25,709
+integer element of an encoded sequence
+
+00:02:21,129 --> 00:02:29,920
+of characters a sequence of code units
+
+00:02:25,709 --> 00:02:32,470
+specifies a code point you can think of
+
+00:02:29,920 --> 00:02:34,870
+code units as being atoms and a code
+
+00:02:32,470 --> 00:02:36,730
+point as being a molecule and it's the
+
+00:02:34,870 --> 00:02:38,769
+molecule that we're interested
+
+00:02:36,730 --> 00:02:42,370
+it's the molecules that represent
+
+00:02:38,769 --> 00:02:44,650
+characters by itself
+
+00:02:42,370 --> 00:02:46,720
+code units really don't have any meaning
+
+00:02:44,650 --> 00:02:49,239
+they don't identify any particular
+
+00:02:46,720 --> 00:02:52,959
+character they don't identify any
+
+00:02:49,239 --> 00:02:56,109
+particular code point the meaning of a
+
+00:02:52,959 --> 00:02:58,569
+particular code unit is derived from the
+
+00:02:56,109 --> 00:03:04,359
+encoding that that code unit is intended
+
+00:02:58,569 --> 00:03:06,609
+to represent and modern C++ here's a
+
+00:03:04,359 --> 00:03:09,400
+list of types that are commonly used as
+
+00:03:06,609 --> 00:03:12,760
+code units for various encoding zin
+
+00:03:09,400 --> 00:03:16,479
+different character representations as
+
+00:03:12,760 --> 00:03:21,099
+it turns out you can use UN 80 to
+
+00:03:16,479 --> 00:03:22,930
+represent code units in utf-8 so an
+
+00:03:21,099 --> 00:03:24,609
+encoding which I just mentioned is a
+
+00:03:22,930 --> 00:03:27,099
+method of representing a sequence of
+
+00:03:24,609 --> 00:03:32,919
+characters as a sequence of code units
+
+00:03:27,099 --> 00:03:36,430
+and code units sub sequences an encoding
+
+00:03:32,919 --> 00:03:39,840
+can be stateless or stateful a stateless
+
+00:03:36,430 --> 00:03:43,150
+encoding is one in which the the
+
+00:03:39,840 --> 00:03:45,970
+decoding of the next sequence of code
+
+00:03:43,150 --> 00:03:48,250
+units does not rely or depend on any
+
+00:03:45,970 --> 00:03:49,989
+decoding you did previously and of
+
+00:03:48,250 --> 00:03:52,599
+course stateful is the opposite where
+
+00:03:49,989 --> 00:03:54,840
+decoding or encoding depends on some
+
+00:03:52,599 --> 00:03:57,549
+operation that you've done previously in
+
+00:03:54,840 --> 00:04:00,150
+codings can be fixed width or variable
+
+00:03:57,549 --> 00:04:02,879
+width utf-32 is a fixed width encoding
+
+00:04:00,150 --> 00:04:05,699
+utf-8 is a variable-width encoding and
+
+00:04:02,879 --> 00:04:08,439
+encoding can support bi-directional
+
+00:04:05,699 --> 00:04:10,120
+decoding you might have sequences that
+
+00:04:08,439 --> 00:04:14,769
+represent right to left or left to right
+
+00:04:10,120 --> 00:04:16,030
+in the same sequence of code units and
+
+00:04:14,769 --> 00:04:20,650
+you've I'm sure you've all heard of
+
+00:04:16,030 --> 00:04:25,220
+these encoding is utf-8 16 and 32 8859
+
+00:04:20,650 --> 00:04:27,600
+and of course windows codepage 1250 to
+
+00:04:25,220 --> 00:04:28,830
+so a code point as I mentioned is the
+
+00:04:27,600 --> 00:04:32,190
+molecule it's the thing that's
+
+00:04:28,830 --> 00:04:34,440
+interested and we're interested in it is
+
+00:04:32,190 --> 00:04:37,229
+an integer value that denotes an
+
+00:04:34,440 --> 00:04:41,090
+abstract character which is defined by a
+
+00:04:37,229 --> 00:04:43,830
+character set a code point by itself
+
+00:04:41,090 --> 00:04:46,639
+doesn't represent any particular
+
+00:04:43,830 --> 00:04:50,160
+character it's just a numerical value
+
+00:04:46,639 --> 00:04:53,520
+the meaning that we give to a particular
+
+00:04:50,160 --> 00:04:58,620
+code point is derived from a character
+
+00:04:53,520 --> 00:05:02,160
+set definition and modern C++ we use
+
+00:04:58,620 --> 00:05:05,580
+char W chart each are 16 T and char 32 T
+
+00:05:02,160 --> 00:05:08,009
+to represent code points char 32 T being
+
+00:05:05,580 --> 00:05:12,259
+the one that most people use excuse me
+
+00:05:08,009 --> 00:05:15,030
+for utf-32 so what's a character set
+
+00:05:12,259 --> 00:05:19,229
+character set is a mapping of code point
+
+00:05:15,030 --> 00:05:20,849
+values to abstract characters it doesn't
+
+00:05:19,229 --> 00:05:23,699
+need to provide a mapping for every
+
+00:05:20,849 --> 00:05:25,500
+possible code point value that that it
+
+00:05:23,699 --> 00:05:27,960
+can be represented by the code point
+
+00:05:25,500 --> 00:05:31,169
+type for example all ASCII characters
+
+00:05:27,960 --> 00:05:34,349
+can be represented in less than 128 code
+
+00:05:31,169 --> 00:05:36,300
+points common character sets while we
+
+00:05:34,349 --> 00:05:41,010
+all know at ASCII Unicode and Windows
+
+00:05:36,300 --> 00:05:42,659
+code page 1252 are a character this is
+
+00:05:41,010 --> 00:05:45,449
+the important thing a character is an
+
+00:05:42,659 --> 00:05:47,130
+element of a written language the thing
+
+00:05:45,449 --> 00:05:48,449
+that we see that there are of which
+
+00:05:47,130 --> 00:05:51,389
+there are glyphs or visual
+
+00:05:48,449 --> 00:05:53,669
+representations for our purposes and the
+
+00:05:51,389 --> 00:05:55,889
+purposes of this talk a character is
+
+00:05:53,669 --> 00:05:58,530
+identified that glyph the thing that you
+
+00:05:55,889 --> 00:06:01,409
+see is identified by the combination of
+
+00:05:58,530 --> 00:06:06,389
+a character set and a code point value
+
+00:06:01,409 --> 00:06:08,759
+so a character set is a mapping of code
+
+00:06:06,389 --> 00:06:11,370
+points where specific code points
+
+00:06:08,759 --> 00:06:15,750
+represent specific code point values or
+
+00:06:11,370 --> 00:06:22,229
+specific characters alright so getting
+
+00:06:15,750 --> 00:06:25,400
+into the meat what is utf-8 utf-16 for
+
+00:06:22,229 --> 00:06:28,470
+encoding code points each code point is
+
+00:06:25,400 --> 00:06:32,729
+encoded by a sequence of one two four
+
+00:06:28,470 --> 00:06:35,340
+eight byte unsigned integers u NT or
+
+00:06:32,729 --> 00:06:37,289
+unsigned char I will refer to these in
+
+00:06:35,340 --> 00:06:38,020
+the rest of the presentation as bytes or
+
+00:06:37,289 --> 00:06:41,020
+ox
+
+00:06:38,020 --> 00:06:45,130
+but when I say bite or octet I mean au
+
+00:06:41,020 --> 00:06:47,800
+n8t the first bite in one of these
+
+00:06:45,130 --> 00:06:49,900
+sequences indicates the total length of
+
+00:06:47,800 --> 00:06:51,060
+the sequence well we'll see how that
+
+00:06:49,900 --> 00:06:53,800
+works
+
+00:06:51,060 --> 00:06:58,810
+ASCII characters as you might expect are
+
+00:06:53,800 --> 00:07:01,090
+encoded in the range 0 to hex 7f the
+
+00:06:58,810 --> 00:07:05,199
+first byte in a multi byte sequence
+
+00:07:01,090 --> 00:07:07,169
+always ranges from hex c2 to hex f4 and
+
+00:07:05,199 --> 00:07:09,940
+we'll see why that is in a moment
+
+00:07:07,169 --> 00:07:11,800
+trailing bytes in other words the bytes
+
+00:07:09,940 --> 00:07:14,349
+that come after the first byte in a
+
+00:07:11,800 --> 00:07:20,050
+multi byte sequence always lie on the
+
+00:07:14,349 --> 00:07:21,220
+range hex 82 hex bf so when I was
+
+00:07:20,050 --> 00:07:23,650
+learning about this and trying to
+
+00:07:21,220 --> 00:07:26,590
+understand how things work
+
+00:07:23,650 --> 00:07:29,340
+it helped me quite a bit to think of the
+
+00:07:26,590 --> 00:07:34,419
+octet in terms of their individual bits
+
+00:07:29,340 --> 00:07:42,460
+so let's look at a one byte sequence an
+
+00:07:34,419 --> 00:07:44,470
+ASCII byte utf-8 code sequences are code
+
+00:07:42,460 --> 00:07:47,289
+unit sequences are the length is
+
+00:07:44,470 --> 00:07:49,030
+determined by the first byte so in this
+
+00:07:47,289 --> 00:07:51,789
+case the first byte begins with the
+
+00:07:49,030 --> 00:07:55,900
+leading 0 which indicates that this is a
+
+00:07:51,789 --> 00:07:58,030
+1 byte sequence the trailing 7 bytes
+
+00:07:55,900 --> 00:08:00,460
+which I've represented by the X's here
+
+00:07:58,030 --> 00:08:04,570
+represent the information that that can
+
+00:08:00,460 --> 00:08:08,020
+be stored in this in this code unit in a
+
+00:08:04,570 --> 00:08:11,380
+to 2 byte sequence the leading byte has
+
+00:08:08,020 --> 00:08:13,630
+the upper three bits of 1 1 0 and so
+
+00:08:11,380 --> 00:08:15,340
+decoders look at those upper 3 bits they
+
+00:08:13,630 --> 00:08:18,580
+see that the upper 3 bits from high to
+
+00:08:15,340 --> 00:08:20,650
+low are 1 1 0 and the 2 ones in the
+
+00:08:18,580 --> 00:08:23,710
+upper two bits indicate this is a 2 byte
+
+00:08:20,650 --> 00:08:26,440
+sequence there's a 0 which acts as a
+
+00:08:23,710 --> 00:08:28,419
+separator and then the lower 5 bits of
+
+00:08:26,440 --> 00:08:31,330
+the upper byte contain useful
+
+00:08:28,419 --> 00:08:35,079
+information and then the trailing byte
+
+00:08:31,330 --> 00:08:37,630
+the second byte begins with 1 0 this is
+
+00:08:35,079 --> 00:08:41,440
+why trailing bites always range from hex
+
+00:08:37,630 --> 00:08:45,300
+8 0 to hex bf because the upper two bits
+
+00:08:41,440 --> 00:08:49,180
+in trailing bytes must begin with 1 0
+
+00:08:45,300 --> 00:08:51,250
+similarly with a 3 3 byte or 3 octet
+
+00:08:49,180 --> 00:08:51,670
+sequence the upper 3 bits and the
+
+00:08:51,250 --> 00:08:55,660
+leading
+
+00:08:51,670 --> 00:09:00,190
+I begin with 1 1 1 0 followed by two
+
+00:08:55,660 --> 00:09:03,190
+trailing bytes and finally for a 4 byte
+
+00:09:00,190 --> 00:09:07,330
+sequence the upper nibble the upper 5
+
+00:09:03,190 --> 00:09:11,350
+bits are 1 1 1 1 0 followed by 3 bits of
+
+00:09:07,330 --> 00:09:12,490
+information and 3 trailing bytes now if
+
+00:09:11,350 --> 00:09:14,890
+you look at the total amount of
+
+00:09:12,490 --> 00:09:17,050
+information that can be stored in each
+
+00:09:14,890 --> 00:09:19,810
+of these ranges a one byte sequence can
+
+00:09:17,050 --> 00:09:23,230
+store seven bits a two byte sequence can
+
+00:09:19,810 --> 00:09:25,930
+store 11 bits a 3 byte sequence can
+
+00:09:23,230 --> 00:09:28,000
+store 16 bits of information and a four
+
+00:09:25,930 --> 00:09:33,190
+byte sequence can store 21 bits of
+
+00:09:28,000 --> 00:09:38,650
+information so let's look at some valid
+
+00:09:33,190 --> 00:09:41,650
+sequences jon kabat feature of c++ the
+
+00:09:38,650 --> 00:09:44,410
+right brace here is a representation of
+
+00:09:41,650 --> 00:09:46,990
+the right brace you can and I've
+
+00:09:44,410 --> 00:09:52,390
+highlighted the bits the bits of
+
+00:09:46,990 --> 00:09:55,750
+information in yellow here is a unicode
+
+00:09:52,390 --> 00:09:59,680
+utf-8 representation of the copyright
+
+00:09:55,750 --> 00:10:02,890
+sign so if you which is represented by
+
+00:09:59,680 --> 00:10:05,560
+hex 0 0 a 9 and for some reason in
+
+00:10:02,890 --> 00:10:09,310
+unicode instead of Oh X they do u plus
+
+00:10:05,560 --> 00:10:11,590
+but what we're looking at is hex a 9 so
+
+00:10:09,310 --> 00:10:15,400
+the alternating sequences of yellow
+
+00:10:11,590 --> 00:10:17,680
+green and yellow represent nibbles in
+
+00:10:15,400 --> 00:10:21,460
+the byte sequence so you can look
+
+00:10:17,680 --> 00:10:24,610
+directly and see that you've got in
+
+00:10:21,460 --> 00:10:27,310
+green you've got a and in the yellow on
+
+00:10:24,610 --> 00:10:31,920
+the right you've got 9 and when encoded
+
+00:10:27,310 --> 00:10:34,750
+in the two byte sequence it's c2 and a 9
+
+00:10:31,920 --> 00:10:40,660
+similarly for a 3 byte sequence which
+
+00:10:34,750 --> 00:10:44,140
+encodes the the not equal sign so it's
+
+00:10:40,660 --> 00:10:45,970
+pretty easy to understand when you
+
+00:10:44,140 --> 00:10:49,570
+stretch the bits out like this you you
+
+00:10:45,970 --> 00:10:51,670
+have encoding sequences which take take
+
+00:10:49,570 --> 00:10:54,610
+bits and stretch them out and put them
+
+00:10:51,670 --> 00:10:56,140
+into utf-8 sequences and decoding you
+
+00:10:54,610 --> 00:10:58,870
+take those bits and you compress them
+
+00:10:56,140 --> 00:11:00,970
+back into code points but there is a
+
+00:10:58,870 --> 00:11:04,000
+important condition called over long
+
+00:11:00,970 --> 00:11:04,700
+sequences so consider the closing brace
+
+00:11:04,000 --> 00:11:09,410
+the
+
+00:11:04,700 --> 00:11:12,590
+as heck 7d when represented as a single
+
+00:11:09,410 --> 00:11:14,390
+byte sequence it's a valid ascii leading
+
+00:11:12,590 --> 00:11:17,870
+byte it's a leading byte in a one byte
+
+00:11:14,390 --> 00:11:20,680
+sequence in its valid however if you try
+
+00:11:17,870 --> 00:11:23,960
+to encode that in a two byte sequence
+
+00:11:20,680 --> 00:11:26,060
+you would be using less information than
+
+00:11:23,960 --> 00:11:28,250
+two byte sequence is capable of
+
+00:11:26,060 --> 00:11:31,340
+representing in other words you've got
+
+00:11:28,250 --> 00:11:35,060
+some leading zeros there that you don't
+
+00:11:31,340 --> 00:11:36,650
+need to have if you represented it in a
+
+00:11:35,060 --> 00:11:40,430
+three byte sequence you would have even
+
+00:11:36,650 --> 00:11:42,560
+more leading zeros where you should be
+
+00:11:40,430 --> 00:11:44,420
+having bits of information these are
+
+00:11:42,560 --> 00:11:47,630
+called over long sequences because
+
+00:11:44,420 --> 00:11:49,760
+you're using more bytes to represent the
+
+00:11:47,630 --> 00:11:51,170
+code point than you actually need to and
+
+00:11:49,760 --> 00:11:54,920
+this is not legal
+
+00:11:51,170 --> 00:11:58,580
+utf-8 in utf-8 you're supposed to use
+
+00:11:54,920 --> 00:12:00,680
+the minimum number of octets which are
+
+00:11:58,580 --> 00:12:04,820
+required to represent the code point of
+
+00:12:00,680 --> 00:12:07,070
+interest and I read that there had a
+
+00:12:04,820 --> 00:12:10,160
+long time ago there were some security
+
+00:12:07,070 --> 00:12:13,400
+exploits that that occurred by feeding
+
+00:12:10,160 --> 00:12:18,350
+over long sequences into some piece of
+
+00:12:13,400 --> 00:12:20,240
+software X so in doing this conversion
+
+00:12:18,350 --> 00:12:23,750
+there are boundary conditions like any
+
+00:12:20,240 --> 00:12:29,840
+problem there is the maximum code point
+
+00:12:23,750 --> 00:12:34,190
+value which is hex 1 o FF FF FF FF which
+
+00:12:29,840 --> 00:12:36,740
+represents 17 planes of 64 K code points
+
+00:12:34,190 --> 00:12:39,770
+per plane there are these strange things
+
+00:12:36,740 --> 00:12:43,670
+called the utf-8 I'm sorry the utf-16
+
+00:12:39,770 --> 00:12:48,080
+surrogates which range from hex d800 to
+
+00:12:43,670 --> 00:12:51,830
+hex dfff they are used to encode code
+
+00:12:48,080 --> 00:12:54,380
+points greater than hex ffff in utf-16
+
+00:12:51,830 --> 00:12:57,290
+not going to talk about them other than
+
+00:12:54,380 --> 00:13:01,490
+to say that they should never appear in
+
+00:12:57,290 --> 00:13:05,960
+utf-32 streams or utf-8 encoding z' by
+
+00:13:01,490 --> 00:13:10,490
+themselves and I just mentioned over
+
+00:13:05,960 --> 00:13:12,050
+long sequences over long sequences well
+
+00:13:10,490 --> 00:13:13,880
+there's no such thing as a one byte over
+
+00:13:12,050 --> 00:13:16,220
+long sequence but for to bite over long
+
+00:13:13,880 --> 00:13:17,670
+sequences any sequence beginning with
+
+00:13:16,220 --> 00:13:21,720
+hex C humps
+
+00:13:17,670 --> 00:13:23,730
+XC 0 or XC 1 is over long any three byte
+
+00:13:21,720 --> 00:13:26,310
+sequence that begins with hex easy row
+
+00:13:23,730 --> 00:13:29,370
+fall owed by a trailing byte whose value
+
+00:13:26,310 --> 00:13:31,980
+is less than hex 9f and similarly with 4
+
+00:13:29,370 --> 00:13:33,990
+byte sequences any any sequence that
+
+00:13:31,980 --> 00:13:36,120
+begins with hex fo is followed by a
+
+00:13:33,990 --> 00:13:39,360
+trailing byte whose value is less than
+
+00:13:36,120 --> 00:13:42,450
+hex AF if you map out the pattern of
+
+00:13:39,360 --> 00:13:46,080
+bits you will see that those are over
+
+00:13:42,450 --> 00:13:47,790
+long sequences so here's a sample
+
+00:13:46,080 --> 00:13:49,260
+converter how do you actually do the
+
+00:13:47,790 --> 00:13:52,470
+conversion this is sort of the canonical
+
+00:13:49,260 --> 00:13:53,820
+simple way of doing it at the top of the
+
+00:13:52,470 --> 00:13:56,910
+function you can see I have an input
+
+00:13:53,820 --> 00:13:59,339
+array I'm taking a pointer I have a code
+
+00:13:56,910 --> 00:14:01,589
+I'm using char 32 as my code point and
+
+00:13:59,339 --> 00:14:03,089
+output parameter on the right and I'm
+
+00:14:01,589 --> 00:14:05,040
+just have an if-else ladder where I
+
+00:14:03,089 --> 00:14:08,220
+start at the top and I look at the value
+
+00:14:05,040 --> 00:14:10,350
+of the leading byte I do some masking to
+
+00:14:08,220 --> 00:14:12,570
+find out what range it is it what range
+
+00:14:10,350 --> 00:14:15,420
+it's in and then depending on how many
+
+00:14:12,570 --> 00:14:17,910
+trailing bytes I expect I do some some
+
+00:14:15,420 --> 00:14:21,060
+bit manipulations in order to compose
+
+00:14:17,910 --> 00:14:23,399
+the bytes from the input octet into the
+
+00:14:21,060 --> 00:14:24,779
+code point and then I have a little
+
+00:14:23,399 --> 00:14:27,630
+function at the end that checks the
+
+00:14:24,779 --> 00:14:30,899
+value to make sure it is a valid code
+
+00:14:27,630 --> 00:14:32,579
+point this is a very standard way of
+
+00:14:30,899 --> 00:14:36,560
+doing this there are lots of bits of
+
+00:14:32,579 --> 00:14:36,560
+software that do something very similar
+
+00:14:40,130 --> 00:14:45,540
+you look at the first byte of the u TF
+
+00:14:43,050 --> 00:14:49,620
+sequence and it should tell you how many
+
+00:14:45,540 --> 00:14:51,890
+bytes there are to advance I'm sorry
+
+00:14:49,620 --> 00:14:51,890
+it's what
+
+00:14:53,470 --> 00:15:04,750
+oh yeah yes the point ourselves not
+
+00:15:00,490 --> 00:15:05,830
+being advanced you're you're right yes I
+
+00:15:04,750 --> 00:15:09,940
+should have passed the pointer in by
+
+00:15:05,830 --> 00:15:13,900
+reference all right so I'd like to talk
+
+00:15:09,940 --> 00:15:16,030
+about what a DFA is a DFA is a terminus
+
+00:15:13,900 --> 00:15:18,460
+t'k finite automaton it's a finite state
+
+00:15:16,030 --> 00:15:22,030
+machine it accepts and rejects strings
+
+00:15:18,460 --> 00:15:23,530
+of input symbols DFAS recognized what
+
+00:15:22,030 --> 00:15:25,450
+are called regular languages they're
+
+00:15:23,530 --> 00:15:29,230
+useful for simple pattern matching
+
+00:15:25,450 --> 00:15:33,250
+they're defined mathematically by five
+
+00:15:29,230 --> 00:15:36,190
+attributes something a thing that has a
+
+00:15:33,250 --> 00:15:38,490
+finite number of states a finite set of
+
+00:15:36,190 --> 00:15:41,080
+input symbols called the alphabet a
+
+00:15:38,490 --> 00:15:42,910
+transition function which determines
+
+00:15:41,080 --> 00:15:45,940
+transitions from state based on the
+
+00:15:42,910 --> 00:15:48,100
+input symbols a start state where you
+
+00:15:45,940 --> 00:15:50,380
+begin your matching and one or more
+
+00:15:48,100 --> 00:15:54,790
+accept states where you conclude your
+
+00:15:50,380 --> 00:15:56,380
+your matching so how does it work well
+
+00:15:54,790 --> 00:15:58,000
+given the current state and a pending
+
+00:15:56,380 --> 00:16:00,090
+input symbol which is typically called
+
+00:15:58,000 --> 00:16:03,430
+the look ahead the transition function
+
+00:16:00,090 --> 00:16:04,870
+specifies the next state so you begin at
+
+00:16:03,430 --> 00:16:07,900
+the start state of which by definition
+
+00:16:04,870 --> 00:16:10,450
+there's one you consume symbols and
+
+00:16:07,900 --> 00:16:12,820
+execute state transitions until
+
+00:16:10,450 --> 00:16:15,250
+recognition halts well when do you halt
+
+00:16:12,820 --> 00:16:18,580
+your recognition you halt recognition
+
+00:16:15,250 --> 00:16:20,590
+when an accept state is reached or there
+
+00:16:18,580 --> 00:16:22,930
+is no transition leaving the state in
+
+00:16:20,590 --> 00:16:26,170
+which case you reject the string because
+
+00:16:22,930 --> 00:16:28,180
+you cannot get to an accept state DFAS
+
+00:16:26,170 --> 00:16:30,610
+are fairly limited in languages that
+
+00:16:28,180 --> 00:16:32,590
+they can recognize they can recognize
+
+00:16:30,610 --> 00:16:34,870
+very simple or very simple regular
+
+00:16:32,590 --> 00:16:38,290
+expressions where you have concatenation
+
+00:16:34,870 --> 00:16:41,260
+or clean positive conditional closure or
+
+00:16:38,290 --> 00:16:43,660
+alternation they cannot solve problems
+
+00:16:41,260 --> 00:16:47,950
+that require more than constant space
+
+00:16:43,660 --> 00:16:49,510
+such as matching properly paired sets of
+
+00:16:47,950 --> 00:16:52,360
+parentheses for that you also need to
+
+00:16:49,510 --> 00:16:56,050
+have a stack this is an example of a
+
+00:16:52,360 --> 00:16:58,660
+very simple DFA it will match any number
+
+00:16:56,050 --> 00:17:01,270
+of leading spaces followed by an
+
+00:16:58,660 --> 00:17:03,970
+optional plus or minus sign followed by
+
+00:17:01,270 --> 00:17:06,420
+a sequence of decimal digits and here I
+
+00:17:03,970 --> 00:17:09,660
+am allowing zeros
+
+00:17:06,420 --> 00:17:11,730
+leading zeros on my integer so you can
+
+00:17:09,660 --> 00:17:13,500
+see that I have start state I have
+
+00:17:11,730 --> 00:17:17,790
+transitions out of the start state based
+
+00:17:13,500 --> 00:17:19,770
+on what my input is if I were going to
+
+00:17:17,790 --> 00:17:22,410
+represent it as a table the table might
+
+00:17:19,770 --> 00:17:26,100
+look something like this where I have my
+
+00:17:22,410 --> 00:17:29,430
+states in the rows and I have my input
+
+00:17:26,100 --> 00:17:31,770
+in the columns and for example if I'm in
+
+00:17:29,430 --> 00:17:33,660
+state 0 which is the begin state and I
+
+00:17:31,770 --> 00:17:36,090
+get a digit I can immediately go to
+
+00:17:33,660 --> 00:17:38,340
+state 2 which is an accepting state but
+
+00:17:36,090 --> 00:17:40,200
+I keep trying to accept more digits and
+
+00:17:38,340 --> 00:17:42,300
+when I finally find something that I
+
+00:17:40,200 --> 00:17:42,720
+can't accept added digit I know that I'm
+
+00:17:42,300 --> 00:17:45,690
+done
+
+00:17:42,720 --> 00:17:48,660
+I've recognized something I'm in the
+
+00:17:45,690 --> 00:17:51,420
+accept state so I can keep that if I
+
+00:17:48,660 --> 00:17:53,550
+have received a sign a plus or minus
+
+00:17:51,420 --> 00:17:57,960
+sign from state 1 I go to state 1 which
+
+00:17:53,550 --> 00:17:59,880
+is digit I'm sorry I go to state 1 if I
+
+00:17:57,960 --> 00:18:02,250
+get a digit from state 1 then I can go
+
+00:17:59,880 --> 00:18:04,800
+to state 2 if I'm in state 1 and I get
+
+00:18:02,250 --> 00:18:08,460
+anything else except a digit I reject it
+
+00:18:04,800 --> 00:18:11,430
+and so on and so forth very simple
+
+00:18:08,460 --> 00:18:15,450
+example of a DFA so how can we use this
+
+00:18:11,430 --> 00:18:18,360
+to recognize utf-8 well remember we have
+
+00:18:15,450 --> 00:18:20,610
+boundary conditions that we have to
+
+00:18:18,360 --> 00:18:22,200
+follow we need to keep in mind as we're
+
+00:18:20,610 --> 00:18:25,980
+trying to build the DFA and here I've
+
+00:18:22,200 --> 00:18:27,540
+just repeated them so when I was working
+
+00:18:25,980 --> 00:18:29,820
+on the problem I tried to figure out how
+
+00:18:27,540 --> 00:18:31,800
+can I find the transitions in the DFA
+
+00:18:29,820 --> 00:18:33,630
+that account for the boundary conditions
+
+00:18:31,800 --> 00:18:34,740
+and I'm not going to go over all of
+
+00:18:33,630 --> 00:18:37,110
+these slides because they're very
+
+00:18:34,740 --> 00:18:38,610
+detailed and I'm but they're in the
+
+00:18:37,110 --> 00:18:41,040
+presentation in case someone wants to
+
+00:18:38,610 --> 00:18:43,260
+look at them but what I really did is I
+
+00:18:41,040 --> 00:18:46,530
+started in the left-hand column and I
+
+00:18:43,260 --> 00:18:49,500
+started working down and mapping out the
+
+00:18:46,530 --> 00:18:51,300
+the binary and hexans for code points
+
+00:18:49,500 --> 00:18:53,340
+and looking for those places where there
+
+00:18:51,300 --> 00:18:55,800
+were transitions so for example if you
+
+00:18:53,340 --> 00:18:59,850
+go from hex 7 FFF to hex
+
+00:18:55,800 --> 00:19:02,460
+800 and you map out utf-8 hex in the
+
+00:18:59,850 --> 00:19:05,190
+third column there you can see that
+
+00:19:02,460 --> 00:19:06,990
+there is a certain range of values of
+
+00:19:05,190 --> 00:19:10,140
+leading bytes and trailing bytes that
+
+00:19:06,990 --> 00:19:11,790
+are over long same thing in the in the
+
+00:19:10,140 --> 00:19:14,580
+first row and the same thing for the
+
+00:19:11,790 --> 00:19:17,400
+surrogates here so the red lines
+
+00:19:14,580 --> 00:19:19,310
+represent boundary conditions which
+
+00:19:17,400 --> 00:19:25,760
+means state transitions have to be
+
+00:19:19,310 --> 00:19:28,160
+in the DFS and for longer sequences I I
+
+00:19:25,760 --> 00:19:29,960
+repeated the surrogates at the top but
+
+00:19:28,160 --> 00:19:32,330
+you can also have for bite over long
+
+00:19:29,960 --> 00:19:34,130
+sequences and then of course you can
+
+00:19:32,330 --> 00:19:38,810
+have byte sequences which just take you
+
+00:19:34,130 --> 00:19:40,400
+out of range on the high end so there
+
+00:19:38,810 --> 00:19:43,820
+for reference if anybody wants to look
+
+00:19:40,400 --> 00:19:46,790
+at it but at the end of the day the DFA
+
+00:19:43,820 --> 00:19:49,900
+that you get looks like this it has nine
+
+00:19:46,790 --> 00:19:53,600
+states it has states that account for
+
+00:19:49,900 --> 00:19:57,260
+single byte sequences so ASCII they're
+
+00:19:53,600 --> 00:19:59,030
+just sequences transitions in in the
+
+00:19:57,260 --> 00:20:01,280
+begin state which is also the accepting
+
+00:19:59,030 --> 00:20:03,620
+state if you go from begin and you get
+
+00:20:01,280 --> 00:20:05,750
+c2 2df go all the way over to
+
+00:20:03,620 --> 00:20:07,250
+continuation state one if you get a
+
+00:20:05,750 --> 00:20:09,500
+valid trailing byte you come all the way
+
+00:20:07,250 --> 00:20:12,920
+back to begin that represents the valid
+
+00:20:09,500 --> 00:20:15,800
+two to octet sequence and we have states
+
+00:20:12,920 --> 00:20:18,530
+partial three bytes states a and B near
+
+00:20:15,800 --> 00:20:20,870
+the top there which then feed into
+
+00:20:18,530 --> 00:20:22,820
+continuation state one and back for
+
+00:20:20,870 --> 00:20:25,280
+three byte sequences and then we have a
+
+00:20:22,820 --> 00:20:28,100
+set of states here partial state for a
+
+00:20:25,280 --> 00:20:31,100
+and B and continuation state 3 and 2
+
+00:20:28,100 --> 00:20:36,770
+which are transitions that are necessary
+
+00:20:31,100 --> 00:20:38,420
+to recognize for byte sequences so how
+
+00:20:36,770 --> 00:20:40,310
+could we use this in practice let's
+
+00:20:38,420 --> 00:20:41,720
+assume that we have a three byte input
+
+00:20:40,310 --> 00:20:44,240
+sequence which you see there at the top
+
+00:20:41,720 --> 00:20:47,510
+of the slide e two eight eight and eight
+
+00:20:44,240 --> 00:20:50,180
+five so we start in the begin state we
+
+00:20:47,510 --> 00:20:52,250
+look at our look ahead which is e2 we
+
+00:20:50,180 --> 00:20:53,900
+have an outgoing transition on e2 which
+
+00:20:52,250 --> 00:20:56,510
+I've highlighted in yellow here which
+
+00:20:53,900 --> 00:20:58,820
+leads to continuation state two so we
+
+00:20:56,510 --> 00:21:01,580
+consume that byte and we don't go to
+
+00:20:58,820 --> 00:21:03,650
+continuation state to our look ahead is
+
+00:21:01,580 --> 00:21:06,020
+now eight eight we have an outgoing
+
+00:21:03,650 --> 00:21:09,470
+transition that matches eight eight that
+
+00:21:06,020 --> 00:21:12,080
+takes us to continuation state one our
+
+00:21:09,470 --> 00:21:14,270
+look ahead is now eight five we have a
+
+00:21:12,080 --> 00:21:16,670
+an outgoing transition that matches that
+
+00:21:14,270 --> 00:21:19,490
+and it takes us back to the begins state
+
+00:21:16,670 --> 00:21:23,510
+our accepting state so boom we've just
+
+00:21:19,490 --> 00:21:27,110
+recognized a three byte or three octet
+
+00:21:23,510 --> 00:21:30,169
+input sequence of utf-8 characters
+
+00:21:27,110 --> 00:21:33,260
+so very straightforward and what I did
+
+00:21:30,169 --> 00:21:36,620
+not say is that every other outgoing
+
+00:21:33,260 --> 00:21:38,720
+transition from these states implicitly
+
+00:21:36,620 --> 00:21:40,279
+goes to the heir estate at the lower
+
+00:21:38,720 --> 00:21:42,620
+right hand corner which is also an
+
+00:21:40,279 --> 00:21:44,269
+accepting state but there are a lot more
+
+00:21:42,620 --> 00:21:48,740
+of those and therefore they're not on
+
+00:21:44,269 --> 00:21:54,200
+the graph so how can we write a
+
+00:21:48,740 --> 00:21:57,019
+converter to do this well clearly the
+
+00:21:54,200 --> 00:21:59,649
+idea is to write to do recognition and
+
+00:21:57,019 --> 00:22:02,299
+decoding with the table based DFA and
+
+00:21:59,649 --> 00:22:03,860
+importantly we want to do the decoding
+
+00:22:02,299 --> 00:22:06,620
+at the same time we're doing the
+
+00:22:03,860 --> 00:22:10,220
+recognition rather than recognizing and
+
+00:22:06,620 --> 00:22:10,940
+then going back and decoding we want to
+
+00:22:10,220 --> 00:22:12,679
+pre-compute
+
+00:22:10,940 --> 00:22:15,169
+as much as possible to get the highest
+
+00:22:12,679 --> 00:22:17,539
+possible performance but we want to keep
+
+00:22:15,169 --> 00:22:19,010
+our tables small because I had imagined
+
+00:22:17,539 --> 00:22:21,679
+that this might be useful in some sort
+
+00:22:19,010 --> 00:22:23,120
+of a sort of embedded application I'd
+
+00:22:21,679 --> 00:22:26,330
+like to keep the code as simple as
+
+00:22:23,120 --> 00:22:28,309
+possible but also make it fast I'd like
+
+00:22:26,330 --> 00:22:30,980
+to hide all of the complexity of the
+
+00:22:28,309 --> 00:22:33,559
+recognition in the DFA tables rather
+
+00:22:30,980 --> 00:22:36,950
+than in the code and of course I'd like
+
+00:22:33,559 --> 00:22:38,240
+to be faster than the other guys so I'm
+
+00:22:36,950 --> 00:22:40,190
+going to show you some code and there
+
+00:22:38,240 --> 00:22:42,350
+are assumptions associated with the code
+
+00:22:40,190 --> 00:22:44,899
+first of all there's no error checking
+
+00:22:42,350 --> 00:22:46,820
+this I'm assuming that all your pointer
+
+00:22:44,899 --> 00:22:49,700
+arguments are non null this is an
+
+00:22:46,820 --> 00:22:51,049
+innocence and academic exercise I'm
+
+00:22:49,700 --> 00:22:53,059
+assuming that the input and output
+
+00:22:51,049 --> 00:22:55,909
+buffers that your pointers point to
+
+00:22:53,059 --> 00:22:58,429
+actually exist I'm also going to assume
+
+00:22:55,909 --> 00:23:00,139
+that the destination buffer is large
+
+00:22:58,429 --> 00:23:02,690
+enough that it can receive any output
+
+00:23:00,139 --> 00:23:06,019
+with no overflow I'm not checking for
+
+00:23:02,690 --> 00:23:07,880
+that in this code I'm also assuming that
+
+00:23:06,019 --> 00:23:10,399
+the destination code points are
+
+00:23:07,880 --> 00:23:12,820
+little-endian which they would be on an
+
+00:23:10,399 --> 00:23:15,799
+Intel architecture where we have SSE I'm
+
+00:23:12,820 --> 00:23:18,409
+assuming that we're going to use Intel
+
+00:23:15,799 --> 00:23:21,289
+hardware and that at least SSE 2 is
+
+00:23:18,409 --> 00:23:22,940
+available on that hardware finally I'm
+
+00:23:21,289 --> 00:23:25,309
+going to assume that the destination
+
+00:23:22,940 --> 00:23:27,889
+code point buffer is a line on a char 32
+
+00:23:25,309 --> 00:23:29,630
+boundary which is necessary for the SSE
+
+00:23:27,889 --> 00:23:32,779
+code I'm going to show you to work and
+
+00:23:29,630 --> 00:23:34,850
+if I'm transcoding to char 16 I'm going
+
+00:23:32,779 --> 00:23:38,890
+to assume that the output buffer is
+
+00:23:34,850 --> 00:23:41,530
+similarly aligned on a char 16 boundary
+
+00:23:38,890 --> 00:23:43,809
+so here's what the public interface for
+
+00:23:41,530 --> 00:23:45,280
+my decoder looks like it's a trait style
+
+00:23:43,809 --> 00:23:47,679
+class everything in it pretty much a
+
+00:23:45,280 --> 00:23:50,230
+static of interest are these three
+
+00:23:47,679 --> 00:23:55,210
+functions basic convert fast convert and
+
+00:23:50,230 --> 00:24:01,420
+SSE convert they take chart eight T
+
+00:23:55,210 --> 00:24:03,100
+input parameter T 2 T pointer as an
+
+00:24:01,420 --> 00:24:05,860
+output Koran that's the output buffer
+
+00:24:03,100 --> 00:24:12,970
+this ordering and style of arguments was
+
+00:24:05,860 --> 00:24:14,980
+chosen to mirror stood copy so in
+
+00:24:12,970 --> 00:24:16,990
+building the state transition table I'm
+
+00:24:14,980 --> 00:24:19,720
+going to define a couple of in ohms so
+
+00:24:16,990 --> 00:24:21,880
+that I can make the table very small the
+
+00:24:19,720 --> 00:24:28,690
+first is a character class enumeration
+
+00:24:21,880 --> 00:24:31,990
+so by examining the state the DFA and
+
+00:24:28,690 --> 00:24:34,120
+the tables that I showed you earlier one
+
+00:24:31,990 --> 00:24:37,750
+can infer that there are twelve distinct
+
+00:24:34,120 --> 00:24:41,679
+character classes and ranging from
+
+00:24:37,750 --> 00:24:44,260
+illegal octets to ASCII to continuation
+
+00:24:41,679 --> 00:24:47,410
+range bytes to bytes which represent
+
+00:24:44,260 --> 00:24:49,570
+leading leading to byte sequence leading
+
+00:24:47,410 --> 00:24:52,270
+three byte sequence and leading byte for
+
+00:24:49,570 --> 00:24:54,220
+a four byte sequence and this is a
+
+00:24:52,270 --> 00:24:56,169
+decomposition of all of those
+
+00:24:54,220 --> 00:25:00,100
+transitions into the minimum number of
+
+00:24:56,169 --> 00:25:05,440
+classes that are capable of representing
+
+00:25:00,100 --> 00:25:11,679
+the state transitions in the DFA I've
+
+00:25:05,440 --> 00:25:14,440
+also got some a scoped typed enumeration
+
+00:25:11,679 --> 00:25:17,410
+which actually represents the states
+
+00:25:14,440 --> 00:25:19,419
+themselves the DFA has nine classes of
+
+00:25:17,410 --> 00:25:24,970
+input I'm sorry twelve classes of input
+
+00:25:19,419 --> 00:25:27,070
+and nine states and this these states
+
+00:25:24,970 --> 00:25:30,070
+map directly to the states that you saw
+
+00:25:27,070 --> 00:25:33,429
+on the state transition diagram I'm
+
+00:25:30,070 --> 00:25:35,380
+using you may wonder why they are
+
+00:25:33,429 --> 00:25:37,270
+incremented in units of twelve that's
+
+00:25:35,380 --> 00:25:39,549
+because there are twelve character
+
+00:25:37,270 --> 00:25:41,830
+classes and I'm using a linear array
+
+00:25:39,549 --> 00:25:43,270
+rather than two-dimensional array to do
+
+00:25:41,830 --> 00:25:44,919
+the lookup when I do the state
+
+00:25:43,270 --> 00:25:45,750
+transition and you'll see why in a
+
+00:25:44,919 --> 00:25:48,300
+moment
+
+00:25:45,750 --> 00:25:50,169
+I've also got some convenience
+
+00:25:48,300 --> 00:25:52,400
+definitions at the bottom to make the
+
+00:25:50,169 --> 00:25:56,660
+state transition table
+
+00:25:52,400 --> 00:25:58,250
+little easier to read I have in terms of
+
+00:25:56,660 --> 00:26:00,830
+data structures there is a data
+
+00:25:58,250 --> 00:26:02,710
+structure I call first unit info this is
+
+00:26:00,830 --> 00:26:05,060
+a little structure that represents
+
+00:26:02,710 --> 00:26:07,700
+special information about the first
+
+00:26:05,060 --> 00:26:10,070
+octet in a sequence the first octet has
+
+00:26:07,700 --> 00:26:11,690
+to be treated especially there are
+
+00:26:10,070 --> 00:26:13,250
+things that you do with the first octet
+
+00:26:11,690 --> 00:26:19,130
+that you don't do with the trailing arm
+
+00:26:13,250 --> 00:26:21,980
+cast so I pre compute what the value of
+
+00:26:19,130 --> 00:26:24,620
+the code point is by applying the mask
+
+00:26:21,980 --> 00:26:26,540
+that would be instead the bits that
+
+00:26:24,620 --> 00:26:28,820
+would be inserted into the code point as
+
+00:26:26,540 --> 00:26:30,860
+you begin the calculation I also pre
+
+00:26:28,820 --> 00:26:34,160
+compute what is the next state given
+
+00:26:30,860 --> 00:26:37,340
+this given this input symbol or this
+
+00:26:34,160 --> 00:26:42,140
+octet I also have a set of look-up
+
+00:26:37,340 --> 00:26:45,590
+tables so there are 256 possible octets
+
+00:26:42,140 --> 00:26:48,050
+right so there are 256 possible first
+
+00:26:45,590 --> 00:26:49,430
+units so there's a table that represents
+
+00:26:48,050 --> 00:26:53,210
+what to do with each of those possible
+
+00:26:49,430 --> 00:26:55,730
+first units there's also a table which
+
+00:26:53,210 --> 00:26:57,200
+Maps each octet into one of the 12
+
+00:26:55,730 --> 00:27:00,740
+character classes that I showed you
+
+00:26:57,200 --> 00:27:03,320
+before and then finally there is the
+
+00:27:00,740 --> 00:27:09,170
+transition table itself that represents
+
+00:27:03,320 --> 00:27:11,840
+the DFA so I have a static I have a
+
+00:27:09,170 --> 00:27:13,460
+static set of lookup tables I also have
+
+00:27:11,840 --> 00:27:16,040
+some static member functions which
+
+00:27:13,460 --> 00:27:17,990
+advanced through the DFA I have a
+
+00:27:16,040 --> 00:27:22,070
+special function which converts runs of
+
+00:27:17,990 --> 00:27:23,480
+ASCII characters using SSA and another
+
+00:27:22,070 --> 00:27:29,090
+function for getting the trailing
+
+00:27:23,480 --> 00:27:30,620
+trailing zeros in a 32-bit word so just
+
+00:27:29,090 --> 00:27:32,930
+as a quick example of those tables
+
+00:27:30,620 --> 00:27:35,480
+here's some example from the first unit
+
+00:27:32,930 --> 00:27:37,670
+table you can see in the left-hand
+
+00:27:35,480 --> 00:27:43,190
+column in blue these are some input code
+
+00:27:37,670 --> 00:27:45,080
+points and well I'm sorry these are the
+
+00:27:43,190 --> 00:27:47,600
+bits the sequence of bits which would be
+
+00:27:45,080 --> 00:27:50,570
+masked into a code point a code point
+
+00:27:47,600 --> 00:27:54,110
+based on their hex values which are in
+
+00:27:50,570 --> 00:27:57,320
+the right-hand column in the in green so
+
+00:27:54,110 --> 00:27:59,720
+for example if the leading octet was hex
+
+00:27:57,320 --> 00:28:02,330
+c3 here at the bottom of the second
+
+00:27:59,720 --> 00:28:04,340
+group then the sequence of bits which
+
+00:28:02,330 --> 00:28:05,490
+actually get masked into the code point
+
+00:28:04,340 --> 00:28:09,299
+are
+
+00:28:05,490 --> 00:28:12,149
+our three and my next state in the state
+
+00:28:09,299 --> 00:28:15,570
+transition would be continuation state
+
+00:28:12,149 --> 00:28:18,149
+one because hex III is the first byte in
+
+00:28:15,570 --> 00:28:20,070
+a two byte sequence so by looking up in
+
+00:28:18,149 --> 00:28:21,870
+the table I immediately know what my
+
+00:28:20,070 --> 00:28:23,580
+bits are that go into the code point and
+
+00:28:21,870 --> 00:28:28,260
+I also know what my next state
+
+00:28:23,580 --> 00:28:30,720
+transition are yes and then the next one
+
+00:28:28,260 --> 00:28:33,299
+as I mentioned the second table Maps my
+
+00:28:30,720 --> 00:28:35,580
+input octet to a set of twelve character
+
+00:28:33,299 --> 00:28:39,210
+classes obviously the first half of the
+
+00:28:35,580 --> 00:28:43,649
+table maps to ASCII then the range from
+
+00:28:39,210 --> 00:28:46,799
+hex 82 hexa bf are the continuation
+
+00:28:43,649 --> 00:28:49,649
+range of bytes and then finally at the
+
+00:28:46,799 --> 00:28:52,080
+high end in red these are bytes which
+
+00:28:49,649 --> 00:28:53,970
+can never appear in a valid utf-8
+
+00:28:52,080 --> 00:28:56,730
+sequence and then in the light blue
+
+00:28:53,970 --> 00:28:59,100
+medium blue and dark blue we have the
+
+00:28:56,730 --> 00:29:01,380
+categorization and cat into character
+
+00:28:59,100 --> 00:29:04,049
+classes for leading bytes for two byte
+
+00:29:01,380 --> 00:29:07,320
+sequences three byte sequences and four
+
+00:29:04,049 --> 00:29:10,140
+byte sequences so I can take 256
+
+00:29:07,320 --> 00:29:11,480
+possible octets and given this table
+
+00:29:10,140 --> 00:29:14,850
+find out what is the appropriate
+
+00:29:11,480 --> 00:29:18,840
+character class for that octet when I do
+
+00:29:14,850 --> 00:29:22,260
+I get a DFA that looks like this so what
+
+00:29:18,840 --> 00:29:24,960
+I've done is I in gray are what you saw
+
+00:29:22,260 --> 00:29:28,830
+previously the ranges of octet for those
+
+00:29:24,960 --> 00:29:32,220
+edges and in in black are the character
+
+00:29:28,830 --> 00:29:35,760
+classes so twelve character classes nine
+
+00:29:32,220 --> 00:29:37,830
+states put it all together you get a
+
+00:29:35,760 --> 00:29:42,840
+transition table the DFA that looks like
+
+00:29:37,830 --> 00:29:46,049
+this so highlighted in yellow are all of
+
+00:29:42,840 --> 00:29:49,380
+the valid valid entries in this table
+
+00:29:46,049 --> 00:29:52,730
+and so in a properly formed utf-8
+
+00:29:49,380 --> 00:29:55,140
+sequence we'll start in the begin state
+
+00:29:52,730 --> 00:29:56,970
+will accept any of the ones you see
+
+00:29:55,140 --> 00:29:58,380
+there on the right or if it's asking
+
+00:29:56,970 --> 00:30:00,240
+will come back into the end state and
+
+00:29:58,380 --> 00:30:03,360
+we'll work our way through this table if
+
+00:30:00,240 --> 00:30:05,610
+we ever get input that takes us out of
+
+00:30:03,360 --> 00:30:08,010
+those yellow entries it becomes an error
+
+00:30:05,610 --> 00:30:09,720
+which we've marked and that's why I had
+
+00:30:08,010 --> 00:30:13,970
+the lowercase to make it easier to read
+
+00:30:09,720 --> 00:30:16,919
+the table so how do we do the conversion
+
+00:30:13,970 --> 00:30:20,539
+well here's the basic conversion
+
+00:30:16,919 --> 00:30:20,539
+algorithm for 8 to 32
+
+00:30:21,000 --> 00:30:28,200
+I've got a couple of temporary variables
+
+00:30:25,320 --> 00:30:30,960
+or working variables at the top and what
+
+00:30:28,200 --> 00:30:32,820
+I want to do is while my input source is
+
+00:30:30,960 --> 00:30:34,260
+not equal to my end pointer just as if
+
+00:30:32,820 --> 00:30:38,010
+you were doing something with iterators
+
+00:30:34,260 --> 00:30:40,290
+I want to take my input byte and I want
+
+00:30:38,010 --> 00:30:43,010
+to advance through the DFA with this
+
+00:30:40,290 --> 00:30:46,980
+function that I called advance and
+
+00:30:43,010 --> 00:30:48,870
+advance returns a state the ending state
+
+00:30:46,980 --> 00:30:50,850
+and I want if the ending state is not
+
+00:30:48,870 --> 00:30:54,120
+equal to the error state I'm going to
+
+00:30:50,850 --> 00:30:57,330
+assign the code point to some output
+
+00:30:54,120 --> 00:31:02,580
+output element and destination so what
+
+00:30:57,330 --> 00:31:04,560
+does advance look like oops sorry this
+
+00:31:02,580 --> 00:31:08,400
+is a sort of a map of advance we'll go
+
+00:31:04,560 --> 00:31:10,700
+through the pieces in more detail so at
+
+00:31:08,400 --> 00:31:15,930
+the top we have some working variables
+
+00:31:10,700 --> 00:31:21,210
+so we will grab the first unit info
+
+00:31:15,930 --> 00:31:23,970
+based on the octet this represents the
+
+00:31:21,210 --> 00:31:26,010
+current code unit this represents the
+
+00:31:23,970 --> 00:31:30,320
+the code units character class and
+
+00:31:26,010 --> 00:31:34,590
+that's the current DFA State so what's
+
+00:31:30,320 --> 00:31:36,240
+so right so the example so let's go back
+
+00:31:34,590 --> 00:31:38,190
+to our example suppose we have this
+
+00:31:36,240 --> 00:31:40,860
+input sequence e two eight eight and
+
+00:31:38,190 --> 00:31:42,930
+eight five our code point value is zero
+
+00:31:40,860 --> 00:31:45,930
+this is our working value this is what
+
+00:31:42,930 --> 00:31:49,890
+we're going to build up and we are at
+
+00:31:45,930 --> 00:31:52,470
+this part in the state machine so I'm
+
+00:31:49,890 --> 00:31:54,090
+going to get the first code unit and I'm
+
+00:31:52,470 --> 00:31:58,680
+going to look it up and get the first
+
+00:31:54,090 --> 00:32:01,410
+unit info descriptor I'm then going to
+
+00:31:58,680 --> 00:32:03,660
+find out what's the initial code point
+
+00:32:01,410 --> 00:32:08,280
+value that goes with this input octet
+
+00:32:03,660 --> 00:32:12,360
+and what is the next state so in this
+
+00:32:08,280 --> 00:32:14,640
+case this is a three this is a three
+
+00:32:12,360 --> 00:32:17,790
+bytes sequence so I'm going to use the
+
+00:32:14,640 --> 00:32:19,590
+lower four bits of the first octet you
+
+00:32:17,790 --> 00:32:20,760
+see there in the second one and I'm
+
+00:32:19,590 --> 00:32:24,480
+going to put them in the bottom of the
+
+00:32:20,760 --> 00:32:27,990
+code point and I'm going to transition
+
+00:32:24,480 --> 00:32:30,000
+to continuation state two now I'm at the
+
+00:32:27,990 --> 00:32:31,950
+top of my loop now I'm going to loop
+
+00:32:30,000 --> 00:32:34,870
+over the continuation bytes
+
+00:32:31,950 --> 00:32:37,390
+so I'm going to get my next code unit
+
+00:32:34,870 --> 00:32:40,210
+and advance my my input pointer I'm
+
+00:32:37,390 --> 00:32:42,220
+going to take those bits that I put in
+
+00:32:40,210 --> 00:32:44,050
+the bottom of the code unit I'm going to
+
+00:32:42,220 --> 00:32:46,540
+advance them to the left by six bits
+
+00:32:44,050 --> 00:32:48,670
+because trailing bytes can only contain
+
+00:32:46,540 --> 00:32:50,650
+six bits of information I'm going to
+
+00:32:48,670 --> 00:32:52,420
+take the trailing byte I'm going to mask
+
+00:32:50,650 --> 00:32:55,050
+off the lower six bits and I'm going to
+
+00:32:52,420 --> 00:32:58,780
+bitwise or them into the code point I'm
+
+00:32:55,050 --> 00:33:01,210
+going to then figure out what is the
+
+00:32:58,780 --> 00:33:03,490
+character class for this cook this code
+
+00:33:01,210 --> 00:33:06,150
+unit that I just read and I'm going to
+
+00:33:03,490 --> 00:33:08,860
+figure out what is the state
+
+00:33:06,150 --> 00:33:11,140
+corresponding to my current state and
+
+00:33:08,860 --> 00:33:15,430
+the type of the character class that I
+
+00:33:11,140 --> 00:33:17,380
+just read so I'm taking the state which
+
+00:33:15,430 --> 00:33:19,420
+is multiplied by 12 which represents an
+
+00:33:17,380 --> 00:33:21,310
+offset in that array I'm adding the
+
+00:33:19,420 --> 00:33:24,280
+character class to it which gives me a
+
+00:33:21,310 --> 00:33:27,370
+specific offset into that long linear
+
+00:33:24,280 --> 00:33:28,750
+table that gets me to my next state so
+
+00:33:27,370 --> 00:33:30,430
+you can see in the middle column there
+
+00:33:28,750 --> 00:33:33,130
+I've taken eight eight a continuation
+
+00:33:30,430 --> 00:33:34,870
+byte I've pulled six bits out of it I've
+
+00:33:33,130 --> 00:33:38,910
+taken my original four bits shifted to
+
+00:33:34,870 --> 00:33:41,500
+the left by six and masked in those six
+
+00:33:38,910 --> 00:33:46,770
+and that takes me to continuation state
+
+00:33:41,500 --> 00:33:49,720
+one where I will repeat the process I
+
+00:33:46,770 --> 00:33:52,540
+get a picture that looks like this this
+
+00:33:49,720 --> 00:33:54,730
+would be my output code point because I
+
+00:33:52,540 --> 00:34:01,180
+have reached the accept state for this
+
+00:33:54,730 --> 00:34:04,030
+sequence I'm done I will return cur
+
+00:34:01,180 --> 00:34:06,520
+which is the state that I ended on which
+
+00:34:04,030 --> 00:34:12,730
+in this case is the begin state which is
+
+00:34:06,520 --> 00:34:18,330
+also the accept state and take this code
+
+00:34:12,730 --> 00:34:21,460
+point the 16-bit well this is 16 bits
+
+00:34:18,330 --> 00:34:23,500
+but you can imagine that I've only shown
+
+00:34:21,460 --> 00:34:25,540
+you the lower 16 bits of the code point
+
+00:34:23,500 --> 00:34:27,580
+but it's actually a 32-bit integer there
+
+00:34:25,540 --> 00:34:31,120
+are 16 zeros to the left here this
+
+00:34:27,580 --> 00:34:35,110
+matched hex 22:05 which is a character
+
+00:34:31,120 --> 00:34:37,270
+representing the empty set I'm then
+
+00:34:35,110 --> 00:34:40,180
+going to take that code point assign it
+
+00:34:37,270 --> 00:34:43,579
+to my output buffer in advance all right
+
+00:34:40,180 --> 00:34:46,049
+so how fast is this right is this useful
+
+00:34:43,579 --> 00:34:47,760
+so here's a benchmark I'll get into more
+
+00:34:46,049 --> 00:34:49,649
+detail later about what the benchmarks
+
+00:34:47,760 --> 00:34:52,559
+are and what they mean but this is
+
+00:34:49,649 --> 00:34:55,799
+supposed to be sort of a gut check
+
+00:34:52,559 --> 00:34:59,010
+is it worth continuing so I've got some
+
+00:34:55,799 --> 00:35:00,660
+Wikipedia pages the Wikipedia page that
+
+00:34:59,010 --> 00:35:02,880
+describes the English language in
+
+00:35:00,660 --> 00:35:06,000
+English the Wikipedia page which
+
+00:35:02,880 --> 00:35:09,089
+describes the Chinese language Mandarin
+
+00:35:06,000 --> 00:35:11,280
+in Mandarin and the Wikipedia page which
+
+00:35:09,089 --> 00:35:14,280
+describes the Hindi language in Hindi
+
+00:35:11,280 --> 00:35:17,130
+I've also got several commonly used
+
+00:35:14,280 --> 00:35:20,250
+libraries for doing conversions I've got
+
+00:35:17,130 --> 00:35:22,349
+icon which is a library from the gnu
+
+00:35:20,250 --> 00:35:24,990
+distribution which is very popular on
+
+00:35:22,349 --> 00:35:27,750
+linux and unix actually runs on
+
+00:35:24,990 --> 00:35:29,339
+everything I've got the LLVM converter
+
+00:35:27,750 --> 00:35:33,900
+taken directly out of the LLVM
+
+00:35:29,339 --> 00:35:35,490
+distribution I in AV this is a converter
+
+00:35:33,900 --> 00:35:38,790
+written by a gentleman named Alexei
+
+00:35:35,490 --> 00:35:43,140
+pachenko I've got stood code convert in
+
+00:35:38,790 --> 00:35:48,569
+yellow there and let's see the light
+
+00:35:43,140 --> 00:35:50,940
+blue is Boost text green a BH this is a
+
+00:35:48,569 --> 00:35:53,880
+DFA based converter written by a
+
+00:35:50,940 --> 00:35:57,119
+gentleman named Buren Harriman and I
+
+00:35:53,880 --> 00:35:59,339
+should say that after I had gone to all
+
+00:35:57,119 --> 00:36:00,690
+the effort of working out the DFA it
+
+00:35:59,339 --> 00:36:04,049
+occurred to me that maybe I could have
+
+00:36:00,690 --> 00:36:06,299
+looked it up on the internet and I found
+
+00:36:04,049 --> 00:36:08,549
+that someone had actually derived the
+
+00:36:06,299 --> 00:36:12,170
+same DFA about ten years before I did so
+
+00:36:08,549 --> 00:36:16,230
+my discovery was ten years too late but
+
+00:36:12,170 --> 00:36:18,359
+you can see and boost text is a very
+
+00:36:16,230 --> 00:36:19,950
+highly optimized converter that in the
+
+00:36:18,359 --> 00:36:22,890
+case of English my performance is very
+
+00:36:19,950 --> 00:36:25,349
+close about 4% worse but in the case of
+
+00:36:22,890 --> 00:36:25,829
+the Chinese and Hindi I actually got
+
+00:36:25,349 --> 00:36:27,720
+much
+
+00:36:25,829 --> 00:36:31,559
+I got substantially better performance
+
+00:36:27,720 --> 00:36:33,329
+than anything else and this is written
+
+00:36:31,559 --> 00:36:38,130
+by the way this is a benchmark running
+
+00:36:33,329 --> 00:36:41,790
+on Linux with GCC 7.2 so can I make it
+
+00:36:38,130 --> 00:36:44,760
+faster all right let's go back and look
+
+00:36:41,790 --> 00:36:47,010
+at our original basic algorithm if you
+
+00:36:44,760 --> 00:36:51,089
+look at this algorithm what's the first
+
+00:36:47,010 --> 00:36:53,910
+thing that stands out at you I look at
+
+00:36:51,089 --> 00:36:55,500
+this and I see I look at this and then I
+
+00:36:53,910 --> 00:36:56,620
+look at the next step which is to go
+
+00:36:55,500 --> 00:36:59,470
+into advance
+
+00:36:56,620 --> 00:37:02,530
+what if the first octet is an ASCII
+
+00:36:59,470 --> 00:37:05,020
+octet right look at all the work I have
+
+00:37:02,530 --> 00:37:06,430
+to do just to figure out that I'm going
+
+00:37:05,020 --> 00:37:07,720
+to go into a state machine in the
+
+00:37:06,430 --> 00:37:09,760
+beginning state and come back to the
+
+00:37:07,720 --> 00:37:12,010
+begin state immediately I've done a lot
+
+00:37:09,760 --> 00:37:16,000
+of extra work just to recognize an ASCII
+
+00:37:12,010 --> 00:37:18,820
+octet so the obvious optimization is to
+
+00:37:16,000 --> 00:37:21,220
+check the leading octet to see if it's
+
+00:37:18,820 --> 00:37:23,860
+asking if the leading octet is ASCII I
+
+00:37:21,220 --> 00:37:26,140
+can immediately just assign it into the
+
+00:37:23,860 --> 00:37:29,200
+code unit and be done loop back around
+
+00:37:26,140 --> 00:37:32,110
+and see what I need to do next and if
+
+00:37:29,200 --> 00:37:33,970
+it's not ASCII only at that point do I
+
+00:37:32,110 --> 00:37:38,770
+drop into advance and try to recognize
+
+00:37:33,970 --> 00:37:42,850
+it through the DFA do I get any benefit
+
+00:37:38,770 --> 00:37:44,920
+well yeah I get some I get a real nice
+
+00:37:42,850 --> 00:37:46,660
+benefit on English actually I get a very
+
+00:37:44,920 --> 00:37:49,420
+nice benefit on all three of these and
+
+00:37:46,660 --> 00:37:51,910
+in fact if you look at it just this
+
+00:37:49,420 --> 00:37:55,030
+simple converter is about four times
+
+00:37:51,910 --> 00:37:58,360
+faster than icon it's about three times
+
+00:37:55,030 --> 00:38:01,210
+faster than icon with Chinese maybe four
+
+00:37:58,360 --> 00:38:03,190
+and three or four times faster with
+
+00:38:01,210 --> 00:38:06,700
+Hindi and it's faster than everything
+
+00:38:03,190 --> 00:38:09,640
+else right very reasonable approach very
+
+00:38:06,700 --> 00:38:13,270
+simple this is all doable with standard
+
+00:38:09,640 --> 00:38:15,100
+C++ now it could be done with C++ 98 in
+
+00:38:13,270 --> 00:38:17,890
+fact the code that I've just shown you
+
+00:38:15,100 --> 00:38:19,870
+could be mechanically translated to see
+
+00:38:17,890 --> 00:38:22,660
+and used there's nothing special about
+
+00:38:19,870 --> 00:38:25,000
+it as I said lots of code but very
+
+00:38:22,660 --> 00:38:27,690
+simple code all of the complexity is
+
+00:38:25,000 --> 00:38:29,680
+hidden in the tables which is nice
+
+00:38:27,690 --> 00:38:35,070
+except if you're the guy that has to
+
+00:38:29,680 --> 00:38:35,070
+figure out the tables okay
+
+00:38:38,630 --> 00:38:48,240
+on the order of about anywhere from 1/3
+
+00:38:42,869 --> 00:38:52,200
+to 1/2 there's a lot of ASCII characters
+
+00:38:48,240 --> 00:38:55,050
+in web pages but I do have some torture
+
+00:38:52,200 --> 00:38:57,660
+tests where I have a hundred percent
+
+00:38:55,050 --> 00:39:00,030
+three byte sequences and fifty percent
+
+00:38:57,660 --> 00:39:01,260
+three byte sequences so let me let me go
+
+00:39:00,030 --> 00:39:06,569
+because I have a lot of slides to go
+
+00:39:01,260 --> 00:39:10,319
+through okay can I go faster I hope I
+
+00:39:06,569 --> 00:39:14,520
+can go faster all right so let's look at
+
+00:39:10,319 --> 00:39:16,319
+our ASCII optimized algorithm again if I
+
+00:39:14,520 --> 00:39:17,190
+look at this I look for opportunities
+
+00:39:16,319 --> 00:39:19,470
+for optimization
+
+00:39:17,190 --> 00:39:22,920
+now I'm looking here at my if statement
+
+00:39:19,470 --> 00:39:26,220
+which is checking for ASCII and and the
+
+00:39:22,920 --> 00:39:28,589
+the assignment to a 32-bit code point if
+
+00:39:26,220 --> 00:39:32,310
+it is asking what if I could make that
+
+00:39:28,589 --> 00:39:37,710
+faster what if I could use 16 byte SSE
+
+00:39:32,310 --> 00:39:40,230
+registers and encode runs or sequences
+
+00:39:37,710 --> 00:39:43,500
+of ASCII characters in one shot would
+
+00:39:40,230 --> 00:39:47,880
+that get me any speed-up so as it turns
+
+00:39:43,500 --> 00:39:50,310
+out you can what I'm going to do is I'm
+
+00:39:47,880 --> 00:39:52,740
+going to bifurcate the algorithm into
+
+00:39:50,310 --> 00:39:57,140
+two the top half of the algorithm is
+
+00:39:52,740 --> 00:40:01,290
+going to scan for input everything up to
+
+00:39:57,140 --> 00:40:03,480
+one SSE registers worth of input at the
+
+00:40:01,290 --> 00:40:05,670
+very end of the buffer I don't want to
+
+00:40:03,480 --> 00:40:08,280
+be I don't want to be in a buffer where
+
+00:40:05,670 --> 00:40:10,579
+I have eight bytes left but I try to
+
+00:40:08,280 --> 00:40:14,190
+read sixteen past the end of the buffer
+
+00:40:10,579 --> 00:40:16,680
+into an SSE register that's why for the
+
+00:40:14,190 --> 00:40:19,109
+last 15 or fewer bytes I don't use this
+
+00:40:16,680 --> 00:40:22,440
+I drop down to the second half but for
+
+00:40:19,109 --> 00:40:25,530
+all of the bytes before the last 15 if
+
+00:40:22,440 --> 00:40:27,359
+the first byte I detect is ASCII I'm
+
+00:40:25,530 --> 00:40:30,200
+going to drop into this inline function
+
+00:40:27,359 --> 00:40:32,700
+that I call convert a ski with SSE
+
+00:40:30,200 --> 00:40:34,890
+otherwise if it's not an ASCII character
+
+00:40:32,700 --> 00:40:36,270
+just like before I'm gonna drop into the
+
+00:40:34,890 --> 00:40:39,690
+advanced algorithm and work through the
+
+00:40:36,270 --> 00:40:42,119
+DFA the bottom half of this function is
+
+00:40:39,690 --> 00:40:45,119
+just the basic algorithm that I showed
+
+00:40:42,119 --> 00:40:47,099
+you before this out this the bottom half
+
+00:40:45,119 --> 00:40:49,319
+occurs when I have 15 or fewer
+
+00:40:47,099 --> 00:40:50,950
+characters left in the buffer I can't
+
+00:40:49,319 --> 00:40:53,980
+use SSE so I
+
+00:40:50,950 --> 00:40:58,480
+just use the ascii optimized algorithm
+
+00:40:53,980 --> 00:41:00,550
+that we just saw so the question is what
+
+00:40:58,480 --> 00:41:03,190
+does convert ascii with SS e look like
+
+00:41:00,550 --> 00:41:04,960
+well here's an overview but it's
+
+00:41:03,190 --> 00:41:07,060
+actually quite simple
+
+00:41:04,960 --> 00:41:08,560
+kind of looks like assembler I'm gonna
+
+00:41:07,060 --> 00:41:11,500
+work through an example with this and
+
+00:41:08,560 --> 00:41:14,079
+just like before go line by line so
+
+00:41:11,500 --> 00:41:17,829
+let's start with an example here I have
+
+00:41:14,079 --> 00:41:19,390
+at the top I have 16 code points Greek
+
+00:41:17,829 --> 00:41:21,910
+word and I don't know how to pronounce
+
+00:41:19,390 --> 00:41:26,829
+it but it's Kappa Omicron Sigma mu
+
+00:41:21,910 --> 00:41:30,130
+Epsilon and it maps out to these 22 code
+
+00:41:26,829 --> 00:41:32,710
+units I'm going to read the first 16
+
+00:41:30,130 --> 00:41:35,320
+code units which are in the darker gray
+
+00:41:32,710 --> 00:41:37,630
+at the bottom into my SSE register and
+
+00:41:35,320 --> 00:41:39,040
+if you count from the left if you're
+
+00:41:37,630 --> 00:41:44,020
+observant and you count from the left
+
+00:41:39,040 --> 00:41:47,079
+the first 11 are asking the the 12th one
+
+00:41:44,020 --> 00:41:54,310
+which is C e is non ASCII so keep that
+
+00:41:47,079 --> 00:41:56,260
+number in your mind 11 all right so I'm
+
+00:41:54,310 --> 00:41:58,930
+gonna start I'm going to Devine define
+
+00:41:56,260 --> 00:42:03,849
+some convenience variables so here are
+
+00:41:58,930 --> 00:42:05,680
+some SSE structs I think the compiler
+
+00:42:03,849 --> 00:42:07,960
+actually treats them as registers so I
+
+00:42:05,680 --> 00:42:10,210
+just you know kind of sideways call them
+
+00:42:07,960 --> 00:42:12,760
+registers in this I also have a couple
+
+00:42:10,210 --> 00:42:15,700
+of integers one for a bit mask and one
+
+00:42:12,760 --> 00:42:17,170
+which is the increment for advancement
+
+00:42:15,700 --> 00:42:19,510
+and we'll see what that means in a
+
+00:42:17,170 --> 00:42:21,970
+moment so the first thing I'm going to
+
+00:42:19,510 --> 00:42:24,760
+do is I'm going to take a register that
+
+00:42:21,970 --> 00:42:28,869
+I call zero or the inner leave register
+
+00:42:24,760 --> 00:42:30,790
+this is going to be 16 bytes of 0 there
+
+00:42:28,869 --> 00:42:32,589
+you go there's a register called 0 I'm
+
+00:42:30,790 --> 00:42:35,380
+setting I'm zeroing it and setting it to
+
+00:42:32,589 --> 00:42:38,530
+16 zero bytes the next thing I'm going
+
+00:42:35,380 --> 00:42:41,859
+to do is I'm going to do an unlined load
+
+00:42:38,530 --> 00:42:43,599
+of 16 bytes into an SSE register and I'm
+
+00:42:41,859 --> 00:42:46,630
+going to call that register chunk that's
+
+00:42:43,599 --> 00:42:49,510
+my chunk of data alright so here's my
+
+00:42:46,630 --> 00:42:51,069
+pointer to memory my source buffer I've
+
+00:42:49,510 --> 00:42:56,020
+called this function and I've loaded
+
+00:42:51,069 --> 00:42:57,160
+into the register that I call chunk next
+
+00:42:56,020 --> 00:43:00,369
+thing I'm going to do is I'm going to
+
+00:42:57,160 --> 00:43:03,450
+call a function called move mask on the
+
+00:43:00,369 --> 00:43:08,579
+chunk register and what this does
+
+00:43:03,450 --> 00:43:10,260
+is this computes a mask in the lower 16
+
+00:43:08,579 --> 00:43:12,990
+bits of the mask oh and I should say on
+
+00:43:10,260 --> 00:43:15,180
+these diagrams least significant byte
+
+00:43:12,990 --> 00:43:17,640
+and least significant bit are on the
+
+00:43:15,180 --> 00:43:20,369
+left most significant byte and most
+
+00:43:17,640 --> 00:43:24,569
+significant bit are on the right so this
+
+00:43:20,369 --> 00:43:27,420
+this intrinsic computes a mask looking
+
+00:43:24,569 --> 00:43:30,119
+for octet in the register that have
+
+00:43:27,420 --> 00:43:34,079
+their highest bit set if the highest bit
+
+00:43:30,119 --> 00:43:38,220
+is set it is not an ASCII character so
+
+00:43:34,079 --> 00:43:42,000
+in computing this mask you can see that
+
+00:43:38,220 --> 00:43:44,910
+the lower 11 bits in the mask are 0
+
+00:43:42,000 --> 00:43:48,119
+meaning the low the first the lower 11
+
+00:43:44,910 --> 00:43:51,240
+bytes in the chunk are non-art are
+
+00:43:48,119 --> 00:43:53,760
+asking and the upper 5 bits there are
+
+00:43:51,240 --> 00:43:57,180
+set to 1 because the upper 5 bytes in
+
+00:43:53,760 --> 00:44:02,369
+that register R greater than ASCII ok
+
+00:43:57,180 --> 00:44:05,700
+this will be important ok so now I am
+
+00:44:02,369 --> 00:44:09,720
+going to use SSE intrinsics to do 0
+
+00:44:05,700 --> 00:44:12,750
+extension alright so I'm going to do
+
+00:44:09,720 --> 00:44:15,150
+some unpacking and interleaving so I
+
+00:44:12,750 --> 00:44:18,119
+call a function called unpack low at the
+
+00:44:15,150 --> 00:44:21,359
+8th and what this is going to do is it's
+
+00:44:18,119 --> 00:44:23,339
+going to take the lower 8 bits sorry the
+
+00:44:21,359 --> 00:44:26,099
+lower 8 octets from the chunk register
+
+00:44:23,339 --> 00:44:29,240
+and it's going to interleave them with
+
+00:44:26,099 --> 00:44:31,740
+the lower 8 octets from the 0 register
+
+00:44:29,240 --> 00:44:34,440
+here's the result in a register that I
+
+00:44:31,740 --> 00:44:38,309
+call 1/2 so now I've taken the bytes and
+
+00:44:34,440 --> 00:44:44,640
+I've 0 extended them to be words 16-bit
+
+00:44:38,309 --> 00:44:46,260
+words in the half register I'm then
+
+00:44:44,640 --> 00:44:47,970
+going to take those and I'm going to
+
+00:44:46,260 --> 00:44:51,510
+repeat the process calling a function
+
+00:44:47,970 --> 00:44:54,770
+called unpack low epi16 so here I'm
+
+00:44:51,510 --> 00:44:54,770
+taking them
+
+00:44:56,950 --> 00:45:01,670
+the lower eight bytes from the half
+
+00:44:59,510 --> 00:45:04,400
+register and zero extending them again
+
+00:45:01,670 --> 00:45:06,859
+into a register that I call quarter so
+
+00:45:04,400 --> 00:45:09,559
+what I've effectively done is taken the
+
+00:45:06,859 --> 00:45:13,369
+lower four bytes in my original chunk
+
+00:45:09,559 --> 00:45:19,790
+and I've zero extended them to 32 bits
+
+00:45:13,369 --> 00:45:24,140
+in using SSE and I'm going to repeat the
+
+00:45:19,790 --> 00:45:27,109
+same process for the upper for the upper
+
+00:45:24,140 --> 00:45:29,540
+four for the upper eight bytes in the
+
+00:45:27,109 --> 00:45:31,190
+half register first I'm going to write
+
+00:45:29,540 --> 00:45:34,640
+them to memory though I'm going to write
+
+00:45:31,190 --> 00:45:39,470
+my result to memory then I'm going to
+
+00:45:34,640 --> 00:45:40,940
+unpack again unpack and interleave so
+
+00:45:39,470 --> 00:45:44,240
+I've unpacked an interleaved the upper
+
+00:45:40,940 --> 00:45:46,940
+eight bytes that were in the half
+
+00:45:44,240 --> 00:45:51,680
+register into the quarter register I'm
+
+00:45:46,940 --> 00:45:53,990
+going to write that again so I've just
+
+00:45:51,680 --> 00:45:57,440
+shoved sixteen more bytes out into
+
+00:45:53,990 --> 00:46:01,010
+memory and I'm going to repeat this
+
+00:45:57,440 --> 00:46:03,559
+process of interleaving and writing for
+
+00:46:01,010 --> 00:46:09,380
+the original eight bytes in the original
+
+00:46:03,559 --> 00:46:11,510
+register that I called chunk so I've now
+
+00:46:09,380 --> 00:46:13,940
+taken these sixteen bytes
+
+00:46:11,510 --> 00:46:16,309
+I've interleaved in zero extended them
+
+00:46:13,940 --> 00:46:20,240
+and I've written them out into memory as
+
+00:46:16,309 --> 00:46:23,990
+64 bytes well now I have to figure out
+
+00:46:20,240 --> 00:46:25,910
+how far do I advance my pointers how far
+
+00:46:23,990 --> 00:46:28,609
+do I advance my input pointer and my
+
+00:46:25,910 --> 00:46:31,190
+output pointer so I have a function
+
+00:46:28,609 --> 00:46:33,559
+called get trailing zeros and what does
+
+00:46:31,190 --> 00:46:35,809
+get trailing zeros do it's going to use
+
+00:46:33,559 --> 00:46:41,329
+that mask that we computed at the top of
+
+00:46:35,809 --> 00:46:44,030
+the show right on linux unix GCC and
+
+00:46:41,329 --> 00:46:45,650
+clang there's a built-in built-in ctz
+
+00:46:44,030 --> 00:46:49,609
+which counts the trailing zeros in a
+
+00:46:45,650 --> 00:46:53,750
+word on windows there is bit scan for
+
+00:46:49,609 --> 00:46:57,410
+word what it does is I have my mask and
+
+00:46:53,750 --> 00:46:59,359
+I compute my increment my advancement by
+
+00:46:57,410 --> 00:47:03,380
+counting the trailing zeros in that mask
+
+00:46:59,359 --> 00:47:04,510
+and remember trailing means from high to
+
+00:47:03,380 --> 00:47:07,630
+low
+
+00:47:04,510 --> 00:47:10,690
+and lo is on the left and hai is on the
+
+00:47:07,630 --> 00:47:12,820
+right in these diagrams so I've counted
+
+00:47:10,690 --> 00:47:14,560
+my trailing zeros I have 11 of them and
+
+00:47:12,820 --> 00:47:16,450
+I wrote the word 11 because I realized
+
+00:47:14,560 --> 00:47:20,890
+11 was 1 1 and that could also be
+
+00:47:16,450 --> 00:47:24,670
+interpreted as 3 okay so I know I can
+
+00:47:20,890 --> 00:47:27,100
+safely advance my source pointer by 11
+
+00:47:24,670 --> 00:47:30,220
+which takes me to seee which is a non
+
+00:47:27,100 --> 00:47:32,170
+ASCII byte and I can also safely advance
+
+00:47:30,220 --> 00:47:34,900
+my destination point or my output
+
+00:47:32,170 --> 00:47:37,180
+pointer to a new location in memory now
+
+00:47:34,900 --> 00:47:38,740
+you may say well you wrote five words
+
+00:47:37,180 --> 00:47:41,470
+five D words in the memory that you
+
+00:47:38,740 --> 00:47:43,870
+didn't need to you're right I did but
+
+00:47:41,470 --> 00:47:45,820
+it's also faster than trying to be smart
+
+00:47:43,870 --> 00:47:53,890
+and only write the number of words that
+
+00:47:45,820 --> 00:48:00,160
+you need so go back to my algorithm I've
+
+00:47:53,890 --> 00:48:02,140
+done my advancement and fall through to
+
+00:48:00,160 --> 00:48:04,780
+the case I've just come to the point
+
+00:48:02,140 --> 00:48:07,300
+where I'm now at a non ASCII byte
+
+00:48:04,780 --> 00:48:11,740
+remember it was C e now I'm gonna fall
+
+00:48:07,300 --> 00:48:15,820
+into the DFA and continue from there is
+
+00:48:11,740 --> 00:48:18,130
+it fast I like to think it's fast I got
+
+00:48:15,820 --> 00:48:20,650
+even better results so now I'm on the
+
+00:48:18,130 --> 00:48:23,590
+order of you know five or six times
+
+00:48:20,650 --> 00:48:25,870
+faster than icon in all of these cases
+
+00:48:23,590 --> 00:48:27,730
+and I'm faster than everybody else by a
+
+00:48:25,870 --> 00:48:31,360
+good margin for these three test cases
+
+00:48:27,730 --> 00:48:41,000
+but your basic one bite and three bite
+
+00:48:31,360 --> 00:48:43,190
+cases I'm hearing myself
+
+00:48:41,000 --> 00:48:45,260
+all right so now I'd like to show you
+
+00:48:43,190 --> 00:48:47,240
+some benchmarks not just this I promised
+
+00:48:45,260 --> 00:48:51,190
+that I would explain it so I did
+
+00:48:47,240 --> 00:48:53,990
+benchmarking on Ubuntu with running on a
+
+00:48:51,190 --> 00:48:56,780
+VM actually on this laptop right here I
+
+00:48:53,990 --> 00:48:59,030
+can PI ran the benchmarks with gc7 to
+
+00:48:56,780 --> 00:49:01,280
+Incline 501 I'll show you the GCC
+
+00:48:59,030 --> 00:49:02,930
+benchmarks the clang benchmarks are very
+
+00:49:01,280 --> 00:49:06,109
+similar there's no surprises there I'm
+
+00:49:02,930 --> 00:49:08,300
+compiling it for Westmere which has some
+
+00:49:06,109 --> 00:49:11,690
+which is a fairly old architecture which
+
+00:49:08,300 --> 00:49:13,880
+supports SSE 2 actually it's very old
+
+00:49:11,690 --> 00:49:17,270
+it's like 8 or 9 years old by now
+
+00:49:13,880 --> 00:49:21,770
+I also compiled with with Visual Studio
+
+00:49:17,270 --> 00:49:23,720
+15 for 4 on this laptop with what I
+
+00:49:21,770 --> 00:49:27,050
+think are the best combination of flags
+
+00:49:23,720 --> 00:49:29,840
+for optimization my input data
+
+00:49:27,050 --> 00:49:32,060
+I have several input files which are
+
+00:49:29,840 --> 00:49:34,790
+taken directly from wikipedia.org as I
+
+00:49:32,060 --> 00:49:37,520
+mentioned what these represent is the
+
+00:49:34,790 --> 00:49:42,830
+Wikipedia description of a language in
+
+00:49:37,520 --> 00:49:47,240
+that language the HTML page the HTML
+
+00:49:42,830 --> 00:49:49,940
+page I have stress-test 0 which is a
+
+00:49:47,240 --> 00:49:51,740
+hundred thousand ASCII code points which
+
+00:49:49,940 --> 00:49:54,830
+is not really much of a stress test but
+
+00:49:51,740 --> 00:49:56,720
+it's intended to be a baseline I have
+
+00:49:54,830 --> 00:49:59,960
+stress test 1 which is a hundred
+
+00:49:56,720 --> 00:50:02,300
+thousand Chinese code points which are
+
+00:49:59,960 --> 00:50:05,330
+all three byte sequences so that's a
+
+00:50:02,300 --> 00:50:08,210
+three hundred thousand input code units
+
+00:50:05,330 --> 00:50:10,700
+and I have stress test two which is
+
+00:50:08,210 --> 00:50:13,849
+fifty thousand Chinese code points
+
+00:50:10,700 --> 00:50:16,010
+interleaved with fifty thousand ASCII
+
+00:50:13,849 --> 00:50:17,900
+code points so every Chinese code point
+
+00:50:16,010 --> 00:50:20,270
+ASCII code point Chinese code point
+
+00:50:17,900 --> 00:50:21,680
+ASCII code point and that if you do the
+
+00:50:20,270 --> 00:50:24,440
+math that works out to two hundred
+
+00:50:21,680 --> 00:50:27,040
+thousand code units my reference
+
+00:50:24,440 --> 00:50:30,770
+libraries that I mentioned before icon L
+
+00:50:27,040 --> 00:50:34,190
+LLVM Alekseevich anko's work stood code
+
+00:50:30,770 --> 00:50:36,890
+convert on those platforms boost text
+
+00:50:34,190 --> 00:50:40,670
+compiled on those platforms the iron
+
+00:50:36,890 --> 00:50:42,200
+Herman's code and on Windows since I
+
+00:50:40,670 --> 00:50:45,380
+thought there might be some local people
+
+00:50:42,200 --> 00:50:47,960
+here comparison against multibyte two
+
+00:50:45,380 --> 00:50:50,700
+wide char on on the windows on the wind
+
+00:50:47,960 --> 00:50:52,589
+from the win32 api
+
+00:50:50,700 --> 00:50:55,529
+the testing methodology is as you might
+
+00:50:52,589 --> 00:50:58,230
+expect read the input file create an
+
+00:50:55,529 --> 00:51:00,119
+oversized output buffer remember it an
+
+00:50:58,230 --> 00:51:02,220
+assumption was that the buffer was large
+
+00:51:00,119 --> 00:51:05,730
+enough to receive the output with no
+
+00:51:02,220 --> 00:51:08,549
+overflow starting a timer entering a
+
+00:51:05,730 --> 00:51:11,579
+timing loop performing conversion of the
+
+00:51:08,549 --> 00:51:13,109
+input buffer multiple times now these
+
+00:51:11,579 --> 00:51:14,519
+test files that I mentioned to you
+
+00:51:13,109 --> 00:51:16,500
+they're not all the same size they
+
+00:51:14,519 --> 00:51:19,289
+wrench they range anywhere from 60
+
+00:51:16,500 --> 00:51:22,740
+kilobytes to about 220 kilobytes in size
+
+00:51:19,289 --> 00:51:25,440
+so in order to keep things more or less
+
+00:51:22,740 --> 00:51:27,750
+apples-to-apples I repeated the test for
+
+00:51:25,440 --> 00:51:32,010
+each one such that a total of one
+
+00:51:27,750 --> 00:51:35,160
+gigabyte of input was processed so a one
+
+00:51:32,010 --> 00:51:38,400
+megabyte input file would be processed a
+
+00:51:35,160 --> 00:51:40,410
+thousand times a 100 kilobyte input file
+
+00:51:38,400 --> 00:51:43,980
+would be processed ten thousand times
+
+00:51:40,410 --> 00:51:48,660
+but at the end of the day I read in 1
+
+00:51:43,980 --> 00:51:50,039
+billion code units exiting the timing
+
+00:51:48,660 --> 00:51:52,980
+loop of course stopping the timer
+
+00:51:50,039 --> 00:51:56,069
+collecting and collating the results to
+
+00:51:52,980 --> 00:51:58,710
+pass every library had to agree with the
+
+00:51:56,069 --> 00:52:00,240
+output for my conk in fact all of the
+
+00:51:58,710 --> 00:52:02,579
+libraries had to agree with each other
+
+00:52:00,240 --> 00:52:04,200
+that was my criteria for making sure
+
+00:52:02,579 --> 00:52:07,259
+that I was right and the libraries
+
+00:52:04,200 --> 00:52:10,319
+themselves were or self-consistent so
+
+00:52:07,259 --> 00:52:12,059
+results on Linux you just saw these this
+
+00:52:10,319 --> 00:52:16,109
+is the slide that I just showed you for
+
+00:52:12,059 --> 00:52:17,640
+English Chinese and Hindi we see very
+
+00:52:16,109 --> 00:52:20,130
+similar performance results for
+
+00:52:17,640 --> 00:52:23,220
+Portuguese which is a lot of - bike
+
+00:52:20,130 --> 00:52:25,200
+carrier to byte sequences Russian which
+
+00:52:23,220 --> 00:52:28,589
+has a lot of 3 byte sequences in it and
+
+00:52:25,200 --> 00:52:30,269
+Swedish which is 2 byte sequences for
+
+00:52:28,589 --> 00:52:32,250
+stress test zero which is a hundred
+
+00:52:30,269 --> 00:52:35,519
+percent ASCII you see some very nice
+
+00:52:32,250 --> 00:52:38,940
+performance numbers I mean it's almost
+
+00:52:35,519 --> 00:52:40,710
+eight times as fast for stress test 1
+
+00:52:38,940 --> 00:52:42,690
+now here's where we see some interesting
+
+00:52:40,710 --> 00:52:48,779
+behavior for stress test 1 remember
+
+00:52:42,690 --> 00:52:52,470
+stress test 1 is is 100% Chinese code
+
+00:52:48,779 --> 00:52:54,539
+points so all three of the my algorithms
+
+00:52:52,470 --> 00:52:56,730
+do very well but it's interesting to see
+
+00:52:54,539 --> 00:52:59,339
+that the basic algorithm does the best
+
+00:52:56,730 --> 00:53:01,650
+by about 2% it does the best because
+
+00:52:59,339 --> 00:53:03,569
+it's only going through the DFA it's
+
+00:53:01,650 --> 00:53:04,380
+never doing that additional check to see
+
+00:53:03,569 --> 00:53:06,990
+if the first care
+
+00:53:04,380 --> 00:53:09,150
+is asking if the first character is
+
+00:53:06,990 --> 00:53:11,789
+asking there in the in the sort of red
+
+00:53:09,150 --> 00:53:13,349
+bar there it's about 2% slower which is
+
+00:53:11,789 --> 00:53:15,720
+interesting because it gives you an idea
+
+00:53:13,349 --> 00:53:19,380
+of what the cost of that branch is in
+
+00:53:15,720 --> 00:53:20,700
+running code and finally the DFA based
+
+00:53:19,380 --> 00:53:22,619
+approach is very similar performance
+
+00:53:20,700 --> 00:53:25,880
+because it's looking to see if the first
+
+00:53:22,619 --> 00:53:30,119
+character is ASCII as well in this test
+
+00:53:25,880 --> 00:53:32,910
+the ASCII branches aren't never never
+
+00:53:30,119 --> 00:53:36,390
+run because it's a hundred percent three
+
+00:53:32,910 --> 00:53:38,759
+unit sequences stress test too is also
+
+00:53:36,390 --> 00:53:40,440
+kind of interesting in that this that
+
+00:53:38,759 --> 00:53:42,480
+was the test where we had a Chinese code
+
+00:53:40,440 --> 00:53:46,710
+point a three three octet sequence
+
+00:53:42,480 --> 00:53:49,680
+followed by ASCII and repeated 150,000
+
+00:53:46,710 --> 00:53:52,410
+times so in that case we see a slightly
+
+00:53:49,680 --> 00:53:54,960
+better performance out of the the cube
+
+00:53:52,410 --> 00:53:57,990
+fast which is basic or I'm sorry the
+
+00:53:54,960 --> 00:54:00,210
+ASCII optimized algorithm because it
+
+00:53:57,990 --> 00:54:02,309
+finds that one ASCII byte that's
+
+00:54:00,210 --> 00:54:04,470
+interleaved between the two Chinese code
+
+00:54:02,309 --> 00:54:07,559
+points but the interesting thing is to
+
+00:54:04,470 --> 00:54:10,680
+look at the SSE that this torture test
+
+00:54:07,559 --> 00:54:13,200
+kills the SSE algorithm because it sees
+
+00:54:10,680 --> 00:54:14,730
+a single ASCII character it then does
+
+00:54:13,200 --> 00:54:16,349
+all of that work and writes all that
+
+00:54:14,730 --> 00:54:20,789
+just to come back and realize I only
+
+00:54:16,349 --> 00:54:24,059
+needed to write one byte right but still
+
+00:54:20,789 --> 00:54:26,339
+even in that case you know the the SSE
+
+00:54:24,059 --> 00:54:28,970
+optimized dog room that's pretty decent
+
+00:54:26,339 --> 00:54:32,160
+compared to the others
+
+00:54:28,970 --> 00:54:34,109
+you can also transcode to utf-16 I
+
+00:54:32,160 --> 00:54:35,700
+didn't show that code it's it's very
+
+00:54:34,109 --> 00:54:37,859
+straightforward
+
+00:54:35,700 --> 00:54:44,460
+here are some similar results on same
+
+00:54:37,859 --> 00:54:46,619
+platform GCC 72 on a bun to 1804 very
+
+00:54:44,460 --> 00:54:49,529
+similar performance characteristics here
+
+00:54:46,619 --> 00:54:54,210
+Alekseevich anko did not have code in
+
+00:54:49,529 --> 00:54:56,309
+his library to transcode to utf-16 which
+
+00:54:54,210 --> 00:54:58,529
+are why there are those empty slots but
+
+00:54:56,309 --> 00:55:00,750
+all the other libraries would work and
+
+00:54:58,529 --> 00:55:01,890
+this was all run on the same machine and
+
+00:55:00,750 --> 00:55:04,380
+the numbers are actually a little bit
+
+00:55:01,890 --> 00:55:07,380
+lower at least for the SSE because there
+
+00:55:04,380 --> 00:55:09,900
+are less writes to memory
+
+00:55:07,380 --> 00:55:13,800
+the interleaving in fact in that SSE
+
+00:55:09,900 --> 00:55:15,690
+algorithms for for UTF for you zero
+
+00:55:13,800 --> 00:55:17,130
+extended sixteen their half as many
+
+00:55:15,690 --> 00:55:19,050
+inner leaves that need to be done and
+
+00:55:17,130 --> 00:55:22,770
+half as many rights which is why the
+
+00:55:19,050 --> 00:55:24,330
+performance is better similar
+
+00:55:22,770 --> 00:55:29,280
+performance characteristics as you saw
+
+00:55:24,330 --> 00:55:31,770
+before utf-16 and the shape of the
+
+00:55:29,280 --> 00:55:34,020
+graphs the shape of these bars is about
+
+00:55:31,770 --> 00:55:36,630
+the same for stress test one and stress
+
+00:55:34,020 --> 00:55:38,970
+test two although interestingly the
+
+00:55:36,630 --> 00:55:41,010
+basic algorithm and the SSE algorithm
+
+00:55:38,970 --> 00:55:42,930
+are our neck and neck therefore stress
+
+00:55:41,010 --> 00:55:47,370
+test to the inner lead ones I don't have
+
+00:55:42,930 --> 00:55:48,750
+a good explanation for that okay so we
+
+00:55:47,370 --> 00:55:50,160
+have some local people here
+
+00:55:48,750 --> 00:55:53,280
+I thought looking at Windows performance
+
+00:55:50,160 --> 00:56:00,180
+would be exciting and entertaining so
+
+00:55:53,280 --> 00:56:02,910
+here's the conversion to utf-32 we got
+
+00:56:00,180 --> 00:56:05,130
+very nice results with SSE through the
+
+00:56:02,910 --> 00:56:07,350
+windows compiler I mean from an absolute
+
+00:56:05,130 --> 00:56:09,780
+basis they were better than using GCC
+
+00:56:07,350 --> 00:56:11,400
+running in a VM a VM running on a
+
+00:56:09,780 --> 00:56:13,170
+quiescent system where I wouldn't expect
+
+00:56:11,400 --> 00:56:16,740
+there was lots of system overhead going
+
+00:56:13,170 --> 00:56:21,570
+on very similar shapes of the graphs no
+
+00:56:16,740 --> 00:56:23,520
+real surprises well except for Boost dot
+
+00:56:21,570 --> 00:56:25,350
+txt and Zack Lane is the author of boost
+
+00:56:23,520 --> 00:56:27,540
+dot txt and he and I are a little
+
+00:56:25,350 --> 00:56:28,770
+puzzled about what's going on here but
+
+00:56:27,540 --> 00:56:33,120
+the performance characteristics were
+
+00:56:28,770 --> 00:56:39,240
+very similar to what we saw with with
+
+00:56:33,120 --> 00:56:42,360
+utf-32 so for utf-16 I wanted to see
+
+00:56:39,240 --> 00:56:46,560
+there is this win32 API multibyte the
+
+00:56:42,360 --> 00:56:49,350
+wide char and it's used in all the
+
+00:56:46,560 --> 00:56:51,840
+system function calls in the win32 api
+
+00:56:49,350 --> 00:56:54,510
+there are some conversion whenever an
+
+00:56:51,840 --> 00:56:56,280
+ASCII string is fed as an input there's
+
+00:56:54,510 --> 00:56:58,710
+an internal conversion that goes on and
+
+00:56:56,280 --> 00:57:01,830
+everything is done as utf-16 internally
+
+00:56:58,710 --> 00:57:03,240
+so Microsoft has this API multibyte to
+
+00:57:01,830 --> 00:57:06,390
+why char which is really heavily
+
+00:57:03,240 --> 00:57:08,370
+optimized over the years and I wanted to
+
+00:57:06,390 --> 00:57:10,470
+see could I do better than that
+
+00:57:08,370 --> 00:57:13,680
+at least on these test cases right that
+
+00:57:10,470 --> 00:57:15,750
+was my benchmark for success so here in
+
+00:57:13,680 --> 00:57:19,920
+the third slot I've replaced Alekseevich
+
+00:57:15,750 --> 00:57:20,730
+anko's benchmarks in grey with win32
+
+00:57:19,920 --> 00:57:23,100
+multibyte
+
+00:57:20,730 --> 00:57:26,550
+charm so in the English case I do a
+
+00:57:23,100 --> 00:57:31,590
+little better Chinese and Hindi case do
+
+00:57:26,550 --> 00:57:34,440
+a little bit better get similar
+
+00:57:31,590 --> 00:57:36,690
+performance improvements for the
+
+00:57:34,440 --> 00:57:38,700
+Portuguese and Swedish which are two
+
+00:57:36,690 --> 00:57:40,580
+byte cases and also for Russian which a
+
+00:57:38,700 --> 00:57:45,780
+lot of three byte sequences in it and
+
+00:57:40,580 --> 00:57:47,580
+then finally on the torture tests well
+
+00:57:45,780 --> 00:57:51,420
+stress test zero which is no torture at
+
+00:57:47,580 --> 00:57:55,230
+all I did better for stress test one
+
+00:57:51,420 --> 00:57:56,850
+which was 100% Chinese all three of my
+
+00:57:55,230 --> 00:57:59,940
+algorithms were very close
+
+00:57:56,850 --> 00:58:02,310
+well the the basic and the SSE were very
+
+00:57:59,940 --> 00:58:05,040
+close to multibyte to wide char they're
+
+00:58:02,310 --> 00:58:08,820
+what nine eighty three and for stress
+
+00:58:05,040 --> 00:58:12,330
+test - I beat Microsoft and two out of
+
+00:58:08,820 --> 00:58:16,410
+three so I'm gonna put a mark in the win
+
+00:58:12,330 --> 00:58:18,840
+column for that so thinking about
+
+00:58:16,410 --> 00:58:21,330
+reusing the library within the next few
+
+00:58:18,840 --> 00:58:23,610
+weeks I'll put a permissive license on
+
+00:58:21,330 --> 00:58:24,930
+this and make the code open-source but I
+
+00:58:23,610 --> 00:58:26,460
+just want to remind you that the error
+
+00:58:24,930 --> 00:58:28,800
+handling and this was intentionally
+
+00:58:26,460 --> 00:58:30,690
+limited the interface is intentionally
+
+00:58:28,800 --> 00:58:33,480
+small I was doing this as a proof of
+
+00:58:30,690 --> 00:58:35,340
+concept I actually have if you look at
+
+00:58:33,480 --> 00:58:38,370
+the code two different table based
+
+00:58:35,340 --> 00:58:40,500
+advanced algorithms I showed you the
+
+00:58:38,370 --> 00:58:43,560
+algorithm for the big table which
+
+00:58:40,500 --> 00:58:46,110
+requires 876 bytes and fourteen cache
+
+00:58:43,560 --> 00:58:48,240
+lines there's also a small table version
+
+00:58:46,110 --> 00:58:52,130
+which is a little bit slower that can
+
+00:58:48,240 --> 00:58:55,680
+fit into 380 bytes or six cache lines
+
+00:58:52,130 --> 00:58:58,320
+I imagine this actually being reused
+
+00:58:55,680 --> 00:58:59,850
+either as a library I really imagine
+
+00:58:58,320 --> 00:59:02,190
+people just taking it and cutting and
+
+00:58:59,850 --> 00:59:05,160
+pasting it into their own code because
+
+00:59:02,190 --> 00:59:09,620
+they will be better able to optimize it
+
+00:59:05,160 --> 00:59:09,620
+than I can by providing a library
+
+00:59:11,000 --> 00:59:15,540
+there's only a trivial mechanism for
+
+00:59:13,500 --> 00:59:16,800
+reporting errors there's no checking as
+
+00:59:15,540 --> 00:59:19,140
+I said done for null pointer
+
+00:59:16,800 --> 00:59:21,660
+requirements and these are the
+
+00:59:19,140 --> 00:59:24,060
+requirements the caveats that I
+
+00:59:21,660 --> 00:59:26,130
+mentioned before in terms of future
+
+00:59:24,060 --> 00:59:28,500
+directions I've been doing a little
+
+00:59:26,130 --> 00:59:32,700
+research and it seems like avx2 and
+
+00:59:28,500 --> 00:59:34,500
+avx-512 will allow me to do faster zero
+
+00:59:32,700 --> 00:59:37,500
+extension with fewer
+
+00:59:34,500 --> 00:59:39,060
+in turn six calls so I'm going to
+
+00:59:37,500 --> 00:59:40,980
+experiment with that in the future I
+
+00:59:39,060 --> 00:59:44,310
+actually don't have access yet to
+
+00:59:40,980 --> 00:59:45,690
+anything that has avx-512 on it all of
+
+00:59:44,310 --> 00:59:47,970
+the conversions that you saw right now
+
+00:59:45,690 --> 00:59:50,280
+were too little endian but one can
+
+00:59:47,970 --> 00:59:52,320
+imagine adding intrinsics using
+
+00:59:50,280 --> 00:59:54,660
+intrinsics to flip them to big-endian if
+
+00:59:52,320 --> 00:59:57,540
+that's what the consumer desires on the
+
+00:59:54,660 --> 01:00:00,120
+output end there should be a validate
+
+00:59:57,540 --> 01:00:02,630
+method which measures length kind of
+
+01:00:00,120 --> 01:00:05,310
+like sterlin except for utf-8 sequences
+
+01:00:02,630 --> 01:00:07,050
+I'd like to provide member function
+
+01:00:05,310 --> 01:00:09,960
+templates that take iterators rather
+
+01:00:07,050 --> 01:00:13,860
+than using pointers as the interface
+
+01:00:09,960 --> 01:00:15,600
+does now input and output iterators
+
+01:00:13,860 --> 01:00:19,050
+could probably be used with some sort of
+
+01:00:15,600 --> 01:00:21,840
+non error handling and ASCII optimized
+
+01:00:19,050 --> 01:00:23,490
+algorithms input and output iterator
+
+01:00:21,840 --> 01:00:25,470
+since they're not random access I don't
+
+01:00:23,490 --> 01:00:32,190
+think I could rely on being able to use
+
+01:00:25,470 --> 01:00:35,520
+them with SSE and yeah I just made that
+
+01:00:32,190 --> 01:00:37,680
+point okay I think there should be four
+
+01:00:35,520 --> 01:00:39,660
+argument versions so that you could do
+
+01:00:37,680 --> 01:00:40,680
+checking of your destination buffer to
+
+01:00:39,660 --> 01:00:42,930
+make sure that you've got enough room
+
+01:00:40,680 --> 01:00:46,770
+with error checking for out of bound
+
+01:00:42,930 --> 01:00:49,530
+rights I'd like to provide meaningful
+
+01:00:46,770 --> 01:00:51,330
+error reporting as I just mentioned the
+
+01:00:49,530 --> 01:00:53,670
+type of error and where it occurred
+
+01:00:51,330 --> 01:00:55,710
+relative to the input and also provides
+
+01:00:53,670 --> 01:00:59,220
+some commonly used mechanisms for error
+
+01:00:55,710 --> 01:01:01,140
+recovery and some of the most common
+
+01:00:59,220 --> 01:01:02,760
+ones are to just stop and return an
+
+01:01:01,140 --> 01:01:05,670
+error or throw an exception immediately
+
+01:01:02,760 --> 01:01:07,500
+to skip to entirely skip defective
+
+01:01:05,670 --> 01:01:09,390
+ranges of code units until you find a
+
+01:01:07,500 --> 01:01:12,480
+sequence of code units that's valid or
+
+01:01:09,390 --> 01:01:14,630
+to replace in the output defective
+
+01:01:12,480 --> 01:01:16,740
+ranges of code units with some
+
+01:01:14,630 --> 01:01:18,540
+representative code point that
+
+01:01:16,740 --> 01:01:20,040
+represents an error if you've ever seen
+
+01:01:18,540 --> 01:01:22,320
+things where you have the little diamond
+
+01:01:20,040 --> 01:01:25,680
+with a question mark in it that's where
+
+01:01:22,320 --> 01:01:27,750
+somebody has substituted invalid utf-8
+
+01:01:25,680 --> 01:01:31,980
+with this character which represents
+
+01:01:27,750 --> 01:01:33,990
+that in the output so in summary
+
+01:01:31,980 --> 01:01:35,790
+sometimes it pays to re-examine the
+
+01:01:33,990 --> 01:01:37,290
+algorithms and data structures that we
+
+01:01:35,790 --> 01:01:40,590
+use from a from a different perspective
+
+01:01:37,290 --> 01:01:42,180
+I spent a lot of time fooling around
+
+01:01:40,590 --> 01:01:43,530
+with these algorithms and changing
+
+01:01:42,180 --> 01:01:45,330
+things around and trying to optimize
+
+01:01:43,530 --> 01:01:47,849
+them and at the end of the day I
+
+01:01:45,330 --> 01:01:49,589
+realized it's very hard to out
+
+01:01:47,849 --> 01:01:53,670
+mark the compiler it's usually pretty
+
+01:01:49,589 --> 01:01:55,859
+smart about stuff but in doing the
+
+01:01:53,670 --> 01:01:59,180
+optimization it's very important to
+
+01:01:55,859 --> 01:02:02,670
+build your benchmarks and test a lot
+
+01:01:59,180 --> 01:02:04,619
+tests with multiple compilers because I
+
+01:02:02,670 --> 01:02:08,190
+would do things that would get me better
+
+01:02:04,619 --> 01:02:10,140
+performance with GCC and would make
+
+01:02:08,190 --> 01:02:13,109
+performance worse say with visual studio
+
+01:02:10,140 --> 01:02:15,749
+or clang and do it on multiple operating
+
+01:02:13,109 --> 01:02:18,119
+systems as if you can on multiple
+
+01:02:15,749 --> 01:02:19,890
+hardware platforms I actually ran these
+
+01:02:18,119 --> 01:02:21,569
+tests that you saw the results the
+
+01:02:19,890 --> 01:02:24,749
+graphs that I generated or from this
+
+01:02:21,569 --> 01:02:27,809
+laptop but I ran it on four or five
+
+01:02:24,749 --> 01:02:29,880
+different Intel chips and I saw very
+
+01:02:27,809 --> 01:02:33,989
+similar performance across all of them
+
+01:02:29,880 --> 01:02:36,479
+and finally last point savor your
+
+01:02:33,989 --> 01:02:38,059
+victories it's not very often you do
+
+01:02:36,479 --> 01:02:43,289
+something easy and you catch a big fish
+
+01:02:38,059 --> 01:02:45,660
+so enjoy it when you can so I'm going to
+
+01:02:43,289 --> 01:02:48,119
+put the talk up on my blog today the
+
+01:02:45,660 --> 01:02:50,430
+slides and the code I'm sorry up on
+
+01:02:48,119 --> 01:02:53,869
+github and there's a link to my blog so
+
+01:02:50,430 --> 01:02:53,869
+thank you any questions
+
+01:02:54,770 --> 01:03:00,909
+[Applause]
+
+01:03:02,130 --> 01:03:06,840
+hi
+
+01:03:03,550 --> 01:03:10,180
+great stuff okay since you're handling
+
+01:03:06,840 --> 01:03:13,540
+ascii out-of-band not as part of your
+
+01:03:10,180 --> 01:03:16,450
+table did you consider taking us those
+
+01:03:13,540 --> 01:03:20,350
+transitions out of your table and would
+
+01:03:16,450 --> 01:03:21,480
+it make that part go faster that's a
+
+01:03:20,350 --> 01:03:24,640
+good question
+
+01:03:21,480 --> 01:03:27,850
+if I take them out of the table I would
+
+01:03:24,640 --> 01:03:29,620
+reduce from 14 cache lines to 12 cache
+
+01:03:27,850 --> 01:03:32,410
+lines would that have made a difference
+
+01:03:29,620 --> 01:03:36,250
+I don't really know because all of that
+
+01:03:32,410 --> 01:03:41,950
+as it is now is 896 bytes in terms of
+
+01:03:36,250 --> 01:03:43,540
+cache lines I did not try it I didn't
+
+01:03:41,950 --> 01:03:46,240
+think about that it would reduce the
+
+01:03:43,540 --> 01:03:48,010
+table size my intuition tells me that
+
+01:03:46,240 --> 01:03:50,710
+would have zero effect on performance
+
+01:03:48,010 --> 01:03:54,910
+but it's it's a good experiment to think
+
+01:03:50,710 --> 01:03:56,590
+about trying I've been messing around a
+
+01:03:54,910 --> 01:04:00,430
+little bit with a lexer generator
+
+01:03:56,590 --> 01:04:02,170
+library and or tool and one of the
+
+01:04:00,430 --> 01:04:04,000
+learnings from that was that if you
+
+01:04:02,170 --> 01:04:06,490
+expose the transition table to the
+
+01:04:04,000 --> 01:04:09,100
+compiler in the form of code instead of
+
+01:04:06,490 --> 01:04:11,830
+you know data as a table sometimes it
+
+01:04:09,100 --> 01:04:14,260
+can produce faster code because it's the
+
+01:04:11,830 --> 01:04:16,420
+optimizer sees the the logic you know
+
+01:04:14,260 --> 01:04:17,920
+and I was wondering if you considered
+
+01:04:16,420 --> 01:04:20,020
+experimenting with that with maybe like
+
+01:04:17,920 --> 01:04:22,180
+one of the boost state machine libraries
+
+01:04:20,020 --> 01:04:24,760
+or something not until this very moment
+
+01:04:22,180 --> 01:04:27,940
+okay but that's that's a good suggestion
+
+01:04:24,760 --> 01:04:31,780
+as well thank you along those lines
+
+01:04:27,940 --> 01:04:34,840
+constic spur might also help in terms of
+
+01:04:31,780 --> 01:04:37,210
+you know when can it do aggressive
+
+01:04:34,840 --> 01:04:39,190
+optimization yes Jason Turner has
+
+01:04:37,210 --> 01:04:41,380
+chastised me continuously for not making
+
+01:04:39,190 --> 01:04:43,690
+everything in this Coast expert by the
+
+01:04:41,380 --> 01:04:47,230
+way cut the Greek word has caused me and
+
+01:04:43,690 --> 01:04:52,600
+it means we are cause me okay thank you
+
+01:04:47,230 --> 01:04:55,240
+any other questions you said you've
+
+01:04:52,600 --> 01:04:58,210
+played around with making the sse
+
+01:04:55,240 --> 01:05:01,900
+version do something different when
+
+01:04:58,210 --> 01:05:03,700
+there are a lot of bad non ASCII chars
+
+01:05:01,900 --> 01:05:05,620
+in it and you going to more detail about
+
+01:05:03,700 --> 01:05:07,660
+what you tried and how much worse it
+
+01:05:05,620 --> 01:05:10,030
+made the faster the ascii case
+
+01:05:07,660 --> 01:05:17,590
+mm-hm not they don't remember what I
+
+01:05:10,030 --> 01:05:22,060
+said I did try a couple of experiments
+
+01:05:17,590 --> 01:05:25,390
+to avoid going into the sse2 using SSC
+
+01:05:22,060 --> 01:05:29,070
+one was to look to see if I had to ASCII
+
+01:05:25,390 --> 01:05:33,190
+characters in a row rather than one and
+
+01:05:29,070 --> 01:05:35,920
+surprisingly the extra branch for doing
+
+01:05:33,190 --> 01:05:39,280
+that test didn't improve it actually
+
+01:05:35,920 --> 01:05:41,830
+degraded performance the other
+
+01:05:39,280 --> 01:05:46,210
+experiments I mean I did experiments
+
+01:05:41,830 --> 01:05:48,610
+with SSE since I chose SSE 2 as my my
+
+01:05:46,210 --> 01:05:50,790
+base my foundation for the intrinsics
+
+01:05:48,610 --> 01:05:53,350
+that I would support I had very limited
+
+01:05:50,790 --> 01:05:57,130
+there are very limited trinsic for doing
+
+01:05:53,350 --> 01:05:59,320
+the the 0 extension basically I had to
+
+01:05:57,130 --> 01:06:01,720
+do the silly 0 or register and
+
+01:05:59,320 --> 01:06:03,430
+interleave when you get to a VX and avx2
+
+01:06:01,720 --> 01:06:05,740
+there are intrinsics you can use that
+
+01:06:03,430 --> 01:06:07,900
+just do it for you in a single intrinsic
+
+01:06:05,740 --> 01:06:09,640
+which is why I think that's my next
+
+01:06:07,900 --> 01:06:11,200
+thing that I'll experiment with because
+
+01:06:09,640 --> 01:06:13,630
+I can do the zero extension much more
+
+01:06:11,200 --> 01:06:15,190
+quickly if you noticed there was a big
+
+01:06:13,630 --> 01:06:19,180
+difference in performance between the
+
+01:06:15,190 --> 01:06:20,920
+utf-32 and utf-16 versions because there
+
+01:06:19,180 --> 01:06:24,010
+were half as many intrinsics calls and
+
+01:06:20,920 --> 01:06:26,680
+half as many writes to memory for 16 as
+
+01:06:24,010 --> 01:06:32,230
+there are for 32 I think in the case
+
+01:06:26,680 --> 01:06:34,630
+with avx2 and 512 intrinsics I might be
+
+01:06:32,230 --> 01:06:37,180
+able to have that again and with the
+
+01:06:34,630 --> 01:06:42,010
+avx-512 you know you can do even more at
+
+01:06:37,180 --> 01:06:44,260
+once oh and in terms I think I know what
+
+01:06:42,010 --> 01:06:50,170
+you're getting at so what I played with
+
+01:06:44,260 --> 01:06:53,140
+was in just a second and I'll get to
+
+01:06:50,170 --> 01:06:55,840
+that slide I think I know what you're
+
+01:06:53,140 --> 01:06:57,490
+asking and since you mentioned a fix 512
+
+01:06:55,840 --> 01:06:59,050
+actually worried me if you go to 512
+
+01:06:57,490 --> 01:07:01,030
+your stress test might get or worse
+
+01:06:59,050 --> 01:07:05,820
+because it's a bigger block size you'll
+
+01:07:01,030 --> 01:07:05,820
+do more work there's a thrown away right
+
+01:07:07,300 --> 01:07:16,360
+is that it okay here at this part at the
+
+01:07:13,990 --> 01:07:18,670
+bottom of the code in the sse conversion
+
+01:07:16,360 --> 01:07:21,430
+this is what I played with now you see
+
+01:07:18,670 --> 01:07:23,320
+that there's a branch there doing this
+
+01:07:21,430 --> 01:07:24,880
+branch looking for a zero mask and
+
+01:07:23,320 --> 01:07:27,760
+incrementing by the literals
+
+01:07:24,880 --> 01:07:29,800
+is faster than always getting the
+
+01:07:27,760 --> 01:07:32,440
+trailing zeros from the mask computing
+
+01:07:29,800 --> 01:07:35,170
+an increment and then adding that in so
+
+01:07:32,440 --> 01:07:36,880
+this extra branch so that I increment by
+
+01:07:35,170 --> 01:07:39,700
+the literals in the case where I have 16
+
+01:07:36,880 --> 01:07:41,980
+16 ASCII characters actually give me a
+
+01:07:39,700 --> 01:07:46,960
+nice 3 or 4 percent performance boost in
+
+01:07:41,980 --> 01:07:49,480
+this case I did play with for example
+
+01:07:46,960 --> 01:07:51,250
+the placement of you know I first tried
+
+01:07:49,480 --> 01:07:53,080
+to take the the get trailing zeroes and
+
+01:07:51,250 --> 01:07:54,850
+was outside of this if statement which
+
+01:07:53,080 --> 01:07:57,430
+was a cost I didn't have to pay every
+
+01:07:54,850 --> 01:07:59,620
+time and experimenting with this led me
+
+01:07:57,430 --> 01:08:01,660
+to this discovery that incrementing by
+
+01:07:59,620 --> 01:08:03,580
+literals is very quick that was one of
+
+01:08:01,660 --> 01:08:04,720
+the things that I played with it I that
+
+01:08:03,580 --> 01:08:08,260
+may have been what you were getting at
+
+01:08:04,720 --> 01:08:11,140
+and yeah placement of things the order
+
+01:08:08,260 --> 01:08:14,440
+of operations inside the order of those
+
+01:08:11,140 --> 01:08:16,390
+those SSE operations but so the the
+
+01:08:14,440 --> 01:08:18,100
+order that I have is you know it's sort
+
+01:08:16,390 --> 01:08:21,220
+of like simulated annealing I think I'm
+
+01:08:18,100 --> 01:08:23,609
+close to the global minimum but I'm not
+
+01:08:21,220 --> 01:08:23,609
+quite sure
+
+01:08:24,750 --> 01:08:33,069
+have you tried to do the DFA itself
+
+01:08:28,660 --> 01:08:35,740
+vectorized so there are people that have
+
+01:08:33,069 --> 01:08:38,290
+experimented with vectorizing DFAS and
+
+01:08:35,740 --> 01:08:41,530
+an vectorizing DFAS to do recognition
+
+01:08:38,290 --> 01:08:44,680
+but i want it to do once you do the
+
+01:08:41,530 --> 01:08:51,700
+recognition you still have to build the
+
+01:08:44,680 --> 01:08:53,830
+code point and I don't see how I'm not
+
+01:08:51,700 --> 01:08:56,020
+yet figured out or aware of how one can
+
+01:08:53,830 --> 01:08:58,270
+build the code point in a vectorized
+
+01:08:56,020 --> 01:09:00,460
+fashion at the same time as you're doing
+
+01:08:58,270 --> 01:09:02,410
+the recognition we usually leave things
+
+01:09:00,460 --> 01:09:03,130
+in utf-8 so just the recognition will be
+
+01:09:02,410 --> 01:09:06,069
+very helpful
+
+01:09:03,130 --> 01:09:09,520
+yeah well the recognition as a deep in
+
+01:09:06,069 --> 01:09:14,830
+the DFA is probably possible thank you
+
+01:09:09,520 --> 01:09:17,530
+yeah this is more of a comment related
+
+01:09:14,830 --> 01:09:19,600
+to the material if you haven't read it
+
+01:09:17,530 --> 01:09:21,040
+like everybody in the room should read
+
+01:09:19,600 --> 01:09:22,900
+Joel Spolsky is too
+
+01:09:21,040 --> 01:09:24,670
+thousand three article the absolute
+
+01:09:22,900 --> 01:09:26,620
+minimum every software developer
+
+01:09:24,670 --> 01:09:28,780
+absolutely positively must know about
+
+01:09:26,620 --> 01:09:33,490
+Unicode and character sets you really
+
+01:09:28,780 --> 01:09:35,830
+should read that if you haven't okay all
+
+01:09:33,490 --> 01:09:37,000
+right anything else all right thank you
+
+01:09:35,830 --> 01:09:37,560
+very much for coming I hope you got
+
+01:09:37,000 --> 01:09:41,739
+something out of it
+
+01:09:37,560 --> 01:09:41,739
+
+YouTube URL: https://www.youtube.com/watch?v=5FQ87-Ecb-A
+
+

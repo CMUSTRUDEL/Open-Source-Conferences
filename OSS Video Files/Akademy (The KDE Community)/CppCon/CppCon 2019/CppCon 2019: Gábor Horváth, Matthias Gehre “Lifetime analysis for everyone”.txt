@@ -1,0 +1,3671 @@
+Title: CppCon 2019: Gábor Horváth, Matthias Gehre “Lifetime analysis for everyone”
+Publication date: 2019-09-27
+Playlist: CppCon 2019
+Description: 
+	http://CppCon.org
+—
+Discussion & Comments: https://www.reddit.com/r/cpp/
+—
+Presentation Slides, PDFs, Source Code and other presenter materials are available at: https://github.com/CppCon/CppCon2019
+—
+Object lifetimes are a common source of bugs in C++ that can cause crashes or other unexpected behavior. Fortunately, we now have tools to help us find issues before they can manifest. Guided by Herb Sutter's paper on lifetime analysis, the Clang community has implemented new lifetime warnings which work on single statements. These warnings are only a subset of what is described in the paper, but they have no false positives and still catch important problems in your code. During this talk we will introduce you to the basic principles of the new warnings, share their results on open source projects, and show you tips and tricks on how to get the most out of these diagnostics both for library and application code authors. Spoiler alert: these warnings found bugs in very popular projects!
+— 
+Gábor Horváth
+Eötvös Loránd University
+PhD Student
+Gabor started a Ph.D. in 2016. He is a contributor to research projects related to static analysis since 2012. He is a clang contributor, participated in Google Summer of Code twice as a student and twice as a mentor, interned for Apple and Microsoft. He teaches C++ and compiler construction to undergrads at Eotvos Lorand University.
+
+
+Matthias Gehre
+Silexica GmbH
+Senior Software Architect
+Cologne Area, Germany
+
+Matthias co-maintains the Clang-based implementation of Herb Sutter’s lifetime checks, available online at https://github.com/mgehre/llvm-project and godbolt.org. He is currently working as a Senior Software Architect at Silexica. With its headquarters in Germany and offices in the US and Japan, Silexica provides development tooling to unleash the power of FPGAs from C/C++ applications. Matthias got his Ph.D. in Computational and Applied Mathematics from the University of Bremen, Germany. He loves tinkering with his home automation electronics.
+—
+Videos Filmed & Edited by Bash Films: http://www.BashFilms.com
+Captions: 
+	00:00:09,669 --> 00:00:15,799
+okay let's start on time
+
+00:00:12,230 --> 00:00:18,039
+hello i'm mateus and very happy to be
+
+00:00:15,799 --> 00:00:20,810
+here I'm honored to be speaking here
+
+00:00:18,039 --> 00:00:23,150
+during day time I work at celexa cow and
+
+00:00:20,810 --> 00:00:27,739
+at night I work on lifetime analysis
+
+00:00:23,150 --> 00:00:30,860
+thank you to my wife I'm gob or a PhD
+
+00:00:27,739 --> 00:00:33,920
+student from Hungary former Microsoft
+
+00:00:30,860 --> 00:00:36,550
+and Apple intern so let's talk about
+
+00:00:33,920 --> 00:00:39,829
+lifetime object lifetimes in particular
+
+00:00:36,550 --> 00:00:41,870
+object lifetimes are very delicate topic
+
+00:00:39,829 --> 00:00:44,120
+and we need to handle them well because
+
+00:00:41,870 --> 00:00:45,829
+if we don't do we will suffer we will
+
+00:00:44,120 --> 00:00:48,380
+suffer crashes we suffered data
+
+00:00:45,829 --> 00:00:50,750
+corruption possible even silent data
+
+00:00:48,380 --> 00:00:53,270
+corruption and it's one of those things
+
+00:00:50,750 --> 00:00:55,040
+that people talk about when they say C++
+
+00:00:53,270 --> 00:00:58,220
+makes it really easy for yourself to
+
+00:00:55,040 --> 00:01:00,920
+shoot you in the food so I will tell you
+
+00:00:58,220 --> 00:01:03,770
+a story I probably made that one up
+
+00:01:00,920 --> 00:01:06,320
+so it's a rainy day outside you'll be
+
+00:01:03,770 --> 00:01:09,530
+looking at some code and you run it on
+
+00:01:06,320 --> 00:01:12,530
+your machine CentOS machine and it works
+
+00:01:09,530 --> 00:01:14,810
+so what you do is it ask you for some
+
+00:01:12,530 --> 00:01:16,579
+name you enter it and it says hello and
+
+00:01:14,810 --> 00:01:18,409
+whatever you entered and you try it
+
+00:01:16,579 --> 00:01:21,530
+multiple times and everything looks fine
+
+00:01:18,409 --> 00:01:23,600
+so good but your customer reports for
+
+00:01:21,530 --> 00:01:26,869
+them it doesn't work at all because when
+
+00:01:23,600 --> 00:01:29,929
+they enter a long name then it just
+
+00:01:26,869 --> 00:01:31,639
+prints hello without any name and if
+
+00:01:29,929 --> 00:01:33,770
+they enter a short name it prints hello
+
+00:01:31,639 --> 00:01:37,459
+and a lot of garbage that they never
+
+00:01:33,770 --> 00:01:40,310
+seen before so you go and dig on the
+
+00:01:37,459 --> 00:01:42,439
+main function looks sane nothing too
+
+00:01:40,310 --> 00:01:45,880
+difficult so we go look at the input
+
+00:01:42,439 --> 00:01:49,130
+function and it's not hard to see oh
+
+00:01:45,880 --> 00:01:50,630
+there's a problem here we returned some
+
+00:01:49,130 --> 00:01:55,459
+buffer of the string object that's going
+
+00:01:50,630 --> 00:01:57,619
+to be destroyed dangling pointer but for
+
+00:01:55,459 --> 00:02:00,439
+us it was not so hard to see it once we
+
+00:01:57,619 --> 00:02:02,959
+had on the screen but why is it so hard
+
+00:02:00,439 --> 00:02:05,179
+for compilers to see it why can't tools
+
+00:02:02,959 --> 00:02:07,549
+tell about tell us about those problems
+
+00:02:05,179 --> 00:02:09,979
+right away we need to really reserve a
+
+00:02:07,549 --> 00:02:12,170
+part of our brain capacity just to look
+
+00:02:09,979 --> 00:02:15,440
+for those kind of errors and all of the
+
+00:02:12,170 --> 00:02:16,760
+source code we write or review but it
+
+00:02:15,440 --> 00:02:19,280
+seems there should be something that
+
+00:02:16,760 --> 00:02:22,170
+compilers do about it and especially
+
+00:02:19,280 --> 00:02:23,700
+because it's such a bad problem we
+
+00:02:22,170 --> 00:02:26,099
+doggone different behavior which means
+
+00:02:23,700 --> 00:02:28,380
+anything can happen it can work it works
+
+00:02:26,099 --> 00:02:30,480
+on my machine but it can also have any
+
+00:02:28,380 --> 00:02:33,530
+other funny things so we need to be
+
+00:02:30,480 --> 00:02:35,970
+really careful about our dead objects
+
+00:02:33,530 --> 00:02:38,430
+Microsoft reports there are 70 percent
+
+00:02:35,970 --> 00:02:42,750
+of their patches fix memory issues so
+
+00:02:38,430 --> 00:02:44,819
+this is a really difficult problem let's
+
+00:02:42,750 --> 00:02:47,700
+look at some of the rules we need to
+
+00:02:44,819 --> 00:02:50,340
+keep in mind when we reason about object
+
+00:02:47,700 --> 00:02:53,760
+lifetime to see what's happening so that
+
+00:02:50,340 --> 00:02:56,910
+we have here function returning a string
+
+00:02:53,760 --> 00:03:00,030
+temporary and we call it an F to print
+
+00:02:56,910 --> 00:03:02,400
+it so we realized that getstring returns
+
+00:03:00,030 --> 00:03:05,069
+a temporary and we should think about
+
+00:03:02,400 --> 00:03:07,440
+how long as a temporary live I mean it
+
+00:03:05,069 --> 00:03:10,140
+would be kind of insane if F was
+
+00:03:07,440 --> 00:03:11,760
+problematic because nobody would use a
+
+00:03:10,140 --> 00:03:13,560
+language that was so easy to get an
+
+00:03:11,760 --> 00:03:16,680
+event behavior so that actually works
+
+00:03:13,560 --> 00:03:18,930
+and it works because temporaries live
+
+00:03:16,680 --> 00:03:21,690
+until the end of the full expression so
+
+00:03:18,930 --> 00:03:23,610
+they get destroyed when I mean at the
+
+00:03:21,690 --> 00:03:26,400
+semicolon after everything else happened
+
+00:03:23,610 --> 00:03:31,290
+so that's good no problem if you look at
+
+00:03:26,400 --> 00:03:32,579
+g string vu appears on the stage and if
+
+00:03:31,290 --> 00:03:38,010
+you don't know string view it's
+
+00:03:32,579 --> 00:03:40,230
+something edit in c++ 17 no so it's the
+
+00:03:38,010 --> 00:03:42,120
+thing that's really good like a struct
+
+00:03:40,230 --> 00:03:47,370
+you have a cons car pointer and the
+
+00:03:42,120 --> 00:03:49,200
+length it represents a text but it
+
+00:03:47,370 --> 00:03:51,420
+doesn't own it so we need to keep
+
+00:03:49,200 --> 00:03:53,519
+whatever owns it alive what we do here
+
+00:03:51,420 --> 00:03:55,650
+we assign the string to the string view
+
+00:03:53,519 --> 00:03:57,120
+but the temporary gets destroyed we know
+
+00:03:55,650 --> 00:03:58,859
+at the end of the flow expression so
+
+00:03:57,120 --> 00:04:02,420
+string you tango and we actually have a
+
+00:03:58,859 --> 00:04:05,100
+problem here and then if you look at 8
+
+00:04:02,420 --> 00:04:08,970
+it looks pretty similar to 3 we also
+
+00:04:05,100 --> 00:04:10,350
+have an on owning reference name name is
+
+00:04:08,970 --> 00:04:12,060
+not a string it was a reference to a
+
+00:04:10,350 --> 00:04:15,810
+string so we could expect there's the
+
+00:04:12,060 --> 00:04:17,459
+same problem but the the C language C++
+
+00:04:15,810 --> 00:04:19,560
+language has this particular special
+
+00:04:17,459 --> 00:04:22,109
+case here because the reference will
+
+00:04:19,560 --> 00:04:24,240
+call something we call cause something
+
+00:04:22,109 --> 00:04:26,250
+we call lifetime extension because the
+
+00:04:24,240 --> 00:04:28,050
+reference is on the left-hand side name
+
+00:04:26,250 --> 00:04:30,030
+and the temporaries on the right-hand
+
+00:04:28,050 --> 00:04:31,710
+side lifetime will be extended and the
+
+00:04:30,030 --> 00:04:33,680
+temporary will live as long as name live
+
+00:04:31,710 --> 00:04:35,690
+so there is no problem
+
+00:04:33,680 --> 00:04:38,940
+moving on
+
+00:04:35,690 --> 00:04:42,509
+sub-objects so we have almost what we
+
+00:04:38,940 --> 00:04:44,220
+had before but now if we get a struct
+
+00:04:42,509 --> 00:04:45,810
+the temporary struct which has two
+
+00:04:44,220 --> 00:04:49,410
+string members the first name the last
+
+00:04:45,810 --> 00:04:52,410
+name and an F we bind the first name the
+
+00:04:49,410 --> 00:05:00,860
+sub-object to our reference whose things
+
+00:04:52,410 --> 00:05:03,449
+this is okay almost nobody it's okay
+
+00:05:00,860 --> 00:05:05,130
+that is because lifetime extension also
+
+00:05:03,449 --> 00:05:07,319
+applies to sub objects so if you have a
+
+00:05:05,130 --> 00:05:08,430
+sub object of a temporary that also gets
+
+00:05:07,319 --> 00:05:13,080
+left I'm extended and there is no
+
+00:05:08,430 --> 00:05:15,690
+problem on the other hand if we call
+
+00:05:13,080 --> 00:05:17,159
+something like a C string method here we
+
+00:05:15,690 --> 00:05:18,599
+don't get left an extension because the
+
+00:05:17,159 --> 00:05:21,000
+right since height is no longer a
+
+00:05:18,599 --> 00:05:23,789
+temporary object is just a pointer and
+
+00:05:21,000 --> 00:05:24,990
+the name is not a reference so two
+
+00:05:23,789 --> 00:05:29,580
+reasons why we don't get lateral
+
+00:05:24,990 --> 00:05:33,569
+extension and this dangles more kumbhak
+
+00:05:29,580 --> 00:05:35,039
+oh yeah and our favorite refactoring why
+
+00:05:33,569 --> 00:05:38,370
+shouldn't we add a getter here and makes
+
+00:05:35,039 --> 00:05:42,030
+everything so much nicer so what happens
+
+00:05:38,370 --> 00:05:44,550
+if an F with replaces dot first white
+
+00:05:42,030 --> 00:05:52,620
+dot get first whose things that will be
+
+00:05:44,550 --> 00:05:55,560
+okay it isn't and that's I mean of
+
+00:05:52,620 --> 00:05:57,990
+course because then the right-hand side
+
+00:05:55,560 --> 00:05:59,669
+is no longer temporary get first doesn't
+
+00:05:57,990 --> 00:06:01,560
+return temporary get first returns of
+
+00:05:59,669 --> 00:06:03,509
+reference so a lifetime extension
+
+00:06:01,560 --> 00:06:05,340
+doesn't kick in and that's because the
+
+00:06:03,509 --> 00:06:07,169
+compiler doesn't look through get first
+
+00:06:05,340 --> 00:06:09,150
+it doesn't see that get first returns
+
+00:06:07,169 --> 00:06:10,860
+the reference to some temporary it just
+
+00:06:09,150 --> 00:06:15,780
+sees there's a reference so no lifetime
+
+00:06:10,860 --> 00:06:20,069
+extension and now range based for loops
+
+00:06:15,780 --> 00:06:22,530
+so we loop over our string right the
+
+00:06:20,069 --> 00:06:24,539
+string is again a temporary and by now
+
+00:06:22,530 --> 00:06:26,340
+we should be a bit very how long does it
+
+00:06:24,539 --> 00:06:30,659
+actually live will it live long enough
+
+00:06:26,340 --> 00:06:32,099
+for the loop body to execute to answer
+
+00:06:30,659 --> 00:06:33,659
+this question we need to look at how
+
+00:06:32,099 --> 00:06:34,919
+range based follow-ups are you fine and
+
+00:06:33,659 --> 00:06:37,889
+they're actually just a bit of syntactic
+
+00:06:34,919 --> 00:06:39,810
+sugar of our constructs we had before so
+
+00:06:37,889 --> 00:06:41,310
+when we look at the definition it will
+
+00:06:39,810 --> 00:06:43,620
+look something like this
+
+00:06:41,310 --> 00:06:47,190
+and what we see in the first line is
+
+00:06:43,620 --> 00:06:49,260
+that the temporary is bound to an
+
+00:06:47,190 --> 00:06:50,640
+r-value reference range
+
+00:06:49,260 --> 00:06:52,710
+r-value references cause laughter
+
+00:06:50,640 --> 00:06:54,270
+extension as well so this temporary will
+
+00:06:52,710 --> 00:06:56,940
+be lifetime extended over the whole body
+
+00:06:54,270 --> 00:06:58,730
+of the loop and everything is good if we
+
+00:06:56,940 --> 00:07:01,380
+do something slightly different though
+
+00:06:58,730 --> 00:07:02,010
+we have a may read input and we feel
+
+00:07:01,380 --> 00:07:03,870
+lucky today
+
+00:07:02,010 --> 00:07:06,630
+just call value without any checking
+
+00:07:03,870 --> 00:07:08,910
+then this won't work so well anymore
+
+00:07:06,630 --> 00:07:11,670
+because as we had before we have this
+
+00:07:08,910 --> 00:07:13,770
+r-value reference here but on the right
+
+00:07:11,670 --> 00:07:15,660
+hand side there is no temporary we
+
+00:07:13,770 --> 00:07:17,460
+invoke the value method and that doesn't
+
+00:07:15,660 --> 00:07:20,340
+return a temporary it returns a
+
+00:07:17,460 --> 00:07:22,470
+reference to a temporary but the
+
+00:07:20,340 --> 00:07:25,890
+compiler doesn't know so this will be a
+
+00:07:22,470 --> 00:07:30,420
+dangling reference again and now the
+
+00:07:25,890 --> 00:07:33,000
+last and my favorite example ternary
+
+00:07:30,420 --> 00:07:35,730
+operators so nice so we have a little
+
+00:07:33,000 --> 00:07:38,100
+function what can go wrong pretty print
+
+00:07:35,730 --> 00:07:41,040
+we give it a thing and it either prints
+
+00:07:38,100 --> 00:07:44,760
+the thing or it prints empty and angle
+
+00:07:41,040 --> 00:07:47,580
+brackets if there was nothing a thing so
+
+00:07:44,760 --> 00:07:51,920
+whose things there is some problem in
+
+00:07:47,580 --> 00:07:54,750
+this code little hint it's on the slide
+
+00:07:51,920 --> 00:07:57,060
+yes there is a problem in the code but
+
+00:07:54,750 --> 00:08:03,300
+when does it happen there's a problem
+
+00:07:57,060 --> 00:08:06,090
+happen when thing is empty some few
+
+00:08:03,300 --> 00:08:11,430
+people does a problem happen when thing
+
+00:08:06,090 --> 00:08:14,070
+is not empty yeah some other few up
+
+00:08:11,430 --> 00:08:16,740
+people so let's zoom in a bit
+
+00:08:14,070 --> 00:08:20,420
+ternary operator we have two operands
+
+00:08:16,740 --> 00:08:23,400
+and one has a type of cons car are a
+
+00:08:20,420 --> 00:08:26,250
+write the string that role and the other
+
+00:08:23,400 --> 00:08:29,040
+have the type of string now the ternary
+
+00:08:26,250 --> 00:08:31,980
+operator itself needs to have one single
+
+00:08:29,040 --> 00:08:34,349
+type and it needs to decide which of
+
+00:08:31,980 --> 00:08:36,780
+those there is a pretty long section the
+
+00:08:34,349 --> 00:08:39,120
+C++ standard explaining how the type is
+
+00:08:36,780 --> 00:08:41,780
+derived but eventually it will happen as
+
+00:08:39,120 --> 00:08:45,030
+those two things agree on being string
+
+00:08:41,780 --> 00:08:48,510
+which already tells us in the case where
+
+00:08:45,030 --> 00:08:50,160
+thing is empty we get a temporary string
+
+00:08:48,510 --> 00:08:52,140
+constructed from this empty string that
+
+00:08:50,160 --> 00:08:54,600
+law was signed to the string of you and
+
+00:08:52,140 --> 00:08:57,660
+it will dangle so that's a problem for
+
+00:08:54,600 --> 00:08:59,880
+sure but it turns out for some reason
+
+00:08:57,660 --> 00:09:02,290
+that don't understand quite that also
+
+00:08:59,880 --> 00:09:05,500
+the thing itself will convert
+
+00:09:02,290 --> 00:09:07,060
+two temporary string object and the code
+
+00:09:05,500 --> 00:09:09,610
+will roughly look like this that the
+
+00:09:07,060 --> 00:09:12,100
+compiler sees so actually both cases
+
+00:09:09,610 --> 00:09:15,940
+lead to dangling pointers and will be
+
+00:09:12,100 --> 00:09:18,279
+and problems you might have noticed that
+
+00:09:15,940 --> 00:09:22,110
+our that when you see string of you on a
+
+00:09:18,279 --> 00:09:25,240
+slide it's usually a problem that thing
+
+00:09:22,110 --> 00:09:27,279
+was also kind of apparent to the C++
+
+00:09:25,240 --> 00:09:29,259
+either committee when they standardized
+
+00:09:27,279 --> 00:09:30,850
+string view so from what I heard there
+
+00:09:29,259 --> 00:09:33,819
+was some concern that this would be a
+
+00:09:30,850 --> 00:09:36,430
+pretty dangerous tool and from what I
+
+00:09:33,819 --> 00:09:38,529
+also heard one argument for when
+
+00:09:36,430 --> 00:09:43,300
+standardizing it was that we would
+
+00:09:38,529 --> 00:09:45,639
+eventually get Latin noses let's see so
+
+00:09:43,300 --> 00:09:47,949
+in summary lifetime ends in a few cases
+
+00:09:45,639 --> 00:09:50,350
+it ends for local objects when their
+
+00:09:47,949 --> 00:09:52,060
+scope ends it ends for temporaries at
+
+00:09:50,350 --> 00:09:54,880
+the end of a full expression so that
+
+00:09:52,060 --> 00:09:58,290
+semicolon unless a a lifetime extended
+
+00:09:54,880 --> 00:10:01,810
+which is not always obvious and
+
+00:09:58,290 --> 00:10:03,639
+especially we can have those type
+
+00:10:01,810 --> 00:10:05,370
+conversions introducing temporaries in
+
+00:10:03,639 --> 00:10:09,760
+places where we don't expect them and
+
+00:10:05,370 --> 00:10:12,130
+temporaries often cause problems but
+
+00:10:09,760 --> 00:10:15,190
+there's also good news the good news is
+
+00:10:12,130 --> 00:10:17,740
+that we implemented some Diagnostics
+
+00:10:15,190 --> 00:10:20,620
+that diagnose all the examples we saw up
+
+00:10:17,740 --> 00:10:23,620
+to now on the slides and they will be
+
+00:10:20,620 --> 00:10:25,269
+shipping with clang 10 and they will be
+
+00:10:23,620 --> 00:10:26,860
+enabled by default so there is no
+
+00:10:25,269 --> 00:10:30,880
+warning flag you need to pass all of
+
+00:10:26,860 --> 00:10:35,310
+those examples will be diagnosed and we
+
+00:10:30,880 --> 00:10:35,310
+have more good news thank you
+
+00:10:36,310 --> 00:10:43,720
+so this is this is not also as a former
+
+00:10:41,800 --> 00:10:45,970
+Microsoft Intel Microsoft note was not
+
+00:10:43,720 --> 00:10:49,209
+only kind enough and let me work on
+
+00:10:45,970 --> 00:10:53,350
+clang but they also let me implement the
+
+00:10:49,209 --> 00:10:56,259
+same rules in a mesh PC so if you end up
+
+00:10:53,350 --> 00:10:59,829
+using Microsoft's tool chain you will
+
+00:10:56,259 --> 00:11:04,569
+also have all these rules at your
+
+00:10:59,829 --> 00:11:07,930
+disposal okay so we already did see some
+
+00:11:04,569 --> 00:11:10,420
+somewhat artificial examples of lifetime
+
+00:11:07,930 --> 00:11:14,230
+issues and the question is do we make
+
+00:11:10,420 --> 00:11:16,870
+such mistakes in production code and to
+
+00:11:14,230 --> 00:11:19,300
+answer this question we run these
+
+00:11:16,870 --> 00:11:23,920
+warnings over a number of open-source
+
+00:11:19,300 --> 00:11:26,379
+projects and maybe you can maybe you
+
+00:11:23,920 --> 00:11:30,100
+know some of these projects although we
+
+00:11:26,379 --> 00:11:34,889
+found issues in all of those and even
+
+00:11:30,100 --> 00:11:36,459
+more but I wanted to talk mainly about
+
+00:11:34,889 --> 00:11:40,629
+these cases
+
+00:11:36,459 --> 00:11:43,420
+so basically LLVM has an asterisk
+
+00:11:40,629 --> 00:11:48,899
+because we did a special experiment
+
+00:11:43,420 --> 00:11:53,790
+there so we not only run the analysis on
+
+00:11:48,899 --> 00:11:56,980
+the LV on top of three code but we also
+
+00:11:53,790 --> 00:11:59,230
+we're looking for some keywords in the
+
+00:11:56,980 --> 00:12:02,019
+commit history of a VM we were looking
+
+00:11:59,230 --> 00:12:06,040
+for commits that are fixing lifetime
+
+00:12:02,019 --> 00:12:08,230
+issues so that we did we said if the
+
+00:12:06,040 --> 00:12:11,589
+warnings we already have could have
+
+00:12:08,230 --> 00:12:14,559
+prevented committing those errors we
+
+00:12:11,589 --> 00:12:16,809
+found about 20 lifetime fixing commits
+
+00:12:14,559 --> 00:12:19,959
+and we found that about half of them
+
+00:12:16,809 --> 00:12:23,589
+could have been prevented if we had
+
+00:12:19,959 --> 00:12:27,040
+these warnings earlier and another thing
+
+00:12:23,589 --> 00:12:30,129
+I want to emphasize these warnings had
+
+00:12:27,040 --> 00:12:33,459
+no false positives on any of the
+
+00:12:30,129 --> 00:12:37,779
+projects we checked so every time you
+
+00:12:33,459 --> 00:12:42,040
+see a warning from this analysis you can
+
+00:12:37,779 --> 00:12:44,259
+be certain there is an issue there if
+
+00:12:42,040 --> 00:12:47,320
+it's not please reach out to us and we
+
+00:12:44,259 --> 00:12:49,810
+will do our best to fix that
+
+00:12:47,320 --> 00:12:52,149
+and another thing that is important to
+
+00:12:49,810 --> 00:12:55,420
+note some of those projects are very
+
+00:12:52,149 --> 00:12:59,079
+popular and this means they have a lot
+
+00:12:55,420 --> 00:13:02,350
+of well seasoned developers they have
+
+00:12:59,079 --> 00:13:06,250
+review process they have build boats
+
+00:13:02,350 --> 00:13:10,170
+they have sanitizers buzzers and still
+
+00:13:06,250 --> 00:13:12,190
+all these efforts they we can still find
+
+00:13:10,170 --> 00:13:15,040
+regardless of all these efforts we can
+
+00:13:12,190 --> 00:13:19,420
+still find some bugs using very senior
+
+00:13:15,040 --> 00:13:21,120
+very simple rules so how is it possible
+
+00:13:19,420 --> 00:13:24,970
+that
+
+00:13:21,120 --> 00:13:28,630
+LLVM developer someone with who works on
+
+00:13:24,970 --> 00:13:32,579
+a C++ compiler and probably has a good
+
+00:13:28,630 --> 00:13:36,670
+track record of quality patches and
+
+00:13:32,579 --> 00:13:40,930
+Valverde's in C++ can introduce bugs
+
+00:13:36,670 --> 00:13:43,630
+that can be detected using such a simple
+
+00:13:40,930 --> 00:13:49,120
+analysis so to answer the question let's
+
+00:13:43,630 --> 00:13:53,860
+look at a code example that was taken
+
+00:13:49,120 --> 00:13:58,060
+directly from LAN I wonder if any of you
+
+00:13:53,860 --> 00:14:01,690
+can spot the problem there it's not easy
+
+00:13:58,060 --> 00:14:06,360
+we added some highlights to guide your
+
+00:14:01,690 --> 00:14:09,339
+eyes but even after having the warnings
+
+00:14:06,360 --> 00:14:15,579
+it took some time for us to understand
+
+00:14:09,339 --> 00:14:20,680
+what was going on so it looks like this
+
+00:14:15,579 --> 00:14:23,410
+time wasn't enough to spot the error so
+
+00:14:20,680 --> 00:14:26,260
+let's look at let's look a bit deeper
+
+00:14:23,410 --> 00:14:28,449
+what is going on so you can notice we
+
+00:14:26,260 --> 00:14:32,350
+have the dreaded string view as the
+
+00:14:28,449 --> 00:14:34,240
+return type of the get name function so
+
+00:14:32,350 --> 00:14:36,579
+let's see how this string B is
+
+00:14:34,240 --> 00:14:39,550
+constructed this string view is
+
+00:14:36,579 --> 00:14:43,000
+constructed from the result of this read
+
+00:14:39,550 --> 00:14:46,000
+module do function so let's see but what
+
+00:14:43,000 --> 00:14:49,360
+object is returned by this bit module do
+
+00:14:46,000 --> 00:14:52,449
+and the return type of this function or
+
+00:14:49,360 --> 00:14:54,610
+method depends on its argument so if we
+
+00:14:52,449 --> 00:14:57,639
+check the argument it's a lambda
+
+00:14:54,610 --> 00:15:01,060
+function and let's look at the body of
+
+00:14:57,639 --> 00:15:03,490
+this lambda function well actually it
+
+00:15:01,060 --> 00:15:04,540
+returns the result of this get modified
+
+00:15:03,490 --> 00:15:06,610
+yet
+
+00:15:04,540 --> 00:15:09,970
+Maju identifier and this get module
+
+00:15:06,610 --> 00:15:12,790
+identifier returns the constants to the
+
+00:15:09,970 --> 00:15:15,399
+stood string everything seems to be step
+
+00:15:12,790 --> 00:15:20,490
+so far because constructing a string
+
+00:15:15,399 --> 00:15:23,769
+view from this reference should be safe
+
+00:15:20,490 --> 00:15:27,430
+unfortunately however the type deduction
+
+00:15:23,769 --> 00:15:29,680
+rules of the language are slightly
+
+00:15:27,430 --> 00:15:31,750
+different so we didn't specify the
+
+00:15:29,680 --> 00:15:35,319
+return type of this lambda function
+
+00:15:31,750 --> 00:15:38,610
+explicitly and what happened the
+
+00:15:35,319 --> 00:15:42,880
+compiler did use the return type to be
+
+00:15:38,610 --> 00:15:46,000
+stood string by value so basically we
+
+00:15:42,880 --> 00:15:48,370
+ended up creating a temporary object a
+
+00:15:46,000 --> 00:15:50,740
+temporary stood string object and we
+
+00:15:48,370 --> 00:15:54,600
+created the string view using this
+
+00:15:50,740 --> 00:15:58,329
+temporary object and this is why we had
+
+00:15:54,600 --> 00:16:02,529
+then link string view issue so basically
+
+00:15:58,329 --> 00:16:05,050
+even though the lifetime rules are not
+
+00:16:02,529 --> 00:16:07,480
+that complicated in the language but
+
+00:16:05,050 --> 00:16:10,510
+having all these different pieces of the
+
+00:16:07,480 --> 00:16:13,029
+language can give us a hard time even
+
+00:16:10,510 --> 00:16:15,490
+when we are season C++ developers and
+
+00:16:13,029 --> 00:16:18,220
+this is why we think it is very
+
+00:16:15,490 --> 00:16:21,689
+important to have such tools at our
+
+00:16:18,220 --> 00:16:27,959
+disposal so we can detect those errors
+
+00:16:21,689 --> 00:16:31,300
+so the fix that was upstream is to
+
+00:16:27,959 --> 00:16:34,209
+specify explicitly the return type of
+
+00:16:31,300 --> 00:16:37,990
+the London function so we no longer have
+
+00:16:34,209 --> 00:16:40,569
+this dangling issue I actually be
+
+00:16:37,990 --> 00:16:44,500
+reported all the bugs we found to all
+
+00:16:40,569 --> 00:16:47,589
+the open source projects and all of all
+
+00:16:44,500 --> 00:16:50,019
+of the active projects fix those bugs
+
+00:16:47,589 --> 00:16:51,550
+already and some of the projects were
+
+00:16:50,019 --> 00:16:55,720
+less active and we did not get any
+
+00:16:51,550 --> 00:16:58,329
+feedback yet ok so let's do a bit of a
+
+00:16:55,720 --> 00:17:05,919
+practice to test that we learned so far
+
+00:16:58,329 --> 00:17:08,890
+so who can see the bug in this code some
+
+00:17:05,919 --> 00:17:11,020
+people this code is also from an open
+
+00:17:08,890 --> 00:17:13,400
+source project so basically we are using
+
+00:17:11,020 --> 00:17:16,160
+the operator plus
+
+00:17:13,400 --> 00:17:18,380
+which concatenate two strings and the
+
+00:17:16,160 --> 00:17:21,920
+result is a temporary stud string object
+
+00:17:18,380 --> 00:17:24,230
+and we will invoke the sister method on
+
+00:17:21,920 --> 00:17:26,570
+the temporary objects so we will end up
+
+00:17:24,230 --> 00:17:28,910
+having a pointer that points into the
+
+00:17:26,570 --> 00:17:30,470
+buffer of a temporary state string that
+
+00:17:28,910 --> 00:17:33,650
+will be destroyed at the end of the full
+
+00:17:30,470 --> 00:17:39,080
+expression so basically we will have
+
+00:17:33,650 --> 00:17:43,640
+done in pointer okay so who can spot the
+
+00:17:39,080 --> 00:17:45,050
+bug in this code it looks like a lot of
+
+00:17:43,640 --> 00:17:47,780
+people okay great
+
+00:17:45,050 --> 00:17:49,910
+so basically this code is from a
+
+00:17:47,780 --> 00:17:54,710
+dependency of the chromium project and
+
+00:17:49,910 --> 00:17:57,950
+you can see the outer root cons string
+
+00:17:54,710 --> 00:18:02,180
+data but probably the outer wanted to
+
+00:17:57,950 --> 00:18:04,670
+Road cones string and percent data so
+
+00:18:02,180 --> 00:18:06,070
+this is actually a typo and we are so
+
+00:18:04,670 --> 00:18:10,850
+used to seeing
+
+00:18:06,070 --> 00:18:14,600
+consti ref that we usually do not notice
+
+00:18:10,850 --> 00:18:17,480
+if we for example forget to type the
+
+00:18:14,600 --> 00:18:21,500
+ampersand so this can also pass reviews
+
+00:18:17,480 --> 00:18:23,210
+for example and having a local having a
+
+00:18:21,500 --> 00:18:26,030
+parameter which is basically a local
+
+00:18:23,210 --> 00:18:29,480
+that will be doing okay today when we
+
+00:18:26,030 --> 00:18:32,660
+return from this function the resulting
+
+00:18:29,480 --> 00:18:39,340
+pointer from the sister method call will
+
+00:18:32,660 --> 00:18:47,450
+dangle okay so who can spot the bug on
+
+00:18:39,340 --> 00:18:49,550
+this slide no one so this is a really
+
+00:18:47,450 --> 00:18:52,670
+great obvious because there is no bug on
+
+00:18:49,550 --> 00:18:56,540
+the slide this code is correct so
+
+00:18:52,670 --> 00:18:58,790
+basically we have unique pointer taken
+
+00:18:56,540 --> 00:19:00,920
+by value and value it is true the unique
+
+00:18:58,790 --> 00:19:04,370
+pointer will be destroyed when we
+
+00:19:00,920 --> 00:19:07,400
+returned from this constructor call we
+
+00:19:04,370 --> 00:19:11,450
+move the contents of the unique pointer
+
+00:19:07,400 --> 00:19:15,440
+into a field so the pointed object will
+
+00:19:11,450 --> 00:19:21,080
+be still alive so it is safe to save a
+
+00:19:15,440 --> 00:19:23,960
+reference to this to the point E and the
+
+00:19:21,080 --> 00:19:25,880
+good news is that we will not warn for
+
+00:19:23,960 --> 00:19:26,820
+this code example the bad news is that
+
+00:19:25,880 --> 00:19:29,670
+we
+
+00:19:26,820 --> 00:19:32,370
+also not worn if you do not have the
+
+00:19:29,670 --> 00:19:34,640
+move so basically this is a very
+
+00:19:32,370 --> 00:19:37,140
+simplistic analysis we want to be very
+
+00:19:34,640 --> 00:19:40,050
+conservative in a sense that we only
+
+00:19:37,140 --> 00:19:44,460
+warn if we are sure it's something that
+
+00:19:40,050 --> 00:19:48,390
+is going on okay so one question you
+
+00:19:44,460 --> 00:19:51,270
+might have we have all these nice - is
+
+00:19:48,390 --> 00:19:55,670
+this dynamic analysis - with sanitizers
+
+00:19:51,270 --> 00:19:58,650
+faster so I earned those sufficient and
+
+00:19:55,670 --> 00:20:03,510
+we do recommend to use sanitizer
+
+00:19:58,650 --> 00:20:09,270
+sanitizers are great but they also have
+
+00:20:03,510 --> 00:20:13,920
+some disadvantages for example it slows
+
+00:20:09,270 --> 00:20:16,980
+down around the tests of your program so
+
+00:20:13,920 --> 00:20:19,680
+some developers just not using sanitized
+
+00:20:16,980 --> 00:20:24,630
+builds during development to speed up
+
+00:20:19,680 --> 00:20:27,180
+their inner loops which is okay and also
+
+00:20:24,630 --> 00:20:29,940
+not every project has good test coverage
+
+00:20:27,180 --> 00:20:33,180
+because sanitizers and dynamic analysis
+
+00:20:29,940 --> 00:20:37,290
+in general relying on how good coverage
+
+00:20:33,180 --> 00:20:41,340
+do you have and what we found in open
+
+00:20:37,290 --> 00:20:44,730
+source projects that we tested most
+
+00:20:41,340 --> 00:20:47,610
+projects do not have great coverage when
+
+00:20:44,730 --> 00:20:49,470
+it comes to error recovery code so
+
+00:20:47,610 --> 00:20:54,660
+basically most of the bugs we found are
+
+00:20:49,470 --> 00:20:57,600
+from error recovery code and also some
+
+00:20:54,660 --> 00:21:00,330
+developers cannot use sanitizers at all
+
+00:20:57,600 --> 00:21:02,700
+for example if you are developing for an
+
+00:21:00,330 --> 00:21:05,490
+embedded platform where you do not have
+
+00:21:02,700 --> 00:21:09,200
+virtual memory support you are out of
+
+00:21:05,490 --> 00:21:12,750
+luck and also even if you have the
+
+00:21:09,200 --> 00:21:14,790
+virtual memory support I heard that from
+
+00:21:12,750 --> 00:21:17,640
+some game developers when you develop or
+
+00:21:14,790 --> 00:21:19,920
+some consoles for example the Nintendo
+
+00:21:17,640 --> 00:21:22,380
+switch you have a limited amount of
+
+00:21:19,920 --> 00:21:25,860
+memory on your device and that rest
+
+00:21:22,380 --> 00:21:29,400
+sanitizer can have a very large amount
+
+00:21:25,860 --> 00:21:33,000
+of memory overhead so if your game or
+
+00:21:29,400 --> 00:21:33,510
+the consumes large amount of memory you
+
+00:21:33,000 --> 00:21:38,220
+have
+
+00:21:33,510 --> 00:21:40,710
+you just cannot deploy a sanitized
+
+00:21:38,220 --> 00:21:42,330
+version of your binary
+
+00:21:40,710 --> 00:21:44,279
+also sanitizers have some
+
+00:21:42,330 --> 00:21:46,649
+incompatibility with some other safety
+
+00:21:44,279 --> 00:21:50,539
+measures for example the fortify source
+
+00:21:46,649 --> 00:21:54,840
+Metro and warnings has other advantages
+
+00:21:50,539 --> 00:21:57,570
+to give you faster feedback so you do
+
+00:21:54,840 --> 00:22:00,649
+not even need to run the test to get
+
+00:21:57,570 --> 00:22:06,620
+these Diagnostics giving you a faster
+
+00:22:00,649 --> 00:22:11,190
+inner loop for development but basically
+
+00:22:06,620 --> 00:22:14,309
+the most important thing is you do not
+
+00:22:11,190 --> 00:22:17,130
+need to choose the best is to use both
+
+00:22:14,309 --> 00:22:20,789
+tools because this is the way you can
+
+00:22:17,130 --> 00:22:25,169
+get the most quality assurance for your
+
+00:22:20,789 --> 00:22:27,929
+code and there is one maybe lesser known
+
+00:22:25,169 --> 00:22:30,480
+fact about the sanitizers such that they
+
+00:22:27,929 --> 00:22:33,630
+can have false negatives so sometimes
+
+00:22:30,480 --> 00:22:35,789
+even the sanitizers fail to see if there
+
+00:22:33,630 --> 00:22:38,010
+is an error in your code and the reason
+
+00:22:35,789 --> 00:22:40,020
+is that the self but the sanitizer can
+
+00:22:38,010 --> 00:22:42,570
+address sanitizer can do for you
+
+00:22:40,020 --> 00:22:44,640
+it can check if you access allocated
+
+00:22:42,570 --> 00:22:46,770
+memory but it cannot check if the
+
+00:22:44,640 --> 00:22:50,520
+allocated memory actually belongs to the
+
+00:22:46,770 --> 00:22:52,320
+object that you wish to use so for
+
+00:22:50,520 --> 00:22:56,580
+example if you have an out of bound
+
+00:22:52,320 --> 00:22:59,580
+access but you end up accessing another
+
+00:22:56,580 --> 00:23:03,110
+object then the sanitizer will not warn
+
+00:22:59,580 --> 00:23:06,600
+of course this is relatively rare so
+
+00:23:03,110 --> 00:23:11,010
+this shouldn't be a to be concerned and
+
+00:23:06,600 --> 00:23:17,039
+we still advise you to use sanitizers as
+
+00:23:11,010 --> 00:23:19,320
+much as possible so let's take a look
+
+00:23:17,039 --> 00:23:22,140
+behind the curtain to see how those
+
+00:23:19,320 --> 00:23:25,020
+warnings are implemented I basically
+
+00:23:22,140 --> 00:23:27,179
+start with an idea from her Sata's paper
+
+00:23:25,020 --> 00:23:30,690
+that in a rough version I think he
+
+00:23:27,179 --> 00:23:32,130
+presented at cpp con in 2014 and then in
+
+00:23:30,690 --> 00:23:36,120
+a much more refined version presented
+
+00:23:32,130 --> 00:23:38,909
+cpp con last year and the part of the
+
+00:23:36,120 --> 00:23:42,450
+body that we upstream are a pretty small
+
+00:23:38,909 --> 00:23:45,929
+subset of the paper but they still build
+
+00:23:42,450 --> 00:23:48,799
+on the same fundamental inside and that
+
+00:23:45,929 --> 00:23:51,630
+is categorizing your classes into
+
+00:23:48,799 --> 00:23:54,450
+pointers and owners and he appoint us
+
+00:23:51,630 --> 00:23:56,570
+has a capital P because it's
+
+00:23:54,450 --> 00:23:59,940
+bigger class and just all pointers and
+
+00:23:56,570 --> 00:24:02,790
+those things make sense because pointers
+
+00:23:59,940 --> 00:24:06,060
+have the specific characteristic that
+
+00:24:02,790 --> 00:24:08,370
+they point at or into owners and for
+
+00:24:06,060 --> 00:24:12,990
+owners it's important to see when they
+
+00:24:08,370 --> 00:24:14,970
+end their lifetime so as an example for
+
+00:24:12,990 --> 00:24:17,220
+those categories what we have in
+
+00:24:14,970 --> 00:24:20,370
+pointers I of course think like raw
+
+00:24:17,220 --> 00:24:22,710
+pointers references but also iterators
+
+00:24:20,370 --> 00:24:24,840
+because they point into some container
+
+00:24:22,710 --> 00:24:27,510
+and they will dangle in a generalized
+
+00:24:24,840 --> 00:24:30,450
+means when the container goes away
+
+00:24:27,510 --> 00:24:33,810
+also ranges that are views into
+
+00:24:30,450 --> 00:24:37,080
+containers have this issue our dear
+
+00:24:33,810 --> 00:24:41,550
+string view and span which was added in
+
+00:24:37,080 --> 00:24:43,620
+C++ 20 or will be edit and is similar to
+
+00:24:41,550 --> 00:24:46,200
+string you but mutable and not only for
+
+00:24:43,620 --> 00:24:50,370
+character data on the other side we have
+
+00:24:46,200 --> 00:24:52,920
+owners which are typeset many say on
+
+00:24:50,370 --> 00:24:55,350
+storage and hand out pointers into them
+
+00:24:52,920 --> 00:24:58,710
+so those are like unique pointer vector
+
+00:24:55,350 --> 00:25:00,350
+or other containers but also optional or
+
+00:24:58,710 --> 00:25:03,540
+variant
+
+00:25:00,350 --> 00:25:05,400
+so after classifying those two and we
+
+00:25:03,540 --> 00:25:07,770
+have told the compiler about all
+
+00:25:05,400 --> 00:25:09,860
+standard types so it works independent
+
+00:25:07,770 --> 00:25:12,270
+of which standard lab you actually use
+
+00:25:09,860 --> 00:25:15,870
+there's a set of rules that are
+
+00:25:12,270 --> 00:25:17,640
+implemented to eventually come up with
+
+00:25:15,870 --> 00:25:18,990
+those warnings and the first thing we
+
+00:25:17,640 --> 00:25:21,960
+need to do is we need to check for
+
+00:25:18,990 --> 00:25:23,490
+pointers what do they point at and the
+
+00:25:21,960 --> 00:25:25,650
+easiest way to get a pointer is to
+
+00:25:23,490 --> 00:25:27,870
+construct one so if you construct a
+
+00:25:25,650 --> 00:25:31,020
+pointer from an owner like for example
+
+00:25:27,870 --> 00:25:33,630
+in the span case then we will say okay
+
+00:25:31,020 --> 00:25:34,710
+this band which is a pointer now points
+
+00:25:33,630 --> 00:25:37,680
+into that container
+
+00:25:34,710 --> 00:25:40,650
+the second way how to obtain a pointer
+
+00:25:37,680 --> 00:25:43,890
+is to get it out of a member function of
+
+00:25:40,650 --> 00:25:47,070
+an owner so for example we had seen it
+
+00:25:43,890 --> 00:25:50,010
+in previously the C string method on a
+
+00:25:47,070 --> 00:25:53,040
+string it will return capital P pointer
+
+00:25:50,010 --> 00:25:54,780
+which here's also a war pointer and for
+
+00:25:53,040 --> 00:25:56,850
+that one we will track and say ah this
+
+00:25:54,780 --> 00:25:57,950
+one points in to the string where it
+
+00:25:56,850 --> 00:26:01,170
+came from
+
+00:25:57,950 --> 00:26:03,600
+the third way how to construct the
+
+00:26:01,170 --> 00:26:05,130
+pointers from another pointer and that
+
+00:26:03,600 --> 00:26:07,260
+happens for example when you have a
+
+00:26:05,130 --> 00:26:08,250
+string view and you constructed from a
+
+00:26:07,260 --> 00:26:12,210
+cons cast
+
+00:26:08,250 --> 00:26:14,610
+so if you first construct a sconce cast
+
+00:26:12,210 --> 00:26:16,620
+arm we will track where this points to
+
+00:26:14,610 --> 00:26:17,970
+and when you then construct a string you
+
+00:26:16,620 --> 00:26:20,340
+from it we will copy that information
+
+00:26:17,970 --> 00:26:23,190
+over so we now know where the string of
+
+00:26:20,340 --> 00:26:26,220
+you point set and with this tracking
+
+00:26:23,190 --> 00:26:28,020
+implemented there's then certain points
+
+00:26:26,220 --> 00:26:32,159
+where we will issue Diagnostics and the
+
+00:26:28,020 --> 00:26:35,250
+first one is when you initialize a local
+
+00:26:32,159 --> 00:26:36,659
+variable of pointer type with something
+
+00:26:35,250 --> 00:26:38,820
+with a right hand side which points on
+
+00:26:36,659 --> 00:26:41,010
+to a temporary because we all know that
+
+00:26:38,820 --> 00:26:43,140
+temporary goes away it at the end of C
+
+00:26:41,010 --> 00:26:46,679
+full expression so the pointer variable
+
+00:26:43,140 --> 00:26:48,840
+will dangle immediately and this so we
+
+00:26:46,679 --> 00:26:50,669
+have seen examples of that like this one
+
+00:26:48,840 --> 00:26:54,030
+all do you ones in previous slides and
+
+00:26:50,669 --> 00:26:55,950
+the second point where we warn us on a
+
+00:26:54,030 --> 00:26:58,230
+return statement when returning your
+
+00:26:55,950 --> 00:27:00,059
+pointer which either points to a
+
+00:26:58,230 --> 00:27:02,490
+temporary owner like before or to a
+
+00:27:00,059 --> 00:27:03,870
+local owner so a local variable because
+
+00:27:02,490 --> 00:27:07,650
+both of them will be gone by the time
+
+00:27:03,870 --> 00:27:10,950
+the function returns we have also seen
+
+00:27:07,650 --> 00:27:13,440
+examples of that and the same thing
+
+00:27:10,950 --> 00:27:16,080
+actually also works for sub objects so
+
+00:27:13,440 --> 00:27:18,419
+if your return value is a struct and the
+
+00:27:16,080 --> 00:27:20,760
+struct has members that are pointers
+
+00:27:18,419 --> 00:27:23,490
+kept your peep generalized pointers and
+
+00:27:20,760 --> 00:27:25,650
+you return by praising utilization you
+
+00:27:23,490 --> 00:27:27,419
+will check those individual members or
+
+00:27:25,650 --> 00:27:28,740
+if you initialize a variable space
+
+00:27:27,419 --> 00:27:32,340
+initialization we will check those
+
+00:27:28,740 --> 00:27:34,440
+members to what's important to know here
+
+00:27:32,340 --> 00:27:36,480
+is that the analysis is restricted to
+
+00:27:34,440 --> 00:27:38,370
+single statements we call a statement
+
+00:27:36,480 --> 00:27:38,909
+local analysis and that's for two
+
+00:27:38,370 --> 00:27:40,770
+reasons
+
+00:27:38,909 --> 00:27:44,370
+because it makes it and it is really
+
+00:27:40,770 --> 00:27:47,039
+fast and secondly it makes the analysis
+
+00:27:44,370 --> 00:27:49,620
+have no false positives because the area
+
+00:27:47,039 --> 00:27:52,260
+space is so small that you can be really
+
+00:27:49,620 --> 00:27:54,840
+sure that what we diagnose is correct
+
+00:27:52,260 --> 00:27:56,490
+and those two reasons are important to
+
+00:27:54,840 --> 00:27:58,980
+allow the wanting to be enabled by
+
+00:27:56,490 --> 00:28:00,299
+default because if it was slow or if we
+
+00:27:58,980 --> 00:28:02,789
+had false positives there would have
+
+00:28:00,299 --> 00:28:09,990
+been a warning switch and then it would
+
+00:28:02,789 --> 00:28:12,390
+have had a much lower exposure so as I
+
+00:28:09,990 --> 00:28:14,159
+mentioned we have told the analysis
+
+00:28:12,390 --> 00:28:16,679
+about all the standard types so you can
+
+00:28:14,159 --> 00:28:20,250
+use it with an older lip C++ version or
+
+00:28:16,679 --> 00:28:21,960
+lips SD C++ version in some cases also
+
+00:28:20,250 --> 00:28:24,690
+works with some M is v
+
+00:28:21,960 --> 00:28:26,220
+stl if you use it on windows but you
+
+00:28:24,690 --> 00:28:28,380
+might also want to tell the analysis
+
+00:28:26,220 --> 00:28:30,779
+about your own types and there's a way
+
+00:28:28,380 --> 00:28:32,520
+for that the first one is you want to
+
+00:28:30,779 --> 00:28:35,190
+tell the analysis that you have a class
+
+00:28:32,520 --> 00:28:37,260
+that behaves as if it was a pointer for
+
+00:28:35,190 --> 00:28:39,960
+example here we have a lazy to upper
+
+00:28:37,260 --> 00:28:42,899
+class so what it does it it takes a
+
+00:28:39,960 --> 00:28:44,970
+string by reference stores it inside and
+
+00:28:42,899 --> 00:28:46,649
+at some later point you can ask it to
+
+00:28:44,970 --> 00:28:49,409
+give you the uppercase version of that
+
+00:28:46,649 --> 00:28:51,539
+string and this class essentially
+
+00:28:49,409 --> 00:28:53,700
+behaves like a pointer because it can
+
+00:28:51,539 --> 00:28:56,370
+also Dingell when the virtual object
+
+00:28:53,700 --> 00:28:58,110
+goes away so you can annotate it by
+
+00:28:56,370 --> 00:29:00,149
+having this attribute here is our
+
+00:28:58,110 --> 00:29:03,750
+pointer and that will enable lifetime
+
+00:29:00,149 --> 00:29:06,779
+uses for this type in the parentheses we
+
+00:29:03,750 --> 00:29:08,669
+give the type that's a pointer points to
+
+00:29:06,779 --> 00:29:10,320
+that's currently optional for this
+
+00:29:08,669 --> 00:29:12,480
+analysis it will work if you leave it
+
+00:29:10,320 --> 00:29:15,539
+out but it's important for analysis that
+
+00:29:12,480 --> 00:29:17,820
+we talked about a bit later so after us
+
+00:29:15,539 --> 00:29:20,130
+is annotation you can have some innocent
+
+00:29:17,820 --> 00:29:22,110
+looking code like this one and you will
+
+00:29:20,130 --> 00:29:24,809
+actually get a warning because this
+
+00:29:22,110 --> 00:29:27,299
+string natural has caused an temporary
+
+00:29:24,809 --> 00:29:29,880
+string to manifest because of type
+
+00:29:27,299 --> 00:29:31,260
+conversions so the lazy to upper thing
+
+00:29:29,880 --> 00:29:33,419
+will actually dangle right after
+
+00:29:31,260 --> 00:29:37,440
+initialization because the temporary
+
+00:29:33,419 --> 00:29:39,090
+will go away the second thing you might
+
+00:29:37,440 --> 00:29:41,100
+want to do is you might want to tell
+
+00:29:39,090 --> 00:29:42,990
+analysis that you have an owner type
+
+00:29:41,100 --> 00:29:45,230
+that you've written for example you
+
+00:29:42,990 --> 00:29:47,880
+implemented your own containers and
+
+00:29:45,230 --> 00:29:50,220
+similarly you will put an attribute on
+
+00:29:47,880 --> 00:29:52,169
+it saying diesel owner and the type it
+
+00:29:50,220 --> 00:29:54,600
+owns where the type is optional again
+
+00:29:52,169 --> 00:29:56,789
+and then when you use it in a way that
+
+00:29:54,600 --> 00:29:59,940
+you did write pointers from it you know
+
+00:29:56,789 --> 00:30:02,130
+and those pointers point to your
+
+00:29:59,940 --> 00:30:05,090
+container going away you will get the
+
+00:30:02,130 --> 00:30:05,090
+appropriate warning
+
+00:30:05,570 --> 00:30:10,620
+so this Betty concludes the first part
+
+00:30:08,820 --> 00:30:13,140
+of the talk which is about what we up
+
+00:30:10,620 --> 00:30:15,750
+streamed the for the second part of the
+
+00:30:13,140 --> 00:30:18,090
+talk we will talk about what we have an
+
+00:30:15,750 --> 00:30:20,340
+hour branch and which we plan to
+
+00:30:18,090 --> 00:30:24,210
+upstream in the near and longer-term
+
+00:30:20,340 --> 00:30:27,590
+future so the first thing we have there
+
+00:30:24,210 --> 00:30:31,350
+is related to the previous slides to the
+
+00:30:27,590 --> 00:30:33,270
+category category and notations so we
+
+00:30:31,350 --> 00:30:36,180
+have a warning which is called suggest
+
+00:30:33,270 --> 00:30:39,120
+lifetime category and it uses
+
+00:30:36,180 --> 00:30:41,400
+and some heuristics also from etceteras
+
+00:30:39,120 --> 00:30:42,990
+paper to determine if the type looks
+
+00:30:41,400 --> 00:30:45,180
+like it should be an owner or looks like
+
+00:30:42,990 --> 00:30:46,800
+it should be in pointer and it will tell
+
+00:30:45,180 --> 00:30:50,580
+you hey maybe you want to put this
+
+00:30:46,800 --> 00:30:52,350
+attribute here so for owners it will
+
+00:30:50,580 --> 00:30:54,300
+look at the shape but we're not looking
+
+00:30:52,350 --> 00:30:56,760
+to bodies look at the Declaration and it
+
+00:30:54,300 --> 00:30:59,190
+will look dass's owner look like
+
+00:30:56,760 --> 00:31:01,140
+container maybe like does it have a
+
+00:30:59,190 --> 00:31:05,220
+beginning an end method and a very good
+
+00:31:01,140 --> 00:31:07,260
+type and type def and especially does it
+
+00:31:05,220 --> 00:31:09,720
+have a user defined destructor because
+
+00:31:07,260 --> 00:31:11,820
+that says I manage resources and then it
+
+00:31:09,720 --> 00:31:14,700
+should suggest maybe you should here put
+
+00:31:11,820 --> 00:31:16,620
+entry is a loner attribute similarly it
+
+00:31:14,700 --> 00:31:18,570
+would check if your type looks like a
+
+00:31:16,620 --> 00:31:20,640
+unique pointer so if it has a DF
+
+00:31:18,570 --> 00:31:22,740
+operator and also user defined
+
+00:31:20,640 --> 00:31:27,030
+constructor it will suggest hey you can
+
+00:31:22,740 --> 00:31:29,340
+put your owner attribute here for
+
+00:31:27,030 --> 00:31:31,950
+pointers there are similar heuristics so
+
+00:31:29,340 --> 00:31:34,110
+if it looks like a range it has a
+
+00:31:31,950 --> 00:31:35,790
+beginning and an end but no user defined
+
+00:31:34,110 --> 00:31:37,800
+destructor it's probably a view into
+
+00:31:35,790 --> 00:31:40,530
+something else so it's a good candidate
+
+00:31:37,800 --> 00:31:43,350
+to be annotated as a pointer or it looks
+
+00:31:40,530 --> 00:31:45,300
+like an iterator it has a D ref operator
+
+00:31:43,350 --> 00:31:47,310
+and a plus plus but no user defined
+
+00:31:45,300 --> 00:31:50,280
+destructor so then also probably
+
+00:31:47,310 --> 00:31:52,500
+pointing into something else this
+
+00:31:50,280 --> 00:31:55,590
+warning is not supposed to be on in your
+
+00:31:52,500 --> 00:31:57,840
+build system but you can use it locally
+
+00:31:55,590 --> 00:31:59,730
+maybe when getting started with analysis
+
+00:31:57,840 --> 00:32:01,710
+to get an overview of all the places
+
+00:31:59,730 --> 00:32:06,660
+where you want or might not want to add
+
+00:32:01,710 --> 00:32:10,170
+those attributes okay so let's look at a
+
+00:32:06,660 --> 00:32:12,870
+small code example very where we have a
+
+00:32:10,170 --> 00:32:16,380
+find function and we would like to find
+
+00:32:12,870 --> 00:32:19,560
+a needle in a haystack and this fine
+
+00:32:16,380 --> 00:32:23,940
+function you probably did use that it is
+
+00:32:19,560 --> 00:32:27,120
+likely to return a pointer that pointing
+
+00:32:23,940 --> 00:32:29,910
+into its first argument and if we look
+
+00:32:27,120 --> 00:32:32,250
+at the code below where we call the find
+
+00:32:29,910 --> 00:32:35,790
+function we can see that there is a
+
+00:32:32,250 --> 00:32:37,470
+string literal hello and from this
+
+00:32:35,790 --> 00:32:40,890
+string literal we will construct the
+
+00:32:37,470 --> 00:32:43,200
+temporary stood string object so fine
+
+00:32:40,890 --> 00:32:45,780
+will return a pointer into this
+
+00:32:43,200 --> 00:32:48,150
+temporary stood string object which will
+
+00:32:45,780 --> 00:32:50,090
+be destroyed at the end of the full
+
+00:32:48,150 --> 00:32:53,179
+expression so we will have
+
+00:32:50,090 --> 00:32:55,820
+then link pointer so the question is how
+
+00:32:53,179 --> 00:32:58,789
+can we teach the compiler to find this
+
+00:32:55,820 --> 00:33:01,669
+problem as you probably know the
+
+00:32:58,789 --> 00:33:04,520
+compiler cannot really understand what
+
+00:33:01,669 --> 00:33:07,190
+is the meaning of the different symbols
+
+00:33:04,520 --> 00:33:10,669
+so by the compiler have a really good
+
+00:33:07,190 --> 00:33:12,650
+picture there do we have the temporaries
+
+00:33:10,669 --> 00:33:14,840
+for example the compiler do see the
+
+00:33:12,650 --> 00:33:18,320
+temporary that was created from the
+
+00:33:14,840 --> 00:33:20,360
+string literal it does not know but the
+
+00:33:18,320 --> 00:33:22,789
+function name or the name of the
+
+00:33:20,360 --> 00:33:25,510
+parameters mean so it cannot really
+
+00:33:22,789 --> 00:33:28,250
+deduce what the relationship might be
+
+00:33:25,510 --> 00:33:31,279
+between the arguments and the return
+
+00:33:28,250 --> 00:33:33,799
+value but if we had a way to describe
+
+00:33:31,279 --> 00:33:38,090
+this relationship this would enable the
+
+00:33:33,799 --> 00:33:41,510
+compiler to detect more errors so
+
+00:33:38,090 --> 00:33:46,220
+basically we implemented new annotations
+
+00:33:41,510 --> 00:33:50,169
+which which does exactly that so we can
+
+00:33:46,220 --> 00:33:52,669
+specify a post condition such that the
+
+00:33:50,169 --> 00:33:56,600
+pointer returned by this function is
+
+00:33:52,669 --> 00:34:00,470
+either now or pointing into this first
+
+00:33:56,600 --> 00:34:04,340
+argument and using this annotation the
+
+00:34:00,470 --> 00:34:08,929
+compiler can detect this error and issue
+
+00:34:04,340 --> 00:34:11,450
+a warning but eventually so this is not
+
+00:34:08,929 --> 00:34:14,419
+implemented completely yet but this is
+
+00:34:11,450 --> 00:34:18,770
+something we are planning to do in the
+
+00:34:14,419 --> 00:34:22,099
+near future but let's dig a bit deeper
+
+00:34:18,770 --> 00:34:24,409
+once we have this annotation we can do
+
+00:34:22,099 --> 00:34:26,690
+even more we can not only check the
+
+00:34:24,409 --> 00:34:29,030
+cause sites but we can check the
+
+00:34:26,690 --> 00:34:33,200
+definition of the function for example
+
+00:34:29,030 --> 00:34:36,919
+if the definition of a function attempts
+
+00:34:33,200 --> 00:34:39,320
+to return a pointer that is derived from
+
+00:34:36,919 --> 00:34:43,929
+the second argument instead of the first
+
+00:34:39,320 --> 00:34:46,520
+you will be able to issue a warning and
+
+00:34:43,929 --> 00:34:49,250
+let's see at another example let's see
+
+00:34:46,520 --> 00:34:54,349
+another example find function but this
+
+00:34:49,250 --> 00:34:56,599
+time we find value in a range and this
+
+00:34:54,349 --> 00:35:01,570
+function has an implicit precondition
+
+00:34:56,599 --> 00:35:03,890
+that it wants to have a valid range and
+
+00:35:01,570 --> 00:35:06,620
+in the course I tweaked
+
+00:35:03,890 --> 00:35:09,610
+see that we do not possible in the range
+
+00:35:06,620 --> 00:35:13,460
+because the beginning of the range is
+
+00:35:09,610 --> 00:35:15,470
+derived from one container and the end
+
+00:35:13,460 --> 00:35:18,770
+of the range is the right from another
+
+00:35:15,470 --> 00:35:21,830
+one so basically this has undefined
+
+00:35:18,770 --> 00:35:27,320
+behavior but if we add the on occasion a
+
+00:35:21,830 --> 00:35:29,630
+precondition such that the and pointer
+
+00:35:27,320 --> 00:35:32,120
+because in this analysis we have the
+
+00:35:29,630 --> 00:35:35,990
+generalized notion of pointer so the nth
+
+00:35:32,120 --> 00:35:39,410
+pointer should have the same pointee and
+
+00:35:35,990 --> 00:35:41,090
+here the point is also a generalized
+
+00:35:39,410 --> 00:35:45,050
+notion because we are not referring to
+
+00:35:41,090 --> 00:35:50,080
+the to the exact element within the
+
+00:35:45,050 --> 00:35:53,440
+container but only that we want this
+
+00:35:50,080 --> 00:35:57,380
+pointer to point into the same container
+
+00:35:53,440 --> 00:36:00,410
+so if we add this precondition the
+
+00:35:57,380 --> 00:36:03,350
+compiler will be able to detect that we
+
+00:36:00,410 --> 00:36:08,780
+passed iterators that are coming from
+
+00:36:03,350 --> 00:36:10,970
+different containers and has not yet
+
+00:36:08,780 --> 00:36:14,690
+been shunned earlier all of the examples
+
+00:36:10,970 --> 00:36:17,570
+I showed you so far are examples where
+
+00:36:14,690 --> 00:36:20,000
+we could get away with only doing
+
+00:36:17,570 --> 00:36:22,610
+statement local analysis so all the
+
+00:36:20,000 --> 00:36:25,970
+information we need to emit a warning
+
+00:36:22,610 --> 00:36:28,700
+can be deduced from a single statement
+
+00:36:25,970 --> 00:36:32,540
+but sometimes we have code where the
+
+00:36:28,700 --> 00:36:35,960
+warnings that the problems span across
+
+00:36:32,540 --> 00:36:40,070
+multiple statements and we might want to
+
+00:36:35,960 --> 00:36:45,190
+find those errors as well and for those
+
+00:36:40,070 --> 00:36:48,410
+of you who want to have a more rigorous
+
+00:36:45,190 --> 00:36:53,240
+analysis of your code we have some good
+
+00:36:48,410 --> 00:36:57,020
+news so we implemented also actually
+
+00:36:53,240 --> 00:36:59,300
+most part of website as paper which goes
+
+00:36:57,020 --> 00:37:01,370
+well beyond statement and local analysis
+
+00:36:59,300 --> 00:37:04,340
+the other parts that we implement in our
+
+00:37:01,370 --> 00:37:06,050
+branch our first flow sensitive analysis
+
+00:37:04,340 --> 00:37:08,960
+so actually goes over multiple
+
+00:37:06,050 --> 00:37:12,800
+statements and checks the pointers and
+
+00:37:08,960 --> 00:37:15,140
+owners there we implemented also known
+
+00:37:12,800 --> 00:37:17,120
+as checking for pointers because point
+
+00:37:15,140 --> 00:37:18,200
+is not only dangled pointer can point us
+
+00:37:17,120 --> 00:37:20,599
+can also be now
+
+00:37:18,200 --> 00:37:23,299
+evenings in some generalized sense and
+
+00:37:20,599 --> 00:37:25,309
+developing in our pointer is as bad as
+
+00:37:23,299 --> 00:37:26,869
+dereferencing a dangling pointer so
+
+00:37:25,309 --> 00:37:29,000
+there needs to be some propagation of
+
+00:37:26,869 --> 00:37:33,500
+saying how when is a pointer now and is
+
+00:37:29,000 --> 00:37:35,539
+it good to dereference now another very
+
+00:37:33,500 --> 00:37:38,329
+important topic for c+ passes that
+
+00:37:35,539 --> 00:37:40,339
+owners can invalidate their pointers
+
+00:37:38,329 --> 00:37:42,920
+like containers can invalidate the
+
+00:37:40,339 --> 00:37:45,319
+iterators if we do some operations to
+
+00:37:42,920 --> 00:37:48,019
+them so we need to be able to track who
+
+00:37:45,319 --> 00:37:49,819
+points into what and when owners get
+
+00:37:48,019 --> 00:37:52,039
+invalidated we need to also invalidate
+
+00:37:49,819 --> 00:37:56,269
+all the iterators to find this kind of
+
+00:37:52,039 --> 00:37:58,490
+errors and the last two points are about
+
+00:37:56,269 --> 00:38:00,650
+automatic inference of all those
+
+00:37:58,490 --> 00:38:02,990
+attributes we showed you because it
+
+00:38:00,650 --> 00:38:04,819
+would be kind of daunting task to add
+
+00:38:02,990 --> 00:38:06,920
+attributes to every single function
+
+00:38:04,819 --> 00:38:09,829
+every single class I mean most of the
+
+00:38:06,920 --> 00:38:12,319
+classes in your codebase but it turns
+
+00:38:09,829 --> 00:38:15,019
+out that there's a proper heuristics you
+
+00:38:12,319 --> 00:38:17,450
+can probably get 90% of your annotations
+
+00:38:15,019 --> 00:38:20,329
+right out of the box and then you should
+
+00:38:17,450 --> 00:38:25,150
+be able to should only need to annotate
+
+00:38:20,329 --> 00:38:27,769
+the remaining functions so this is all
+
+00:38:25,150 --> 00:38:31,430
+implemented in our branch it's working
+
+00:38:27,769 --> 00:38:35,630
+progress things not break but I can show
+
+00:38:31,430 --> 00:38:38,390
+you how this looks in practice so for
+
+00:38:35,630 --> 00:38:40,430
+flow sensitive analysis that's how it
+
+00:38:38,390 --> 00:38:42,200
+goes you we have an integer here on the
+
+00:38:40,430 --> 00:38:44,359
+slide and the pointer and we have no
+
+00:38:42,200 --> 00:38:47,150
+initializer for the pointer so we know
+
+00:38:44,359 --> 00:38:48,559
+the pointer is right now invalid to
+
+00:38:47,150 --> 00:38:50,329
+track this in the flow sensitive
+
+00:38:48,559 --> 00:38:51,019
+analysis we have something that we call
+
+00:38:50,329 --> 00:38:53,960
+P sets
+
+00:38:51,019 --> 00:38:56,059
+points to sets and each pointer gets one
+
+00:38:53,960 --> 00:38:58,490
+of them each of the generalized pointers
+
+00:38:56,059 --> 00:39:01,910
+so for now we say the P set of P is
+
+00:38:58,490 --> 00:39:03,950
+invalid because it has not been pointed
+
+00:39:01,910 --> 00:39:06,259
+to anything the next thing we encounter
+
+00:39:03,950 --> 00:39:09,170
+in the code is a conditional and now we
+
+00:39:06,259 --> 00:39:12,410
+need to split our analysis we basically
+
+00:39:09,170 --> 00:39:14,390
+analyze both branches in parallel let's
+
+00:39:12,410 --> 00:39:16,400
+first look at the vent branch so in the
+
+00:39:14,390 --> 00:39:19,009
+then branch the pointer gets assigned to
+
+00:39:16,400 --> 00:39:21,529
+the address of I which means we need to
+
+00:39:19,009 --> 00:39:23,720
+update our P set because now people's
+
+00:39:21,529 --> 00:39:27,109
+two eyes so we put I in the P set of P
+
+00:39:23,720 --> 00:39:31,220
+on the else branch kinda at the same
+
+00:39:27,109 --> 00:39:31,430
+time P gets assigned to now so we update
+
+00:39:31,220 --> 00:39:33,319
+the
+
+00:39:31,430 --> 00:39:38,180
+he said they are saying okay P is now
+
+00:39:33,319 --> 00:39:41,890
+now and at the end of this condition we
+
+00:39:38,180 --> 00:39:43,790
+merge the P sets and that's particular
+
+00:39:41,890 --> 00:39:46,460
+characteristics of flow sensitive
+
+00:39:43,790 --> 00:39:48,589
+analysis an alternative would be path
+
+00:39:46,460 --> 00:39:50,599
+sensitive analysis where you keep all
+
+00:39:48,589 --> 00:39:53,059
+those pairs separate and you don't merge
+
+00:39:50,599 --> 00:39:55,730
+but it usually has problems with
+
+00:39:53,059 --> 00:39:57,859
+complexity think of loops if you don't
+
+00:39:55,730 --> 00:40:00,050
+know the loop bound every iteration is
+
+00:39:57,859 --> 00:40:02,390
+basically like a branch and you quickly
+
+00:40:00,050 --> 00:40:04,460
+get a huge number of passes which is
+
+00:40:02,390 --> 00:40:06,980
+really hard to analyze you quickly run
+
+00:40:04,460 --> 00:40:09,680
+out of computational resources so what
+
+00:40:06,980 --> 00:40:11,510
+this analysis does it is flow sensitive
+
+00:40:09,680 --> 00:40:14,359
+is emerges those things and I think it's
+
+00:40:11,510 --> 00:40:16,190
+also pretty similar how humans think
+
+00:40:14,359 --> 00:40:17,420
+when they reason about code because it's
+
+00:40:16,190 --> 00:40:20,450
+really hard to keep all those pairs in
+
+00:40:17,420 --> 00:40:23,359
+your mind at the same time anyhow we are
+
+00:40:20,450 --> 00:40:26,569
+now at a piece at E which can be ion now
+
+00:40:23,359 --> 00:40:29,599
+and if we now go on in the code and
+
+00:40:26,569 --> 00:40:32,180
+dereference I then we will look at the
+
+00:40:29,599 --> 00:40:33,619
+pset and we will figure out oh the piece
+
+00:40:32,180 --> 00:40:36,859
+that contains now that's probably not
+
+00:40:33,619 --> 00:40:38,299
+safe and will generate a warning and we
+
+00:40:36,859 --> 00:40:43,369
+will also generate a note telling you
+
+00:40:38,299 --> 00:40:45,290
+where this now came from the second
+
+00:40:43,369 --> 00:40:48,589
+thing I talked about was owner
+
+00:40:45,290 --> 00:40:51,020
+invalidation and there's an example here
+
+00:40:48,589 --> 00:40:53,900
+we have a vector and we take an iterate
+
+00:40:51,020 --> 00:40:56,420
+out of it so now we track that the
+
+00:40:53,900 --> 00:41:00,319
+iterator which is a pointer has a P set
+
+00:40:56,420 --> 00:41:02,359
+of V prime the prime means into the
+
+00:41:00,319 --> 00:41:05,450
+owner if it would take the address of V
+
+00:41:02,359 --> 00:41:08,359
+it would be the P set V but if because I
+
+00:41:05,450 --> 00:41:11,470
+point into V its V Prime and then I go
+
+00:41:08,359 --> 00:41:14,299
+on and push back into my vector which it
+
+00:41:11,470 --> 00:41:16,640
+which invalidates iterators because
+
+00:41:14,299 --> 00:41:18,410
+possibly it could be reallocating and so
+
+00:41:16,640 --> 00:41:21,349
+I now need to look through all my P sets
+
+00:41:18,410 --> 00:41:23,569
+and see whose pointing into V and change
+
+00:41:21,349 --> 00:41:26,180
+them to invalid so we now see that it
+
+00:41:23,569 --> 00:41:28,369
+has been invalid P set and if you then
+
+00:41:26,180 --> 00:41:31,790
+go on and do something with it like T
+
+00:41:28,369 --> 00:41:34,549
+referencing it it then you will get
+
+00:41:31,790 --> 00:41:38,089
+warnings and also no telling you where
+
+00:41:34,549 --> 00:41:39,950
+the invalidation happened and the last
+
+00:41:38,089 --> 00:41:43,250
+thing I want to talk about about this
+
+00:41:39,950 --> 00:41:45,410
+whole lifetime notice which is behind
+
+00:41:43,250 --> 00:41:49,070
+the W lifetime switch
+
+00:41:45,410 --> 00:41:51,320
+His function annotations and automatic
+
+00:41:49,070 --> 00:41:53,090
+inference of them because that's really
+
+00:41:51,320 --> 00:41:55,070
+important if we can't automatically in
+
+00:41:53,090 --> 00:41:56,330
+fear most of the function notations it
+
+00:41:55,070 --> 00:41:58,820
+will be really hard to adopt this kind
+
+00:41:56,330 --> 00:42:02,420
+of analysis but it turns out that in
+
+00:41:58,820 --> 00:42:05,150
+most cases humans have a way to in fear
+
+00:42:02,420 --> 00:42:07,010
+those annotations and we can mimic them
+
+00:42:05,150 --> 00:42:09,800
+in the software so let's look at an
+
+00:42:07,010 --> 00:42:11,420
+example we have yeasted min which is an
+
+00:42:09,800 --> 00:42:13,310
+amazing function for lifetime analysis
+
+00:42:11,420 --> 00:42:16,310
+because even this min you can get
+
+00:42:13,310 --> 00:42:19,010
+lifetime errors huh we pass in the
+
+00:42:16,310 --> 00:42:20,210
+temporary and min returns a reference so
+
+00:42:19,010 --> 00:42:22,970
+it will return a reference to a
+
+00:42:20,210 --> 00:42:27,560
+temporary so M will actually dangle
+
+00:42:22,970 --> 00:42:29,990
+after this line finishes and how can we
+
+00:42:27,560 --> 00:42:31,370
+teach the analysis to see that the
+
+00:42:29,990 --> 00:42:34,070
+answer was already we need to have a
+
+00:42:31,370 --> 00:42:36,350
+functional notation on min but how do we
+
+00:42:34,070 --> 00:42:37,880
+get there so the idea is we look at the
+
+00:42:36,350 --> 00:42:39,980
+inputs of the function we look at the
+
+00:42:37,880 --> 00:42:42,050
+output of the function and we put them
+
+00:42:39,980 --> 00:42:43,820
+to different categories I'm not going
+
+00:42:42,050 --> 00:42:45,320
+into too much detail now but actually
+
+00:42:43,820 --> 00:42:47,420
+the paper is quite readable so if you
+
+00:42:45,320 --> 00:42:50,450
+want you can look it up eventually what
+
+00:42:47,420 --> 00:42:53,060
+we see is ha a and B pointers the same
+
+00:42:50,450 --> 00:42:55,700
+kind of type they both point 2 T and
+
+00:42:53,060 --> 00:42:57,830
+what we return also points to T so it's
+
+00:42:55,700 --> 00:43:00,350
+same to assume that the return value is
+
+00:42:57,830 --> 00:43:02,660
+derived from either A or B so the in
+
+00:43:00,350 --> 00:43:06,020
+Fiat a notation that we put there will
+
+00:43:02,660 --> 00:43:08,870
+be the lifetime of the return values a
+
+00:43:06,020 --> 00:43:11,200
+or b and will that in fiat annotation
+
+00:43:08,870 --> 00:43:13,700
+then analysis can run and it will see ah
+
+00:43:11,200 --> 00:43:14,750
+there's actually temporary being
+
+00:43:13,700 --> 00:43:18,580
+destroyed
+
+00:43:14,750 --> 00:43:18,580
+and you will have a dangling pointer
+
+00:43:20,590 --> 00:43:29,090
+okay so if you attended last CPP con or
+
+00:43:25,820 --> 00:43:31,700
+so our previous talk you might know that
+
+00:43:29,090 --> 00:43:35,660
+the flow sensitive analysis is not new
+
+00:43:31,700 --> 00:43:39,110
+but we did add some new features since
+
+00:43:35,660 --> 00:43:41,210
+last year so for example we implemented
+
+00:43:39,110 --> 00:43:43,910
+new checks and one of the new checks we
+
+00:43:41,210 --> 00:43:47,990
+have post condition checks for example
+
+00:43:43,910 --> 00:43:51,140
+if you have an output parameter and you
+
+00:43:47,990 --> 00:43:54,140
+forget to set the value of this output
+
+00:43:51,140 --> 00:43:56,059
+we will now have a warning to tell you
+
+00:43:54,140 --> 00:43:59,819
+so
+
+00:43:56,059 --> 00:44:01,500
+sometimes we might not interpret your
+
+00:43:59,819 --> 00:44:04,109
+code well in a sense that you actually
+
+00:44:01,500 --> 00:44:06,630
+have an input parameter rather than an
+
+00:44:04,109 --> 00:44:09,240
+output parameter in that case you can
+
+00:44:06,630 --> 00:44:10,490
+add an annotation to suppress this
+
+00:44:09,240 --> 00:44:15,240
+morning
+
+00:44:10,490 --> 00:44:19,260
+we also added some new checks to detect
+
+00:44:15,240 --> 00:44:23,339
+if you'd reference deleted pointer we
+
+00:44:19,260 --> 00:44:27,150
+did not add it before the last CPP come
+
+00:44:23,339 --> 00:44:30,359
+because this analysis is mostly for
+
+00:44:27,150 --> 00:44:32,339
+people who for certain guidelines and
+
+00:44:30,359 --> 00:44:36,960
+those guidelines prohibit the use of
+
+00:44:32,339 --> 00:44:41,030
+Nick delete but if you do have some of
+
+00:44:36,960 --> 00:44:43,799
+those in your code we can find the
+
+00:44:41,030 --> 00:44:47,220
+dangling pointers because of those
+
+00:44:43,799 --> 00:44:52,770
+deletes and we also can detect if you
+
+00:44:47,220 --> 00:44:57,900
+assign a possibly no pointer to a non
+
+00:44:52,770 --> 00:45:02,069
+now okay and the other big improvement
+
+00:44:57,900 --> 00:45:05,069
+we did were to improve the Diagnostics
+
+00:45:02,069 --> 00:45:08,730
+so basically we now include
+
+00:45:05,069 --> 00:45:12,180
+full source range information and this
+
+00:45:08,730 --> 00:45:14,660
+is important because when there is a
+
+00:45:12,180 --> 00:45:17,490
+diagnostic message about the temporary
+
+00:45:14,660 --> 00:45:20,730
+one might ask okay but which temporary
+
+00:45:17,490 --> 00:45:23,520
+because in a expression we might have
+
+00:45:20,730 --> 00:45:27,660
+multiple temporaries but if we do see
+
+00:45:23,520 --> 00:45:30,150
+the carrots in in our burning messages
+
+00:45:27,660 --> 00:45:33,119
+we can be certain and this is without
+
+00:45:30,150 --> 00:45:37,829
+them adding any extra text to the
+
+00:45:33,119 --> 00:45:40,020
+warning message so you might be
+
+00:45:37,829 --> 00:45:44,010
+wondering by now we're talking about all
+
+00:45:40,020 --> 00:45:46,740
+those inferences and analysis can the
+
+00:45:44,010 --> 00:45:49,650
+analysis read my mind does it understand
+
+00:45:46,740 --> 00:45:54,109
+my code better than I do half year later
+
+00:45:49,650 --> 00:45:56,579
+and it's true that can be a problem and
+
+00:45:54,109 --> 00:45:58,470
+we can look at a simple example to
+
+00:45:56,579 --> 00:46:03,359
+motivate this a bit so if we have a
+
+00:45:58,470 --> 00:46:07,020
+function taking pointer what do we know
+
+00:46:03,359 --> 00:46:09,240
+about it do we how do we know if P can
+
+00:46:07,020 --> 00:46:10,680
+be now this is a very important
+
+00:46:09,240 --> 00:46:13,500
+for the algorithm because we want to
+
+00:46:10,680 --> 00:46:16,350
+check the nanus of pointers so we need
+
+00:46:13,500 --> 00:46:18,990
+to know are you allowed to pass null in
+
+00:46:16,350 --> 00:46:21,119
+here and what is the implicit contract
+
+00:46:18,990 --> 00:46:23,640
+that a human has in mind or maybe not
+
+00:46:21,119 --> 00:46:29,760
+maybe the author had it in mind but all
+
+00:46:23,640 --> 00:46:31,530
+his colleagues that don't so depending
+
+00:46:29,760 --> 00:46:33,690
+on what we see first we can't really
+
+00:46:31,530 --> 00:46:35,310
+decide this by looking at like all the
+
+00:46:33,690 --> 00:46:37,650
+calls and all the bodies we do local
+
+00:46:35,310 --> 00:46:39,390
+analysis if you see first one of the
+
+00:46:37,650 --> 00:46:42,030
+call sites we need to decide right away
+
+00:46:39,390 --> 00:46:44,940
+is this an error or is this not an error
+
+00:46:42,030 --> 00:46:46,860
+and this can be pretty hard also for
+
+00:46:44,940 --> 00:46:48,390
+humans because you might be writing some
+
+00:46:46,860 --> 00:46:50,700
+code but you don't see the definition of
+
+00:46:48,390 --> 00:46:52,110
+the first on the same page maybe the
+
+00:46:50,700 --> 00:46:56,490
+analysis sees the body of the function
+
+00:46:52,110 --> 00:46:58,500
+first and is this now an error should
+
+00:46:56,490 --> 00:47:01,290
+this be flagged or is there an implicit
+
+00:46:58,500 --> 00:47:02,670
+agreement between all the call side and
+
+00:47:01,290 --> 00:47:05,040
+the body of this function that they will
+
+00:47:02,670 --> 00:47:06,810
+never be now entering this function in
+
+00:47:05,040 --> 00:47:09,810
+case we shouldn't want otherwise it
+
+00:47:06,810 --> 00:47:12,690
+would be a false positive so this can be
+
+00:47:09,810 --> 00:47:14,940
+a hard problem for analysis but I think
+
+00:47:12,690 --> 00:47:17,700
+it can also be a hard problem for humans
+
+00:47:14,940 --> 00:47:21,680
+working on the same code and you can
+
+00:47:17,700 --> 00:47:26,040
+help your fellow humans colleagues
+
+00:47:21,680 --> 00:47:28,650
+friends maybe not friends and also the
+
+00:47:26,040 --> 00:47:30,869
+analysis and not only our analysis but
+
+00:47:28,650 --> 00:47:33,030
+basically any analysis that works with
+
+00:47:30,869 --> 00:47:36,210
+your source code if you express those
+
+00:47:33,030 --> 00:47:38,520
+constraints better in their code for
+
+00:47:36,210 --> 00:47:40,650
+example here we could pass EP by
+
+00:47:38,520 --> 00:47:42,900
+reference to make clear it should never
+
+00:47:40,650 --> 00:47:45,900
+be now then the body of the function
+
+00:47:42,900 --> 00:47:48,420
+would not raise any warnings because it
+
+00:47:45,900 --> 00:47:50,880
+cannot be now and then the caller would
+
+00:47:48,420 --> 00:47:52,470
+need to dereference before passing it
+
+00:47:50,880 --> 00:47:54,210
+and at the dereferencing we could check
+
+00:47:52,470 --> 00:47:58,170
+how do we dereference something that's
+
+00:47:54,210 --> 00:48:00,720
+now and this problem not only applies to
+
+00:47:58,170 --> 00:48:04,470
+non-us of pointers it also applies in
+
+00:48:00,720 --> 00:48:06,990
+wide various other ways like how do you
+
+00:48:04,470 --> 00:48:09,630
+know if parameter of a function is an
+
+00:48:06,990 --> 00:48:11,580
+output parameter or maybe it's meant as
+
+00:48:09,630 --> 00:48:13,830
+an in/out parameter so it needs to be
+
+00:48:11,580 --> 00:48:15,540
+valid on the call and there will be
+
+00:48:13,830 --> 00:48:18,270
+something different there after the call
+
+00:48:15,540 --> 00:48:20,369
+if the if there are no consistent rules
+
+00:48:18,270 --> 00:48:22,710
+is really hard to tell them and then you
+
+00:48:20,369 --> 00:48:25,440
+might need to pass some comments if they
+
+00:48:22,710 --> 00:48:27,510
+or maybe they are outdated so if there's
+
+00:48:25,440 --> 00:48:30,540
+a consistent set of rules that you use
+
+00:48:27,510 --> 00:48:32,940
+it the analysis will be able to model
+
+00:48:30,540 --> 00:48:35,400
+them if there's no consistent rules then
+
+00:48:32,940 --> 00:48:42,060
+post for humans and analysis will be
+
+00:48:35,400 --> 00:48:44,670
+hard in summary what we showed you today
+
+00:48:42,060 --> 00:48:48,480
+is we implemented an analysis and clang
+
+00:48:44,670 --> 00:48:50,250
+that finds a subset of problems but I
+
+00:48:48,480 --> 00:48:52,349
+guess a subset of maybe common problems
+
+00:48:50,250 --> 00:48:54,420
+and it will be unavailable in faint and
+
+00:48:52,349 --> 00:48:56,490
+it will be available in M SVC and it's
+
+00:48:54,420 --> 00:48:59,250
+on by default nothing you need to do
+
+00:48:56,490 --> 00:49:01,710
+about it what you can do is you can
+
+00:48:59,250 --> 00:49:04,380
+check out our branch which will show
+
+00:49:01,710 --> 00:49:06,210
+later and try the full lifetime noses
+
+00:49:04,380 --> 00:49:08,970
+which is behind the W left-hand switch
+
+00:49:06,210 --> 00:49:11,430
+if you're really interested feel free to
+
+00:49:08,970 --> 00:49:13,859
+join us because it's the two of us and
+
+00:49:11,430 --> 00:49:14,369
+we don't have infinite time on our ends
+
+00:49:13,859 --> 00:49:17,070
+to do it
+
+00:49:14,369 --> 00:49:18,540
+so anybody joining is really welcoming
+
+00:49:17,070 --> 00:49:20,160
+there's a good start to get into
+
+00:49:18,540 --> 00:49:24,570
+compilers what actually my start to get
+
+00:49:20,160 --> 00:49:27,150
+into compilers and finally strive for
+
+00:49:24,570 --> 00:49:29,609
+consistent interfaces try to use high
+
+00:49:27,150 --> 00:49:32,910
+abstractions this lifetime analysis is
+
+00:49:29,609 --> 00:49:34,619
+kind of impossible on C because there
+
+00:49:32,910 --> 00:49:36,990
+are no abstractions you can't have
+
+00:49:34,619 --> 00:49:39,000
+owning pointers and non owning pointers
+
+00:49:36,990 --> 00:49:41,339
+you can't do any of those reasonings and
+
+00:49:39,000 --> 00:49:44,490
+you can also not do any of those
+
+00:49:41,339 --> 00:49:46,470
+reasonings if you write C in C++ so if
+
+00:49:44,490 --> 00:49:49,170
+you use good abstractions if you have
+
+00:49:46,470 --> 00:49:51,420
+consistent rules for like nanus and out
+
+00:49:49,170 --> 00:49:53,310
+input of the parameter passing then it
+
+00:49:51,420 --> 00:49:54,869
+helps your colleagues right now and it
+
+00:49:53,310 --> 00:49:59,599
+helps any kind of analysis when they
+
+00:49:54,869 --> 00:49:59,599
+become available thank you
+
+00:50:07,840 --> 00:50:14,630
+so feel free to ask any questions and
+
+00:50:11,360 --> 00:50:17,000
+you can also try either the statement
+
+00:50:14,630 --> 00:50:20,150
+local analysis on God both if you use
+
+00:50:17,000 --> 00:50:23,150
+client rank or the flow sensitive
+
+00:50:20,150 --> 00:51:05,990
+analysis if you select the experimental
+
+00:50:23,150 --> 00:51:09,020
+- W lifetime compiler on Godbole sorry
+
+00:51:05,990 --> 00:51:11,690
+the echo is really bad I think it will
+
+00:51:09,020 --> 00:51:13,310
+work best if you come here ask it
+
+00:51:11,690 --> 00:51:14,570
+without a mic and I just repeat the
+
+00:51:13,310 --> 00:51:33,650
+question I thought that in the other
+
+00:51:14,570 --> 00:51:35,180
+sections otherwise it's kind of yes yes
+
+00:51:33,650 --> 00:51:37,690
+so the quest was do we need to write the
+
+00:51:35,180 --> 00:51:40,610
+attributes yourself and the answers
+
+00:51:37,690 --> 00:51:42,980
+partly yes for statement local analysis
+
+00:51:40,610 --> 00:51:45,410
+yes you will need to write them for the
+
+00:51:42,980 --> 00:51:47,990
+whole analysis we will want to have
+
+00:51:45,410 --> 00:51:49,760
+inference one thing we also have been
+
+00:51:47,990 --> 00:51:51,920
+talking about is having a client ID
+
+00:51:49,760 --> 00:51:53,720
+checker something similar going over
+
+00:51:51,920 --> 00:51:55,190
+your functions offline and looking at
+
+00:51:53,720 --> 00:51:57,860
+the function bodies and deriving what
+
+00:51:55,190 --> 00:52:02,290
+see what C attributes are that this
+
+00:51:57,860 --> 00:52:02,290
+function needs and guarantees
+
+00:52:08,830 --> 00:52:14,000
+so are they've written the code
+
+00:52:11,090 --> 00:52:16,100
+attributes if they are in fear in the
+
+00:52:14,000 --> 00:52:17,750
+analysis body you get upstream they will
+
+00:52:16,100 --> 00:52:20,510
+not be written in the code they will
+
+00:52:17,750 --> 00:52:22,730
+follow a certain set of simple mystics
+
+00:52:20,510 --> 00:52:24,560
+and so they will not be written down for
+
+00:52:22,730 --> 00:52:25,940
+all those special cases not handled by
+
+00:52:24,560 --> 00:52:28,400
+the inference they will need to be
+
+00:52:25,940 --> 00:52:31,610
+written down well also small not
+
+00:52:28,400 --> 00:52:34,580
+regarding the notations these this
+
+00:52:31,610 --> 00:52:40,120
+syntax we showed you is not the finer
+
+00:52:34,580 --> 00:52:42,980
+syntax we plan to reuse as mature of the
+
+00:52:40,120 --> 00:52:45,350
+contracts proposal as possible but
+
+00:52:42,980 --> 00:52:49,010
+unfortunately contracts were not read
+
+00:52:45,350 --> 00:52:51,170
+yet for the next C++ standard so until
+
+00:52:49,010 --> 00:53:05,960
+then this is the syntax we are stuck
+
+00:52:51,170 --> 00:53:09,440
+with do we have false positives with W
+
+00:53:05,960 --> 00:53:11,240
+lifetime and the answer is yes and the
+
+00:53:09,440 --> 00:53:13,640
+reason is what I discussed in the last
+
+00:53:11,240 --> 00:53:15,830
+slides if it's not obvious what the
+
+00:53:13,640 --> 00:53:18,350
+function is telling me then I can have
+
+00:53:15,830 --> 00:53:20,570
+false positives so if I see an insta
+
+00:53:18,350 --> 00:53:23,210
+peep parameter and then it you reference
+
+00:53:20,570 --> 00:53:25,730
+it the analysis by default assumes that
+
+00:53:23,210 --> 00:53:27,050
+those pointers can be now and if you did
+
+00:53:25,730 --> 00:53:29,740
+reference it without checking it will
+
+00:53:27,050 --> 00:53:32,840
+warn you can disable the part of years
+
+00:53:29,740 --> 00:53:35,300
+of the analysis by passing a different
+
+00:53:32,840 --> 00:53:36,980
+warning flag but by default it will warn
+
+00:53:35,300 --> 00:53:39,440
+and that might be a false positive in
+
+00:53:36,980 --> 00:53:41,180
+your case if the conflict implicit
+
+00:53:39,440 --> 00:53:43,540
+contract says you actually never pass
+
+00:53:41,180 --> 00:53:47,240
+null and moreover than that
+
+00:53:43,540 --> 00:53:52,700
+unfortunately every flow sensitive
+
+00:53:47,240 --> 00:53:55,130
+analysis has kind of cost in enforced
+
+00:53:52,700 --> 00:53:57,440
+positives because every flow sensitive
+
+00:53:55,130 --> 00:54:03,140
+analysis have this implicit assumption
+
+00:53:57,440 --> 00:54:07,940
+of every path in your program code can
+
+00:54:03,140 --> 00:54:10,850
+happen so in order to be in order to be
+
+00:54:07,940 --> 00:54:13,850
+used false positives one option would be
+
+00:54:10,850 --> 00:54:16,850
+to go pass sensitive instead of flow
+
+00:54:13,850 --> 00:54:20,670
+sensitive but that would have a great
+
+00:54:16,850 --> 00:54:25,330
+run time cost and memory cost instance
+
+00:54:20,670 --> 00:54:27,430
+in the analysis time so basically this
+
+00:54:25,330 --> 00:54:30,250
+there is a Sun trade-off there and
+
+00:54:27,430 --> 00:54:33,040
+because of this you might need to
+
+00:54:30,250 --> 00:54:35,650
+enforce some coding styles if you want
+
+00:54:33,040 --> 00:54:39,930
+to keep your code warning free in case
+
+00:54:35,650 --> 00:54:39,930
+you go for the flow sensitive analysis
+
+00:54:56,310 --> 00:55:00,850
+so the question is clang - to be
+
+00:54:59,200 --> 00:55:02,710
+released as anything already available
+
+00:55:00,850 --> 00:55:05,740
+in clang 9 or do we really need to wait
+
+00:55:02,710 --> 00:55:08,620
+for clang 10 and I think the answers we
+
+00:55:05,740 --> 00:55:10,390
+need to wait for clang 10 yes one was
+
+00:55:08,620 --> 00:55:14,170
+fought before we started up streaming
+
+00:55:10,390 --> 00:55:17,320
+day yes basically Clank has released
+
+00:55:14,170 --> 00:55:20,620
+branches and the trunk and if anything
+
+00:55:17,320 --> 00:55:22,870
+you upstream is after release branch was
+
+00:55:20,620 --> 00:55:26,620
+forth then even though you have an
+
+00:55:22,870 --> 00:55:30,520
+unreleased version of crank it only in
+
+00:55:26,620 --> 00:55:33,400
+very exceptional cases can you push your
+
+00:55:30,520 --> 00:55:36,070
+change changes to the release branch so
+
+00:55:33,400 --> 00:55:37,510
+this is the reason why even though clang
+
+00:55:36,070 --> 00:55:41,680
+9 is not released yet
+
+00:55:37,510 --> 00:55:44,080
+these features will only be available in
+
+00:55:41,680 --> 00:55:46,720
+clang 10 but even if you do not update
+
+00:55:44,080 --> 00:55:48,370
+your compiler to a Trank
+
+00:55:46,720 --> 00:55:52,570
+version of clang because that is of
+
+00:55:48,370 --> 00:55:55,900
+course risky you can still use trunk
+
+00:55:52,570 --> 00:56:00,490
+version of client ID or clang B because
+
+00:55:55,900 --> 00:56:04,690
+that that has no risk of MIS compiling
+
+00:56:00,490 --> 00:56:06,940
+your binaries so if you want to get this
+
+00:56:04,690 --> 00:56:16,260
+analysis earlier I think this is the
+
+00:56:06,940 --> 00:56:16,260
+best way to go okay
+
+00:56:24,259 --> 00:56:30,930
+yeah did we mention this thing with the
+
+00:56:27,180 --> 00:56:32,849
+contributors so yeah oh the question was
+
+00:56:30,930 --> 00:56:36,779
+is it also available in GCC because we
+
+00:56:32,849 --> 00:56:39,269
+just mentioned clang & M SVC and no we
+
+00:56:36,779 --> 00:56:40,680
+don't have anybody working on VC C so
+
+00:56:39,269 --> 00:56:42,509
+it's not there
+
+00:56:40,680 --> 00:56:44,940
+if anybody knows GCC and once
+
+00:56:42,509 --> 00:56:47,190
+implemented we will happily guide and
+
+00:56:44,940 --> 00:56:49,589
+share all the stuff we learned what we
+
+00:56:47,190 --> 00:56:53,400
+did it but we also don't really have
+
+00:56:49,589 --> 00:56:56,160
+plans to do that to tell the truth since
+
+00:56:53,400 --> 00:56:58,170
+everything we did is open source and the
+
+00:56:56,160 --> 00:57:00,180
+source code is available and all the
+
+00:56:58,170 --> 00:57:04,019
+rules for the statement local analysis
+
+00:57:00,180 --> 00:57:06,660
+are very simple I think for GCC
+
+00:57:04,019 --> 00:57:09,119
+developer it shouldn't take more than a
+
+00:57:06,660 --> 00:57:11,880
+couple of weeks to implement this so I
+
+00:57:09,119 --> 00:57:14,089
+think if they do see the value in this
+
+00:57:11,880 --> 00:57:23,430
+analysis I would expect them to
+
+00:57:14,089 --> 00:57:26,910
+implement the same at some point so the
+
+00:57:23,430 --> 00:57:29,009
+question was is this obvious is this
+
+00:57:26,910 --> 00:57:31,289
+also true for the for sensitive analysis
+
+00:57:29,009 --> 00:57:33,450
+and unfortunately the flows sensitive
+
+00:57:31,289 --> 00:57:36,119
+analysis is way more complicated than
+
+00:57:33,450 --> 00:57:40,460
+the statement local one so to implement
+
+00:57:36,119 --> 00:57:44,160
+that it would take much more effort so I
+
+00:57:40,460 --> 00:57:45,960
+don't I cannot speak for GCC developers
+
+00:57:44,160 --> 00:57:50,430
+but I would assume that they would not
+
+00:57:45,960 --> 00:57:56,390
+want to like allocate resources for
+
+00:57:50,430 --> 00:57:56,390
+death until they see wider adoption
+
+00:57:57,079 --> 00:58:06,390
+Thanks we have two more minutes and you
+
+00:58:04,140 --> 00:58:13,530
+can go
+
+00:58:06,390 --> 00:58:15,120
+I can really recommend clang D I also
+
+00:58:13,530 --> 00:58:16,680
+use it locally it catches all the things
+
+00:58:15,120 --> 00:58:19,290
+while you're typing like Visual Studio
+
+00:58:16,680 --> 00:58:21,510
+code or other IDs you should check it
+
+00:58:19,290 --> 00:58:24,510
+out if you didn't yet and also some
+
+00:58:21,510 --> 00:58:27,360
+related talks so in the next slot slot
+
+00:58:24,510 --> 00:58:29,360
+there will be a talk about uninitialized
+
+00:58:27,360 --> 00:58:34,170
+memory so if you are interested in
+
+00:58:29,360 --> 00:58:36,360
+catching errors or dealing with memory
+
+00:58:34,170 --> 00:58:39,090
+related issues I would definitely
+
+00:58:36,360 --> 00:58:41,390
+recommend that one and unfortunately
+
+00:58:39,090 --> 00:58:45,420
+this was a mistake on our side we did
+
+00:58:41,390 --> 00:58:47,700
+recommend you to use address sanitizer
+
+00:58:45,420 --> 00:58:53,430
+but address sanitizer was not available
+
+00:58:47,700 --> 00:58:55,890
+for Windows until now so in parallel
+
+00:58:53,430 --> 00:58:58,440
+with this thought there was another one
+
+00:58:55,890 --> 00:59:01,410
+that that is about porting that rest
+
+00:58:58,440 --> 00:59:04,500
+sanitizer to Microsoft platforms so
+
+00:59:01,410 --> 00:59:07,500
+since we do recommend use that too as
+
+00:59:04,500 --> 00:59:09,480
+well I would recommend to check out that
+
+00:59:07,500 --> 00:59:15,770
+talk later than the recordings are
+
+00:59:09,480 --> 00:59:20,039
+available thank you
+
+00:59:15,770 --> 00:59:20,039
+
+YouTube URL: https://www.youtube.com/watch?v=d67kfSnhbpA
+
+

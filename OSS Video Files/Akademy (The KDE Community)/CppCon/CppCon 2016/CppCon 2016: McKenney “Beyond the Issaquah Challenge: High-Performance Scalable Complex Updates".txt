@@ -1,0 +1,4741 @@
+Title: CppCon 2016: McKenney “Beyond the Issaquah Challenge: High-Performance Scalable Complex Updates"
+Publication date: 2016-10-01
+Playlist: CppCon 2016
+Description: 
+	http://CppCon.org
+—
+Presentation Slides, PDFs, Source Code and other presenter materials are available at: https://github.com/cppcon/cppcon2016
+—
+Highly performant and scalable techniques such as RCU have been quite successful in read-mostly situations. However, there do come times when updates are necessary. It would be convenient if there was some general update-side counterpart to RCU, but sadly there is not yet any such thing. Nevertheless, there are a number of specialized update-side techniques whose performance and scalability rival that of RCU. This talk will discuss several of them and provide an outlook into the future of low-overhead scalable updates. 
+
+One technique is the solution to the Issaquah Challenge, which was put forward at the C++ standards committee meeting in early 2014 at Issaquah, WA, USA. This challenge requires a performant and scalable technique to atomically move elements back and forth between a pair of search trees, but without using transactional memory. This talk will give an overview of a solution to a more general problem, that of atomically moving groups of elements among a group of several different types of linked data structures, including simple linked lists, hash tables, and skiplists, while still permitting lockless searches before, during, and after this atomic move.
+— 
+Paul E. McKenney
+IBM Linux Technology Center
+Distinguished Engineer
+Hillsboro, OR, USA
+Paul E. McKenney has been coding for almost four decades, more than half of that on parallel hardware, where his work has earned him a reputation among some as a flaming heretic. Over the past decade, Paul has been an IBM Distinguished Engineer at the IBM Linux Technology Center. Paul maintains the RCU implementation within the Linux kernel, where the variety of workloads present highly entertaining performance, scalability, real-time response, and energy-efficiency challenges. Prior to that, he worked on the DYNIX/ptx kernel at Sequent, and prior to that on packet-radio and Internet protocols (but long before it was polite to mention Internet at cocktail parties), system administration, business applications, and real-time systems. His hobbies include what passes for running at his age along with the usual house-wife-and-kids habit.
+—
+Videos Filmed & Edited by Bash Films: http://www.BashFilms.com
+Captions: 
+	00:00:00,410 --> 00:00:07,170
+okay may as well get started here so
+
+00:00:04,440 --> 00:00:10,170
+this is a kind of a follow-on to the
+
+00:00:07,170 --> 00:00:11,519
+talk two years ago that was the Squatch
+
+00:00:10,170 --> 00:00:12,780
+challenge and was one approach to
+
+00:00:11,519 --> 00:00:14,519
+dealing with it and we'll be looking at
+
+00:00:12,780 --> 00:00:17,430
+a little bit beyond this a lot challenge
+
+00:00:14,519 --> 00:00:18,660
+on this one I asked a literally ER but
+
+00:00:17,430 --> 00:00:21,449
+I'll ask again some work people can how
+
+00:00:18,660 --> 00:00:24,439
+many people were at the talk and 2014
+
+00:00:21,449 --> 00:00:26,880
+okay so several be that's good well
+
+00:00:24,439 --> 00:00:28,109
+it'll this talk relies lived on that
+
+00:00:26,880 --> 00:00:31,980
+will do a little bit of a review to
+
+00:00:28,109 --> 00:00:34,079
+catch up but if you hear if you have a
+
+00:00:31,980 --> 00:00:38,520
+little advantage those are the top was
+
+00:00:34,079 --> 00:00:39,570
+going to cover and first off I'm gonna
+
+00:00:38,520 --> 00:00:41,579
+do is you kind of review what the
+
+00:00:39,570 --> 00:00:43,140
+issaquah challenge itself was to give a
+
+00:00:41,579 --> 00:00:46,410
+starting point and then show up what
+
+00:00:43,140 --> 00:00:48,899
+we're doing beyond that point so the
+
+00:00:46,410 --> 00:00:50,940
+point of the issaquah challenge is you
+
+00:00:48,899 --> 00:00:53,010
+have binary search trees and you need to
+
+00:00:50,940 --> 00:00:56,160
+be able to move stuff from one tree to
+
+00:00:53,010 --> 00:00:59,370
+the other atomically and that means that
+
+00:00:56,160 --> 00:01:02,190
+if a reader goes and looks in the
+
+00:00:59,370 --> 00:01:05,280
+right-hand tree and doesn't see element
+
+00:01:02,190 --> 00:01:07,470
+for that if it looks in the left-hand
+
+00:01:05,280 --> 00:01:11,159
+treated better see it okay so that's be
+
+00:01:07,470 --> 00:01:12,570
+atomic in that sense and also the other
+
+00:01:11,159 --> 00:01:15,479
+big thing and then the same thing for
+
+00:01:12,570 --> 00:01:18,200
+element 1 in the other direction the
+
+00:01:15,479 --> 00:01:20,340
+other big thing is that in this case
+
+00:01:18,200 --> 00:01:21,780
+there's no relationship between these
+
+00:01:20,340 --> 00:01:23,280
+guys in a data structure sense they're
+
+00:01:21,780 --> 00:01:26,100
+entirely different parts of the tree and
+
+00:01:23,280 --> 00:01:28,110
+so it's a requirement that these moves
+
+00:01:26,100 --> 00:01:32,400
+be carried out with no contention
+
+00:01:28,110 --> 00:01:34,790
+whatsoever okay and that means no lock
+
+00:01:32,400 --> 00:01:39,030
+contention no memory contention no none
+
+00:01:34,790 --> 00:01:40,950
+all right and that means that most
+
+00:01:39,030 --> 00:01:43,649
+solutions based on locking in fact most
+
+00:01:40,950 --> 00:01:45,869
+solutions based on a lot of things just
+
+00:01:43,649 --> 00:01:47,729
+need not apply because they will have
+
+00:01:45,869 --> 00:01:49,170
+contention lock contention or if you use
+
+00:01:47,729 --> 00:01:51,030
+some of the non blocks organization
+
+00:01:49,170 --> 00:01:53,220
+you'll find yourself doing Kaz's on the
+
+00:01:51,030 --> 00:01:56,520
+same element that's contention sorry out
+
+00:01:53,220 --> 00:01:58,409
+of the pool okay so the next slide is
+
+00:01:56,520 --> 00:02:00,810
+just kind of a quick history of where
+
+00:01:58,409 --> 00:02:02,520
+we've been with this the very first
+
+00:02:00,810 --> 00:02:05,640
+thing after the meeting escalon
+
+00:02:02,520 --> 00:02:08,039
+february2014 was a c-plus paper the
+
+00:02:05,640 --> 00:02:10,250
+presentation here I followed up at LCA
+
+00:02:08,039 --> 00:02:13,590
+with better scalability which will see
+
+00:02:10,250 --> 00:02:16,980
+at conference in June
+
+00:02:13,590 --> 00:02:20,129
+I made some changes the main thing was
+
+00:02:16,980 --> 00:02:23,160
+laziness on my part I was getting ready
+
+00:02:20,129 --> 00:02:25,260
+to start definitely some of this stuff
+
+00:02:23,160 --> 00:02:27,390
+for real and realized that meant I had
+
+00:02:25,260 --> 00:02:29,790
+to have two copies of every algorithm
+
+00:02:27,390 --> 00:02:32,160
+yet have a hash function for just RS you
+
+00:02:29,790 --> 00:02:36,110
+look up hashes and then another one for
+
+00:02:32,160 --> 00:02:38,220
+if you want to do tonic moves and that
+
+00:02:36,110 --> 00:02:42,480
+deeply offended my inner sense of
+
+00:02:38,220 --> 00:02:44,400
+laziness and so that meant a bit did
+
+00:02:42,480 --> 00:02:46,530
+more work to avoid that so we can just
+
+00:02:44,400 --> 00:02:48,599
+use one underlying algorithm and rapper
+
+00:02:46,530 --> 00:02:49,829
+the stuff on top of course that means we
+
+00:02:48,599 --> 00:02:52,890
+start from Ground Zero on scalability
+
+00:02:49,829 --> 00:02:55,230
+and reliability and I've made some of
+
+00:02:52,890 --> 00:02:58,170
+that up but I have made it all up anyway
+
+00:02:55,230 --> 00:03:02,610
+here we are in September 2016 looking
+
+00:02:58,170 --> 00:03:04,440
+another round of this I'm just going to
+
+00:03:02,610 --> 00:03:05,819
+quickly run through this some people
+
+00:03:04,440 --> 00:03:07,440
+would argue that parallel updates or
+
+00:03:05,819 --> 00:03:11,790
+solve problem we got hash tables we have
+
+00:03:07,440 --> 00:03:13,379
+locks in each each bucket and you know
+
+00:03:11,790 --> 00:03:14,730
+randomness should work you should have
+
+00:03:13,379 --> 00:03:18,060
+no contention life should be wonderful
+
+00:03:14,730 --> 00:03:19,470
+but if you actually try running it well
+
+00:03:18,060 --> 00:03:21,510
+your global blocking you'd expect that
+
+00:03:19,470 --> 00:03:23,130
+to be horrible and it is but per bucket
+
+00:03:21,510 --> 00:03:25,109
+locking that's the wonderful stuff for
+
+00:03:23,130 --> 00:03:27,690
+the updates and it falls off there and
+
+00:03:25,109 --> 00:03:31,190
+this is a log-log scale so that drop is
+
+00:03:27,690 --> 00:03:33,450
+is it looks general but it's not alright
+
+00:03:31,190 --> 00:03:37,859
+and we'll see that and we'll see the
+
+00:03:33,450 --> 00:03:39,510
+next slide yeah poof real down hard we
+
+00:03:37,859 --> 00:03:41,670
+can get some of that back by making the
+
+00:03:39,510 --> 00:03:44,310
+hash table bigger okay we don't have
+
+00:03:41,670 --> 00:03:46,169
+that many CPUs going up to 60 but still
+
+00:03:44,310 --> 00:03:48,419
+with 124 you've got some chance of them
+
+00:03:46,169 --> 00:03:51,060
+running into each other but we never
+
+00:03:48,419 --> 00:03:54,109
+really it's still a cliff it's a shorter
+
+00:03:51,060 --> 00:03:58,380
+cliff but it's still a cliff and the
+
+00:03:54,109 --> 00:04:02,750
+problem we have is a little thing called
+
+00:03:58,380 --> 00:04:05,340
+the laws of physics the thing is that
+
+00:04:02,750 --> 00:04:08,819
+the machines we have our set up kind of
+
+00:04:05,340 --> 00:04:11,340
+like this in fact in the talk just down
+
+00:04:08,819 --> 00:04:12,959
+in the theater before us there was
+
+00:04:11,340 --> 00:04:15,660
+discussion about newman effects it had
+
+00:04:12,959 --> 00:04:18,120
+and we having that here we split our
+
+00:04:15,660 --> 00:04:19,470
+computers up into pieces it takes time
+
+00:04:18,120 --> 00:04:22,229
+to get the information one piece to
+
+00:04:19,470 --> 00:04:26,219
+another and that shows up in our
+
+00:04:22,229 --> 00:04:27,560
+performance results the speed of light
+
+00:04:26,219 --> 00:04:30,710
+isn't all that fast
+
+00:04:27,560 --> 00:04:32,270
+scale and the speed of electrons or
+
+00:04:30,710 --> 00:04:35,120
+holes depending on would look at it is
+
+00:04:32,270 --> 00:04:38,480
+even slower we are not a vacuum where
+
+00:04:35,120 --> 00:04:42,200
+silicon essentially and we're not light
+
+00:04:38,480 --> 00:04:44,120
+we're little particles not only that it
+
+00:04:42,200 --> 00:04:45,169
+gets worse we are not just transmitting
+
+00:04:44,120 --> 00:04:46,910
+a signal from one point to the other
+
+00:04:45,169 --> 00:04:48,980
+we're going through a bunch of clocked
+
+00:04:46,910 --> 00:04:50,330
+logic going through cash is going
+
+00:04:48,980 --> 00:04:53,800
+through cache coherence protocols going
+
+00:04:50,330 --> 00:04:57,470
+through bus protocols things get slow
+
+00:04:53,800 --> 00:04:59,090
+but if we could get rid of all of that
+
+00:04:57,470 --> 00:05:02,570
+we still have two fundamental laws of
+
+00:04:59,090 --> 00:05:04,729
+physics that are actually constraining
+
+00:05:02,570 --> 00:05:08,060
+up via problem the first is the speed of
+
+00:05:04,729 --> 00:05:09,590
+light sorry it's finite now there's been
+
+00:05:08,060 --> 00:05:10,850
+some variance in the measurement over
+
+00:05:09,590 --> 00:05:13,729
+the past century or so the people
+
+00:05:10,850 --> 00:05:17,330
+measuring it accurately but it's still
+
+00:05:13,729 --> 00:05:19,310
+finite the other problem we have and
+
+00:05:17,330 --> 00:05:21,260
+this is not mine Stephen Hawking made
+
+00:05:19,310 --> 00:05:24,590
+these observations at a tour of a lab of
+
+00:05:21,260 --> 00:05:28,310
+some years back is that two atoms are
+
+00:05:24,590 --> 00:05:29,680
+not zero thighs they're the problem we
+
+00:05:28,310 --> 00:05:31,640
+have is that transistor is kind of
+
+00:05:29,680 --> 00:05:32,930
+cartoonishly like structured kind of
+
+00:05:31,640 --> 00:05:34,850
+like this you have a base in the middle
+
+00:05:32,930 --> 00:05:37,160
+and the electrical with the base
+
+00:05:34,850 --> 00:05:41,330
+controls how quickly you can switch the
+
+00:05:37,160 --> 00:05:42,830
+transistor and about ten years ago we
+
+00:05:41,330 --> 00:05:44,810
+had bases that had about there were
+
+00:05:42,830 --> 00:05:47,450
+about this many atoms thick like four or
+
+00:05:44,810 --> 00:05:48,890
+five okay they had scanning electron
+
+00:05:47,450 --> 00:05:50,150
+microscopes of these things pictures
+
+00:05:48,890 --> 00:05:52,100
+these things I don't know where they're
+
+00:05:50,150 --> 00:05:53,600
+at now but I know they've made these in
+
+00:05:52,100 --> 00:05:55,250
+research labs and actually operated them
+
+00:05:53,600 --> 00:05:57,380
+I don't know what the production
+
+00:05:55,250 --> 00:06:00,229
+transitioners look like but we're
+
+00:05:57,380 --> 00:06:01,340
+probably not far off of that now there's
+
+00:06:00,229 --> 00:06:02,660
+a bunch of things where they could do in
+
+00:06:01,340 --> 00:06:04,460
+hardware and they will do and hardware
+
+00:06:02,660 --> 00:06:06,139
+vacuum tubes believe it or not are
+
+00:06:04,460 --> 00:06:08,030
+making it come back and not you think he
+
+00:06:06,139 --> 00:06:09,919
+come back and silicon rather than have
+
+00:06:08,030 --> 00:06:13,070
+that base B atoms haven't be a gap right
+
+00:06:09,919 --> 00:06:15,100
+it turns out at these scales the
+
+00:06:13,070 --> 00:06:18,440
+atmosphere is essentially a vacuum of
+
+00:06:15,100 --> 00:06:19,940
+the odds of molecule of air actually
+
+00:06:18,440 --> 00:06:22,520
+hitting that junction at that point in
+
+00:06:19,940 --> 00:06:24,760
+time is vanishingly small your radiation
+
+00:06:22,520 --> 00:06:26,750
+is the higher probability in some sense
+
+00:06:24,760 --> 00:06:30,740
+because you don't have to actually hit
+
+00:06:26,750 --> 00:06:32,510
+directly with the radiation so but still
+
+00:06:30,740 --> 00:06:35,690
+we have some serious limits we're up
+
+00:06:32,510 --> 00:06:37,610
+against and we don't know how to
+
+00:06:35,690 --> 00:06:39,349
+abstract these away I mean some people
+
+00:06:37,610 --> 00:06:40,340
+say they do but I always look at what
+
+00:06:39,349 --> 00:06:41,220
+they do in their performance results
+
+00:06:40,340 --> 00:06:42,900
+don't
+
+00:06:41,220 --> 00:06:48,150
+aren't consistent with the eerily
+
+00:06:42,900 --> 00:06:50,310
+abstracting it away but abstraction may
+
+00:06:48,150 --> 00:06:52,020
+feel the may fail us but dirty tricks
+
+00:06:50,310 --> 00:06:54,000
+and workarounds are still with us and we
+
+00:06:52,020 --> 00:06:56,250
+can make those happen all right I've
+
+00:06:54,000 --> 00:06:59,310
+been doing this for a long time and well
+
+00:06:56,250 --> 00:07:02,940
+you know one trick which I have used a
+
+00:06:59,310 --> 00:07:05,130
+lot over the past 20-plus years is read
+
+00:07:02,940 --> 00:07:07,230
+mostly access you see if it's read
+
+00:07:05,130 --> 00:07:08,550
+mostly you don't have to communicate it
+
+00:07:07,230 --> 00:07:10,620
+you can just get it out there to start
+
+00:07:08,550 --> 00:07:12,600
+with the Akamai trick except apply it
+
+00:07:10,620 --> 00:07:15,750
+inside a computer and before i come i
+
+00:07:12,600 --> 00:07:17,040
+was thought of you just make sure the
+
+00:07:15,750 --> 00:07:18,870
+data is spread out everywhere it needs
+
+00:07:17,040 --> 00:07:21,450
+it's read-only it stays in the caches
+
+00:07:18,870 --> 00:07:26,160
+and you get instant access to it life is
+
+00:07:21,450 --> 00:07:28,050
+wonderful unfortunately sooner or later
+
+00:07:26,160 --> 00:07:29,160
+if you want your computation doing the
+
+00:07:28,050 --> 00:07:31,590
+interesting you're going to have to
+
+00:07:29,160 --> 00:07:32,610
+update something I mean somebody you
+
+00:07:31,590 --> 00:07:34,470
+might be able to prove me wrong on that
+
+00:07:32,610 --> 00:07:35,850
+but every time i've come across
+
+00:07:34,470 --> 00:07:38,190
+something sooner or later you have to
+
+00:07:35,850 --> 00:07:39,780
+update something and you know we got
+
+00:07:38,190 --> 00:07:41,310
+these little values or from cave a
+
+00:07:39,780 --> 00:07:43,620
+little black square is that same value
+
+00:07:41,310 --> 00:07:47,750
+replicate out everywhere as soon as you
+
+00:07:43,620 --> 00:07:50,880
+update that value sorry poof all gone
+
+00:07:47,750 --> 00:07:53,190
+it's now back where the in the updaters
+
+00:07:50,880 --> 00:07:54,840
+cash and every else has lost it the
+
+00:07:53,190 --> 00:07:56,669
+update operation was expensive although
+
+00:07:54,840 --> 00:07:57,840
+the CPU designers usually overlap that
+
+00:07:56,669 --> 00:07:59,850
+with everything so you don't notice it
+
+00:07:57,840 --> 00:08:02,520
+as much right buffers wonderful things
+
+00:07:59,850 --> 00:08:05,010
+but the next time those other guy is
+
+00:08:02,520 --> 00:08:07,830
+read they get the full electrical prices
+
+00:08:05,010 --> 00:08:10,979
+the system to get that value back and
+
+00:08:07,830 --> 00:08:14,520
+that hurts well there's tricks and work
+
+00:08:10,979 --> 00:08:17,520
+around for this as well one of them is
+
+00:08:14,520 --> 00:08:18,479
+to leverage locality this is the big
+
+00:08:17,520 --> 00:08:20,820
+thing with sharding they talk about
+
+00:08:18,479 --> 00:08:22,680
+across as root systems we do the same
+
+00:08:20,820 --> 00:08:25,350
+sorts of things inside of systems for
+
+00:08:22,680 --> 00:08:27,000
+example replicating statistical counters
+
+00:08:25,350 --> 00:08:29,250
+across all the CPUs or all the threads
+
+00:08:27,000 --> 00:08:30,390
+you increment your own counter you want
+
+00:08:29,250 --> 00:08:32,430
+to read the thing out you sum them all
+
+00:08:30,390 --> 00:08:34,349
+up and if you're incrementing a lot and
+
+00:08:32,430 --> 00:08:35,669
+something Sullum like you might if you
+
+00:08:34,349 --> 00:08:38,610
+have an operating system that receives
+
+00:08:35,669 --> 00:08:40,589
+packets increments a cap pack a counter
+
+00:08:38,610 --> 00:08:43,289
+for each packet received and maybe every
+
+00:08:40,589 --> 00:08:44,850
+five seconds or a minute or so it puts
+
+00:08:43,289 --> 00:08:49,950
+out the sum to some kind of monitoring
+
+00:08:44,850 --> 00:08:53,640
+system works great so there are some
+
+00:08:49,950 --> 00:08:54,690
+workarounds and I guess one way to dodge
+
+00:08:53,640 --> 00:08:56,730
+it is the
+
+00:08:54,690 --> 00:08:58,290
+right unless you have to at least a
+
+00:08:56,730 --> 00:09:01,170
+shared memory if you're writing to your
+
+00:08:58,290 --> 00:09:03,240
+own memory okay that's not so bad and if
+
+00:09:01,170 --> 00:09:04,920
+you can do a read-only traversal and
+
+00:09:03,240 --> 00:09:06,990
+then only right at the edges where
+
+00:09:04,920 --> 00:09:08,700
+nobody else will notice as much that can
+
+00:09:06,990 --> 00:09:11,730
+be helpful too we'll talk about that
+
+00:09:08,700 --> 00:09:13,230
+more and if you can you want to char the
+
+00:09:11,730 --> 00:09:15,240
+data and give each CPU its own little
+
+00:09:13,230 --> 00:09:16,590
+piece and not have them talk back and
+
+00:09:15,240 --> 00:09:22,620
+forth although sooner or later they
+
+00:09:16,590 --> 00:09:24,060
+usually have to and the problem with
+
+00:09:22,620 --> 00:09:26,130
+hash tables of course is you have a hash
+
+00:09:24,060 --> 00:09:27,750
+function and that means your accesses
+
+00:09:26,130 --> 00:09:30,450
+are sort of random although you can
+
+00:09:27,750 --> 00:09:33,500
+cheat and use a hash function that chops
+
+00:09:30,450 --> 00:09:35,790
+the CPUs up then it's been done before
+
+00:09:33,500 --> 00:09:38,250
+trees are really nice for this because
+
+00:09:35,790 --> 00:09:39,510
+they spread things out unfortunately
+
+00:09:38,250 --> 00:09:40,920
+there's just bit about having to
+
+00:09:39,510 --> 00:09:45,300
+rebalance them every once a while and
+
+00:09:40,920 --> 00:09:46,860
+that is difficult although it's easier
+
+00:09:45,300 --> 00:09:49,410
+to skip lists than with other things
+
+00:09:46,860 --> 00:09:50,670
+apparently although again skip lists
+
+00:09:49,410 --> 00:09:54,620
+don't need it as much because they kind
+
+00:09:50,670 --> 00:09:54,620
+of Iran but life's like that sometimes
+
+00:09:55,640 --> 00:09:59,610
+okay I'm going to go through this next
+
+00:09:57,900 --> 00:10:01,650
+part pretty quickly because it's just
+
+00:09:59,610 --> 00:10:03,240
+what you'd expect if you lock at each
+
+00:10:01,650 --> 00:10:05,340
+node and keep going down that's a really
+
+00:10:03,240 --> 00:10:06,750
+bad idea because everybody locks the
+
+00:10:05,340 --> 00:10:08,430
+route that becomes a bottleneck
+
+00:10:06,750 --> 00:10:12,840
+everything's slow the conditional over
+
+00:10:08,430 --> 00:10:14,750
+the place don't do it okay I'm going to
+
+00:10:12,840 --> 00:10:17,820
+go through this part pretty quickly too
+
+00:10:14,750 --> 00:10:19,680
+we're going to have a talk magid michael
+
+00:10:17,820 --> 00:10:21,600
+michael wang and i'll be presenting on
+
+00:10:19,680 --> 00:10:22,830
+hazard pointers in our see you and
+
+00:10:21,600 --> 00:10:24,300
+concurrency field kits will be a little
+
+00:10:22,830 --> 00:10:26,310
+more information on this plus there's
+
+00:10:24,300 --> 00:10:29,730
+references into the slide set and other
+
+00:10:26,310 --> 00:10:31,980
+things available but the idea behind our
+
+00:10:29,730 --> 00:10:34,650
+see you is that you just let the
+
+00:10:31,980 --> 00:10:36,480
+traverse reversing things read you don't
+
+00:10:34,650 --> 00:10:38,490
+require them to do updates to note their
+
+00:10:36,480 --> 00:10:40,830
+presence and then the updaters have to
+
+00:10:38,490 --> 00:10:44,670
+be careful in order to avoid disrupting
+
+00:10:40,830 --> 00:10:47,370
+the readers all right and yeah well care
+
+00:10:44,670 --> 00:10:49,680
+is required but and I'll just quickly go
+
+00:10:47,370 --> 00:10:51,570
+through insertion what this is is four
+
+00:10:49,680 --> 00:10:53,430
+different states three transitions
+
+00:10:51,570 --> 00:10:54,960
+between them we have a very simple
+
+00:10:53,430 --> 00:10:56,790
+linked data structure which is just one
+
+00:10:54,960 --> 00:10:58,860
+pointer and one element hanging off of
+
+00:10:56,790 --> 00:11:00,330
+it maybe to start off with we don't have
+
+00:10:58,860 --> 00:11:02,640
+any element hanging off of it null
+
+00:11:00,330 --> 00:11:05,610
+pointer or null and see which for i'm at
+
+00:11:02,640 --> 00:11:08,929
+usually we allocate a new data structure
+
+00:11:05,610 --> 00:11:10,980
+it has garbage in it okay no problem
+
+00:11:08,929 --> 00:11:13,170
+nobody can get at it so it's okay that
+
+00:11:10,980 --> 00:11:14,730
+has garbage the only person is access to
+
+00:11:13,170 --> 00:11:16,709
+this guy there's allocated assuming your
+
+00:11:14,730 --> 00:11:20,249
+memory allocators working which I hope
+
+00:11:16,709 --> 00:11:22,319
+it is then the next thing we do is
+
+00:11:20,249 --> 00:11:25,829
+initialize it still a big deal nobody
+
+00:11:22,319 --> 00:11:27,420
+else can see it and then we assign it
+
+00:11:25,829 --> 00:11:28,829
+into the pointer the reason we use a
+
+00:11:27,420 --> 00:11:30,959
+special thing instead of an equal sign
+
+00:11:28,829 --> 00:11:34,529
+is that the compiler and the CPU can
+
+00:11:30,959 --> 00:11:38,420
+often mess things up for you but once we
+
+00:11:34,529 --> 00:11:41,339
+do that suddenly already can see it but
+
+00:11:38,420 --> 00:11:43,259
+because we stored it carefully that
+
+00:11:41,339 --> 00:11:45,720
+pointer store is a single instruction a
+
+00:11:43,259 --> 00:11:47,579
+single store that means somebody racing
+
+00:11:45,720 --> 00:11:50,600
+a reads from it if you're using proper
+
+00:11:47,579 --> 00:11:52,799
+see Atomics instead of just assignments
+
+00:11:50,600 --> 00:11:55,410
+and even if you are using assignments
+
+00:11:52,799 --> 00:11:57,709
+like pilot it'll be a little bit why
+
+00:11:55,410 --> 00:12:00,299
+don't miss to get at you but some might
+
+00:11:57,709 --> 00:12:02,309
+what happens is that anybody reloading
+
+00:12:00,299 --> 00:12:04,319
+that pointer will see either the null
+
+00:12:02,309 --> 00:12:06,420
+value the old value or they'll see the
+
+00:12:04,319 --> 00:12:08,819
+new value but they won't see some mush
+
+00:12:06,420 --> 00:12:10,019
+of the two values and that means that no
+
+00:12:08,819 --> 00:12:11,429
+matter what they do they either you see
+
+00:12:10,019 --> 00:12:14,759
+a null pointer and see nothing there
+
+00:12:11,429 --> 00:12:16,769
+which is fine or they see your structure
+
+00:12:14,759 --> 00:12:20,399
+properly filled out which is also fine
+
+00:12:16,769 --> 00:12:22,589
+okay so what this means is we can insert
+
+00:12:20,399 --> 00:12:24,389
+things into a link structure without
+
+00:12:22,589 --> 00:12:26,100
+having to do anything to the updaters
+
+00:12:24,389 --> 00:12:28,949
+the updaters can just go around and do
+
+00:12:26,100 --> 00:12:30,889
+stuff to us and the readers don't have
+
+00:12:28,949 --> 00:12:32,819
+to exclude them they can run in
+
+00:12:30,889 --> 00:12:37,230
+concurrently with them and it works out
+
+00:12:32,819 --> 00:12:40,110
+fine for insertion and there are some
+
+00:12:37,230 --> 00:12:41,879
+affair it's kind of surprising there are
+
+00:12:40,110 --> 00:12:45,029
+actually a feral on a software that uses
+
+00:12:41,879 --> 00:12:46,980
+just this and does stop the world tricks
+
+00:12:45,029 --> 00:12:48,839
+when they need to get rid of things okay
+
+00:12:46,980 --> 00:12:50,999
+but stop the world can be a little
+
+00:12:48,839 --> 00:12:54,899
+annoying so we'd like to remove stuff as
+
+00:12:50,999 --> 00:12:56,069
+well same situation we this time we're
+
+00:12:54,899 --> 00:12:57,809
+to get a little more complicated we have
+
+00:12:56,069 --> 00:13:01,019
+a three element linked list and remove
+
+00:12:57,809 --> 00:13:02,429
+the cat now if we store the pointer from
+
+00:13:01,019 --> 00:13:04,439
+the bullet to the cat and we make it
+
+00:13:02,429 --> 00:13:06,799
+point to the new and we do that again
+
+00:13:04,439 --> 00:13:09,360
+using C++ tommix or something equivalent
+
+00:13:06,799 --> 00:13:11,999
+so that we just store the pointer in one
+
+00:13:09,360 --> 00:13:14,579
+shot that means readers see either the
+
+00:13:11,999 --> 00:13:15,869
+pointer from the bow to the cat or they
+
+00:13:14,579 --> 00:13:17,220
+see the pointer from the bullet to the
+
+00:13:15,869 --> 00:13:20,129
+canoe they don't see some mush of the
+
+00:13:17,220 --> 00:13:21,629
+two pointers now they may disagree as to
+
+00:13:20,129 --> 00:13:22,050
+whether the cats there a nod to given
+
+00:13:21,629 --> 00:13:23,790
+point
+
+00:13:22,050 --> 00:13:25,170
+I'm pending on when they show up and
+
+00:13:23,790 --> 00:13:29,490
+when they get cramped and all that stuff
+
+00:13:25,170 --> 00:13:30,899
+but they'll all see a valid list and if
+
+00:13:29,490 --> 00:13:32,850
+we can somehow magically wait for all
+
+00:13:30,899 --> 00:13:35,310
+the readers to get done once they were
+
+00:13:32,850 --> 00:13:37,830
+done there no numerator can find the cat
+
+00:13:35,310 --> 00:13:40,680
+only old readers can be there so once we
+
+00:13:37,830 --> 00:13:41,730
+wait for all the readers there can't be
+
+00:13:40,680 --> 00:13:44,910
+anybody with the updater with a
+
+00:13:41,730 --> 00:13:46,800
+reference to the cat and at that point
+
+00:13:44,910 --> 00:13:48,180
+we can free the element override it do
+
+00:13:46,800 --> 00:13:53,790
+whatever we want to it the readers can't
+
+00:13:48,180 --> 00:13:54,959
+see it okay of course you do actually
+
+00:13:53,790 --> 00:13:58,290
+have to implement the synchronize our
+
+00:13:54,959 --> 00:13:59,970
+see you magic operator operation and the
+
+00:13:58,290 --> 00:14:01,440
+readers aren't leaving in the in the
+
+00:13:59,970 --> 00:14:04,860
+most aggressive case if you compile a
+
+00:14:01,440 --> 00:14:07,290
+linux kernel for a server with config
+
+00:14:04,860 --> 00:14:08,490
+preempt equals n you will get this case
+
+00:14:07,290 --> 00:14:11,880
+where the readers leave no trace of
+
+00:14:08,490 --> 00:14:13,670
+their presence in memory okay but we
+
+00:14:11,880 --> 00:14:19,019
+still have to deal with them and we do
+
+00:14:13,670 --> 00:14:21,300
+we cheat as always what we do is rely on
+
+00:14:19,019 --> 00:14:23,750
+the fact that it in non prepped
+
+00:14:21,300 --> 00:14:26,670
+environments if you're holding a
+
+00:14:23,750 --> 00:14:29,390
+non-parental resource a spin lock for
+
+00:14:26,670 --> 00:14:31,470
+example you're not allowed to block if
+
+00:14:29,390 --> 00:14:35,250
+you did block while holding a pure
+
+00:14:31,470 --> 00:14:37,500
+spinlock you a deadlock you've got the
+
+00:14:35,250 --> 00:14:40,110
+spin lock you block every else tries to
+
+00:14:37,500 --> 00:14:41,760
+go for the spin lock they spin well
+
+00:14:40,110 --> 00:14:43,200
+they're not going to stop spinning tilly
+
+00:14:41,760 --> 00:14:45,060
+at the lock you're not going to get a
+
+00:14:43,200 --> 00:14:46,589
+CPU until they get the lock until you
+
+00:14:45,060 --> 00:14:49,980
+get the CPU you can't let go of the lock
+
+00:14:46,589 --> 00:14:53,070
+and life is hard at that point so we use
+
+00:14:49,980 --> 00:14:55,560
+the same rule for the readers okay if
+
+00:14:53,070 --> 00:14:58,890
+you're reading you're not not allowed to
+
+00:14:55,560 --> 00:15:00,990
+block what that means is if you see a
+
+00:14:58,890 --> 00:15:03,029
+cpu block that means that all the
+
+00:15:00,990 --> 00:15:05,790
+previous readers have to have finished
+
+00:15:03,029 --> 00:15:07,320
+if it worries following your rules on
+
+00:15:05,790 --> 00:15:10,079
+the other hand if people fail to follow
+
+00:15:07,320 --> 00:15:12,209
+rules no synchronization world mecos in
+
+00:15:10,079 --> 00:15:13,829
+the world it will help you right you can
+
+00:15:12,209 --> 00:15:16,500
+break anything if your malicious about
+
+00:15:13,829 --> 00:15:18,990
+it well that means that once we see all
+
+00:15:16,500 --> 00:15:21,779
+three of these guys context switch so we
+
+00:15:18,990 --> 00:15:23,519
+move the cat over here we do you think
+
+00:15:21,779 --> 00:15:26,760
+right as RC went we blocked so we're
+
+00:15:23,519 --> 00:15:28,279
+done and as soon as this guy does his
+
+00:15:26,760 --> 00:15:30,630
+conscience which that readers done and
+
+00:15:28,279 --> 00:15:32,610
+finally this guy the third guy in last
+
+00:15:30,630 --> 00:15:34,199
+guy does his highlights which he's done
+
+00:15:32,610 --> 00:15:35,970
+now the only reader that could possibly
+
+00:15:34,199 --> 00:15:37,319
+see the cat's this guy but that's a
+
+00:15:35,970 --> 00:15:39,120
+okay it's okay to be a little longer
+
+00:15:37,319 --> 00:15:41,129
+than maybe we're just returning memory
+
+00:15:39,120 --> 00:15:43,379
+once we've seen all three of them that
+
+00:15:41,129 --> 00:15:45,000
+means no reader can possibly be seen the
+
+00:15:43,379 --> 00:15:51,209
+cat anymore and we can free it or
+
+00:15:45,000 --> 00:15:53,129
+override it or do whatever okay and what
+
+00:15:51,209 --> 00:15:54,029
+that means is that the main thing is in
+
+00:15:53,129 --> 00:15:56,449
+the middle there are sila
+
+00:15:54,029 --> 00:15:59,129
+synchronization via social engineering
+
+00:15:56,449 --> 00:16:00,870
+the primitives in the most aggressive
+
+00:15:59,129 --> 00:16:03,360
+case optum the developer who has to
+
+00:16:00,870 --> 00:16:04,949
+refrain from blocking if you desire to
+
+00:16:03,360 --> 00:16:07,319
+read lock he has to not block until he
+
+00:16:04,949 --> 00:16:08,790
+gets to the arch you read unlock just
+
+00:16:07,319 --> 00:16:10,829
+like all the other synchronization
+
+00:16:08,790 --> 00:16:12,959
+mechanisms if you are going to use
+
+00:16:10,829 --> 00:16:15,329
+transactional memory you'd better have
+
+00:16:12,959 --> 00:16:17,459
+all the relevant accesses in a
+
+00:16:15,329 --> 00:16:20,790
+transaction if you don't it won't work
+
+00:16:17,459 --> 00:16:23,009
+okay similar with locking and there's a
+
+00:16:20,790 --> 00:16:25,350
+void data races is a big thing in C++
+
+00:16:23,009 --> 00:16:27,240
+memory model the thing that's unusual
+
+00:16:25,350 --> 00:16:29,189
+blood RCU isn't that it relies on social
+
+00:16:27,240 --> 00:16:31,800
+engineering but then in some
+
+00:16:29,189 --> 00:16:34,649
+implementations relies solely on social
+
+00:16:31,800 --> 00:16:37,350
+engineering and the nice thing about
+
+00:16:34,649 --> 00:16:40,649
+that is that there's not a whole lot
+
+00:16:37,350 --> 00:16:42,329
+faster than doing nothing doing nothing
+
+00:16:40,649 --> 00:16:43,379
+is pretty fast is pretty scalable its
+
+00:16:42,329 --> 00:16:45,059
+energy efficient there's whole bunch of
+
+00:16:43,379 --> 00:16:47,189
+nice things about it and in that
+
+00:16:45,059 --> 00:16:49,319
+aggressive case we get done with that we
+
+00:16:47,189 --> 00:16:51,899
+can take advantage of that but there's a
+
+00:16:49,319 --> 00:16:56,610
+downside that downside is that is
+
+00:16:51,899 --> 00:16:59,939
+specialized the best place is things
+
+00:16:56,610 --> 00:17:01,709
+like networking stacks where there's or
+
+00:16:59,939 --> 00:17:03,240
+any kind of a situation where you have a
+
+00:17:01,709 --> 00:17:07,709
+data structure in the computer that is
+
+00:17:03,240 --> 00:17:09,480
+tracking some external object because of
+
+00:17:07,709 --> 00:17:11,459
+our friends the speed of light delays on
+
+00:17:09,480 --> 00:17:13,860
+the atomic nature of matter that data
+
+00:17:11,459 --> 00:17:15,780
+structure is out of date if something
+
+00:17:13,860 --> 00:17:18,630
+changes it takes time for it to be
+
+00:17:15,780 --> 00:17:20,490
+updated therefore any algorithm dealing
+
+00:17:18,630 --> 00:17:22,400
+with that has to deal with the fact that
+
+00:17:20,490 --> 00:17:25,140
+there will be times when it is stale in
+
+00:17:22,400 --> 00:17:26,669
+those situations this works wonderfully
+
+00:17:25,140 --> 00:17:28,260
+because the fact that you might see
+
+00:17:26,669 --> 00:17:29,820
+something old well he nice and level
+
+00:17:28,260 --> 00:17:31,559
+anyway because the update might have got
+
+00:17:29,820 --> 00:17:32,820
+not it got to you yet something they
+
+00:17:31,559 --> 00:17:35,220
+have changed out there but you haven't
+
+00:17:32,820 --> 00:17:36,750
+seen it yet therefore if some of the
+
+00:17:35,220 --> 00:17:39,390
+system has seen it some of it hasn't
+
+00:17:36,750 --> 00:17:41,669
+that still okay in the case of routing
+
+00:17:39,390 --> 00:17:43,950
+tables of TCP you may send the packet
+
+00:17:41,669 --> 00:17:45,299
+the wrong way but you've probably been
+
+00:17:43,950 --> 00:17:46,799
+sending the packets the wrong way for
+
+00:17:45,299 --> 00:17:49,500
+quite some time because the routing has
+
+00:17:46,799 --> 00:17:49,680
+update hasn't gotten to you yet and if
+
+00:17:49,500 --> 00:17:50,760
+you
+
+00:17:49,680 --> 00:17:54,660
+the pack of the wrong way for another
+
+00:17:50,760 --> 00:17:56,760
+millisecond or so nobody cares okay but
+
+00:17:54,660 --> 00:17:58,350
+that's not not all about algorithms are
+
+00:17:56,760 --> 00:18:00,840
+that way there's some of them were you
+
+00:17:58,350 --> 00:18:04,110
+need consistent data so for example in
+
+00:18:00,840 --> 00:18:06,660
+Linux kernel our CEO is used to mediate
+
+00:18:04,110 --> 00:18:09,240
+the translation from a system 5
+
+00:18:06,660 --> 00:18:12,150
+semaphore ID to the internal internal
+
+00:18:09,240 --> 00:18:13,890
+data structure well it's a foul it's
+
+00:18:12,150 --> 00:18:15,870
+really bad to let somebody do something
+
+00:18:13,890 --> 00:18:19,860
+to a semaphore that got deleted a moment
+
+00:18:15,870 --> 00:18:21,360
+ago okay you can't allow that and so we
+
+00:18:19,860 --> 00:18:23,280
+have to apply out some additional
+
+00:18:21,360 --> 00:18:24,840
+synchronization we have a lock on the
+
+00:18:23,280 --> 00:18:26,670
+screen Colonel data structure selfie
+
+00:18:24,840 --> 00:18:28,710
+market say I'm deleted you release
+
+00:18:26,670 --> 00:18:30,600
+Locker it comes in he finds it because
+
+00:18:28,710 --> 00:18:31,770
+he got there a little fast he says all
+
+00:18:30,600 --> 00:18:33,660
+I've been deleted okay I pretend I
+
+00:18:31,770 --> 00:18:36,450
+didn't find it and that works pretty
+
+00:18:33,660 --> 00:18:38,370
+well there if you have a lot of updates
+
+00:18:36,450 --> 00:18:39,990
+and unique assistant data there are
+
+00:18:38,370 --> 00:18:43,110
+places for example where this is used in
+
+00:18:39,990 --> 00:18:45,960
+Linux kernel for example the translation
+
+00:18:43,110 --> 00:18:47,970
+from pathname to I node structure is
+
+00:18:45,960 --> 00:18:49,980
+example that however if you update
+
+00:18:47,970 --> 00:18:52,580
+mostly unique this is data you probably
+
+00:18:49,980 --> 00:18:55,110
+should be using something else okay
+
+00:18:52,580 --> 00:18:56,850
+there are a couple special cases we come
+
+00:18:55,110 --> 00:19:01,020
+across where it actually does work well
+
+00:18:56,850 --> 00:19:02,550
+but usually if you're down there
+
+00:19:01,020 --> 00:19:05,610
+updating a lot and using this isn't date
+
+00:19:02,550 --> 00:19:07,170
+a lot you something else so of course
+
+00:19:05,610 --> 00:19:08,550
+that means that's a challenge and we try
+
+00:19:07,170 --> 00:19:12,420
+to do it anyway which is where this
+
+00:19:08,550 --> 00:19:13,890
+presentation is that ok so what we do
+
+00:19:12,420 --> 00:19:18,150
+for read-only traversal to update
+
+00:19:13,890 --> 00:19:20,910
+location is we use our see you to keep
+
+00:19:18,150 --> 00:19:23,610
+the stuff nail down so we're in recycler
+
+00:19:20,910 --> 00:19:26,910
+kill section that means that if we find
+
+00:19:23,610 --> 00:19:28,200
+getting it a reference and by reference
+
+00:19:26,910 --> 00:19:29,400
+I just mean we get a pointer to it we
+
+00:19:28,200 --> 00:19:30,360
+don't haven't done anything smart
+
+00:19:29,400 --> 00:19:31,710
+pointers or anything like that no
+
+00:19:30,360 --> 00:19:35,130
+reference counts don't anything we just
+
+00:19:31,710 --> 00:19:37,890
+have a pointer to it that thing cannot
+
+00:19:35,130 --> 00:19:40,280
+disappear it cannot be deallocated until
+
+00:19:37,890 --> 00:19:42,540
+we exit the read site critical section
+
+00:19:40,280 --> 00:19:45,000
+that means we can just reverse down a
+
+00:19:42,540 --> 00:19:46,850
+tree we enter the recycle it achill
+
+00:19:45,000 --> 00:19:50,340
+session we traverse down the tree and
+
+00:19:46,850 --> 00:19:52,530
+once we get to where we want to go maybe
+
+00:19:50,340 --> 00:19:54,630
+where we're inserting or the thing we're
+
+00:19:52,530 --> 00:19:58,500
+looked up or other thing we deleted then
+
+00:19:54,630 --> 00:20:01,530
+and only then we acquire locks all right
+
+00:19:58,500 --> 00:20:02,760
+now we may have to do some checks and
+
+00:20:01,530 --> 00:20:03,690
+we'll talk about that a little bit we
+
+00:20:02,760 --> 00:20:04,559
+may try to delete
+
+00:20:03,690 --> 00:20:07,529
+something was just something else just
+
+00:20:04,559 --> 00:20:09,269
+deleted we have to detect that and retry
+
+00:20:07,529 --> 00:20:14,009
+much as you would for something like
+
+00:20:09,269 --> 00:20:15,600
+sequence locking in this case okay but
+
+00:20:14,009 --> 00:20:18,299
+what if we get there and the checks pass
+
+00:20:15,600 --> 00:20:21,870
+then we release the locks we go and
+
+00:20:18,299 --> 00:20:24,779
+we're done there's quite a bit more on
+
+00:20:21,870 --> 00:20:26,129
+this it's the idea has been around for a
+
+00:20:24,779 --> 00:20:28,409
+long time maybe back to nineteen eighty
+
+00:20:26,129 --> 00:20:30,480
+it's not Wrigley Neil idea using it
+
+00:20:28,409 --> 00:20:34,620
+organized away and actually using in
+
+00:20:30,480 --> 00:20:36,029
+production is somewhat more new but well
+
+00:20:34,620 --> 00:20:37,230
+my kids are all out of college now when
+
+00:20:36,029 --> 00:20:39,480
+Jack and I started doing this they
+
+00:20:37,230 --> 00:20:41,309
+weren't in in kindergarten yet so it's
+
+00:20:39,480 --> 00:20:44,429
+been around for a while as well in our
+
+00:20:41,309 --> 00:20:47,399
+use okay I'm going to go quickly through
+
+00:20:44,429 --> 00:20:49,919
+the solution this Glock problem and we
+
+00:20:47,399 --> 00:20:51,779
+start off with the tree here and the big
+
+00:20:49,919 --> 00:20:54,330
+thing here is that because RSU is
+
+00:20:51,779 --> 00:20:56,429
+specialized what that means is we use
+
+00:20:54,330 --> 00:20:58,590
+other synchronization primitives in
+
+00:20:56,429 --> 00:21:01,049
+combination with it we don't try to go
+
+00:20:58,590 --> 00:21:02,490
+it alone and so we have different
+
+00:21:01,049 --> 00:21:04,740
+domains in the data structure that are
+
+00:21:02,490 --> 00:21:06,000
+doing different things so we've RCU
+
+00:21:04,740 --> 00:21:08,159
+protecting the upper part we're
+
+00:21:06,000 --> 00:21:10,230
+reversing it and that's really important
+
+00:21:08,159 --> 00:21:11,759
+because if we actually did something
+
+00:21:10,230 --> 00:21:13,740
+about stop knows we take in a really
+
+00:21:11,759 --> 00:21:16,139
+horrible contention and we have to avoid
+
+00:21:13,740 --> 00:21:17,879
+that even if it wasn't a rule for the
+
+00:21:16,139 --> 00:21:20,519
+issaquah solution we still want to avoid
+
+00:21:17,879 --> 00:21:22,289
+it because it's expensive so when we get
+
+00:21:20,519 --> 00:21:24,570
+to the bottom though at that point we
+
+00:21:22,289 --> 00:21:28,230
+need the consistency so we rely on
+
+00:21:24,570 --> 00:21:30,990
+locking now locking is only going to
+
+00:21:28,230 --> 00:21:32,669
+protect a point update and we need
+
+00:21:30,990 --> 00:21:34,080
+something that deals with this atomic
+
+00:21:32,669 --> 00:21:35,220
+move from one tree to another and we're
+
+00:21:34,080 --> 00:21:36,629
+not going to have a lock spanning both
+
+00:21:35,220 --> 00:21:39,149
+trees at least not if we want to scale
+
+00:21:36,629 --> 00:21:40,830
+or perform well either so we're going to
+
+00:21:39,149 --> 00:21:45,990
+use existence structures to mediate that
+
+00:21:40,830 --> 00:21:47,309
+and will show that in a moment I'm not
+
+00:21:45,990 --> 00:21:48,690
+going to go through this in detail these
+
+00:21:47,309 --> 00:21:50,580
+are just the four cases you run into
+
+00:21:48,690 --> 00:21:52,799
+when you go down without locking and try
+
+00:21:50,580 --> 00:21:54,029
+to update something and it's broken one
+
+00:21:52,799 --> 00:21:55,289
+of the things might have been deleted or
+
+00:21:54,029 --> 00:21:58,259
+something not even stuck between them
+
+00:21:55,289 --> 00:21:59,639
+and you have to you could there you
+
+00:21:58,259 --> 00:22:01,320
+could be used in very complicated
+
+00:21:59,639 --> 00:22:07,500
+recovery mechanisms what I currently do
+
+00:22:01,320 --> 00:22:12,240
+is just start the thing over okay and
+
+00:22:07,500 --> 00:22:14,970
+then as it just drop locks and retry you
+
+00:22:12,240 --> 00:22:16,470
+could if you retry too many times
+
+00:22:14,970 --> 00:22:17,040
+actually acquire locks all the way down
+
+00:22:16,470 --> 00:22:18,570
+there's a bunch of
+
+00:22:17,040 --> 00:22:21,240
+stuff you could do and I haven't had to
+
+00:22:18,570 --> 00:22:22,980
+do that yet so what's an existence
+
+00:22:21,240 --> 00:22:24,870
+structure well we're adding another
+
+00:22:22,980 --> 00:22:26,310
+level of indirection this is the common
+
+00:22:24,870 --> 00:22:29,490
+computer science approach to the world
+
+00:22:26,310 --> 00:22:30,450
+and initially in fact in 2014 I was
+
+00:22:29,490 --> 00:22:32,310
+actually adding three levels of
+
+00:22:30,450 --> 00:22:36,810
+indirection just to you know keep things
+
+00:22:32,310 --> 00:22:38,730
+going and the trick here and I'm going
+
+00:22:36,810 --> 00:22:40,080
+to just show kind of I'm just going to
+
+00:22:38,730 --> 00:22:43,680
+step through this without explaining it
+
+00:22:40,080 --> 00:22:45,980
+but the idea is that you can flip one
+
+00:22:43,680 --> 00:22:49,920
+value this is yellow existence which and
+
+00:22:45,980 --> 00:22:52,110
+change the existence or not of the
+
+00:22:49,920 --> 00:22:54,150
+structure now you could have any number
+
+00:22:52,110 --> 00:22:55,860
+of structures tying into this thing and
+
+00:22:54,150 --> 00:22:58,650
+what this allows you to do is kind of
+
+00:22:55,860 --> 00:23:00,480
+synchronized on/off switch on any number
+
+00:22:58,650 --> 00:23:04,200
+of structures that are making up another
+
+00:23:00,480 --> 00:23:05,820
+structure all right we'll go through an
+
+00:23:04,200 --> 00:23:08,610
+example showing showing that in a real
+
+00:23:05,820 --> 00:23:10,290
+tree in a moment but three levels of
+
+00:23:08,610 --> 00:23:11,970
+indirection was too much for Dmitri view
+
+00:23:10,290 --> 00:23:14,820
+Cobb and he says come on I can't get
+
+00:23:11,970 --> 00:23:16,830
+your act together do it this way this of
+
+00:23:14,820 --> 00:23:18,360
+course takes us outside of the c++
+
+00:23:16,830 --> 00:23:20,010
+standard you're not allowed tag pointers
+
+00:23:18,360 --> 00:23:24,150
+but it's really convenient a lot of
+
+00:23:20,010 --> 00:23:26,040
+people do it so I'm doing it to the idea
+
+00:23:24,150 --> 00:23:28,110
+is that because the switch is big enough
+
+00:23:26,040 --> 00:23:29,730
+to be aligned that gives you some bits
+
+00:23:28,110 --> 00:23:31,590
+on the bottom so instead of having this
+
+00:23:29,730 --> 00:23:33,030
+extra three levels a thing you just use
+
+00:23:31,590 --> 00:23:35,370
+the bottom fits the pointer and they
+
+00:23:33,030 --> 00:23:36,750
+match this integer or they don't if they
+
+00:23:35,370 --> 00:23:39,270
+match the integer this other thing out
+
+00:23:36,750 --> 00:23:41,760
+there exists otherwise it doesn't okay
+
+00:23:39,270 --> 00:23:43,950
+so it's a fairly simple computation if
+
+00:23:41,760 --> 00:23:47,450
+the pointer is null then it exists
+
+00:23:43,950 --> 00:23:50,130
+because it's not changing at all and
+
+00:23:47,450 --> 00:23:52,650
+will represent this structure like that
+
+00:23:50,130 --> 00:23:54,870
+with a little just a little rectangle
+
+00:23:52,650 --> 00:23:57,240
+with the red and blue parts of it just
+
+00:23:54,870 --> 00:23:58,800
+because otherwise the diagram get too
+
+00:23:57,240 --> 00:24:02,370
+full we showed the example on the tree
+
+00:23:58,800 --> 00:24:05,520
+but the same thing applies what happens
+
+00:24:02,370 --> 00:24:08,250
+is that by doing a store into that
+
+00:24:05,520 --> 00:24:10,350
+distance which okay it starts out 0
+
+00:24:08,250 --> 00:24:14,460
+which means a exists and B doesn't we
+
+00:24:10,350 --> 00:24:16,110
+store a 1 into it and bang suddenly a
+
+00:24:14,460 --> 00:24:18,270
+doesn't exist in B does exist at the
+
+00:24:16,110 --> 00:24:19,980
+same time so with a single store we can
+
+00:24:18,270 --> 00:24:22,380
+make any number of data structures pop
+
+00:24:19,980 --> 00:24:24,950
+into and out of existence at our at our
+
+00:24:22,380 --> 00:24:24,950
+control okay
+
+00:24:25,250 --> 00:24:32,600
+so let's apply this to the 2014 problem
+
+00:24:30,490 --> 00:24:35,240
+which is our tree and this is our
+
+00:24:32,600 --> 00:24:38,480
+initial state we want to as one atomic
+
+00:24:35,240 --> 00:24:40,460
+thing move for over to the left-hand
+
+00:24:38,480 --> 00:24:44,720
+tree and move one over to the right-hand
+
+00:24:40,460 --> 00:24:46,970
+tree so we want for it no matter what a
+
+00:24:44,720 --> 00:24:48,710
+reader does going through here it can't
+
+00:24:46,970 --> 00:24:51,350
+see anything that would show those being
+
+00:24:48,710 --> 00:24:55,730
+non-atomic in other words for example it
+
+00:24:51,350 --> 00:24:57,140
+can't see one in this tree and then see
+
+00:24:55,730 --> 00:24:59,630
+one of the one on the right hand tree
+
+00:24:57,140 --> 00:25:03,320
+and then c1 a left hand tree it can't
+
+00:24:59,630 --> 00:25:04,820
+see four in the left hand tree and then
+
+00:25:03,320 --> 00:25:06,500
+go around see one in that same left hand
+
+00:25:04,820 --> 00:25:08,930
+tree because that would mean it was a
+
+00:25:06,500 --> 00:25:10,400
+non atomic update it can't see anything
+
+00:25:08,930 --> 00:25:11,960
+that indicates that both over one tree
+
+00:25:10,400 --> 00:25:15,230
+at the same time or that there was a
+
+00:25:11,960 --> 00:25:16,310
+time when there's nobody there so the
+
+00:25:15,230 --> 00:25:18,050
+first thing we do is we get new
+
+00:25:16,310 --> 00:25:20,930
+existence structure we allocate some new
+
+00:25:18,050 --> 00:25:22,190
+a new four and a new one and you can use
+
+00:25:20,930 --> 00:25:23,630
+in direction if you want to make a
+
+00:25:22,190 --> 00:25:28,220
+common data structure or you can do
+
+00:25:23,630 --> 00:25:30,950
+copying take your poison and we start
+
+00:25:28,220 --> 00:25:32,150
+off with Ellen one existing and I look
+
+00:25:30,950 --> 00:25:34,640
+forward to seeing the dark green ones
+
+00:25:32,150 --> 00:25:38,060
+and the thing is that we had to make a
+
+00:25:34,640 --> 00:25:39,380
+change here but the change didn't really
+
+00:25:38,060 --> 00:25:42,140
+change anything it just made the
+
+00:25:39,380 --> 00:25:44,390
+computation more expensive so before we
+
+00:25:42,140 --> 00:25:45,830
+added this elint one the left-hand tree
+
+00:25:44,390 --> 00:25:48,640
+existed and you could tell because
+
+00:25:45,830 --> 00:25:50,870
+there's a null pointer there after this
+
+00:25:48,640 --> 00:25:52,160
+now what one still exists and the way
+
+00:25:50,870 --> 00:25:53,570
+you tell is there's a pointer and it
+
+00:25:52,160 --> 00:25:55,190
+goes off you check the bits and they
+
+00:25:53,570 --> 00:25:56,330
+match that says that zero in the bottom
+
+00:25:55,190 --> 00:26:00,170
+bit this thing has there on the bottom
+
+00:25:56,330 --> 00:26:01,790
+bit life is good and the st. and Owens
+
+00:26:00,170 --> 00:26:04,520
+four and one that are coming in there's
+
+00:26:01,790 --> 00:26:05,930
+no big deal nobody can see them so we
+
+00:26:04,520 --> 00:26:07,850
+can make this transformation on
+
+00:26:05,930 --> 00:26:09,920
+atomically and not affect the readers
+
+00:26:07,850 --> 00:26:11,120
+aside from making their computation a
+
+00:26:09,920 --> 00:26:14,330
+bit more expect making their life more
+
+00:26:11,120 --> 00:26:15,770
+difficult I guess ok the next thing we
+
+00:26:14,330 --> 00:26:18,560
+do is we actually add the new four and
+
+00:26:15,770 --> 00:26:20,570
+one to the tree we can again do this non
+
+00:26:18,560 --> 00:26:22,570
+atomically beforehand they didn't exist
+
+00:26:20,570 --> 00:26:24,440
+because you couldn't find them
+
+00:26:22,570 --> 00:26:26,120
+afterwards they don't exist because you
+
+00:26:24,440 --> 00:26:28,370
+look at the bottom of their pointer it's
+
+00:26:26,120 --> 00:26:29,870
+a one and it's a zero still the blue
+
+00:26:28,370 --> 00:26:33,560
+part is the one that's the current state
+
+00:26:29,870 --> 00:26:35,030
+all right so beforehand you went and and
+
+00:26:33,560 --> 00:26:37,370
+that brown node you saw a null pointer
+
+00:26:35,030 --> 00:26:38,640
+nobody's there afterwards you go there
+
+00:26:37,370 --> 00:26:40,110
+for here but it's
+
+00:26:38,640 --> 00:26:41,460
+where'd bottom disz pointer doesn't
+
+00:26:40,110 --> 00:26:44,010
+match therefore it doesn't exist pretend
+
+00:26:41,460 --> 00:26:47,610
+it wasn't there so we can make this
+
+00:26:44,010 --> 00:26:49,140
+change again as slow as you want we are
+
+00:26:47,610 --> 00:26:50,370
+just inconvenience Lee readers making
+
+00:26:49,140 --> 00:26:53,730
+them a little slower we aren't changing
+
+00:26:50,370 --> 00:26:57,000
+their answer the next thing we do does
+
+00:26:53,730 --> 00:27:00,450
+change things we store a one into that
+
+00:26:57,000 --> 00:27:04,230
+assistive structure when we do that
+
+00:27:00,450 --> 00:27:08,280
+suddenly the existence of the fours and
+
+00:27:04,230 --> 00:27:09,330
+ones exchange so the old for the one
+
+00:27:08,280 --> 00:27:11,640
+that used to exist don't anymore
+
+00:27:09,330 --> 00:27:14,910
+suddenly and the new foreign one that
+
+00:27:11,640 --> 00:27:16,920
+didn't exist now suddenly do and the
+
+00:27:14,910 --> 00:27:18,780
+readers coming in because that's a
+
+00:27:16,920 --> 00:27:20,810
+single location if they see it in one
+
+00:27:18,780 --> 00:27:23,310
+state and then they see in the new state
+
+00:27:20,810 --> 00:27:25,170
+by all the memory models we have and by
+
+00:27:23,310 --> 00:27:29,160
+the the fact that you do a relaxed load
+
+00:27:25,170 --> 00:27:30,660
+you have to get coherence if you relax
+
+00:27:29,160 --> 00:27:33,450
+load of a variable and then later on to
+
+00:27:30,660 --> 00:27:39,480
+a black same variable you're required to
+
+00:27:33,450 --> 00:27:41,460
+see them in order and therefore we get
+
+00:27:39,480 --> 00:27:43,380
+we get this atomicity yeah unfortunately
+
+00:27:41,460 --> 00:27:45,540
+it isn't quite that simple you have to
+
+00:27:43,380 --> 00:27:47,220
+do a acquire a load of the pointer
+
+00:27:45,540 --> 00:27:51,360
+itself but you know life's hard
+
+00:27:47,220 --> 00:27:53,370
+sometimes once we've done this people
+
+00:27:51,360 --> 00:27:54,960
+really don't see that one on the left or
+
+00:27:53,370 --> 00:27:56,220
+the four on the right I mean they go
+
+00:27:54,960 --> 00:27:58,320
+through some work to see they don't see
+
+00:27:56,220 --> 00:28:00,150
+it but it's not there and so we can non
+
+00:27:58,320 --> 00:28:02,970
+atomically remove them from the list and
+
+00:28:00,150 --> 00:28:04,590
+once we've done that we can clean up so
+
+00:28:02,970 --> 00:28:06,180
+that's the basic sort of a thing we're
+
+00:28:04,590 --> 00:28:07,500
+doing and this is you may recognize this
+
+00:28:06,180 --> 00:28:09,210
+as kind of one of the components that
+
+00:28:07,500 --> 00:28:11,310
+some transactional memory
+
+00:28:09,210 --> 00:28:16,620
+implementations use it's in some ways
+
+00:28:11,310 --> 00:28:18,480
+kind of similar so we have existence
+
+00:28:16,620 --> 00:28:20,250
+pointers if it's null it's there
+
+00:28:18,480 --> 00:28:21,990
+otherwise you check the bit and the
+
+00:28:20,250 --> 00:28:23,340
+thing it points to and you better have a
+
+00:28:21,990 --> 00:28:24,870
+good API I'm not going to go through the
+
+00:28:23,340 --> 00:28:27,270
+API and detail it's here if you want to
+
+00:28:24,870 --> 00:28:29,130
+look at it but other if I didn't have an
+
+00:28:27,270 --> 00:28:31,020
+API I know I would have a really hard
+
+00:28:29,130 --> 00:28:33,960
+time having something equal know being
+
+00:28:31,020 --> 00:28:36,390
+it existed all right so you have to put
+
+00:28:33,960 --> 00:28:37,980
+it behind something so this is kind of
+
+00:28:36,390 --> 00:28:39,180
+an overview of what it looks like you've
+
+00:28:37,980 --> 00:28:40,380
+got some kind of data structure header
+
+00:28:39,180 --> 00:28:42,630
+you guys this is head you got a user
+
+00:28:40,380 --> 00:28:44,190
+pointer if you if you if you need to
+
+00:28:42,630 --> 00:28:45,870
+have stable pointers to the things while
+
+00:28:44,190 --> 00:28:47,760
+they're moving around obviously you
+
+00:28:45,870 --> 00:28:49,380
+could take this green thing and have two
+
+00:28:47,760 --> 00:28:52,240
+copies of it once in each structure if
+
+00:28:49,380 --> 00:28:53,890
+that if the long-lived rougher
+
+00:28:52,240 --> 00:28:56,200
+to it well as moving around different
+
+00:28:53,890 --> 00:28:59,380
+data structures is not required and if
+
+00:28:56,200 --> 00:29:02,080
+it's small okay so that's kind of what
+
+00:28:59,380 --> 00:29:06,970
+it looks like this is pseudo code for
+
+00:29:02,080 --> 00:29:08,320
+the move and basic goes to what we're
+
+00:29:06,970 --> 00:29:10,120
+gonna do there this is the old stuff so
+
+00:29:08,320 --> 00:29:15,550
+I go through this in detail and it
+
+00:29:10,120 --> 00:29:40,900
+doesn't like me right now well that was
+
+00:29:15,550 --> 00:29:42,190
+exciting let's try this again okay
+
+00:29:40,900 --> 00:29:48,030
+member where I put it it was this would
+
+00:29:42,190 --> 00:29:48,030
+be much easier there we go
+
+00:30:03,230 --> 00:30:07,800
+there we go okay and it's just if I want
+
+00:30:06,720 --> 00:30:19,230
+to recover it yeah I kind of like to
+
+00:30:07,800 --> 00:30:20,670
+thank you let's try this again okay well
+
+00:30:19,230 --> 00:30:21,840
+it looks promising let's see if it'll
+
+00:30:20,670 --> 00:30:26,850
+put up with me going through this
+
+00:30:21,840 --> 00:30:36,600
+quickly I've got a stress test a little
+
+00:30:26,850 --> 00:30:41,100
+bit let's see if it does it this time
+
+00:30:36,600 --> 00:30:45,270
+too you know okay we're so far so good
+
+00:30:41,100 --> 00:30:49,200
+so far so good I do have a PDF you see
+
+00:30:45,270 --> 00:30:51,090
+if worse comes to worst okay all right
+
+00:30:49,200 --> 00:30:52,140
+and I'm not going through that detail
+
+00:30:51,090 --> 00:30:54,990
+what I'm going to do is go through the
+
+00:30:52,140 --> 00:30:57,840
+performance results we had last year we
+
+00:30:54,990 --> 00:31:01,140
+got to 80 on 60 CPUs and we got to an
+
+00:30:57,840 --> 00:31:02,700
+LCA we got to about 90 and you may
+
+00:31:01,140 --> 00:31:04,920
+wonder why you're getting 90 on 60 it's
+
+00:31:02,700 --> 00:31:06,450
+because of the cash effects this is
+
+00:31:04,920 --> 00:31:08,790
+super linear scale up beat up because
+
+00:31:06,450 --> 00:31:10,740
+more cpus they have the smaller piece of
+
+00:31:08,790 --> 00:31:14,850
+instructions are looking at and the less
+
+00:31:10,740 --> 00:31:16,710
+cash they is ok if you that was read
+
+00:31:14,850 --> 00:31:18,060
+only if you add a small amount of
+
+00:31:16,710 --> 00:31:21,000
+updates things get a little bit worse
+
+00:31:18,060 --> 00:31:22,890
+only 40 X on 60 CPUs it's at least beats
+
+00:31:21,000 --> 00:31:27,200
+of the arnaz 10x he wanted this morning
+
+00:31:22,890 --> 00:31:29,730
+I heard and if you're only doing updates
+
+00:31:27,200 --> 00:31:32,430
+this is on eight CPUs things were really
+
+00:31:29,730 --> 00:31:34,430
+horrible back into 2014 they're a little
+
+00:31:32,430 --> 00:31:38,400
+bitter CPP con not much better at LCA
+
+00:31:34,430 --> 00:31:40,530
+however one nice thing about the LCA
+
+00:31:38,400 --> 00:31:42,120
+results is that if you add more cpus you
+
+00:31:40,530 --> 00:31:45,030
+still got better up to about thirty two
+
+00:31:42,120 --> 00:31:46,950
+CPUs what happens is 32 CPUs is that
+
+00:31:45,030 --> 00:31:48,900
+this is an Intel machine that has
+
+00:31:46,950 --> 00:31:51,900
+hyperthreading and it's one of the older
+
+00:31:48,900 --> 00:31:54,030
+ones that has thread 0 it through 0
+
+00:31:51,900 --> 00:31:57,030
+through 31 and then thread two on the
+
+00:31:54,030 --> 00:31:58,940
+same course from 32 to 63 and this thing
+
+00:31:57,030 --> 00:32:02,430
+is able to use more than half of a core
+
+00:31:58,940 --> 00:32:03,450
+so you get nice slope and 10 then you
+
+00:32:02,430 --> 00:32:06,540
+don't get quite as much out of the rest
+
+00:32:03,450 --> 00:32:08,280
+accor's still room for improvement but
+
+00:32:06,540 --> 00:32:11,070
+that's not this still beats yarn is 10x
+
+00:32:08,280 --> 00:32:13,280
+you know not bad maybe kind of okay not
+
+00:32:11,070 --> 00:32:15,780
+great but all right
+
+00:32:13,280 --> 00:32:17,640
+but as I said at the beginning this
+
+00:32:15,780 --> 00:32:19,110
+requires me modify my algorithms it's
+
+00:32:17,640 --> 00:32:20,520
+not a big modification you have these
+
+00:32:19,110 --> 00:32:21,720
+little thingies and you know you go
+
+00:32:20,520 --> 00:32:23,370
+through your tree thing you traverse it
+
+00:32:21,720 --> 00:32:25,020
+you say does this thing exists in a few
+
+00:32:23,370 --> 00:32:26,640
+places and then you have to have a way
+
+00:32:25,020 --> 00:32:29,820
+of backing back out to start over if it
+
+00:32:26,640 --> 00:32:31,830
+doesn't but still it's different and and
+
+00:32:29,820 --> 00:32:33,660
+I didn't want to maintain two different
+
+00:32:31,830 --> 00:32:35,670
+ones because i was lazy which men i did
+
+00:32:33,660 --> 00:32:38,400
+a much more work to avoid the laziness
+
+00:32:35,670 --> 00:32:39,840
+so the goal is to be able to take just
+
+00:32:38,400 --> 00:32:41,100
+an RC yew tree like a ballad rhythm or
+
+00:32:39,840 --> 00:32:43,140
+just an RC hash table algorithm
+
+00:32:41,100 --> 00:32:45,570
+unchanged all it knows how to do is
+
+00:32:43,140 --> 00:32:46,650
+insert delete look up that's it it
+
+00:32:45,570 --> 00:32:49,010
+doesn't know anything about this atomic
+
+00:32:46,650 --> 00:32:51,420
+stuff and make it so that it can support
+
+00:32:49,010 --> 00:32:53,309
+atomic moves among a bunch of different
+
+00:32:51,420 --> 00:32:54,480
+data structures in fact we want to make
+
+00:32:53,309 --> 00:32:56,040
+it so if you have a skip list in the
+
+00:32:54,480 --> 00:32:57,120
+hash table you're gonna tonnelle move
+
+00:32:56,040 --> 00:32:58,980
+stuff from the Skip list of the hash
+
+00:32:57,120 --> 00:33:02,280
+table in back all right why mess around
+
+00:32:58,980 --> 00:33:04,020
+you know I guess you could already the
+
+00:33:02,280 --> 00:33:08,040
+whole thing's messing around but okay
+
+00:33:04,020 --> 00:33:10,170
+fine gotta have some fun right so this
+
+00:33:08,040 --> 00:33:11,130
+is kind of what we're doing here so we
+
+00:33:10,170 --> 00:33:12,450
+have in this we're going to start off
+
+00:33:11,130 --> 00:33:14,970
+with rotating elements through hash
+
+00:33:12,450 --> 00:33:16,350
+tables so we're going to take first off
+
+00:33:14,970 --> 00:33:17,880
+we have element 1 and hash table 1
+
+00:33:16,350 --> 00:33:19,110
+element 2 and hash table 2 element 3 and
+
+00:33:17,880 --> 00:33:21,510
+hash tables through two and we're too
+
+00:33:19,110 --> 00:33:24,510
+kind of rotate them so when we get done
+
+00:33:21,510 --> 00:33:26,640
+element 2 is gonna be a hash table 1 l
+
+00:33:24,510 --> 00:33:28,320
+but three is in the hash table to an
+
+00:33:26,640 --> 00:33:30,390
+element one is going to hash table 3
+
+00:33:28,320 --> 00:33:31,800
+we're do that atomically it's going to
+
+00:33:30,390 --> 00:33:34,440
+happen all at once as far as the readers
+
+00:33:31,800 --> 00:33:36,390
+are concerned a reader going through
+
+00:33:34,440 --> 00:33:38,040
+there's nothing he could do to ever see
+
+00:33:36,390 --> 00:33:39,600
+a time when there were elements when
+
+00:33:38,040 --> 00:33:41,100
+there wasn't when each hash table didn't
+
+00:33:39,600 --> 00:33:43,290
+have one of the elements or other or
+
+00:33:41,100 --> 00:33:46,470
+anytime when a hash table clearly had
+
+00:33:43,290 --> 00:33:48,000
+both of them all right so no matter what
+
+00:33:46,470 --> 00:33:50,040
+it does there's only three elements and
+
+00:33:48,000 --> 00:33:52,980
+each hash table any given time only has
+
+00:33:50,040 --> 00:33:54,360
+one of them okay what we start off with
+
+00:33:52,980 --> 00:33:58,170
+we're going to make these existence
+
+00:33:54,360 --> 00:34:00,090
+things and we march some as incoming and
+
+00:33:58,170 --> 00:34:02,070
+outgoing and these are hooked up to
+
+00:34:00,090 --> 00:34:03,630
+these I ran out of space i'm sorry i
+
+00:34:02,070 --> 00:34:04,770
+don't have a little diamonds but you
+
+00:34:03,630 --> 00:34:06,000
+think of each one of these things i'm a
+
+00:34:04,770 --> 00:34:08,580
+little diamond hanging off of it and
+
+00:34:06,000 --> 00:34:09,720
+point at the right thing of it and we
+
+00:34:08,580 --> 00:34:11,250
+have the existence structure down here
+
+00:34:09,720 --> 00:34:13,470
+says 0 that means the things that are
+
+00:34:11,250 --> 00:34:15,780
+outgoing which have a zero on the bottom
+
+00:34:13,470 --> 00:34:17,129
+of their pointer exists now the incoming
+
+00:34:15,780 --> 00:34:18,840
+ones which are tagged with one of the
+
+00:34:17,129 --> 00:34:21,419
+bond the pointer don't that's why
+
+00:34:18,840 --> 00:34:22,830
+they're red so if you look if you look
+
+00:34:21,419 --> 00:34:26,429
+up in hash table 1 you'll find out what
+
+00:34:22,830 --> 00:34:28,050
+one you won't find element 3 because
+
+00:34:26,429 --> 00:34:31,079
+its marked as not being there with that
+
+00:34:28,050 --> 00:34:32,669
+red incoming guy however as soon as we
+
+00:34:31,079 --> 00:34:36,240
+store a 12 that yellow existence
+
+00:34:32,669 --> 00:34:39,540
+structure everything changes all at once
+
+00:34:36,240 --> 00:34:40,950
+and we have atomically rotated those
+
+00:34:39,540 --> 00:34:44,339
+elements through those three hash tables
+
+00:34:40,950 --> 00:34:46,109
+and then once we've done that we can
+
+00:34:44,339 --> 00:34:48,659
+just clean things up and we end up with
+
+00:34:46,109 --> 00:34:50,490
+something looking like that and what
+
+00:34:48,659 --> 00:34:53,700
+happens is that on the incoming things
+
+00:34:50,490 --> 00:34:55,859
+we store null into the pointer and if
+
+00:34:53,700 --> 00:34:57,089
+it's a null pointer it doesn't point to
+
+00:34:55,859 --> 00:34:59,309
+any existence stretch at all that means
+
+00:34:57,089 --> 00:35:00,960
+it unconditionally exists so these
+
+00:34:59,309 --> 00:35:02,970
+things become white permanent things the
+
+00:35:00,960 --> 00:35:04,680
+outgoing things we pull out and free
+
+00:35:02,970 --> 00:35:08,630
+them up because nobody's looking at men
+
+00:35:04,680 --> 00:35:08,630
+anyway and life is good we've rotated
+
+00:35:08,750 --> 00:35:16,050
+the data is fairly similar the trick we
+
+00:35:11,910 --> 00:35:18,930
+do here is that we put we put an element
+
+00:35:16,050 --> 00:35:22,859
+the H this hehd a thing is H tlm that is
+
+00:35:18,930 --> 00:35:24,690
+a hash table element alright and all the
+
+00:35:22,859 --> 00:35:26,640
+RCU hash table thing knows is about is
+
+00:35:24,690 --> 00:35:28,859
+that thing it doesn't know or care about
+
+00:35:26,640 --> 00:35:30,420
+the rest of this stuff and so we just
+
+00:35:28,859 --> 00:35:31,740
+hand this to a normal hash table
+
+00:35:30,420 --> 00:35:33,030
+algorithm and it hashes it and throws
+
+00:35:31,740 --> 00:35:35,549
+the right place we tell it move it
+
+00:35:33,030 --> 00:35:37,920
+everything's fine and on top of that
+
+00:35:35,549 --> 00:35:39,630
+will it we lay our code that uses the
+
+00:35:37,920 --> 00:35:41,790
+rest of these guys for example this
+
+00:35:39,630 --> 00:35:43,410
+existence head structure which is going
+
+00:35:41,790 --> 00:35:45,839
+to point to any when they say assistant
+
+00:35:43,410 --> 00:35:47,549
+flip the guys we use those to implement
+
+00:35:45,839 --> 00:35:50,130
+the atomic moves on top of the structure
+
+00:35:47,549 --> 00:35:56,040
+that is just an unchanged normal RCU
+
+00:35:50,130 --> 00:35:57,329
+algorithm and then once we do that this
+
+00:35:56,040 --> 00:35:58,890
+looks a little bit ugly because I wrote
+
+00:35:57,329 --> 00:36:03,569
+it therefore it looks like see okay
+
+00:35:58,890 --> 00:36:05,250
+sorry you know it's encrypted to you
+
+00:36:03,569 --> 00:36:08,369
+guys you convert C++ and I wouldn't
+
+00:36:05,250 --> 00:36:10,230
+understand it either the but the general
+
+00:36:08,369 --> 00:36:11,490
+but still is pretty straightforward what
+
+00:36:10,230 --> 00:36:12,809
+we're doing is we're allocating the
+
+00:36:11,490 --> 00:36:14,549
+existence thing that's a big yellow
+
+00:36:12,809 --> 00:36:16,859
+thing the top allocation is a big yellow
+
+00:36:14,549 --> 00:36:18,540
+thing of bottle Cruz diagram we make
+
+00:36:16,859 --> 00:36:21,089
+sure we got one we initialize this so
+
+00:36:18,540 --> 00:36:23,880
+it's there we do an RC read lock we
+
+00:36:21,089 --> 00:36:26,970
+allocate the new exists of structures
+
+00:36:23,880 --> 00:36:29,160
+for the place we're going to and then we
+
+00:36:26,970 --> 00:36:32,190
+set the ones that are going away to
+
+00:36:29,160 --> 00:36:33,809
+outgoing we get out of we don't need our
+
+00:36:32,190 --> 00:36:34,920
+see you anymore we do existence flip
+
+00:36:33,809 --> 00:36:38,160
+which to essentially just does that
+
+00:36:34,920 --> 00:36:39,690
+store and we do call RCU to fremont
+
+00:36:38,160 --> 00:36:41,250
+existence flip
+
+00:36:39,690 --> 00:36:43,079
+this stuff maintains lists of the things
+
+00:36:41,250 --> 00:36:44,880
+that are coming or going and so
+
+00:36:43,079 --> 00:36:47,250
+existence flip flips the value and then
+
+00:36:44,880 --> 00:36:49,410
+cleans things up either freeing up the
+
+00:36:47,250 --> 00:36:50,849
+stuff that's going away or storing
+
+00:36:49,410 --> 00:36:53,369
+zeroes into the appropriate places of
+
+00:36:50,849 --> 00:36:55,050
+stuff that's staying so it does a
+
+00:36:53,369 --> 00:36:57,750
+tracking for you a little bit of it
+
+00:36:55,050 --> 00:37:00,750
+anyway so that's all you need to do a
+
+00:36:57,750 --> 00:37:02,940
+three-way rotation thrash tables you
+
+00:37:00,750 --> 00:37:04,890
+allocate the thing you go through and
+
+00:37:02,940 --> 00:37:07,790
+you make the new existence structures
+
+00:37:04,890 --> 00:37:11,280
+you set the old ones to being outgoing
+
+00:37:07,790 --> 00:37:12,480
+you flip the switch and the outgoing was
+
+00:37:11,280 --> 00:37:14,640
+no longer exists suddenly in the
+
+00:37:12,480 --> 00:37:17,010
+incoming ones are there and then that
+
+00:37:14,640 --> 00:37:20,339
+frees up old it also frees up the extra
+
+00:37:17,010 --> 00:37:26,849
+stuff and then we call RCU to get rid of
+
+00:37:20,339 --> 00:37:28,170
+the of these structure itself and this
+
+00:37:26,849 --> 00:37:31,109
+is kind of this is kind of a cheat
+
+00:37:28,170 --> 00:37:32,160
+because I very carefully reverse into
+
+00:37:31,109 --> 00:37:33,839
+the hash function make sure I had
+
+00:37:32,160 --> 00:37:36,660
+absolutely no contention and therefore
+
+00:37:33,839 --> 00:37:38,430
+the outgoings can't fail all right
+
+00:37:36,660 --> 00:37:40,260
+they're always there normally you'd have
+
+00:37:38,430 --> 00:37:42,089
+to have a check there and do an
+
+00:37:40,260 --> 00:37:43,940
+exception or something to get out if if
+
+00:37:42,089 --> 00:37:45,930
+you can flicked it with something else
+
+00:37:43,940 --> 00:37:50,250
+if you just if you didn't have some
+
+00:37:45,930 --> 00:37:51,630
+other way of organizing it and again the
+
+00:37:50,250 --> 00:37:52,800
+big thing about this is you can have an
+
+00:37:51,630 --> 00:37:54,660
+artery protected hash function that
+
+00:37:52,800 --> 00:37:58,800
+knows nothing about atomic move and on
+
+00:37:54,660 --> 00:37:59,730
+top of it yet atomic moves and the next
+
+00:37:58,800 --> 00:38:03,420
+question is well how well this
+
+00:37:59,730 --> 00:38:06,030
+performance scale well for readers is
+
+00:38:03,420 --> 00:38:07,710
+great but as I mentioned the beginning I
+
+00:38:06,030 --> 00:38:09,569
+kind of had to start over from on both
+
+00:38:07,710 --> 00:38:12,480
+reliability and scalability from ground
+
+00:38:09,569 --> 00:38:14,430
+zero as of a few months ago and so it's
+
+00:38:12,480 --> 00:38:18,200
+not so good would be a polite way to put
+
+00:38:14,430 --> 00:38:20,490
+it on the other hand this is down here
+
+00:38:18,200 --> 00:38:22,200
+this is I'm using our seen a problem
+
+00:38:20,490 --> 00:38:24,210
+where I've said many times as stupid to
+
+00:38:22,200 --> 00:38:27,200
+use our see you okay but you know
+
+00:38:24,210 --> 00:38:27,200
+sometimes you gotta do something stupid
+
+00:38:27,410 --> 00:38:31,440
+yeah and the other thing is nice about
+
+00:38:30,150 --> 00:38:32,760
+this is an opportunity to prove the
+
+00:38:31,440 --> 00:38:34,650
+infrastructure if you've used something
+
+00:38:32,760 --> 00:38:36,060
+and a break she fix it you may make it
+
+00:38:34,650 --> 00:38:38,220
+work better for things that aren't
+
+00:38:36,060 --> 00:38:44,390
+abusing it so it's not necessarily a bad
+
+00:38:38,220 --> 00:38:44,390
+thing to do my usual traditional quote
+
+00:38:44,400 --> 00:38:47,530
+for writing perfect scale loading for us
+
+00:38:46,660 --> 00:38:49,270
+is like committing the perfect crime
+
+00:38:47,530 --> 00:38:50,560
+there 50 things if I go wrong and pure
+
+00:38:49,270 --> 00:38:53,740
+genius you might build for sea and
+
+00:38:50,560 --> 00:38:55,690
+forced all 25 of them as you see that
+
+00:38:53,740 --> 00:38:58,480
+list is not 25 long so there's some work
+
+00:38:55,690 --> 00:39:00,430
+left to go well I did over the last week
+
+00:38:58,480 --> 00:39:02,350
+or so get some more stuff and it's a
+
+00:39:00,430 --> 00:39:03,730
+little bit more filled out one of the
+
+00:39:02,350 --> 00:39:05,950
+problems I'm having is that this thing
+
+00:39:03,730 --> 00:39:07,960
+just kills memory alligators I mean
+
+00:39:05,950 --> 00:39:09,340
+these things just were not meant to
+
+00:39:07,960 --> 00:39:11,320
+handle a producer consumer relationship
+
+00:39:09,340 --> 00:39:13,450
+or you jamming elements down one side
+
+00:39:11,320 --> 00:39:15,640
+just allocating out the other none of
+
+00:39:13,450 --> 00:39:18,190
+the alligators and lat well at all I
+
+00:39:15,640 --> 00:39:21,220
+cheated and made a special purpose
+
+00:39:18,190 --> 00:39:22,630
+allocator the switch the lock was Q the
+
+00:39:21,220 --> 00:39:24,130
+thing is is that i know the thread that
+
+00:39:22,630 --> 00:39:26,860
+is freeing things up i know the threats
+
+00:39:24,130 --> 00:39:30,640
+Alec image pass the stuff back stupid
+
+00:39:26,860 --> 00:39:31,720
+that it works so that that helped a
+
+00:39:30,640 --> 00:39:33,130
+little bit and that made it so I
+
+00:39:31,720 --> 00:39:34,840
+actually got positive scale of illegal
+
+00:39:33,130 --> 00:39:36,610
+you'll notice that I'm getting nowhere
+
+00:39:34,840 --> 00:39:39,310
+near the order of magnitude that yard I
+
+00:39:36,610 --> 00:39:40,750
+would like to see okay again I had to
+
+00:39:39,310 --> 00:39:42,430
+start over from ground zero I am doing
+
+00:39:40,750 --> 00:39:44,440
+better than it was last June so I've got
+
+00:39:42,430 --> 00:39:47,110
+a little bit of improvement out of it
+
+00:39:44,440 --> 00:39:49,270
+but I mean we're at two on this side and
+
+00:39:47,110 --> 00:39:50,890
+we got seven cpu you want to be 14 over
+
+00:39:49,270 --> 00:39:53,260
+here or not at six and a half okay I
+
+00:39:50,890 --> 00:39:56,740
+mean pretty straightforward plus i'm
+
+00:39:53,260 --> 00:39:58,660
+only using seven threads so you you
+
+00:39:56,740 --> 00:40:00,430
+really want to be using at least a few
+
+00:39:58,660 --> 00:40:02,920
+tens to even show you're serious these
+
+00:40:00,430 --> 00:40:06,940
+days he last hash tables I'm not skip
+
+00:40:02,920 --> 00:40:08,980
+list right well this is the same diagram
+
+00:40:06,940 --> 00:40:10,540
+we had before substance SL down up on
+
+00:40:08,980 --> 00:40:12,970
+the top I mean it's exactly the same
+
+00:40:10,540 --> 00:40:14,440
+situation and you know we do exactly the
+
+00:40:12,970 --> 00:40:16,840
+same thing and they rotate around and
+
+00:40:14,440 --> 00:40:18,310
+life's wonderful and you know here
+
+00:40:16,840 --> 00:40:20,140
+instead of having a hash table we have a
+
+00:40:18,310 --> 00:40:22,900
+skip list structure and skip list
+
+00:40:20,140 --> 00:40:25,870
+pointer to the head but and then the
+
+00:40:22,900 --> 00:40:27,550
+code looks rather similar yeah you do
+
+00:40:25,870 --> 00:40:28,390
+pretty much the same thing which
+
+00:40:27,550 --> 00:40:30,730
+probably means there's an opportunity
+
+00:40:28,390 --> 00:40:32,590
+for attraction here somewhere although
+
+00:40:30,730 --> 00:40:35,320
+I'm being included if you're mature
+
+00:40:32,590 --> 00:40:39,310
+abstraction through illegal but that
+
+00:40:35,320 --> 00:40:41,260
+maybe that's just me anyway and again
+
+00:40:39,310 --> 00:40:42,550
+this skip list is just an RP sorry super
+
+00:40:41,260 --> 00:40:44,500
+take a skip list it knows nothing of
+
+00:40:42,550 --> 00:40:47,170
+atomic moves or anything like that it's
+
+00:40:44,500 --> 00:40:49,200
+just it's just there and this wrappers
+
+00:40:47,170 --> 00:40:53,020
+all that stuff on top of it
+
+00:40:49,200 --> 00:40:53,900
+unfortunately it's scalable really
+
+00:40:53,020 --> 00:40:56,190
+horrible
+
+00:40:53,900 --> 00:40:57,809
+what's happening here is the hash table
+
+00:40:56,190 --> 00:41:00,930
+I very carefully avoided any contention
+
+00:40:57,809 --> 00:41:02,400
+and the Skip list like I could make it
+
+00:41:00,930 --> 00:41:03,869
+the boy the contention but I just let it
+
+00:41:02,400 --> 00:41:06,150
+randomly choose stuff and so we do have
+
+00:41:03,869 --> 00:41:08,220
+contention and therefore we have the
+
+00:41:06,150 --> 00:41:10,440
+line there and skip list is kind of like
+
+00:41:08,220 --> 00:41:12,240
+a randomly generated tree and what I'm
+
+00:41:10,440 --> 00:41:14,400
+doing is I'm having different threads
+
+00:41:12,240 --> 00:41:15,869
+deal with different sub trees and the
+
+00:41:14,400 --> 00:41:17,460
+way the Skip list is laid out there they
+
+00:41:15,869 --> 00:41:19,559
+will share some locks unless you are
+
+00:41:17,460 --> 00:41:23,309
+very carefully step your skip list which
+
+00:41:19,559 --> 00:41:26,309
+I wasn't in this case okay all right
+
+00:41:23,309 --> 00:41:28,140
+well you know there's a bunch of things
+
+00:41:26,309 --> 00:41:31,079
+you could do to make that better I could
+
+00:41:28,140 --> 00:41:32,369
+tune the skip lists I could I'm doing
+
+00:41:31,079 --> 00:41:33,569
+huge amounts of memory allocation I
+
+00:41:32,369 --> 00:41:35,010
+could patch that up in various ways
+
+00:41:33,569 --> 00:41:37,230
+there's a bunch of stuff I could do but
+
+00:41:35,010 --> 00:41:38,789
+first off let's just try you know one
+
+00:41:37,230 --> 00:41:40,950
+thing you try is doing more elements
+
+00:41:38,789 --> 00:41:43,140
+right I'm taking three elements rotating
+
+00:41:40,950 --> 00:41:45,630
+through and I'm paying a certain price
+
+00:41:43,140 --> 00:41:49,049
+just for the fact I'm rotating so why
+
+00:41:45,630 --> 00:41:53,940
+not rotate more elements and so you can
+
+00:41:49,049 --> 00:41:55,650
+do that what you do instead of so just
+
+00:41:53,940 --> 00:41:58,289
+rotating three elements rotate three
+
+00:41:55,650 --> 00:41:59,819
+pairs of elements ok so you rotate
+
+00:41:58,289 --> 00:42:00,869
+through triple I can't make a diagram of
+
+00:41:59,819 --> 00:42:03,119
+that and have it looked at all
+
+00:42:00,869 --> 00:42:05,039
+reasonable so I'm not going to try but
+
+00:42:03,119 --> 00:42:06,450
+it's just the thing is the top instead
+
+00:42:05,039 --> 00:42:07,559
+of atomically moving three elements
+
+00:42:06,450 --> 00:42:10,079
+round and round through these hash
+
+00:42:07,559 --> 00:42:12,450
+tables skip lists we have pairs of
+
+00:42:10,079 --> 00:42:13,769
+elements there were triples of pairs of
+
+00:42:12,450 --> 00:42:15,509
+elements are rotating around around or
+
+00:42:13,769 --> 00:42:20,039
+moorim which is making a bigger problem
+
+00:42:15,509 --> 00:42:22,410
+essentially and this can be done I did
+
+00:42:20,039 --> 00:42:24,720
+it but the end you'd expect the
+
+00:42:22,410 --> 00:42:26,069
+performance graph you'd expect to go up
+
+00:42:24,720 --> 00:42:27,990
+and then kind of level off right as you
+
+00:42:26,069 --> 00:42:30,390
+as you do more and more of them you
+
+00:42:27,990 --> 00:42:32,309
+amortize away the overheads of just
+
+00:42:30,390 --> 00:42:33,630
+doing an atomic move and eventually get
+
+00:42:32,309 --> 00:42:35,519
+to wear just the memory allocation is
+
+00:42:33,630 --> 00:42:39,210
+hurting you and that's sort of what
+
+00:42:35,519 --> 00:42:41,369
+happens but it looks like that I haven't
+
+00:42:39,210 --> 00:42:42,869
+had a chance to look at this my guess is
+
+00:42:41,369 --> 00:42:44,099
+that I'm getting an extra cash line
+
+00:42:42,869 --> 00:42:47,099
+every fourth element or something like
+
+00:42:44,099 --> 00:42:48,539
+that it's possible i'm also popping out
+
+00:42:47,099 --> 00:42:49,500
+of a page of your fourth element it does
+
+00:42:48,539 --> 00:42:52,859
+out like eight more memory than it
+
+00:42:49,500 --> 00:42:54,960
+should in some sense and so and if you
+
+00:42:52,859 --> 00:42:56,460
+count you see three one two three up
+
+00:42:54,960 --> 00:42:58,460
+four down one two three up four down
+
+00:42:56,460 --> 00:43:01,410
+Sosa does that all the way across
+
+00:42:58,460 --> 00:43:04,339
+nevertheless we are getting better
+
+00:43:01,410 --> 00:43:05,490
+efficiency out of it it is going up
+
+00:43:04,339 --> 00:43:09,060
+although
+
+00:43:05,490 --> 00:43:11,070
+we're coming short on set on this is on
+
+00:43:09,060 --> 00:43:12,690
+seven threads and we're still not met
+
+00:43:11,070 --> 00:43:15,240
+quite making 25 million operations per
+
+00:43:12,690 --> 00:43:16,650
+second 25 million rotations rotations
+
+00:43:15,240 --> 00:43:20,670
+sets per second notice i rotate to
+
+00:43:16,650 --> 00:43:23,880
+account twice right and that's a little
+
+00:43:20,670 --> 00:43:25,740
+disappointing but if you think about it
+
+00:43:23,880 --> 00:43:27,750
+an even bigger mystery than those
+
+00:43:25,740 --> 00:43:30,630
+jaggies on the performance is why would
+
+00:43:27,750 --> 00:43:32,400
+you do it this way I mean if I do three
+
+00:43:30,630 --> 00:43:36,540
+rotations I end up in the same place I
+
+00:43:32,400 --> 00:43:43,290
+started so why bother allocating d
+
+00:43:36,540 --> 00:43:45,360
+allocating the memory okay I mean you
+
+00:43:43,290 --> 00:43:46,440
+know why bother we're gonna allocate
+
+00:43:45,360 --> 00:43:48,330
+we're in a free and we go through grace
+
+00:43:46,440 --> 00:43:50,160
+period and every one of these things why
+
+00:43:48,330 --> 00:43:53,790
+because we're just coming back where we
+
+00:43:50,160 --> 00:43:55,230
+started why not instead the thing is a
+
+00:43:53,790 --> 00:43:57,150
+state variable I mean it's just a
+
+00:43:55,230 --> 00:43:58,320
+variable and we got a sick sport machine
+
+00:43:57,150 --> 00:44:01,290
+you got three bits on the bottom the
+
+00:43:58,320 --> 00:44:03,710
+pointer all right so you're not limited
+
+00:44:01,290 --> 00:44:06,240
+to there or not you could have states
+
+00:44:03,710 --> 00:44:09,630
+all right and we've got three states in
+
+00:44:06,240 --> 00:44:11,220
+fact except that and then what i call
+
+00:44:09,630 --> 00:44:12,240
+this is a kaleidoscopic data structures
+
+00:44:11,220 --> 00:44:14,880
+kind of like you turn the kaleidoscope
+
+00:44:12,240 --> 00:44:17,580
+you different picture right okay and
+
+00:44:14,880 --> 00:44:19,200
+that's the effect you have you just have
+
+00:44:17,580 --> 00:44:21,510
+these things each pointers tagged with
+
+00:44:19,200 --> 00:44:23,670
+which state it is and then you can have
+
+00:44:21,510 --> 00:44:26,730
+the variable has take long takes on one
+
+00:44:23,670 --> 00:44:28,170
+of those numbers and you just match up
+
+00:44:26,730 --> 00:44:29,490
+or you don't and you change the number
+
+00:44:28,170 --> 00:44:31,980
+you get a different set of things going
+
+00:44:29,490 --> 00:44:33,660
+coming or going you can go further of
+
+00:44:31,980 --> 00:44:34,950
+course you have multiple existence
+
+00:44:33,660 --> 00:44:37,170
+things wearing the same time and update
+
+00:44:34,950 --> 00:44:39,240
+them separately or you could use shifts
+
+00:44:37,170 --> 00:44:41,310
+and masks and have a 64-bit number and
+
+00:44:39,240 --> 00:44:42,750
+then you know each pointer has a tag
+
+00:44:41,310 --> 00:44:45,450
+with it saying we're in that thing it
+
+00:44:42,750 --> 00:44:46,560
+pulls its value from or you can even
+
+00:44:45,450 --> 00:44:48,869
+have a mat you do a bunch of things I
+
+00:44:46,560 --> 00:44:50,580
+mean you go crazy I decided not to i
+
+00:44:48,869 --> 00:44:53,190
+just use the bottom bits and match them
+
+00:44:50,580 --> 00:44:56,670
+exactly what they integer because that's
+
+00:44:53,190 --> 00:44:58,050
+all I needed now I'm only showing to
+
+00:44:56,670 --> 00:45:02,460
+what I'm doing is I'm rotating from a
+
+00:44:58,050 --> 00:45:03,900
+skip list to a hash table so I mean I
+
+00:45:02,460 --> 00:45:05,550
+could have two of each or but it did
+
+00:45:03,900 --> 00:45:07,350
+seem it is seem fair to have two one one
+
+00:45:05,550 --> 00:45:09,420
+or the other so I just have one of each
+
+00:45:07,350 --> 00:45:12,030
+and what we're gonna do is we're make
+
+00:45:09,420 --> 00:45:15,390
+that element 1 and 2 swap into the hash
+
+00:45:12,030 --> 00:45:18,300
+table into the Skip list atomically same
+
+00:45:15,390 --> 00:45:19,390
+rules as before if you if we before we
+
+00:45:18,300 --> 00:45:22,089
+do the switch if you look
+
+00:45:19,390 --> 00:45:24,630
+if somebody doing a look up exactly new
+
+00:45:22,089 --> 00:45:27,279
+switch sees element 2 in the hash table
+
+00:45:24,630 --> 00:45:29,109
+it better not see element 1 in the Skip
+
+00:45:27,279 --> 00:45:30,819
+list or excuse me a better CL and one of
+
+00:45:29,109 --> 00:45:34,000
+the Skip list I'm getting the pact let
+
+00:45:30,819 --> 00:45:36,400
+me try that again that was uh yeah okay
+
+00:45:34,000 --> 00:45:37,839
+let's do this again okay so if it looks
+
+00:45:36,400 --> 00:45:39,760
+up in the hash table sees element to
+
+00:45:37,839 --> 00:45:41,980
+there that means the switch has already
+
+00:45:39,760 --> 00:45:45,519
+happened therefore if it looks up in the
+
+00:45:41,980 --> 00:45:47,740
+Skip list it better see element 1 okay
+
+00:45:45,519 --> 00:45:49,809
+if it sees any evidence that the switch
+
+00:45:47,740 --> 00:45:50,980
+has happened anything it looks at after
+
+00:45:49,809 --> 00:45:54,549
+that had better see that switch is
+
+00:45:50,980 --> 00:45:57,519
+having happened and the way we can do
+
+00:45:54,549 --> 00:45:58,869
+that we have our kaleidoscope structure
+
+00:45:57,519 --> 00:46:00,910
+it just has a number this case we only
+
+00:45:58,869 --> 00:46:04,210
+need to need to two elements that's fine
+
+00:46:00,910 --> 00:46:05,829
+and we have a state 0 thing which used
+
+00:46:04,210 --> 00:46:07,180
+to be outgoing we have a state one thing
+
+00:46:05,829 --> 00:46:08,200
+which used to be in coming and we can
+
+00:46:07,180 --> 00:46:10,630
+have a state two and A three and a four
+
+00:46:08,200 --> 00:46:12,760
+and a five and a six and seven we could
+
+00:46:10,630 --> 00:46:13,750
+do more than that if we wanted to go
+
+00:46:12,760 --> 00:46:17,619
+back to having three levels in the
+
+00:46:13,750 --> 00:46:19,480
+direction but why bother now it's
+
+00:46:17,619 --> 00:46:22,000
+initially 0 which means state 0 is the
+
+00:46:19,480 --> 00:46:25,359
+thing that exists and state one doesn't
+
+00:46:22,000 --> 00:46:26,950
+so currently we don't have element 1 in
+
+00:46:25,359 --> 00:46:28,119
+the Skip list because that state 1 which
+
+00:46:26,950 --> 00:46:32,220
+doesn't exist because the current state
+
+00:46:28,119 --> 00:46:36,099
+is 0 but we store a 1 in there and
+
+00:46:32,220 --> 00:46:39,339
+suddenly they flip places and now the
+
+00:46:36,099 --> 00:46:41,440
+hash table contains element 2 and the
+
+00:46:39,339 --> 00:46:44,349
+Skip list contains a little one and we
+
+00:46:41,440 --> 00:46:48,910
+could flip it again and we could flip it
+
+00:46:44,349 --> 00:46:49,869
+again and go back and forth now and the
+
+00:46:48,910 --> 00:46:51,150
+loop to do this is kind of
+
+00:46:49,869 --> 00:46:53,619
+straightforward right you just
+
+00:46:51,150 --> 00:46:54,490
+essentially just while you're while
+
+00:46:53,619 --> 00:46:57,400
+you're supposed to keep running the
+
+00:46:54,490 --> 00:46:59,619
+benchmark you set your state to the
+
+00:46:57,400 --> 00:47:01,960
+current number of rotations percent to
+
+00:46:59,619 --> 00:47:03,700
+when you increment Oh rotations and you
+
+00:47:01,960 --> 00:47:06,160
+can c % 3 or percent for if you had more
+
+00:47:03,700 --> 00:47:07,509
+of them whichever it was and you'd hope
+
+00:47:06,160 --> 00:47:08,470
+you'd get prettiest kale ability to that
+
+00:47:07,509 --> 00:47:12,130
+because all you're doing is doing a
+
+00:47:08,470 --> 00:47:17,859
+restore release over and over again and
+
+00:47:12,130 --> 00:47:19,569
+thankfully we we do in this case we're
+
+00:47:17,859 --> 00:47:22,960
+get we're doing linear scalability up to
+
+00:47:19,569 --> 00:47:24,730
+32 and it tails off after that because
+
+00:47:22,960 --> 00:47:27,970
+we're getting more than half of a core
+
+00:47:24,730 --> 00:47:30,880
+just with one thread but we're getting a
+
+00:47:27,970 --> 00:47:31,200
+factor of 32 which nicely exceeds yarn
+
+00:47:30,880 --> 00:47:33,720
+is
+
+00:47:31,200 --> 00:47:36,630
+man for a factor of 10 so on the other
+
+00:47:33,720 --> 00:47:38,099
+hand this is you know this is great this
+
+00:47:36,630 --> 00:47:40,020
+this is the kind of scalable you like to
+
+00:47:38,099 --> 00:47:41,550
+see but we're talking about something
+
+00:47:40,020 --> 00:47:42,869
+pretty specific I mean you have to know
+
+00:47:41,550 --> 00:47:44,700
+what you want the data structure to do
+
+00:47:42,869 --> 00:47:46,460
+through time and you're you're just
+
+00:47:44,700 --> 00:47:49,680
+changing it through a couple of states
+
+00:47:46,460 --> 00:47:52,170
+so a big lesson out of this is be wary
+
+00:47:49,680 --> 00:47:54,359
+of benchmarks because this is a
+
+00:47:52,170 --> 00:47:57,920
+legitimate solution to that problem it's
+
+00:47:54,359 --> 00:48:00,780
+just very fast and very restricted
+
+00:47:57,920 --> 00:48:04,010
+nevertheless it's something that could
+
+00:48:00,780 --> 00:48:06,599
+potentially useful in some situation and
+
+00:48:04,010 --> 00:48:08,430
+it's possible that it may be that it may
+
+00:48:06,599 --> 00:48:09,630
+be something where we can use this with
+
+00:48:08,430 --> 00:48:13,890
+some other things to make some nice
+
+00:48:09,630 --> 00:48:15,750
+stuff happening advantage this
+
+00:48:13,890 --> 00:48:17,430
+advantages you still this is not
+
+00:48:15,750 --> 00:48:18,750
+something you just wave a wand you do
+
+00:48:17,430 --> 00:48:20,220
+have to make some change your program
+
+00:48:18,750 --> 00:48:22,200
+you have to you know put some things in
+
+00:48:20,220 --> 00:48:23,910
+data structures I'm sure if I knew C++ I
+
+00:48:22,200 --> 00:48:25,290
+would just do a template and suddenly
+
+00:48:23,910 --> 00:48:27,300
+bang it be there are inherit from this
+
+00:48:25,290 --> 00:48:28,589
+the other thing and I started doing that
+
+00:48:27,300 --> 00:48:32,550
+a little bit with the arceus stuff and
+
+00:48:28,589 --> 00:48:34,200
+it's been interesting education and
+
+00:48:32,550 --> 00:48:35,250
+maybe I'll get to their hair or maybe
+
+00:48:34,200 --> 00:48:38,760
+somebody also beat me to it which is
+
+00:48:35,250 --> 00:48:40,160
+fine right now this is works for linked
+
+00:48:38,760 --> 00:48:42,390
+structures and not much of anything else
+
+00:48:40,160 --> 00:48:44,460
+there might be some way of making it
+
+00:48:42,390 --> 00:48:45,569
+work without link but one
+
+00:48:44,460 --> 00:48:46,770
+straightforward thing is to take your
+
+00:48:45,569 --> 00:48:48,450
+stuff that isn't linked and put it on
+
+00:48:46,770 --> 00:48:50,310
+the other side of a link which of course
+
+00:48:48,450 --> 00:48:52,980
+get you an extra level one direction and
+
+00:48:50,310 --> 00:48:55,140
+an extra cash miss and further down the
+
+00:48:52,980 --> 00:48:58,109
+road of the cs always takes the computer
+
+00:48:55,140 --> 00:48:59,910
+science always takes if you have to
+
+00:48:58,109 --> 00:49:01,260
+explore some memory management you could
+
+00:48:59,910 --> 00:49:03,720
+use as the garbage collected language i
+
+00:49:01,260 --> 00:49:08,819
+expect but right now we're talking about
+
+00:49:03,720 --> 00:49:12,000
+mary manage things if you wanted to take
+
+00:49:08,819 --> 00:49:14,579
+the same key and flip it back and forth
+
+00:49:12,000 --> 00:49:15,569
+same key different value you would have
+
+00:49:14,579 --> 00:49:18,540
+to have a structure that could tolerate
+
+00:49:15,569 --> 00:49:20,250
+duplicate keys all right mine don't
+
+00:49:18,540 --> 00:49:23,520
+right now but you could do that if you
+
+00:49:20,250 --> 00:49:25,380
+wanted we can have rear revocable
+
+00:49:23,520 --> 00:49:26,760
+operations or you can do whatever you
+
+00:49:25,380 --> 00:49:28,530
+want while you're doing this stuff in it
+
+00:49:26,760 --> 00:49:29,700
+it's fine go on to some I oh great when
+
+00:49:28,530 --> 00:49:32,609
+do some networking operations okay
+
+00:49:29,700 --> 00:49:34,710
+whatever you can exploit locking
+
+00:49:32,609 --> 00:49:36,089
+hierarchies to make it so that you can
+
+00:49:34,710 --> 00:49:38,490
+coordinate your updates if you have
+
+00:49:36,089 --> 00:49:40,829
+overlapping atomic updates I haven't
+
+00:49:38,490 --> 00:49:44,430
+messed with that yet but it's something
+
+00:49:40,829 --> 00:49:48,960
+that it should not be a difficult thing
+
+00:49:44,430 --> 00:49:51,430
+the fact that we can get semi decent
+
+00:49:48,960 --> 00:49:53,470
+form scalability we create great form
+
+00:49:51,430 --> 00:49:55,480
+scalability if we we benchmark the
+
+00:49:53,470 --> 00:49:58,810
+problem to death but what else is doing
+
+00:49:55,480 --> 00:50:01,840
+and there's a lot more automation and
+
+00:49:58,810 --> 00:50:03,250
+the fact we can use the RCU elegance
+
+00:50:01,840 --> 00:50:05,440
+unchanged makes things a little bit
+
+00:50:03,250 --> 00:50:07,300
+easier and this thing is a really mean
+
+00:50:05,440 --> 00:50:09,040
+allocate memory allocator RCU test case
+
+00:50:07,300 --> 00:50:11,110
+I'll tell you I mean you can find all
+
+00:50:09,040 --> 00:50:12,880
+sorts of any sorts of bugs and all sorts
+
+00:50:11,110 --> 00:50:14,110
+of performance problems and scalability
+
+00:50:12,880 --> 00:50:18,700
+problems and those things really well
+
+00:50:14,110 --> 00:50:20,710
+with this tub what would you use this
+
+00:50:18,700 --> 00:50:21,910
+I've had a couple people say they
+
+00:50:20,710 --> 00:50:23,470
+thought they might have something but I
+
+00:50:21,910 --> 00:50:26,140
+haven't heard of anybody actually using
+
+00:50:23,470 --> 00:50:27,880
+us for real all right this started as a
+
+00:50:26,140 --> 00:50:29,530
+challenge well since it wasn't intended
+
+00:50:27,880 --> 00:50:33,130
+to be healing real it's just a ball you
+
+00:50:29,530 --> 00:50:34,240
+do this okay sure and I've got kind of
+
+00:50:33,130 --> 00:50:37,860
+interesting and that kind of got carried
+
+00:50:34,240 --> 00:50:40,480
+away with it what can I say you know um
+
+00:50:37,860 --> 00:50:42,520
+this is my guess best guess is where it
+
+00:50:40,480 --> 00:50:44,650
+might be usable or might be something
+
+00:50:42,520 --> 00:50:46,510
+you do many small updates to a big
+
+00:50:44,650 --> 00:50:48,370
+complex thing I could imagine that my
+
+00:50:46,510 --> 00:50:50,290
+desk is something with graphs maybe but
+
+00:50:48,370 --> 00:50:51,370
+I haven't got to that point yet besides
+
+00:50:50,290 --> 00:50:55,720
+if you haven't done it yet you know I
+
+00:50:51,370 --> 00:50:57,580
+say it has to be that um it should be
+
+00:50:55,720 --> 00:50:58,930
+read mostly you know fairly complex
+
+00:50:57,580 --> 00:51:00,940
+updates there's a lot of overhead there
+
+00:50:58,930 --> 00:51:03,340
+I've been about doing only updates with
+
+00:51:00,940 --> 00:51:05,020
+it is probably an abuse but if you don't
+
+00:51:03,340 --> 00:51:06,430
+abuse you want to you want to abuse it
+
+00:51:05,020 --> 00:51:08,200
+before your users reviews it I mean
+
+00:51:06,430 --> 00:51:09,910
+they're going to eventually if you abuse
+
+00:51:08,200 --> 00:51:11,590
+it first you have a chance to fix some
+
+00:51:09,910 --> 00:51:15,430
+of your own bugs it's kind of a good
+
+00:51:11,590 --> 00:51:17,920
+self defense technique and the other
+
+00:51:15,430 --> 00:51:20,500
+thing is if you need compatibility with
+
+00:51:17,920 --> 00:51:23,980
+Hardware old hardware it works fine and
+
+00:51:20,500 --> 00:51:25,390
+also one side benefit is that you don't
+
+00:51:23,980 --> 00:51:27,160
+have to have software fallbacks I mean
+
+00:51:25,390 --> 00:51:29,380
+the software is the fall back its own
+
+00:51:27,160 --> 00:51:31,060
+fall back you know you don't have to try
+
+00:51:29,380 --> 00:51:34,320
+this in hardware and if it succeeded
+
+00:51:31,060 --> 00:51:38,110
+great otherwise do something a software
+
+00:51:34,320 --> 00:51:40,060
+production readiness I've know a lot of
+
+00:51:38,110 --> 00:51:41,440
+people and burned by research code and
+
+00:51:40,060 --> 00:51:44,830
+if you don't want to burn don't use it
+
+00:51:41,440 --> 00:51:48,880
+yet this is kind of my scale of but the
+
+00:51:44,830 --> 00:51:51,340
+thing is you see you know if you've got
+
+00:51:48,880 --> 00:51:53,890
+when I started working my way through
+
+00:51:51,340 --> 00:51:55,380
+college I had to users right and if I
+
+00:51:53,890 --> 00:51:57,059
+kept those two years happy
+
+00:51:55,380 --> 00:52:02,309
+didn't matter what bugs I had elsewhere
+
+00:51:57,059 --> 00:52:04,230
+was that was fine later on in the 90s I
+
+00:52:02,309 --> 00:52:05,970
+had like six thousand installations and
+
+00:52:04,230 --> 00:52:07,440
+that seemed really impressive at the
+
+00:52:05,970 --> 00:52:09,720
+time I was impressed with myself and my
+
+00:52:07,440 --> 00:52:11,099
+employer with all that but you know if
+
+00:52:09,720 --> 00:52:13,950
+you only got six thousand salacious
+
+00:52:11,099 --> 00:52:16,400
+murphy's actually kind of a nice guy you
+
+00:52:13,950 --> 00:52:19,769
+know everything that can happen will
+
+00:52:16,400 --> 00:52:21,630
+eventually maybe in geologic time and
+
+00:52:19,769 --> 00:52:25,440
+you know you get away the full source of
+
+00:52:21,630 --> 00:52:28,410
+stuff and just won't ever happen right
+
+00:52:25,440 --> 00:52:29,940
+now with Lance Colonel RCU I'm us well
+
+00:52:28,410 --> 00:52:31,680
+above a billion instances there's once
+
+00:52:29,940 --> 00:52:34,140
+most people like 1.4 billion Android
+
+00:52:31,680 --> 00:52:36,210
+smartphones alone right and when you got
+
+00:52:34,140 --> 00:52:38,099
+the few billion users Murphy can be real
+
+00:52:36,210 --> 00:52:40,589
+jerk I mean everything can't have will
+
+00:52:38,099 --> 00:52:42,059
+and it can have a really really fast all
+
+00:52:40,589 --> 00:52:43,650
+right well this stuff is not ready for
+
+00:52:42,059 --> 00:52:45,779
+that kind of environment give you that
+
+00:52:43,650 --> 00:52:47,549
+rent tell you that right now the old
+
+00:52:45,779 --> 00:52:51,089
+stuff that required things I got up to
+
+00:52:47,549 --> 00:52:53,910
+kind of the prototype stage this thing
+
+00:52:51,089 --> 00:52:55,619
+in June was probably at like limping I
+
+00:52:53,910 --> 00:52:57,660
+think I got it to benchmark special at
+
+00:52:55,619 --> 00:52:59,670
+this point so if you really want to use
+
+00:52:57,660 --> 00:53:03,509
+in production i would suggest a
+
+00:52:59,670 --> 00:53:05,069
+validation effort and let me know you
+
+00:53:03,509 --> 00:53:07,980
+know i might be willing to help with if
+
+00:53:05,069 --> 00:53:09,930
+you tell me about it thing is that the 1
+
+00:53:07,980 --> 00:53:12,269
+billion is actually kind of not much
+
+00:53:09,930 --> 00:53:13,410
+because Internet of Things is coming
+
+00:53:12,269 --> 00:53:15,779
+along and we're gonna get two trillion
+
+00:53:13,410 --> 00:53:18,809
+pretty fast and I don't know how to do
+
+00:53:15,779 --> 00:53:21,539
+that okay i can i can actually make a
+
+00:53:18,809 --> 00:53:24,150
+test plan for linux kernel RSU that Lou
+
+00:53:21,539 --> 00:53:25,680
+a billion users and I can do that in
+
+00:53:24,150 --> 00:53:28,410
+about 18 hours of test time on a large
+
+00:53:25,680 --> 00:53:30,390
+machine all right I've learned a lot of
+
+00:53:28,410 --> 00:53:32,670
+dirty tricks over the last 25 years all
+
+00:53:30,390 --> 00:53:35,460
+right but a trillions like through his
+
+00:53:32,670 --> 00:53:37,160
+pet banging more than that and I don't
+
+00:53:35,460 --> 00:53:39,480
+know how to do that with testing
+
+00:53:37,160 --> 00:53:40,710
+fortunately there are some people
+
+00:53:39,480 --> 00:53:41,940
+getting interested in formal
+
+00:53:40,710 --> 00:53:43,200
+verification and I've heard rumors
+
+00:53:41,940 --> 00:53:45,059
+there's three different groups that
+
+00:53:43,200 --> 00:53:47,730
+claim to have formally verified some
+
+00:53:45,059 --> 00:53:49,200
+part of linux kernel are see you now I
+
+00:53:47,730 --> 00:53:52,140
+take that with a grain of salt because
+
+00:53:49,200 --> 00:53:54,089
+they haven't reported ate bugs I know
+
+00:53:52,140 --> 00:53:56,910
+there's bugs in there and they didn't
+
+00:53:54,089 --> 00:53:58,980
+find them all right so but still it's
+
+00:53:56,910 --> 00:54:00,480
+actually it's actually something that's
+
+00:53:58,980 --> 00:54:02,190
+kind of encouraging these things might
+
+00:54:00,480 --> 00:54:03,119
+actually after they've been telling your
+
+00:54:02,190 --> 00:54:05,160
+decades that stuff's great you should
+
+00:54:03,119 --> 00:54:06,779
+use it and you're going do anything for
+
+00:54:05,160 --> 00:54:08,400
+me they may actually be getting to a
+
+00:54:06,779 --> 00:54:09,860
+point where it's actually useful in real
+
+00:54:08,400 --> 00:54:13,830
+life
+
+00:54:09,860 --> 00:54:15,390
+anyway these are some antecedents of it
+
+00:54:13,830 --> 00:54:17,870
+some things that done before standing on
+
+00:54:15,390 --> 00:54:20,700
+the shoulders of giants and all that and
+
+00:54:17,870 --> 00:54:22,500
+onto the summary here we can't actually
+
+00:54:20,700 --> 00:54:24,980
+do complex updates we can do it to
+
+00:54:22,500 --> 00:54:27,750
+unmodified RC you protected structures
+
+00:54:24,980 --> 00:54:30,090
+all we need is to building to add remove
+
+00:54:27,750 --> 00:54:31,710
+and free the elements in the structure
+
+00:54:30,090 --> 00:54:33,450
+the structure itself doesn't need to
+
+00:54:31,710 --> 00:54:36,840
+know anything about the atomicity or the
+
+00:54:33,450 --> 00:54:38,310
+complex updates and you can use any
+
+00:54:36,840 --> 00:54:39,840
+synchronization method negatives you
+
+00:54:38,310 --> 00:54:40,920
+want these things and you can use any
+
+00:54:39,840 --> 00:54:42,360
+member allocator you want although
+
+00:54:40,920 --> 00:54:43,830
+better she's a pretty good one because
+
+00:54:42,360 --> 00:54:47,940
+it really Amber's of every alligator
+
+00:54:43,830 --> 00:54:49,710
+hard you can automate the back out
+
+00:54:47,940 --> 00:54:51,870
+processing and back when I was here last
+
+00:54:49,710 --> 00:54:53,400
+time you had to do that by hand and that
+
+00:54:51,870 --> 00:54:54,960
+was a real pain getting it right so it's
+
+00:54:53,400 --> 00:54:56,160
+kind of nice having automated just bills
+
+00:54:54,960 --> 00:55:00,060
+list of the things and used to clean up
+
+00:54:56,160 --> 00:55:05,400
+and needs to fix up hi update rate is a
+
+00:55:00,060 --> 00:55:07,380
+really good diagnostic tool and the read
+
+00:55:05,400 --> 00:55:09,630
+mostly mostly work codes consider to
+
+00:55:07,380 --> 00:55:11,070
+continue to work well and I think that's
+
+00:55:09,630 --> 00:55:12,330
+mostly where people will be at there's a
+
+00:55:11,070 --> 00:55:13,740
+lot more read mostly stuff that used to
+
+00:55:12,330 --> 00:55:16,620
+be and the same applies the
+
+00:55:13,740 --> 00:55:18,960
+kaleidoscopic updates and so it looks
+
+00:55:16,620 --> 00:55:20,160
+like there's a lot of operation invasion
+
+00:55:18,960 --> 00:55:22,590
+although I feel better about if I
+
+00:55:20,160 --> 00:55:24,900
+actually had some people using it so but
+
+00:55:22,590 --> 00:55:26,520
+you know canon everything right these
+
+00:55:24,900 --> 00:55:29,880
+are for the people that might want to
+
+00:55:26,520 --> 00:55:33,270
+dig deeper and that's sponsored by OB
+
+00:55:29,880 --> 00:55:35,340
+and legal and again as always you seen
+
+00:55:33,270 --> 00:55:36,750
+this many times some of you if you
+
+00:55:35,340 --> 00:55:39,090
+remember only one thing from this
+
+00:55:36,750 --> 00:55:41,010
+presentation use the right tool for the
+
+00:55:39,090 --> 00:55:42,780
+job you know if you if my stuff's right
+
+00:55:41,010 --> 00:55:44,190
+till great use it I'm proud of it but
+
+00:55:42,780 --> 00:55:48,300
+you know my stuff is not the right tool
+
+00:55:44,190 --> 00:55:49,440
+use something else anyway we got a few
+
+00:55:48,300 --> 00:55:55,580
+minutes left for questions that people
+
+00:55:49,440 --> 00:55:55,580
+have any yeah
+
+00:56:01,319 --> 00:56:15,880
+sure let me see if I do this a lot
+
+00:56:08,410 --> 00:56:18,819
+crashing my display thing here okay so
+
+00:56:15,880 --> 00:56:21,760
+look like this for example so for what
+
+00:56:18,819 --> 00:56:23,380
+he's asking is you know how's this how
+
+00:56:21,760 --> 00:56:24,520
+the readers really protected I mean
+
+00:56:23,380 --> 00:56:27,099
+you've got all these updaters doing
+
+00:56:24,520 --> 00:56:28,810
+stuff why are the readers protected so
+
+00:56:27,099 --> 00:56:31,450
+as a couple things one is that when the
+
+00:56:28,810 --> 00:56:33,329
+readers are going through and looking up
+
+00:56:31,450 --> 00:56:37,450
+the state they're using an acquirer load
+
+00:56:33,329 --> 00:56:38,770
+okay and what that means is if what you
+
+00:56:37,450 --> 00:56:40,329
+could have if you didn't have an acquire
+
+00:56:38,770 --> 00:56:44,109
+load is that both readers could go down
+
+00:56:40,329 --> 00:56:45,910
+that side now the compiler could split
+
+00:56:44,109 --> 00:56:47,740
+them up let me let me try to say that
+
+00:56:45,910 --> 00:56:50,109
+again let me try let me start over if
+
+00:56:47,740 --> 00:56:51,609
+you didn't have an acquire load the
+
+00:56:50,109 --> 00:56:52,630
+compiler could say ho we got two things
+
+00:56:51,609 --> 00:56:54,040
+to have nothing to do with each other
+
+00:56:52,630 --> 00:56:55,750
+I'll just enter leave them I'll generate
+
+00:56:54,040 --> 00:56:57,069
+the code for them step by step in
+
+00:56:55,750 --> 00:56:58,859
+between and you know who knows what
+
+00:56:57,069 --> 00:57:01,000
+happens in what order right and you
+
+00:56:58,859 --> 00:57:02,560
+could in fact when you thought sling up
+
+00:57:01,000 --> 00:57:04,960
+the hash table first it could look up
+
+00:57:02,560 --> 00:57:08,349
+the Skip list first because you don't
+
+00:57:04,960 --> 00:57:10,660
+have any thing telling it not to so you
+
+00:57:08,349 --> 00:57:13,060
+have to have an acquire read when it
+
+00:57:10,660 --> 00:57:15,339
+pulls out the indicator the thing that
+
+00:57:13,060 --> 00:57:16,510
+points to this kaleidoscope structure so
+
+00:57:15,339 --> 00:57:19,810
+that means the reads are going to pull
+
+00:57:16,510 --> 00:57:23,050
+them out in order all right so what
+
+00:57:19,810 --> 00:57:28,390
+happens a bad thing would be is if a
+
+00:57:23,050 --> 00:57:30,460
+reader came through and looked up in
+
+00:57:28,390 --> 00:57:32,650
+will go to the next state here to see
+
+00:57:30,460 --> 00:57:34,510
+this the reader go through into the Skip
+
+00:57:32,650 --> 00:57:39,790
+list and it could look of element 1 and
+
+00:57:34,510 --> 00:57:43,780
+find it all right it was really bad if
+
+00:57:39,790 --> 00:57:46,060
+it then went to the hash table looked up
+
+00:57:43,780 --> 00:57:48,460
+LMK one and found it afterwards that
+
+00:57:46,060 --> 00:57:52,869
+would not be atomic but that can't
+
+00:57:48,460 --> 00:57:54,760
+happen because the two reads from the
+
+00:57:52,869 --> 00:57:56,470
+state variable are acquires therefore
+
+00:57:54,760 --> 00:57:58,119
+though we ordered the choir is not
+
+00:57:56,470 --> 00:58:00,940
+allowed to move them the CPU is not
+
+00:57:58,119 --> 00:58:02,710
+allowed to move them okay so that means
+
+00:58:00,940 --> 00:58:05,410
+that it looked up the Skip list first
+
+00:58:02,710 --> 00:58:09,040
+and then the hash table it and then it
+
+00:58:05,410 --> 00:58:10,720
+went down here it has to see the early
+
+00:58:09,040 --> 00:58:12,130
+value in the late value can't
+
+00:58:10,720 --> 00:58:14,619
+go backwards because as a relaxed load
+
+00:58:12,130 --> 00:58:17,140
+is not on to the same variable plus the
+
+00:58:14,619 --> 00:58:22,900
+reads are forced in order and so it
+
+00:58:17,140 --> 00:58:25,630
+can't see the amount of orders result so
+
+00:58:22,900 --> 00:58:27,790
+the the fact that relaxed loads are
+
+00:58:25,630 --> 00:58:29,290
+required to to the same variable are
+
+00:58:27,790 --> 00:58:30,849
+required to do atomicity and the fact
+
+00:58:29,290 --> 00:58:34,530
+that we're doing acquires to get the
+
+00:58:30,849 --> 00:58:37,510
+address to load to load should do it and
+
+00:58:34,530 --> 00:58:40,510
+if we want it to be more careful which i
+
+00:58:37,510 --> 00:58:42,849
+think you would you would if we ever get
+
+00:58:40,510 --> 00:58:46,330
+it fixed use them every or consume to go
+
+00:58:42,849 --> 00:58:47,859
+through the through the pointer as it is
+
+00:58:46,330 --> 00:58:49,840
+right now i use volatile as we do in the
+
+00:58:47,859 --> 00:58:51,280
+legs colonel because never consume is
+
+00:58:49,840 --> 00:58:53,170
+broken although i think i'm getting
+
+00:58:51,280 --> 00:59:00,840
+closer so it's a good question did that
+
+00:58:53,170 --> 00:59:19,359
+did that help it's okay other questions
+
+00:59:00,840 --> 00:59:20,980
+yeah yes well see the okay so the
+
+00:59:19,359 --> 00:59:22,690
+question was i'm using these bits in the
+
+00:59:20,980 --> 00:59:25,150
+lower bits of the pointers how do you
+
+00:59:22,690 --> 00:59:26,830
+know how can i use the standard
+
+00:59:25,150 --> 00:59:29,170
+algorithms which don't expect those and
+
+00:59:26,830 --> 00:59:31,390
+have it work a good question well the
+
+00:59:29,170 --> 00:59:33,520
+trick is that the Skip list is up there
+
+00:59:31,390 --> 00:59:35,500
+I just look it up there's no bits in
+
+00:59:33,520 --> 00:59:36,670
+anything until it gets to the element
+
+00:59:35,500 --> 00:59:39,160
+and it hands he back this thing here I
+
+00:59:36,670 --> 00:59:41,109
+get an element and then I and then the
+
+00:59:39,160 --> 00:59:42,460
+next levels is okay great that elements
+
+00:59:41,109 --> 00:59:45,210
+inside this thing so get me the full
+
+00:59:42,460 --> 00:59:47,050
+structure there's a pointer pick it up
+
+00:59:45,210 --> 00:59:49,480
+okay and that's the thing that has the
+
+00:59:47,050 --> 00:59:51,220
+bits in it so the thing that has bits on
+
+00:59:49,480 --> 00:59:53,650
+the pointer isn't exposed to the Skip
+
+00:59:51,220 --> 00:59:56,560
+list of hash table it's a it's a it's a
+
+00:59:53,650 --> 00:59:58,720
+wrapper around it in C++ terms you'd
+
+00:59:56,560 --> 00:59:59,800
+probably take so you have an element in
+
+00:59:58,720 --> 01:00:02,200
+the Skip list you have an element at
+
+00:59:59,800 --> 01:00:04,420
+hash table you would inherit this other
+
+01:00:02,200 --> 01:00:06,130
+structure from those so you have a skip
+
+01:00:04,420 --> 01:00:08,320
+list and then you have the pointer as in
+
+01:00:06,130 --> 01:00:12,390
+the not in the base class but in the
+
+01:00:08,320 --> 01:00:15,030
+what do you derive class derived class
+
+01:00:12,390 --> 01:00:20,460
+that's so yeah
+
+01:00:15,030 --> 01:00:22,050
+see i'll let you talk linnaeus
+
+01:00:20,460 --> 01:00:27,390
+Horrible's into taking C++ into the
+
+01:00:22,050 --> 01:00:28,920
+kernel anyway the so what happens then
+
+01:00:27,390 --> 01:00:31,920
+is that is that if you think of it that
+
+01:00:28,920 --> 01:00:34,200
+way the RC particular algorithm is the
+
+01:00:31,920 --> 01:00:40,740
+base class and the point of the bits is
+
+01:00:34,200 --> 01:00:42,930
+in the derived class it's just that the
+
+01:00:40,740 --> 01:00:44,670
+it's just that the algorithm for the the
+
+01:00:42,930 --> 01:00:45,890
+base class doesn't ever look at the
+
+01:00:44,670 --> 01:00:48,180
+stuff that's in the derived class
+
+01:00:45,890 --> 01:00:51,510
+because I mean I can't because it's the
+
+01:00:48,180 --> 01:00:54,240
+base class now we look okay the way I do
+
+01:00:51,510 --> 01:00:56,340
+it and see is I have a field that's the
+
+01:00:54,240 --> 01:00:57,720
+thing that the Skip list expects and I
+
+01:00:56,340 --> 01:00:58,680
+have some other fields after the Skip
+
+01:00:57,720 --> 01:01:00,420
+list is only in a mess with this
+
+01:00:58,680 --> 01:01:11,910
+structure here there are no bits on the
+
+01:01:00,420 --> 01:01:17,070
+bottles of pointers Harry I went past it
+
+01:01:11,910 --> 01:01:19,770
+let's see if I can okay so this thing
+
+01:01:17,070 --> 01:01:22,230
+the s the struct skip list is thing the
+
+01:01:19,770 --> 01:01:26,130
+Skip list our looks at it's just
+
+01:01:22,230 --> 01:01:29,040
+standard normal pointers no bits that's
+
+01:01:26,130 --> 01:01:30,480
+right the this thing is just a pointer
+
+01:01:29,040 --> 01:01:32,550
+the header the Skip list so i can find
+
+01:01:30,480 --> 01:01:35,460
+it and then the bits are in this
+
+01:01:32,550 --> 01:01:37,340
+existence head guy okay and so the Skip
+
+01:01:35,460 --> 01:01:39,900
+list doesn't have to know about that but
+
+01:01:37,340 --> 01:01:42,990
+yeah it's a I should have made that
+
+01:01:39,900 --> 01:01:44,460
+distinction clear to begin with okay I
+
+01:01:42,990 --> 01:01:45,900
+think we're out of time thank you very
+
+01:01:44,460 --> 01:01:47,940
+much for your time and attention it's
+
+01:01:45,900 --> 01:01:51,170
+been firing this up rueful on my right
+
+01:01:47,940 --> 01:01:51,170
+
+YouTube URL: https://www.youtube.com/watch?v=qcD2Zj9GgI4
+
+

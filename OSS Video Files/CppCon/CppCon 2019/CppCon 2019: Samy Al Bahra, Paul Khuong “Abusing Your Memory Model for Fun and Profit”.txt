@@ -1,0 +1,3974 @@
+Title: CppCon 2019: Samy Al Bahra, Paul Khuong “Abusing Your Memory Model for Fun and Profit”
+Publication date: 2019-09-27
+Playlist: CppCon 2019
+Description: 
+	http://CppCon.org
+—
+Discussion & Comments: https://www.reddit.com/r/cpp/
+—
+Presentation Slides, PDFs, Source Code and other presenter materials are available at: https://github.com/CppCon/CppCon2019
+—
+The most efficient concurrent C++ data structures used in the wild today usually achieve break-neck performance by either constraining their workload or constraining correctness to a particular memory model. The audience will learn about the Wild West of abusing memory models for performance and simplification, through real world examples. Non-blocking data structures and their benefits often come at the cost of increased latency because they require additional complexity in the common case. There are plenty of exceptions to this if the requirements of the data structure are relaxed, such as supporting only a bounded level of write or read concurrency or if correctness is constrained to a particular memory model. For this reason, well-designed specialized non-blocking data structures guarantee improved resiliency, throughput and latency in all cases compared to alternatives relying on traditional concurrency primitives. Specialized concurrent structures are common place in the Linux kernel and other performance critical systems.
+
+You will learn about foundational concepts to understanding your underlying hardware's memory model and abusing memory models for fun and profit:
+* Cache coherency
+* Store Buffers
+* Pipelines and speculative execution
+
+This talk provides real-world examples that exploit the x86-TSO model to their advantage:
+* A general technique to turn literally, any, open-addressed hash table into a concurrent hash table with low to negligible (near 0) cost. The transformation makes your hash table wait-free for writers and mostly wait-free for readers (lock-free in hypothetical worse cases) and is practical for languages such as C++. The mechanism is superior to the previously popular Azure lock-free hash table and even more importantly, practical for any non-garbage-collected environment. The overhead is negligible on TSO and low on non-TSO.
+* Blazingly fast event counters. An extremely efficient replacement for condition variables is introduced and faster than any other alternative. This is implemented without requiring any heavy-weight atomic operations on the fast path by exploiting properties of the x86-TSO model.
+* Scalable memory management: Exploit the ordering and visibility constraints of the underlying architecture for blazingly fast implementations of RCU and other safe memory reclamation schemes.
+* and more.
+— 
+Samy Al Bahra
+Backtrace
+CTO
+Greater New York City Area
+
+Samy Al Bahra is the cofounder of Backtrace, where he is helping build a modern debugging platform for today’s complex applications. Prior to Backtrace, Samy was a principal engineer at AppNexus, where he played a lead role in the architecture and development of many mission-critical components of the ecosystem. His work at AppNexus was instrumental in scaling the system to 18 billion impressions with orders of magnitude in efficiency improvements. Prior to AppNexus, Samy was behind major performance improvements to the core technology at Message Systems. At the George Washington University High Performance Computing Laboratory, Samy worked on the UPC programming language, heterogeneous computing, and multicore synchronization. Samy is also the founder of the Concurrency Kit project, which is part of the FreeBSD kernel and several leading technology companies rely on for scalability and performance. Samy serves on the ACM Queue Editorial Board
+
+Paul Khuong
+Not Google
+Vice President
+New York, NY
+
+After toiling on his dissertation about mathematical optimisation methods for large-scale network design, Paul Khuong has spent the majority of his professional and hobbyist life reverse engineering and modernising C, C++, and Common Lisp legacy systems. When not engaged in code archaeology, Paul enjoys overfitting classic data structures and algorithms to contemporary computers, which lead to his work on linear Robin Hood hashing, on searching in sorted arrays and permutations thereof, and on abusing timesharing for even more asymmetric synchronisation.
+—
+Videos Filmed & Edited by Bash Films: http://www.BashFilms.com
+Captions: 
+	00:00:12,410 --> 00:00:17,420
+welcome to memory models abusing them
+
+00:00:14,750 --> 00:00:19,580
+for fun and profit or if you're not a
+
+00:00:17,420 --> 00:00:22,900
+fan of this trove memory models
+
+00:00:19,580 --> 00:00:26,599
+considered them in data structure design
+
+00:00:22,900 --> 00:00:28,880
+all right I'm Paul Kwang I used to work
+
+00:00:26,599 --> 00:00:30,230
+at Google and at Nexus now I work
+
+00:00:28,880 --> 00:00:32,119
+somewhere else that doesn't want to be
+
+00:00:30,230 --> 00:00:32,629
+named and I waste a lot of time on steal
+
+00:00:32,119 --> 00:00:35,180
+Bing
+
+00:00:32,629 --> 00:00:37,280
+Common Lisp and on concurrency kit and
+
+00:00:35,180 --> 00:00:40,970
+I'm also the binary search dude from
+
+00:00:37,280 --> 00:00:44,360
+yesterday's keynote cool and um I'm Sami
+
+00:00:40,970 --> 00:00:46,910
+Barra I am the co-founder back raise
+
+00:00:44,360 --> 00:00:50,059
+working on debugging tools and databases
+
+00:00:46,910 --> 00:00:51,170
+and most my curious vent has been spent
+
+00:00:50,059 --> 00:00:57,469
+working on performance and reliability
+
+00:00:51,170 --> 00:00:59,420
+at various enterprise workloads and
+
+00:00:57,469 --> 00:01:04,280
+before that in academia I worked in in
+
+00:00:59,420 --> 00:01:08,930
+multi-core alright so today we are
+
+00:01:04,280 --> 00:01:11,060
+talking about today we're talking about
+
+00:01:08,930 --> 00:01:12,740
+our experiences building high
+
+00:01:11,060 --> 00:01:15,259
+performance concurrent data structures
+
+00:01:12,740 --> 00:01:17,810
+that have billions of CPI hours
+
+00:01:15,259 --> 00:01:19,880
+underneath their belt in particular
+
+00:01:17,810 --> 00:01:21,350
+we're gonna present four different
+
+00:01:19,880 --> 00:01:24,530
+techniques that are generic something
+
+00:01:21,350 --> 00:01:31,720
+you can all take home that are very
+
+00:01:24,530 --> 00:01:33,890
+close to optimal for TSO and x86 so
+
+00:01:31,720 --> 00:01:35,990
+concurrent a bit of background so
+
+00:01:33,890 --> 00:01:38,439
+concurrent data structures a lot of us
+
+00:01:35,990 --> 00:01:40,400
+will typically rely on traditional
+
+00:01:38,439 --> 00:01:41,840
+synchronization primitives implement
+
+00:01:40,400 --> 00:01:44,869
+concurrent data structures such as
+
+00:01:41,840 --> 00:01:46,670
+blocks etc a lot of you may have heard
+
+00:01:44,869 --> 00:01:48,259
+of none blocking data structures you'll
+
+00:01:46,670 --> 00:01:51,500
+hear terms like lock freedom weight
+
+00:01:48,259 --> 00:01:53,720
+freedom etc etc unfortunately a lot of
+
+00:01:51,500 --> 00:01:57,140
+the generic none blocking data
+
+00:01:53,720 --> 00:01:59,689
+structures are not a silver bullet
+
+00:01:57,140 --> 00:02:01,820
+there's a trade-off at the very least in
+
+00:01:59,689 --> 00:02:04,430
+fast path latency over here we have a
+
+00:02:01,820 --> 00:02:08,030
+comparison of a lock free stack compared
+
+00:02:04,430 --> 00:02:09,739
+to lock based stack on x86 box and you
+
+00:02:08,030 --> 00:02:12,920
+can see that the lock free stack has
+
+00:02:09,739 --> 00:02:15,799
+higher fast path latency so a lot of
+
+00:02:12,920 --> 00:02:17,600
+generic concurrent data structures that
+
+00:02:15,799 --> 00:02:19,489
+are not blocking will tend to have this
+
+00:02:17,600 --> 00:02:22,290
+property there is additional complexity
+
+00:02:19,489 --> 00:02:24,180
+on the fast mount but
+
+00:02:22,290 --> 00:02:25,349
+and well as a result of this you
+
+00:02:24,180 --> 00:02:26,760
+actually have a lot of fun
+
+00:02:25,349 --> 00:02:28,319
+right a lot of people like never use
+
+00:02:26,760 --> 00:02:32,370
+lock free data structures the make your
+
+00:02:28,319 --> 00:02:35,010
+systems more complex they're slow etc
+
+00:02:32,370 --> 00:02:35,819
+etc you can't actually have the cake and
+
+00:02:35,010 --> 00:02:37,860
+eat it too
+
+00:02:35,819 --> 00:02:39,959
+if you are able to specialize for your
+
+00:02:37,860 --> 00:02:41,370
+workload and for your memory model and
+
+00:02:39,959 --> 00:02:43,410
+that's the piece that we're gonna focus
+
+00:02:41,370 --> 00:02:46,080
+on in this talk so we're gonna start off
+
+00:02:43,410 --> 00:02:48,150
+with a bit of background on some basic
+
+00:02:46,080 --> 00:02:51,170
+concepts like cache coherency memory
+
+00:02:48,150 --> 00:02:59,790
+models etc and then dive right into the
+
+00:02:51,170 --> 00:03:01,739
+cool stuff we built so as I said this
+
+00:02:59,790 --> 00:03:02,970
+previous comment is not really true if
+
+00:03:01,739 --> 00:03:04,230
+you can specialize a lot of
+
+00:03:02,970 --> 00:03:06,750
+high-performance concurrent systems
+
+00:03:04,230 --> 00:03:07,890
+today leverage these advanced data
+
+00:03:06,750 --> 00:03:10,319
+structures in order to achieve
+
+00:03:07,890 --> 00:03:12,630
+performance this is an example from the
+
+00:03:10,319 --> 00:03:15,480
+FreeBSD kernel they're able to achieve
+
+00:03:12,630 --> 00:03:18,060
+significant improvements in UDP in the
+
+00:03:15,480 --> 00:03:20,580
+network stack by adopting epoch
+
+00:03:18,060 --> 00:03:22,110
+reclamation and RCU techniques which
+
+00:03:20,580 --> 00:03:23,940
+we'll be covering here so they switch
+
+00:03:22,110 --> 00:03:27,170
+from the traditional readwrite locking
+
+00:03:23,940 --> 00:03:29,670
+and reference counting to something else
+
+00:03:27,170 --> 00:03:33,950
+which is not as popular though it should
+
+00:03:29,670 --> 00:03:36,570
+be and they got huge performance gains
+
+00:03:33,950 --> 00:03:38,700
+so these advanced concurrent data
+
+00:03:36,570 --> 00:03:40,920
+structures as I'd mentioned are hard to
+
+00:03:38,700 --> 00:03:44,160
+design they are hard to validate but you
+
+00:03:40,920 --> 00:03:46,200
+can simplify things by limiting the
+
+00:03:44,160 --> 00:03:48,450
+number of readers writers relaxing your
+
+00:03:46,200 --> 00:03:50,070
+correctness constraints and considering
+
+00:03:48,450 --> 00:03:51,510
+the memory model you're building on so
+
+00:03:50,070 --> 00:03:53,730
+the various techniques that we're going
+
+00:03:51,510 --> 00:03:55,170
+to share with you today do you make
+
+00:03:53,730 --> 00:03:58,170
+these trade-offs either relaxed
+
+00:03:55,170 --> 00:04:02,880
+correctness limit writers and/or are
+
+00:03:58,170 --> 00:04:06,650
+optimized for TSM so the first concept I
+
+00:04:02,880 --> 00:04:09,180
+want to touch on is cache coherency so
+
+00:04:06,650 --> 00:04:11,549
+your modern multi-core system is a
+
+00:04:09,180 --> 00:04:14,359
+distributed system of sorts you need
+
+00:04:11,549 --> 00:04:16,470
+some kind of mechanism to ensure the
+
+00:04:14,359 --> 00:04:18,539
+coherency of your memory right if you
+
+00:04:16,470 --> 00:04:20,070
+write some value to memory eventually
+
+00:04:18,539 --> 00:04:21,690
+all other processors should see that
+
+00:04:20,070 --> 00:04:23,070
+same value if you have multiple
+
+00:04:21,690 --> 00:04:24,900
+processors writing to the same memory
+
+00:04:23,070 --> 00:04:26,520
+locations something needs to arbitrate
+
+00:04:24,900 --> 00:04:28,560
+what actually gets written to that
+
+00:04:26,520 --> 00:04:30,390
+memory location you don't want things to
+
+00:04:28,560 --> 00:04:33,690
+tear for example you ideally you want
+
+00:04:30,390 --> 00:04:35,370
+like a store to be atomic so this is
+
+00:04:33,690 --> 00:04:36,540
+implemented with the help of the cash
+
+00:04:35,370 --> 00:04:38,250
+currency protocol
+
+00:04:36,540 --> 00:04:39,540
+all loads from memory to me the Korean
+
+00:04:38,250 --> 00:04:43,530
+sea grant Lera T is known as a cache
+
+00:04:39,540 --> 00:04:46,110
+line so on x86 add 64 bytes and a lot of
+
+00:04:43,530 --> 00:04:47,970
+other architectures as well and so on
+
+00:04:46,110 --> 00:04:49,440
+the right here you just have an example
+
+00:04:47,970 --> 00:04:51,750
+of a cache line and a cash currency
+
+00:04:49,440 --> 00:04:54,030
+state machine so you write to a cache
+
+00:04:51,750 --> 00:04:55,650
+line and then the cash currency
+
+00:04:54,030 --> 00:04:59,520
+mechanism may invalidate other cache
+
+00:04:55,650 --> 00:05:04,080
+lines in the system in order to ensure a
+
+00:04:59,520 --> 00:05:06,480
+valid execution that is coherent the
+
+00:05:04,080 --> 00:05:08,700
+other piece we're touching on so I
+
+00:05:06,480 --> 00:05:10,860
+mentioned TSO or during etc is a
+
+00:05:08,700 --> 00:05:12,900
+processor memory model so this defines
+
+00:05:10,860 --> 00:05:15,750
+of semantics of visibility and ordering
+
+00:05:12,900 --> 00:05:17,180
+of operations to memory so for example
+
+00:05:15,750 --> 00:05:21,540
+on the Left we have a sequential
+
+00:05:17,180 --> 00:05:24,120
+specification we have a store to a value
+
+00:05:21,540 --> 00:05:26,940
+1 so it could be value 2 C 3 then below
+
+00:05:24,120 --> 00:05:28,380
+D load C right so this is what would
+
+00:05:26,940 --> 00:05:30,300
+happen if we're to execute program order
+
+00:05:28,380 --> 00:05:31,890
+but most modern processors will end up
+
+00:05:30,300 --> 00:05:34,200
+reordering instructions in order to
+
+00:05:31,890 --> 00:05:36,240
+squeeze more performance out so for
+
+00:05:34,200 --> 00:05:38,070
+example x86 adopts a total store
+
+00:05:36,240 --> 00:05:41,490
+ordering memory model it would be
+
+00:05:38,070 --> 00:05:43,350
+possible for it to reorder low D if for
+
+00:05:41,490 --> 00:05:45,300
+some reason which we'll get into later
+
+00:05:43,350 --> 00:05:46,830
+and then our mo relaxing on your
+
+00:05:45,300 --> 00:05:48,450
+ordering which is something elsea on
+
+00:05:46,830 --> 00:05:50,100
+processes like arm and power can pretty
+
+00:05:48,450 --> 00:05:57,090
+much reorder everything but data
+
+00:05:50,100 --> 00:06:00,590
+dependent loads so why would you want to
+
+00:05:57,090 --> 00:06:02,640
+relax the memory model it does make the
+
+00:06:00,590 --> 00:06:04,830
+it does make it more difficult to
+
+00:06:02,640 --> 00:06:07,500
+program the processor but allows for
+
+00:06:04,830 --> 00:06:10,470
+more optimizations without seeing you
+
+00:06:07,500 --> 00:06:13,170
+know additional hardware complexity so
+
+00:06:10,470 --> 00:06:14,610
+to be most pipelines today are multi
+
+00:06:13,170 --> 00:06:15,660
+issue you'll be able to excuse multiple
+
+00:06:14,610 --> 00:06:17,550
+instructions in the pipeline
+
+00:06:15,660 --> 00:06:20,010
+here's an example where every ordering
+
+00:06:17,550 --> 00:06:21,690
+might make sense we have a load from a
+
+00:06:20,010 --> 00:06:23,490
+and then a load from B and for some
+
+00:06:21,690 --> 00:06:27,720
+reason or another the load from a is
+
+00:06:23,490 --> 00:06:29,940
+very slow so you know if the unless the
+
+00:06:27,720 --> 00:06:31,710
+processor adopts additional complexity
+
+00:06:29,940 --> 00:06:34,110
+one approach it might take is to simply
+
+00:06:31,710 --> 00:06:38,210
+block all subsequent instructions until
+
+00:06:34,110 --> 00:06:41,430
+load from a is executed to completion
+
+00:06:38,210 --> 00:06:45,330
+before executing load B the other option
+
+00:06:41,430 --> 00:06:48,740
+is for the load to be to be the load to
+
+00:06:45,330 --> 00:06:50,460
+be to be to be to be reordered
+
+00:06:48,740 --> 00:06:52,139
+which obvious
+
+00:06:50,460 --> 00:06:58,169
+would be faster in terms of end-to-end
+
+00:06:52,139 --> 00:07:00,509
+latency so the two relevant memory
+
+00:06:58,169 --> 00:07:02,419
+models today are TSO and our mo and
+
+00:07:00,509 --> 00:07:07,020
+we're primarily going to be focusing on
+
+00:07:02,419 --> 00:07:13,740
+TSO it's it's a very simple memory model
+
+00:07:07,020 --> 00:07:15,300
+so for x86 which has TSO memory model
+
+00:07:13,740 --> 00:07:17,340
+there are basically two exceptions where
+
+00:07:15,300 --> 00:07:19,380
+reorderings can occur one is vector
+
+00:07:17,340 --> 00:07:21,630
+and/or non-temporal instructions which
+
+00:07:19,380 --> 00:07:23,880
+we don't really focus on in this talk
+
+00:07:21,630 --> 00:07:25,830
+today and then store to load reordering
+
+00:07:23,880 --> 00:07:28,229
+right so I could do a store to a load
+
+00:07:25,830 --> 00:07:31,650
+from B it's possible for that load to be
+
+00:07:28,229 --> 00:07:33,900
+to execute before the store today which
+
+00:07:31,650 --> 00:07:36,470
+can have implications on correctness and
+
+00:07:33,900 --> 00:07:41,280
+we'll get into examples of that later
+
+00:07:36,470 --> 00:07:43,710
+you can enforce ordering by using fences
+
+00:07:41,280 --> 00:07:45,840
+or atomic operations so in this case
+
+00:07:43,710 --> 00:07:48,300
+you're using fence sequential
+
+00:07:45,840 --> 00:07:51,300
+consistency to ensure that the snort EA
+
+00:07:48,300 --> 00:07:53,400
+is ordered with respect to store two a
+
+00:07:51,300 --> 00:07:56,039
+is ordered with respect to load to be
+
+00:07:53,400 --> 00:07:58,020
+I'll refer to this fans of the full
+
+00:07:56,039 --> 00:08:04,139
+fence or a memory barrier for the
+
+00:07:58,020 --> 00:08:08,849
+remainder of the talk so why is this
+
+00:08:04,139 --> 00:08:10,860
+reordering possible so most here DSL
+
+00:08:08,849 --> 00:08:13,650
+process today will have a store buffer
+
+00:08:10,860 --> 00:08:18,030
+or write buffer any stores will go
+
+00:08:13,650 --> 00:08:21,330
+through this store buffer right the
+
+00:08:18,030 --> 00:08:23,039
+store buffer is also FIFO ordered this
+
+00:08:21,330 --> 00:08:26,419
+is why you do have sorts of store
+
+00:08:23,039 --> 00:08:29,930
+ordering for example even globally and
+
+00:08:26,419 --> 00:08:32,430
+loads will always fetch the latest value
+
+00:08:29,930 --> 00:08:34,140
+and if the latest value is in the store
+
+00:08:32,430 --> 00:08:38,390
+buffer it will load it from the store
+
+00:08:34,140 --> 00:08:38,390
+buffer and this is store buffer bypass
+
+00:08:38,419 --> 00:08:43,979
+atomic operations are serializing so
+
+00:08:41,750 --> 00:08:49,380
+essentially they will execute when the
+
+00:08:43,979 --> 00:08:54,300
+store buffer is flushed same thing with
+
+00:08:49,380 --> 00:08:57,029
+the offense instruction right now a key
+
+00:08:54,300 --> 00:09:00,360
+thing to note here is the store buffer
+
+00:08:57,029 --> 00:09:04,710
+itself does have limited capacity right
+
+00:09:00,360 --> 00:09:07,200
+so once once the store buffer
+
+00:09:04,710 --> 00:09:09,260
+full no further instructions can enter
+
+00:09:07,200 --> 00:09:12,030
+the pipeline until the store buffer is
+
+00:09:09,260 --> 00:09:14,160
+flushed and so this is another way to
+
+00:09:12,030 --> 00:09:16,950
+actually enforce ordering which will
+
+00:09:14,160 --> 00:09:20,100
+take advantage of later in the talk as
+
+00:09:16,950 --> 00:09:22,080
+well so basically if you have like on a
+
+00:09:20,100 --> 00:09:24,380
+lot of Intel processors 32 stores
+
+00:09:22,080 --> 00:09:29,970
+pending you can use this to serialize
+
+00:09:24,380 --> 00:09:33,000
+further stores and loads so to recap the
+
+00:09:29,970 --> 00:09:35,850
+store buffer is a FIFO that buffer
+
+00:09:33,000 --> 00:09:38,670
+stores until it must flush them tonic
+
+00:09:35,850 --> 00:09:42,030
+and em fences serializing and the store
+
+00:09:38,670 --> 00:09:43,500
+buffers serializing if it's full and
+
+00:09:42,030 --> 00:09:45,510
+then as far as how things are
+
+00:09:43,500 --> 00:09:47,190
+coordinated across multiple cores across
+
+00:09:45,510 --> 00:09:50,820
+multiple caches the cash grants the
+
+00:09:47,190 --> 00:09:54,110
+protocol is what's probably okay so this
+
+00:09:50,820 --> 00:09:57,300
+is this is a primer let's jump into some
+
+00:09:54,110 --> 00:10:00,240
+examples where we take advantage of some
+
+00:09:57,300 --> 00:10:01,890
+of these properties so the first one I
+
+00:10:00,240 --> 00:10:04,470
+want to talk about is a fast bounded
+
+00:10:01,890 --> 00:10:06,720
+concurrency hash table a bit of
+
+00:10:04,470 --> 00:10:07,950
+backstory here this is when I was at app
+
+00:10:06,720 --> 00:10:10,740
+next this we had a firm real-time
+
+00:10:07,950 --> 00:10:13,110
+workload we had to be busy got HP
+
+00:10:10,740 --> 00:10:15,660
+requests and we had to return the
+
+00:10:13,110 --> 00:10:19,320
+response they were from 10 to 130
+
+00:10:15,660 --> 00:10:21,990
+hundred 40 milliseconds and we heavily
+
+00:10:19,320 --> 00:10:23,940
+relied on on map data structures every
+
+00:10:21,990 --> 00:10:25,800
+couple of seconds or minutes we would
+
+00:10:23,940 --> 00:10:28,440
+get a burst of millions of writes and we
+
+00:10:25,800 --> 00:10:30,990
+wanted to ensure read side progress in
+
+00:10:28,440 --> 00:10:32,310
+the presence of those rights and so
+
+00:10:30,990 --> 00:10:34,170
+looking at the literature and what's
+
+00:10:32,310 --> 00:10:35,790
+available out there today a lot of the
+
+00:10:34,170 --> 00:10:37,950
+mechanisms that provide those forward
+
+00:10:35,790 --> 00:10:41,550
+forward to progress guarantees required
+
+00:10:37,950 --> 00:10:44,130
+chaining and chaining is just a lot more
+
+00:10:41,550 --> 00:10:46,470
+expensive than I had wanted this
+
+00:10:44,130 --> 00:10:49,950
+mechanism to be as far as open address
+
+00:10:46,470 --> 00:10:52,500
+schemes are concerned pretty much the
+
+00:10:49,950 --> 00:10:54,900
+only viable implementation at the time
+
+00:10:52,500 --> 00:10:57,930
+was cliff clicks hash table which was
+
+00:10:54,900 --> 00:11:01,950
+more designed for garbage-collected
+
+00:10:57,930 --> 00:11:03,360
+languages such as Java so it is possible
+
+00:11:01,950 --> 00:11:05,610
+to use this in a language such as C++
+
+00:11:03,360 --> 00:11:08,250
+but you would either you would either
+
+00:11:05,610 --> 00:11:11,160
+require duplicating the copying the the
+
+00:11:08,250 --> 00:11:13,380
+key or having some really weird API
+
+00:11:11,160 --> 00:11:16,350
+constraints so I wanted to avoid that
+
+00:11:13,380 --> 00:11:17,700
+the other thing too is the workloads I
+
+00:11:16,350 --> 00:11:18,210
+was dealing with we're quite delete
+
+00:11:17,700 --> 00:11:19,740
+heavy
+
+00:11:18,210 --> 00:11:22,470
+as well so I wanted to see if I could
+
+00:11:19,740 --> 00:11:24,720
+actually be use deleted slots in the
+
+00:11:22,470 --> 00:11:28,620
+hash table and that last one all these
+
+00:11:24,720 --> 00:11:30,420
+are just expensive right so clicks hash
+
+00:11:28,620 --> 00:11:32,220
+table have compared swamps etc on the
+
+00:11:30,420 --> 00:11:36,209
+fast path so I went down the journey of
+
+00:11:32,220 --> 00:11:37,560
+okay what can I do to simplify this so a
+
+00:11:36,209 --> 00:11:39,810
+couple constraints I don't care about
+
+00:11:37,560 --> 00:11:42,390
+termination safety if a thread dies the
+
+00:11:39,810 --> 00:11:44,010
+process dies will just restart it other
+
+00:11:42,390 --> 00:11:45,000
+thing is we don't require concurrent
+
+00:11:44,010 --> 00:11:47,250
+writers all right we're talking about
+
+00:11:45,000 --> 00:11:49,560
+you know couple of millions maybe tens
+
+00:11:47,250 --> 00:11:53,399
+of millions of writes every couple of
+
+00:11:49,560 --> 00:11:55,080
+minutes that's usually to handle with a
+
+00:11:53,399 --> 00:11:58,140
+single core for this greatly simplifies
+
+00:11:55,080 --> 00:11:59,760
+things so the end result was a technique
+
+00:11:58,140 --> 00:12:02,880
+they could apply to any open address
+
+00:11:59,760 --> 00:12:06,660
+hash table that's practically zero costs
+
+00:12:02,880 --> 00:12:09,029
+for TSO right so you could take your
+
+00:12:06,660 --> 00:12:11,130
+existing open address hash table apply
+
+00:12:09,029 --> 00:12:13,170
+some very basic transformations and
+
+00:12:11,130 --> 00:12:15,450
+you'll have a mechanism that provides
+
+00:12:13,170 --> 00:12:17,070
+you lock freedom weight freedom for
+
+00:12:15,450 --> 00:12:19,260
+writers so very very smart forward
+
+00:12:17,070 --> 00:12:22,560
+progress guarantees for free basically
+
+00:12:19,260 --> 00:12:25,350
+and what I would call statistically
+
+00:12:22,560 --> 00:12:27,450
+weight free weight freedom for for
+
+00:12:25,350 --> 00:12:30,900
+readers lock freedom if you want to take
+
+00:12:27,450 --> 00:12:33,870
+a worst case there so let's jump into
+
+00:12:30,900 --> 00:12:37,580
+this today knee and hear the results by
+
+00:12:33,870 --> 00:12:39,990
+the way so I took a serial hash has
+
+00:12:37,580 --> 00:12:42,690
+applied to transformation basically the
+
+00:12:39,990 --> 00:12:48,180
+performance difference is negligible and
+
+00:12:42,690 --> 00:12:49,290
+this is competitive with anything with
+
+00:12:48,180 --> 00:12:51,150
+this transformation is still very
+
+00:12:49,290 --> 00:12:53,610
+competitive with sort of ended industry
+
+00:12:51,150 --> 00:12:56,310
+standard hash sets and hash tables I
+
+00:12:53,610 --> 00:12:58,529
+think you'd see here so let me start off
+
+00:12:56,310 --> 00:13:01,410
+with what the transformation is and then
+
+00:12:58,529 --> 00:13:06,480
+I'll briefly talk about how I thought
+
+00:13:01,410 --> 00:13:07,829
+about correctness all right so on the
+
+00:13:06,480 --> 00:13:11,820
+get side we're going to actually want to
+
+00:13:07,829 --> 00:13:12,959
+get a value from the hash set you we're
+
+00:13:11,820 --> 00:13:16,649
+busily going to consider three things
+
+00:13:12,959 --> 00:13:18,630
+here you have a key of value and then
+
+00:13:16,649 --> 00:13:20,670
+for simplicity we'll just have a global
+
+00:13:18,630 --> 00:13:22,320
+version counter on the get side just
+
+00:13:20,670 --> 00:13:24,720
+want to load that version counter and
+
+00:13:22,320 --> 00:13:26,550
+then you do your probe sequence you load
+
+00:13:24,720 --> 00:13:29,220
+the key you load the value it does have
+
+00:13:26,550 --> 00:13:30,430
+to be in that order and then you load
+
+00:13:29,220 --> 00:13:32,290
+the version counter again
+
+00:13:30,430 --> 00:13:36,279
+and if the version counter changed
+
+00:13:32,290 --> 00:13:40,240
+you'll be trying to read very simple and
+
+00:13:36,279 --> 00:13:41,680
+then on the right side you do your probe
+
+00:13:40,240 --> 00:13:44,470
+sequence you find a slot that you want
+
+00:13:41,680 --> 00:13:46,330
+to update and if the slot that you're
+
+00:13:44,470 --> 00:13:48,070
+updating contains a tombstone you update
+
+00:13:46,330 --> 00:13:50,350
+the version counter and then you just
+
+00:13:48,070 --> 00:13:52,300
+set the value and then set the key and
+
+00:13:50,350 --> 00:13:54,339
+then for deletion you just set the
+
+00:13:52,300 --> 00:14:01,410
+tombstone so very very simple
+
+00:13:54,339 --> 00:14:05,640
+transformation so let's walk through a
+
+00:14:01,410 --> 00:14:09,760
+state tree this is how I thought about
+
+00:14:05,640 --> 00:14:12,610
+correctness for this so what we're gonna
+
+00:14:09,760 --> 00:14:14,589
+do is walk through the state diagram
+
+00:14:12,610 --> 00:14:17,529
+transitioning from an empty slot and the
+
+00:14:14,589 --> 00:14:19,750
+hash set to deleting that slot and then
+
+00:14:17,529 --> 00:14:22,390
+reusing the salon typically the only
+
+00:14:19,750 --> 00:14:26,200
+window of inconsistency is if you aren't
+
+00:14:22,390 --> 00:14:28,420
+moving key value pairs across within the
+
+00:14:26,200 --> 00:14:30,580
+hash set or hash table or if you are
+
+00:14:28,420 --> 00:14:32,620
+reusing a tombstone so that's really the
+
+00:14:30,580 --> 00:14:36,520
+case that we care about avoiding so over
+
+00:14:32,620 --> 00:14:38,350
+here we have key value version counter
+
+00:14:36,520 --> 00:14:41,140
+so the key and value are empty the
+
+00:14:38,350 --> 00:14:43,390
+version counter contains some value D we
+
+00:14:41,140 --> 00:14:47,050
+go ahead and store about we store value
+
+00:14:43,390 --> 00:14:49,810
+V into the value field so now we have
+
+00:14:47,050 --> 00:14:51,910
+EVD that is externally observable we
+
+00:14:49,810 --> 00:14:54,070
+will go ahead and store the key now so
+
+00:14:51,910 --> 00:14:55,839
+now you have KVD and that's pretty much
+
+00:14:54,070 --> 00:14:59,620
+it so now we've inserted a new value
+
+00:14:55,839 --> 00:15:01,690
+into an empty hash set and the only
+
+00:14:59,620 --> 00:15:04,000
+potential value that the reader could
+
+00:15:01,690 --> 00:15:05,950
+observe would be e V or K being the case
+
+00:15:04,000 --> 00:15:08,290
+of e V obviously that's invalid and it
+
+00:15:05,950 --> 00:15:10,720
+would ignore it all right all right
+
+00:15:08,290 --> 00:15:13,570
+let's do deletion pretty trivial code
+
+00:15:10,720 --> 00:15:18,060
+path so we'll just insert a tombstone in
+
+00:15:13,570 --> 00:15:19,900
+the key and then it'll be ignored right
+
+00:15:18,060 --> 00:15:21,160
+this is where things get more
+
+00:15:19,900 --> 00:15:23,589
+interesting let's say we want it to
+
+00:15:21,160 --> 00:15:24,730
+recycle this slot and write the
+
+00:15:23,589 --> 00:15:26,140
+tombstone what we're gonna do is
+
+00:15:24,730 --> 00:15:27,970
+increment the version counters and I
+
+00:15:26,140 --> 00:15:32,200
+have D Prime assume this version counter
+
+00:15:27,970 --> 00:15:35,040
+is monotonic and now we'll go ahead and
+
+00:15:32,200 --> 00:15:37,630
+insert the new value V Prime well and
+
+00:15:35,040 --> 00:15:41,380
+then we will go ahead and sir K Prime
+
+00:15:37,630 --> 00:15:44,530
+right so obviously the problem here is
+
+00:15:41,380 --> 00:15:46,300
+someone could observe V prime K
+
+00:15:44,530 --> 00:15:48,610
+in other words you have some other value
+
+00:15:46,300 --> 00:15:52,240
+for some other key and then some old
+
+00:15:48,610 --> 00:15:54,550
+version of the key right so like someone
+
+00:15:52,240 --> 00:15:56,860
+could a reader could come in I don't
+
+00:15:54,550 --> 00:15:59,290
+they could go ahead read this key some
+
+00:15:56,860 --> 00:16:03,280
+stuff happens on the right side and then
+
+00:15:59,290 --> 00:16:05,560
+ends up beating V prime right but the
+
+00:16:03,280 --> 00:16:07,330
+version counter protect us protects us
+
+00:16:05,560 --> 00:16:09,130
+from this so if you were to observe V
+
+00:16:07,330 --> 00:16:11,410
+prime or K Prime you're guaranteed to
+
+00:16:09,130 --> 00:16:13,900
+also observe D prime if you were to
+
+00:16:11,410 --> 00:16:19,780
+observe V or K you're also guaranteed to
+
+00:16:13,900 --> 00:16:21,640
+observe D right so that's that's pretty
+
+00:16:19,780 --> 00:16:24,310
+much it now this same mechanism can also
+
+00:16:21,640 --> 00:16:26,470
+be used for modifying probe sequences
+
+00:16:24,310 --> 00:16:28,000
+this is this is what makes this generic
+
+00:16:26,470 --> 00:16:30,400
+and essentially you could apply it to
+
+00:16:28,000 --> 00:16:32,500
+all sorts of open address schemes we've
+
+00:16:30,400 --> 00:16:35,320
+applied this to a double hash variant
+
+00:16:32,500 --> 00:16:38,470
+with linear probing at the first level
+
+00:16:35,320 --> 00:16:40,630
+as well as Robin Hood hashing right and
+
+00:16:38,470 --> 00:16:43,570
+basically all you need to do is insert
+
+00:16:40,630 --> 00:16:45,930
+the news the the new key value insert
+
+00:16:43,570 --> 00:16:48,460
+the key value pair in its new location
+
+00:16:45,930 --> 00:16:51,430
+increment the counter delete the old
+
+00:16:48,460 --> 00:16:53,650
+locations value there are some
+
+00:16:51,430 --> 00:16:56,740
+tombstones in there and that's pretty
+
+00:16:53,650 --> 00:17:00,490
+much pretty much it so what have you
+
+00:16:56,740 --> 00:17:03,640
+achieved we have one we took advantage
+
+00:17:00,490 --> 00:17:05,440
+of single writer here to be able to just
+
+00:17:03,640 --> 00:17:07,450
+use regular store operations or no
+
+00:17:05,440 --> 00:17:08,920
+Atomics which tends to be a lot more
+
+00:17:07,450 --> 00:17:10,750
+expensive
+
+00:17:08,920 --> 00:17:12,790
+the insertion path only relies on
+
+00:17:10,750 --> 00:17:14,590
+storage store ordering the load path
+
+00:17:12,790 --> 00:17:17,290
+only relies on load to load ordering
+
+00:17:14,590 --> 00:17:19,930
+which we basically get for free and yes
+
+00:17:17,290 --> 00:17:22,690
+so so you have something very fast
+
+00:17:19,930 --> 00:17:24,760
+that's that's the first technique I
+
+00:17:22,690 --> 00:17:27,190
+wanted to present and I'll share a link
+
+00:17:24,760 --> 00:17:29,200
+later at the end of the talk if folks
+
+00:17:27,190 --> 00:17:32,140
+are interested in learning more or
+
+00:17:29,200 --> 00:17:33,790
+trying it out and shout out to folks
+
+00:17:32,140 --> 00:17:35,020
+when I first built this I'd reach out to
+
+00:17:33,790 --> 00:17:38,650
+a bunch people some of them in the groom
+
+00:17:35,020 --> 00:17:42,880
+maggot Paul Paul who also helped review
+
+00:17:38,650 --> 00:17:50,050
+this all right so second thing I want to
+
+00:17:42,880 --> 00:17:51,970
+talk about is epoch reclamation so I'm
+
+00:17:50,050 --> 00:17:54,940
+going to talk about how we were able to
+
+00:17:51,970 --> 00:17:58,370
+use specialization to scale RC and I'll
+
+00:17:54,940 --> 00:18:00,830
+talk about what RC u is to millions of
+
+00:17:58,370 --> 00:18:03,440
+userspace threads events fibers whatever
+
+00:18:00,830 --> 00:18:05,480
+you want to call them today as well as
+
+00:18:03,440 --> 00:18:08,990
+remove a very expensive memory barrier
+
+00:18:05,480 --> 00:18:11,690
+for busy systems so what am I talking
+
+00:18:08,990 --> 00:18:13,670
+about when I say RC u so RS you save
+
+00:18:11,690 --> 00:18:15,920
+memory reclamation etc protect us
+
+00:18:13,670 --> 00:18:17,660
+against bead reclaim races that's a
+
+00:18:15,920 --> 00:18:20,270
+primary use case for them there are
+
+00:18:17,660 --> 00:18:22,160
+other use cases as well and a reed
+
+00:18:20,270 --> 00:18:23,900
+reclaim race happens when a thread is
+
+00:18:22,160 --> 00:18:25,700
+reading some object in memory and then
+
+00:18:23,900 --> 00:18:27,710
+that object is destroyed from underneath
+
+00:18:25,700 --> 00:18:31,850
+the wall it's doing a read bad stuff
+
+00:18:27,710 --> 00:18:33,800
+happens right so usually most people
+
+00:18:31,850 --> 00:18:36,050
+will protect themselves from this using
+
+00:18:33,800 --> 00:18:37,429
+locks and reference counting but the
+
+00:18:36,050 --> 00:18:40,280
+problem of the locks in reference County
+
+00:18:37,429 --> 00:18:41,870
+is they're slow that are error-prone and
+
+00:18:40,280 --> 00:18:43,490
+they don't work for more advanced
+
+00:18:41,870 --> 00:18:46,520
+concurrent data structures like lock
+
+00:18:43,490 --> 00:18:49,010
+free data structures for me personally
+
+00:18:46,520 --> 00:18:51,320
+my primary motivation for using these
+
+00:18:49,010 --> 00:18:52,850
+mechanisms mechanisms is actually not
+
+00:18:51,320 --> 00:18:55,040
+performance typically it's actually
+
+00:18:52,850 --> 00:18:56,750
+simplicity and ease of use so in our
+
+00:18:55,040 --> 00:18:57,800
+code base developers never have to worry
+
+00:18:56,750 --> 00:19:00,260
+about reference counting or anything
+
+00:18:57,800 --> 00:19:04,910
+like this is just it's some magic that
+
+00:19:00,260 --> 00:19:07,790
+happens behind the scenes and so what
+
+00:19:04,910 --> 00:19:11,179
+one of the key operations RC introduces
+
+00:19:07,790 --> 00:19:13,130
+is a synchronized operation right and
+
+00:19:11,179 --> 00:19:15,620
+this allows the writer to wait for all
+
+00:19:13,130 --> 00:19:19,340
+potential readers to have observed
+
+00:19:15,620 --> 00:19:22,280
+previous writes so for example we have
+
+00:19:19,340 --> 00:19:24,380
+some data structure here called n we're
+
+00:19:22,280 --> 00:19:26,510
+gonna remove object oh we want to delete
+
+00:19:24,380 --> 00:19:32,660
+it we'll call synchronize and then we'll
+
+00:19:26,510 --> 00:19:34,580
+go ahead and destroy oh right and the
+
+00:19:32,660 --> 00:19:37,460
+guaranty here is after the RC
+
+00:19:34,580 --> 00:19:40,280
+synchronized call has completed everyone
+
+00:19:37,460 --> 00:19:42,320
+would know there will no longer be any
+
+00:19:40,280 --> 00:19:44,690
+references to oh and oh is no longer
+
+00:19:42,320 --> 00:19:47,950
+reachable so the store operations which
+
+00:19:44,690 --> 00:19:51,320
+end up removing o from this object in
+
+00:19:47,950 --> 00:19:53,570
+would be visible to everybody all the
+
+00:19:51,320 --> 00:19:55,640
+threads on the system so very simple
+
+00:19:53,570 --> 00:19:58,640
+implementation if you just use a global
+
+00:19:55,640 --> 00:20:01,490
+counter again this is TSO and this
+
+00:19:58,640 --> 00:20:04,970
+situation and what we do on the right
+
+00:20:01,490 --> 00:20:06,380
+side is we remove o and then synchronize
+
+00:20:04,970 --> 00:20:08,570
+can be implemented this way we'll go
+
+00:20:06,380 --> 00:20:10,460
+ahead and increment some global counter
+
+00:20:08,570 --> 00:20:12,020
+there was a 64-bit counter never
+
+00:20:10,460 --> 00:20:14,120
+overflows with a
+
+00:20:12,020 --> 00:20:15,560
+Tomic ink and then we'll go through all
+
+00:20:14,120 --> 00:20:17,230
+the threads and check whether the
+
+00:20:15,560 --> 00:20:20,390
+threads have observed the new value of
+
+00:20:17,230 --> 00:20:22,220
+incremented - right and then once that
+
+00:20:20,390 --> 00:20:26,960
+has occurred I could go ahead and
+
+00:20:22,220 --> 00:20:29,660
+distort the read side I can I perform
+
+00:20:26,960 --> 00:20:31,940
+the read I use oh and then once I'm done
+
+00:20:29,660 --> 00:20:35,780
+with a you know I mean idle say I'll go
+
+00:20:31,940 --> 00:20:37,790
+ahead and just load the latest value of
+
+00:20:35,780 --> 00:20:40,250
+the counter so the guarantee here if the
+
+00:20:37,790 --> 00:20:42,140
+reader observed the new counter value
+
+00:20:40,250 --> 00:20:48,290
+then it must have observed the prior
+
+00:20:42,140 --> 00:20:51,050
+stores as well so a big issue with this
+
+00:20:48,290 --> 00:20:53,510
+implementation is it relies on the
+
+00:20:51,050 --> 00:20:55,100
+system being idle at some point in time
+
+00:20:53,510 --> 00:20:59,030
+there's some point in time where you
+
+00:20:55,100 --> 00:21:02,120
+need to observe the counter and there
+
+00:20:59,030 --> 00:21:06,680
+are no active hazardous references right
+
+00:21:02,120 --> 00:21:08,900
+the other challenge here is and this is
+
+00:21:06,680 --> 00:21:11,030
+called a quiescent State right the other
+
+00:21:08,900 --> 00:21:13,580
+challenge is an application with
+
+00:21:11,030 --> 00:21:15,260
+thousands you know to millions of events
+
+00:21:13,580 --> 00:21:18,350
+or fibers may never have a quiescent
+
+00:21:15,260 --> 00:21:21,770
+State there may never be an idle say all
+
+00:21:18,350 --> 00:21:24,500
+right so you know we have the problem of
+
+00:21:21,770 --> 00:21:26,780
+having to wake up threads occasionally
+
+00:21:24,500 --> 00:21:29,960
+just to observe the counter which may
+
+00:21:26,780 --> 00:21:32,450
+not be possible and then in addition to
+
+00:21:29,960 --> 00:21:34,100
+that we have the issue of no forward
+
+00:21:32,450 --> 00:21:36,350
+progress because there is no pre essence
+
+00:21:34,100 --> 00:21:38,570
+right so let's talk about the first
+
+00:21:36,350 --> 00:21:41,270
+problem detecting idleness so a very
+
+00:21:38,570 --> 00:21:45,740
+cheap way for us to do this is to use a
+
+00:21:41,270 --> 00:21:48,890
+flag right so the right side doesn't
+
+00:21:45,740 --> 00:21:50,420
+change that much so basically we'll loop
+
+00:21:48,890 --> 00:21:54,250
+through all threads if any thread is
+
+00:21:50,420 --> 00:21:57,350
+idle we will ignore it on the read side
+
+00:21:54,250 --> 00:22:00,350
+we will go ahead and set the flag before
+
+00:21:57,350 --> 00:22:02,900
+performing any further operations pretty
+
+00:22:00,350 --> 00:22:05,300
+straightforward but the problem we
+
+00:22:02,900 --> 00:22:06,890
+suffer from here is store to load be
+
+00:22:05,300 --> 00:22:08,540
+ordering with TSO so we actually end up
+
+00:22:06,890 --> 00:22:13,840
+needing this very expensive memory
+
+00:22:08,540 --> 00:22:15,980
+barrier now on the fast file right so
+
+00:22:13,840 --> 00:22:17,330
+ideally we would like a way to to get
+
+00:22:15,980 --> 00:22:20,720
+rid of this mm-hmm
+
+00:22:17,330 --> 00:22:23,480
+right so we have a solution but it kind
+
+00:22:20,720 --> 00:22:25,070
+of sucks cause we have this fence but
+
+00:22:23,480 --> 00:22:27,230
+let's move on for now
+
+00:22:25,070 --> 00:22:29,810
+so we have a solution for idleness we
+
+00:22:27,230 --> 00:22:33,530
+have to pay with the fence the other
+
+00:22:29,810 --> 00:22:35,180
+problem we have is on a sort of modern
+
+00:22:33,530 --> 00:22:38,150
+event based system or system music
+
+00:22:35,180 --> 00:22:40,760
+fibres etc etc having a count on every
+
+00:22:38,150 --> 00:22:43,070
+fiber it's not going to scale right
+
+00:22:40,760 --> 00:22:45,140
+you're gonna have like what's the right
+
+00:22:43,070 --> 00:22:48,760
+are gonna do like scan counters across
+
+00:22:45,140 --> 00:22:53,570
+millions of events or fibers no the
+
+00:22:48,760 --> 00:22:56,660
+socks so we can change the semantics of
+
+00:22:53,570 --> 00:22:58,010
+this counter and bound it and take
+
+00:22:56,660 --> 00:23:01,460
+advantage of this later
+
+00:22:58,010 --> 00:23:03,320
+so epoch reclamation will bound the
+
+00:23:01,460 --> 00:23:05,120
+counter to three distinct values so
+
+00:23:03,320 --> 00:23:07,100
+we're gonna start using this semantics
+
+00:23:05,120 --> 00:23:11,030
+so assume that the counter can only have
+
+00:23:07,100 --> 00:23:13,070
+values 0 e 1 and E 2 right what the
+
+00:23:11,030 --> 00:23:15,260
+writer will do is if all threads have
+
+00:23:13,070 --> 00:23:17,480
+observed a 0 the current counter value
+
+00:23:15,260 --> 00:23:19,010
+then it'll increment it and then I'll do
+
+00:23:17,480 --> 00:23:21,200
+this again if all threads have observed
+
+00:23:19,010 --> 00:23:23,450
+a 1 it'll increment the counter again
+
+00:23:21,200 --> 00:23:26,540
+and at this point now we have to
+
+00:23:23,450 --> 00:23:28,790
+guarantee that anyone at a 0 any
+
+00:23:26,540 --> 00:23:32,120
+operations prior to easier or visible to
+
+00:23:28,790 --> 00:23:34,580
+all threads and we have a a safe point a
+
+00:23:32,120 --> 00:23:36,350
+grace period for at which point we can
+
+00:23:34,580 --> 00:23:45,500
+actually do the physical destruction
+
+00:23:36,350 --> 00:23:48,860
+right hmm here's a diagram alright cool
+
+00:23:45,500 --> 00:23:50,210
+so the nice thing about this is now at
+
+00:23:48,860 --> 00:23:53,570
+any point in time there are only two
+
+00:23:50,210 --> 00:23:56,180
+distinct epoch values that are active
+
+00:23:53,570 --> 00:23:58,370
+and so very cheap optimization we can
+
+00:23:56,180 --> 00:24:00,320
+make here is to attach reference counts
+
+00:23:58,370 --> 00:24:03,500
+to any of the possible epoch values a
+
+00:24:00,320 --> 00:24:05,150
+thread may observe and when the
+
+00:24:03,500 --> 00:24:06,740
+reference count to the old epoch value
+
+00:24:05,150 --> 00:24:11,450
+reaches zero then we could update the
+
+00:24:06,740 --> 00:24:13,400
+thread record the epoch value to the to
+
+00:24:11,450 --> 00:24:15,380
+the latest one that was observed on that
+
+00:24:13,400 --> 00:24:19,730
+thread and the change is pretty simple
+
+00:24:15,380 --> 00:24:21,800
+so now every thread you have this like
+
+00:24:19,730 --> 00:24:24,050
+my thread variable that has a record
+
+00:24:21,800 --> 00:24:26,150
+that stores a value will contain a
+
+00:24:24,050 --> 00:24:29,060
+reference count to two potential epochs
+
+00:24:26,150 --> 00:24:31,460
+and then on the read side all you will
+
+00:24:29,060 --> 00:24:33,320
+do is every time you or before you make
+
+00:24:31,460 --> 00:24:35,630
+a hazardous reference so over here we've
+
+00:24:33,320 --> 00:24:37,370
+already set active to one alright we've
+
+00:24:35,630 --> 00:24:38,070
+already set active to true and paid for
+
+00:24:37,370 --> 00:24:41,760
+the fence
+
+00:24:38,070 --> 00:24:43,170
+right we now every time you make a
+
+00:24:41,760 --> 00:24:45,240
+hazard its reference you will go ahead
+
+00:24:43,170 --> 00:24:47,190
+and observe the global counter and then
+
+00:24:45,240 --> 00:24:50,940
+increment the reference count the
+
+00:24:47,190 --> 00:24:52,860
+relevant reference count right you do
+
+00:24:50,940 --> 00:24:56,460
+some work and then once you're done with
+
+00:24:52,860 --> 00:24:58,680
+that word once you're done with that
+
+00:24:56,460 --> 00:25:00,690
+work you can go ahead and decrement your
+
+00:24:58,680 --> 00:25:03,240
+reference count if you have a reference
+
+00:25:00,690 --> 00:25:05,430
+to another epoch and that other epoch is
+
+00:25:03,240 --> 00:25:07,320
+newer than yours and there are no more
+
+00:25:05,430 --> 00:25:09,230
+epochs to your older epoch then you can
+
+00:25:07,320 --> 00:25:12,390
+go ahead and update the thread record
+
+00:25:09,230 --> 00:25:20,520
+epoch to the new global epoch value
+
+00:25:12,390 --> 00:25:23,250
+right so let's just review this so the
+
+00:25:20,520 --> 00:25:25,860
+change we made is records OS threads now
+
+00:25:23,250 --> 00:25:28,260
+have two reference counts and then every
+
+00:25:25,860 --> 00:25:32,550
+event or fiber must cash and observed
+
+00:25:28,260 --> 00:25:34,200
+epoch value some side effects with the
+
+00:25:32,550 --> 00:25:36,720
+of this change is now we can make
+
+00:25:34,200 --> 00:25:39,480
+forward progress without relying on PSN
+
+00:25:36,720 --> 00:25:41,790
+state per fiber per event is suffered
+
+00:25:39,480 --> 00:25:45,390
+cetera it's only this scales now with
+
+00:25:41,790 --> 00:25:47,970
+parallelism not with concurrency when
+
+00:25:45,390 --> 00:25:49,110
+when the when a thread is busy we
+
+00:25:47,970 --> 00:25:51,930
+actually don't require that fence
+
+00:25:49,110 --> 00:25:53,460
+anymore all right so for a lot of
+
+00:25:51,930 --> 00:25:56,730
+workloads that heavily make use of
+
+00:25:53,460 --> 00:25:58,500
+events fibers etc etc you only have to
+
+00:25:56,730 --> 00:26:00,000
+pay for the fence when you're going from
+
+00:25:58,500 --> 00:26:02,430
+a completely idle system once your
+
+00:26:00,000 --> 00:26:08,700
+system is loaded you that you don't pay
+
+00:26:02,430 --> 00:26:10,470
+the cost of that fence on on TSL so end
+
+00:26:08,700 --> 00:26:13,050
+result we have a state-of-the-art safe
+
+00:26:10,470 --> 00:26:14,730
+memory reclamation mechanism it scales
+
+00:26:13,050 --> 00:26:16,770
+with parallelism rather than concurrency
+
+00:26:14,730 --> 00:26:18,570
+no atomic source utilizing instructions
+
+00:26:16,770 --> 00:26:21,330
+on the fast path and we don't have to
+
+00:26:18,570 --> 00:26:23,970
+play any complex operating system magic
+
+00:26:21,330 --> 00:26:27,870
+on the fast path either and we'll get
+
+00:26:23,970 --> 00:26:29,580
+into that complex magic shortly with
+
+00:26:27,870 --> 00:26:32,370
+Paul cool so that's the second technique
+
+00:26:29,580 --> 00:26:36,120
+I'll hand it off to Paul Thank You Sammy
+
+00:26:32,370 --> 00:26:40,740
+that's like that alarm all right
+
+00:26:36,120 --> 00:26:42,450
+so so far we've seen a technique to wait
+
+00:26:40,740 --> 00:26:43,950
+until everyone was done doing their work
+
+00:26:42,450 --> 00:26:46,200
+so we could go on we're all life and did
+
+00:26:43,950 --> 00:26:48,570
+eat data we're getting the kind of the
+
+00:26:46,200 --> 00:26:50,700
+duo here how do we wait until we have
+
+00:26:48,570 --> 00:26:52,240
+more work to do so the classic solution
+
+00:26:50,700 --> 00:26:55,460
+is
+
+00:26:52,240 --> 00:26:57,590
+well okay yes you use a condition
+
+00:26:55,460 --> 00:26:59,060
+variable right you take a meat ax we
+
+00:26:57,590 --> 00:27:00,830
+have your states that you wait until the
+
+00:26:59,060 --> 00:27:03,530
+state says hey start doing some work and
+
+00:27:00,830 --> 00:27:06,050
+then use condition variable so you don't
+
+00:27:03,530 --> 00:27:09,770
+have to spin and waste CPU time waiting
+
+00:27:06,050 --> 00:27:11,450
+for that value to change now that
+
+00:27:09,770 --> 00:27:13,790
+doesn't work if you have lock free code
+
+00:27:11,450 --> 00:27:15,800
+right the condition variable needs a
+
+00:27:13,790 --> 00:27:16,850
+mutex and if you do some unit X and
+
+00:27:15,800 --> 00:27:19,640
+what's the point having all this lock
+
+00:27:16,850 --> 00:27:22,040
+freedom so we're gonna introduce an
+
+00:27:19,640 --> 00:27:22,820
+alternative to condition variables
+
+00:27:22,040 --> 00:27:25,610
+they're called
+
+00:27:22,820 --> 00:27:27,320
+event counts and we're going to
+
+00:27:25,610 --> 00:27:30,200
+implement a specialization of the
+
+00:27:27,320 --> 00:27:34,070
+generic event count protocol that is
+
+00:27:30,200 --> 00:27:35,390
+specialized for x86 and IC 664 and for
+
+00:27:34,070 --> 00:27:38,390
+the case where there's only one thread
+
+00:27:35,390 --> 00:27:43,190
+that is notifying the presence of new
+
+00:27:38,390 --> 00:27:45,560
+work or changing data all right so first
+
+00:27:43,190 --> 00:27:47,900
+why do condition variables have to be
+
+00:27:45,560 --> 00:27:49,310
+locked so let's see what happens if we
+
+00:27:47,900 --> 00:27:52,250
+were to try to use condition variables
+
+00:27:49,310 --> 00:27:54,800
+without logging we could first get lucky
+
+00:27:52,250 --> 00:27:57,740
+right so we have the writer
+
+00:27:54,800 --> 00:27:59,960
+it changes the data tweak the waiter
+
+00:27:57,740 --> 00:28:02,350
+there's no one to wake so nothing to do
+
+00:27:59,960 --> 00:28:04,940
+and the waiter comes in observes data
+
+00:28:02,350 --> 00:28:07,100
+enters to wake you and this is safe
+
+00:28:04,940 --> 00:28:09,080
+because the next data change from the
+
+00:28:07,100 --> 00:28:11,060
+signaler will also wake up that waiter
+
+00:28:09,080 --> 00:28:12,730
+so eventually we'll preserve a data
+
+00:28:11,060 --> 00:28:16,070
+change and wake up
+
+00:28:12,730 --> 00:28:18,440
+however we could also be unlucky we
+
+00:28:16,070 --> 00:28:20,990
+could start by the waiter observing the
+
+00:28:18,440 --> 00:28:23,840
+data and then immediately after the
+
+00:28:20,990 --> 00:28:25,820
+singer comes in changes the data wakes
+
+00:28:23,840 --> 00:28:28,790
+up any waiter but no one's waiting yet
+
+00:28:25,820 --> 00:28:30,950
+and then the waiter says okay I've
+
+00:28:28,790 --> 00:28:35,240
+observed his data I need more now you're
+
+00:28:30,950 --> 00:28:36,530
+stuck you're gonna sleep forever so the
+
+00:28:35,240 --> 00:28:38,570
+problem here is that the condition
+
+00:28:36,530 --> 00:28:41,150
+variable interface is edge triggered and
+
+00:28:38,570 --> 00:28:42,290
+that force is locking it's kind of like
+
+00:28:41,150 --> 00:28:44,120
+back in the day you would talk to your
+
+00:28:42,290 --> 00:28:46,160
+friend say call me when something
+
+00:28:44,120 --> 00:28:48,170
+happens you go back home it takes you
+
+00:28:46,160 --> 00:28:50,150
+half hour to get home because I don't
+
+00:28:48,170 --> 00:28:51,650
+know you're riding your bike and during
+
+00:28:50,150 --> 00:28:53,570
+that time you missed a call so you don't
+
+00:28:51,650 --> 00:28:54,560
+know that something has happened what's
+
+00:28:53,570 --> 00:28:57,470
+the solution here does anyone remember
+
+00:28:54,560 --> 00:29:00,160
+this thing yeah it's an answering
+
+00:28:57,470 --> 00:29:00,160
+machine okay
+
+00:29:01,150 --> 00:29:04,300
+that's right to figure this out here
+
+00:29:02,830 --> 00:29:06,220
+could we add some sort of additional
+
+00:29:04,300 --> 00:29:08,020
+step in the read side so that we could
+
+00:29:06,220 --> 00:29:11,350
+detect when a change has happened while
+
+00:29:08,020 --> 00:29:13,420
+we were reading the data and that's what
+
+00:29:11,350 --> 00:29:16,090
+event counts do but the idea here is
+
+00:29:13,420 --> 00:29:17,920
+that we're gonna add a cookie and weight
+
+00:29:16,090 --> 00:29:19,930
+on the cookie and on city if the cookie
+
+00:29:17,920 --> 00:29:23,020
+has not changed since our previous read
+
+00:29:19,930 --> 00:29:25,390
+so again the same two scenarios first or
+
+00:29:23,020 --> 00:29:27,190
+signal changes data regenerates the
+
+00:29:25,390 --> 00:29:29,020
+cookies and wakes up any waiter no one
+
+00:29:27,190 --> 00:29:32,170
+here nothing to do great the waiter
+
+00:29:29,020 --> 00:29:34,600
+comes in reads a cookie observes the
+
+00:29:32,170 --> 00:29:36,340
+data and says all right wake me up next
+
+00:29:34,600 --> 00:29:37,630
+time there's a data change so it's gonna
+
+00:29:36,340 --> 00:29:39,250
+wait on the cookie it's gonna say
+
+00:29:37,630 --> 00:29:40,900
+alright I'm going to sleep but only if
+
+00:29:39,250 --> 00:29:43,210
+the cookie is still the value that
+
+00:29:40,900 --> 00:29:46,120
+observed at step one before reading and
+
+00:29:43,210 --> 00:29:48,100
+this is how this saves us in what was
+
+00:29:46,120 --> 00:29:50,160
+previously there bad interleaving the
+
+00:29:48,100 --> 00:29:53,380
+winner is gonna come in read the cookie
+
+00:29:50,160 --> 00:29:56,890
+observe the data better writers comes in
+
+00:29:53,380 --> 00:29:59,080
+changes the data regenerates a cookie
+
+00:29:56,890 --> 00:30:01,080
+and that is a wake-up but it is also a
+
+00:29:59,080 --> 00:30:04,450
+change of the current epoch value and
+
+00:30:01,080 --> 00:30:06,070
+then the waiter tries to conditionally
+
+00:30:04,450 --> 00:30:07,870
+sleep on the cookie immediately observed
+
+00:30:06,070 --> 00:30:09,400
+that the cookie has changed so doesn't
+
+00:30:07,870 --> 00:30:13,090
+sleep and goes back hey there's
+
+00:30:09,400 --> 00:30:14,320
+something new to process here alright so
+
+00:30:13,090 --> 00:30:16,000
+in practice here's these cookies as
+
+00:30:14,320 --> 00:30:19,660
+simple as a generation count or just an
+
+00:30:16,000 --> 00:30:21,040
+incremental version counter so whatever
+
+00:30:19,660 --> 00:30:23,230
+event count is good for well they're
+
+00:30:21,040 --> 00:30:25,000
+classically very good for work use if
+
+00:30:23,230 --> 00:30:26,200
+you have a reactor or a thread pool and
+
+00:30:25,000 --> 00:30:28,090
+would like them to go to sleep but
+
+00:30:26,200 --> 00:30:29,440
+there's nothing to do but also you want
+
+00:30:28,090 --> 00:30:32,530
+them to wake up as soon as a new work
+
+00:30:29,440 --> 00:30:34,630
+and it comes in again also good for just
+
+00:30:32,530 --> 00:30:36,640
+in general lock free containers when you
+
+00:30:34,630 --> 00:30:38,440
+read the data and then say all right
+
+00:30:36,640 --> 00:30:40,720
+next time there's a change maybe I want
+
+00:30:38,440 --> 00:30:41,860
+to do something else or in general
+
+00:30:40,720 --> 00:30:44,890
+whenever you'd use a condition variable
+
+00:30:41,860 --> 00:30:46,360
+but you don't need the locking and the
+
+00:30:44,890 --> 00:30:48,340
+go here by avoiding the locking is to
+
+00:30:46,360 --> 00:30:50,440
+preserve lock freedom to make sure that
+
+00:30:48,340 --> 00:30:51,940
+no one thread can prevent every other
+
+00:30:50,440 --> 00:30:53,559
+thread and your program from making
+
+00:30:51,940 --> 00:30:56,559
+forward progress and that's how we
+
+00:30:53,559 --> 00:30:58,360
+control tail latency but also we don't
+
+00:30:56,559 --> 00:31:00,580
+want to spend forever we want to
+
+00:30:58,360 --> 00:31:03,010
+eventually be able to sleep and let the
+
+00:31:00,580 --> 00:31:07,480
+operating system make good use of the
+
+00:31:03,010 --> 00:31:08,890
+CPUs okay in fact we can even use event
+
+00:31:07,480 --> 00:31:10,480
+counts as an alternative to condition
+
+00:31:08,890 --> 00:31:12,600
+variables just here's how I like to
+
+00:31:10,480 --> 00:31:14,650
+think about this condition variables is
+
+00:31:12,600 --> 00:31:15,100
+kind of like a monitor except you can
+
+00:31:14,650 --> 00:31:16,299
+have finer
+
+00:31:15,100 --> 00:31:19,120
+brain juice you can have multiple
+
+00:31:16,299 --> 00:31:21,970
+conditions area balls for one mutex what
+
+00:31:19,120 --> 00:31:24,970
+event counts now we can also have finer
+
+00:31:21,970 --> 00:31:27,400
+greenery Texas we can have em mutex and
+
+00:31:24,970 --> 00:31:29,500
+event count and duration ship between
+
+00:31:27,400 --> 00:31:31,720
+the twist arbitrate it's up to us so I
+
+00:31:29,500 --> 00:31:33,490
+like to use this lot when I implement
+
+00:31:31,720 --> 00:31:35,440
+block striping on a data structure and
+
+00:31:33,490 --> 00:31:37,600
+the wait condition are not easily
+
+00:31:35,440 --> 00:31:39,669
+chargeable then we can have multiple
+
+00:31:37,600 --> 00:31:43,240
+stripe locks and a single event count
+
+00:31:39,669 --> 00:31:44,410
+that preserves correctness okay so how
+
+00:31:43,240 --> 00:31:46,390
+are we going to best with event counts
+
+00:31:44,410 --> 00:31:49,570
+here so classic union counties would be
+
+00:31:46,390 --> 00:31:51,940
+like the one in Folly we're gonna use
+
+00:31:49,570 --> 00:31:54,400
+one atomic fetch an add on the fast fat
+
+00:31:51,940 --> 00:31:57,640
+and so the on contended notified to
+
+00:31:54,400 --> 00:31:59,320
+Express be 24 cycles we're going to
+
+00:31:57,640 --> 00:32:01,929
+specialize this for a single writer for
+
+00:31:59,320 --> 00:32:04,360
+x86 x86 64 and that will let us move
+
+00:32:01,929 --> 00:32:07,120
+work do the waiters to president trying
+
+00:32:04,360 --> 00:32:09,159
+to sleep anyway and the result is the
+
+00:32:07,120 --> 00:32:11,740
+single writer cke see where and and
+
+00:32:09,159 --> 00:32:17,679
+contended notify it takes 8 cycles and
+
+00:32:11,740 --> 00:32:19,809
+no atomic okay so the core of event
+
+00:32:17,679 --> 00:32:21,909
+counts is waiting or blocking with
+
+00:32:19,809 --> 00:32:23,710
+operating system support we're gonna use
+
+00:32:21,909 --> 00:32:26,230
+a primitive that is known as a free text
+
+00:32:23,710 --> 00:32:28,809
+on linux so that's a 32-bit integers
+
+00:32:26,230 --> 00:32:30,370
+anywhere in physical memory there are
+
+00:32:28,809 --> 00:32:32,799
+two operations one is a conditional wait
+
+00:32:30,370 --> 00:32:35,830
+enters the week you on that address if
+
+00:32:32,799 --> 00:32:37,990
+the value is what expect and free text
+
+00:32:35,830 --> 00:32:40,150
+week which is just wait everyone who's
+
+00:32:37,990 --> 00:32:41,860
+waiting on that address and wait and
+
+00:32:40,150 --> 00:32:43,120
+wait our atomic particulate back to each
+
+00:32:41,860 --> 00:32:45,669
+other because there's a synchronization
+
+00:32:43,120 --> 00:32:47,620
+and the kernel so that's what makes this
+
+00:32:45,669 --> 00:32:51,820
+useful windows has essentially the same
+
+00:32:47,620 --> 00:32:54,159
+primitive except it's more powerful and
+
+00:32:51,820 --> 00:32:56,230
+now few textures are extremely easy to
+
+00:32:54,159 --> 00:32:56,710
+miss you so that's why only used to text
+
+00:32:56,230 --> 00:32:59,140
+wake
+
+00:32:56,710 --> 00:33:00,570
+futex wait and there's a ton of other
+
+00:32:59,140 --> 00:33:02,710
+operations they all tend to be either
+
+00:33:00,570 --> 00:33:05,340
+extremely hard to use correctly or
+
+00:33:02,710 --> 00:33:07,840
+comedian scalable so there you go
+
+00:33:05,340 --> 00:33:09,429
+okay so given a few decks are getting
+
+00:33:07,840 --> 00:33:12,000
+implement just a classic multi writer
+
+00:33:09,429 --> 00:33:14,409
+event challenge so we're gonna do is
+
+00:33:12,000 --> 00:33:16,960
+we're gonna encode two bits of
+
+00:33:14,409 --> 00:33:19,840
+information in our 32-bit free text it's
+
+00:33:16,960 --> 00:33:22,870
+gonna be in a little bit the flag that
+
+00:33:19,840 --> 00:33:25,960
+says is anyone waiting to be woken up on
+
+00:33:22,870 --> 00:33:28,500
+this event count and then a 32 31 bit
+
+00:33:25,960 --> 00:33:31,049
+counter for the rest of a
+
+00:33:28,500 --> 00:33:33,240
+their feet X so for a real
+
+00:33:31,049 --> 00:33:36,600
+implementation of a classic ultra-bright
+
+00:33:33,240 --> 00:33:38,520
+or event count you could see folly and
+
+00:33:36,600 --> 00:33:40,530
+here's how we might use it let's say you
+
+00:33:38,520 --> 00:33:42,590
+have a ring buffer and you want to be
+
+00:33:40,530 --> 00:33:44,789
+able to pull work from that read buffer
+
+00:33:42,590 --> 00:33:47,309
+but at some point ring buffer is empty
+
+00:33:44,789 --> 00:33:50,460
+and you want to enter C so what you do
+
+00:33:47,309 --> 00:33:51,780
+is you see prepare weight from the event
+
+00:33:50,460 --> 00:33:54,720
+count that's gonna give you a cookie
+
+00:33:51,780 --> 00:33:56,880
+then you try to get work from the work
+
+00:33:54,720 --> 00:33:58,830
+queue if you don't find anything you
+
+00:33:56,880 --> 00:34:00,870
+then enter weight on the event count and
+
+00:33:58,830 --> 00:34:02,520
+you do the same thing we get woken up
+
+00:34:00,870 --> 00:34:03,870
+eventually you're gonna get something to
+
+00:34:02,520 --> 00:34:06,600
+do and you're returned from your choir
+
+00:34:03,870 --> 00:34:07,710
+work so this means that when you add
+
+00:34:06,600 --> 00:34:09,510
+more work through ring buffer there's
+
+00:34:07,710 --> 00:34:11,460
+one additional step in addition to
+
+00:34:09,510 --> 00:34:13,500
+pushing the ring buffer you also have to
+
+00:34:11,460 --> 00:34:17,609
+remember to notify the event count to
+
+00:34:13,500 --> 00:34:19,859
+wake up any Sivir so how is prepare
+
+00:34:17,609 --> 00:34:21,960
+weight implemented in our scheme prepare
+
+00:34:19,859 --> 00:34:24,659
+weight is simply reading the counter
+
+00:34:21,960 --> 00:34:26,879
+value so we load the ephod and we shift
+
+00:34:24,659 --> 00:34:29,190
+right by one bit to just clear out the
+
+00:34:26,879 --> 00:34:30,540
+factors that's irrelevant to us and then
+
+00:34:29,190 --> 00:34:33,419
+when it comes time to wait
+
+00:34:30,540 --> 00:34:35,669
+we're gonna use a compare and swap to
+
+00:34:33,419 --> 00:34:37,290
+make sure that the counter value has not
+
+00:34:35,669 --> 00:34:39,869
+changed and to transition to fly from
+
+00:34:37,290 --> 00:34:41,849
+zero to one this conference webkinz fail
+
+00:34:39,869 --> 00:34:43,800
+for two reasons either the counter value
+
+00:34:41,849 --> 00:34:47,339
+has changed and in that case we return
+
+00:34:43,800 --> 00:34:48,960
+because there's new data for us or the
+
+00:34:47,339 --> 00:34:50,790
+flag was already set to 1 and that's
+
+00:34:48,960 --> 00:34:52,530
+okay because our only goal here is to
+
+00:34:50,790 --> 00:34:54,149
+make sure that the flag is 1 doesn't
+
+00:34:52,530 --> 00:34:56,550
+matter if someone else had already done
+
+00:34:54,149 --> 00:34:58,950
+it for us and what's that done we can
+
+00:34:56,550 --> 00:35:01,349
+just call feed X weight with the
+
+00:34:58,950 --> 00:35:03,359
+expectation that we only sleep if the
+
+00:35:01,349 --> 00:35:06,900
+counter has not changed and the fight
+
+00:35:03,359 --> 00:35:08,609
+weight is still set to 1 now on the
+
+00:35:06,900 --> 00:35:11,359
+right side when we add new work and we
+
+00:35:08,609 --> 00:35:13,830
+want to notify any waiter what we do is
+
+00:35:11,359 --> 00:35:15,390
+we increment the counter we check if the
+
+00:35:13,830 --> 00:35:17,400
+flag is set and if so we entered is
+
+00:35:15,390 --> 00:35:18,990
+sloped at where we play the right we
+
+00:35:17,400 --> 00:35:22,320
+care the flag and we notify everyone
+
+00:35:18,990 --> 00:35:24,119
+waiting on that rejects ok good that was
+
+00:35:22,320 --> 00:35:26,040
+the classic implementation the problem
+
+00:35:24,119 --> 00:35:28,770
+here is that on the fast pad for notifi
+
+00:35:26,040 --> 00:35:32,220
+there's a single pension at atomic would
+
+00:35:28,770 --> 00:35:35,460
+like to avoid that how are we gonna do
+
+00:35:32,220 --> 00:35:37,200
+that with x86 64 we're going to packet
+
+00:35:35,460 --> 00:35:39,450
+counter in a 5 bit and the Machine word
+
+00:35:37,200 --> 00:35:41,460
+64 bit and the counter will still be
+
+00:35:39,450 --> 00:35:43,069
+monotonically increasing you know modulo
+
+00:35:41,460 --> 00:35:45,329
+RepRap
+
+00:35:43,069 --> 00:35:46,950
+however instead of having a flag bit
+
+00:35:45,329 --> 00:35:48,420
+that is always obeyed the moment it's
+
+00:35:46,950 --> 00:35:51,180
+set we're gonna make it eventually
+
+00:35:48,420 --> 00:35:52,530
+stable so it's gonna take some time at
+
+00:35:51,180 --> 00:35:54,480
+some point we're going to say this fight
+
+00:35:52,530 --> 00:35:58,440
+with is stable and the only way it gets
+
+00:35:54,480 --> 00:36:00,960
+cleared is if I get woken up anyway okay
+
+00:35:58,440 --> 00:36:03,720
+so given these relaxation how can we
+
+00:36:00,960 --> 00:36:05,609
+implement the fast path to notify pad so
+
+00:36:03,720 --> 00:36:08,520
+TSO already says we're always going to
+
+00:36:05,609 --> 00:36:11,730
+read the latest value from the TSO right
+
+00:36:08,520 --> 00:36:14,130
+buffer to write q or from memory so we
+
+00:36:11,730 --> 00:36:16,170
+can use a regular read triggering
+
+00:36:14,130 --> 00:36:18,510
+comment we're going to write and the
+
+00:36:16,170 --> 00:36:20,280
+only thing we might miss is the flag the
+
+00:36:18,510 --> 00:36:22,050
+counter value will always correctly
+
+00:36:20,280 --> 00:36:24,809
+increment so that's what we wanted right
+
+00:36:22,050 --> 00:36:26,460
+this is great problem here is that we
+
+00:36:24,809 --> 00:36:31,109
+could get preempted between the read and
+
+00:36:26,460 --> 00:36:32,309
+the write so why is preemption bad so
+
+00:36:31,109 --> 00:36:34,230
+let's see what would happen if we get
+
+00:36:32,309 --> 00:36:36,089
+preempted there so we're gonna trace
+
+00:36:34,230 --> 00:36:39,170
+through the execution here you read the
+
+00:36:36,089 --> 00:36:42,329
+event count stir it in there some are 64
+
+00:36:39,170 --> 00:36:46,829
+then we compute our 64 plus to start at
+
+00:36:42,329 --> 00:36:48,750
+in temp and we get preempted now during
+
+00:36:46,829 --> 00:36:52,859
+that time we're not running the reader
+
+00:36:48,750 --> 00:36:54,780
+comes in says the event count to 101 to
+
+00:36:52,859 --> 00:36:57,569
+say hey if I get said wake me up please
+
+00:36:54,780 --> 00:36:59,490
+then it waits until sometime maybe very
+
+00:36:57,569 --> 00:37:01,530
+conservatively you could save with 10
+
+00:36:59,490 --> 00:37:03,930
+minutes at that point sure either write
+
+00:37:01,530 --> 00:37:08,400
+is visible right and then it enters free
+
+00:37:03,930 --> 00:37:11,369
+text sleep finally at t1 plus Epsilon
+
+00:37:08,400 --> 00:37:13,530
+just one second after 10 minutes the
+
+00:37:11,369 --> 00:37:15,839
+writer comes back in and resumes
+
+00:37:13,530 --> 00:37:17,549
+execution now what's gonna happen well
+
+00:37:15,839 --> 00:37:19,020
+the write would execute but it's gonna
+
+00:37:17,549 --> 00:37:21,660
+use the value that it read 10 minutes
+
+00:37:19,020 --> 00:37:23,609
+ago so it's going to raise that flag not
+
+00:37:21,660 --> 00:37:25,349
+notice that the flag was set and never
+
+00:37:23,609 --> 00:37:27,390
+entered the slope at never wake up the
+
+00:37:25,349 --> 00:37:28,799
+waiter that's no good right because
+
+00:37:27,390 --> 00:37:31,920
+we're at the mercy of the scheduler here
+
+00:37:28,799 --> 00:37:35,339
+that can introduce arbitrary delays in
+
+00:37:31,920 --> 00:37:37,650
+our observation of the flag all right so
+
+00:37:35,339 --> 00:37:41,130
+here's something special about x86 x86
+
+00:37:37,650 --> 00:37:43,619
+64 has non atomic read-modify-write
+
+00:37:41,130 --> 00:37:46,319
+instructions so these instructions are
+
+00:37:43,619 --> 00:37:48,569
+just one instruction that the load or
+
+00:37:46,319 --> 00:37:50,670
+adnetik in a store now with respect to
+
+00:37:48,569 --> 00:37:51,990
+cache coherency and atomicity they're
+
+00:37:50,670 --> 00:37:53,790
+not atomic right because it's multiple
+
+00:37:51,990 --> 00:37:56,220
+microwaves so it's exactly the same
+
+00:37:53,790 --> 00:37:59,800
+thing has multiple instructions
+
+00:37:56,220 --> 00:38:01,599
+but with respect to the scheduler it is
+
+00:37:59,800 --> 00:38:03,520
+atomic because preemption only happens
+
+00:38:01,599 --> 00:38:05,140
+and it is at you know is given
+
+00:38:03,520 --> 00:38:07,810
+instruction boundary you can't interrupt
+
+00:38:05,140 --> 00:38:09,369
+in the middle of an instruction and sown
+
+00:38:07,810 --> 00:38:11,980
+on x86 do you have read-modify-write
+
+00:38:09,369 --> 00:38:13,570
+instructions but they're always locked
+
+00:38:11,980 --> 00:38:17,950
+and we're trying here to avoid the
+
+00:38:13,570 --> 00:38:19,869
+overhead of locking okay so we're gonna
+
+00:38:17,950 --> 00:38:22,390
+use this X add instruction which does
+
+00:38:19,869 --> 00:38:24,580
+exactly what we want it's a load and add
+
+00:38:22,390 --> 00:38:26,560
+in a store in one instruction and we get
+
+00:38:24,580 --> 00:38:28,359
+the previous value here then we can
+
+00:38:26,560 --> 00:38:29,950
+check the previous value was set to one
+
+00:38:28,359 --> 00:38:32,950
+and if so entered is slow path
+
+00:38:29,950 --> 00:38:34,660
+difference here is that we can still
+
+00:38:32,950 --> 00:38:37,000
+have a delay but the delay is controlled
+
+00:38:34,660 --> 00:38:40,089
+by the hardware and never affected by
+
+00:38:37,000 --> 00:38:42,040
+preemption oh yeah and we can make
+
+00:38:40,089 --> 00:38:46,450
+optimize this a bit if you guys want a
+
+00:38:42,040 --> 00:38:47,859
+nice assembly challenge okay if we go
+
+00:38:46,450 --> 00:38:50,410
+back to when we had an immediate
+
+00:38:47,859 --> 00:38:52,390
+immediately stable flag or the wait side
+
+00:38:50,410 --> 00:38:55,150
+what we said was we flip the flag and
+
+00:38:52,390 --> 00:38:57,940
+then immediately we can enter free text
+
+00:38:55,150 --> 00:38:59,710
+wait what do we do when the flag isn't
+
+00:38:57,940 --> 00:39:04,660
+immediately stable it takes a while
+
+00:38:59,710 --> 00:39:06,580
+before we can enter a free text wait so
+
+00:39:04,660 --> 00:39:09,099
+the first step is the same right we want
+
+00:39:06,580 --> 00:39:10,990
+to make sure that the counter value has
+
+00:39:09,099 --> 00:39:14,020
+not changed and fled the five bit to one
+
+00:39:10,990 --> 00:39:15,970
+to notify the presence of waiters and it
+
+00:39:14,020 --> 00:39:17,440
+can only fail if there's a new counter
+
+00:39:15,970 --> 00:39:19,330
+value in which case we return
+
+00:39:17,440 --> 00:39:21,580
+immediately or the fight was already set
+
+00:39:19,330 --> 00:39:22,000
+and that's just irrelevant good enough
+
+00:39:21,580 --> 00:39:24,609
+for us
+
+00:39:22,000 --> 00:39:28,060
+and then we spent all right why do we
+
+00:39:24,609 --> 00:39:31,030
+spend well we already said that the
+
+00:39:28,060 --> 00:39:33,430
+store buffer and tso is bounded and in
+
+00:39:31,030 --> 00:39:35,050
+fact the reason it's bounded is that the
+
+00:39:33,430 --> 00:39:38,230
+store buffer is essentially an out of
+
+00:39:35,050 --> 00:39:39,940
+order execution resource so the amount
+
+00:39:38,230 --> 00:39:42,190
+of time that a write can be stuck in a
+
+00:39:39,940 --> 00:39:43,390
+store buffer is proportional to the
+
+00:39:42,190 --> 00:39:45,700
+amount of time it could take to fully
+
+00:39:43,390 --> 00:39:48,460
+execute a pipeline full of words of
+
+00:39:45,700 --> 00:39:51,010
+micro instructions all right on the chip
+
+00:39:48,460 --> 00:39:53,170
+so I mean in theory there's no
+
+00:39:51,010 --> 00:39:55,690
+worst-case position down here but it is
+
+00:39:53,170 --> 00:39:57,369
+possible to build it and an interesting
+
+00:39:55,690 --> 00:40:00,310
+set up where it's gonna take a million
+
+00:39:57,369 --> 00:40:03,010
+cycles to sew that pipeline but in
+
+00:40:00,310 --> 00:40:05,140
+practice almost always after a couple of
+
+00:40:03,010 --> 00:40:08,020
+thousand cycles the right I'll be right
+
+00:40:05,140 --> 00:40:09,380
+will be visible and we can start doing
+
+00:40:08,020 --> 00:40:12,950
+free text wait
+
+00:40:09,380 --> 00:40:14,539
+however that futex weights cannot be
+
+00:40:12,950 --> 00:40:16,640
+forever because we're not sure not a
+
+00:40:14,539 --> 00:40:19,700
+hundred percent sure that the flag bit
+
+00:40:16,640 --> 00:40:20,779
+flip has been seen by the writer so
+
+00:40:19,700 --> 00:40:25,220
+we're gonna start doing exponential
+
+00:40:20,779 --> 00:40:28,190
+back-off for hello alright here's the
+
+00:40:25,220 --> 00:40:29,960
+other trick here turns out we're already
+
+00:40:28,190 --> 00:40:31,579
+paying for barriers which are called
+
+00:40:29,960 --> 00:40:34,309
+interrupts you know for preemption or
+
+00:40:31,579 --> 00:40:37,670
+i/o interrupt and whenever our Hooser
+
+00:40:34,309 --> 00:40:39,829
+code is interrupted in hardware that
+
+00:40:37,670 --> 00:40:41,569
+interrupts is also a full barrier for a
+
+00:40:39,829 --> 00:40:44,569
+user code so any right had happened
+
+00:40:41,569 --> 00:40:46,220
+before any request process is visible
+
+00:40:44,569 --> 00:40:48,380
+globally to the rest of the system and
+
+00:40:46,220 --> 00:40:50,479
+it so happens that if only for
+
+00:40:48,380 --> 00:40:53,210
+preemption interrupts have been several
+
+00:40:50,479 --> 00:40:55,279
+times a second so we're gonna wait one
+
+00:40:53,210 --> 00:40:57,019
+second if it takes more than one second
+
+00:40:55,279 --> 00:40:59,210
+to process even one interrupt your
+
+00:40:57,019 --> 00:41:01,430
+system is probably completely wedged or
+
+00:40:59,210 --> 00:41:03,079
+you have like a interrupts free setup
+
+00:41:01,430 --> 00:41:06,049
+and you're kind of looking for trouble
+
+00:41:03,079 --> 00:41:08,420
+if you're using this error alright and
+
+00:41:06,049 --> 00:41:12,099
+now the is definitely stable we can
+
+00:41:08,420 --> 00:41:12,099
+finally do their regular food text wait
+
+00:41:12,789 --> 00:41:17,299
+what does that get us
+
+00:41:14,440 --> 00:41:18,680
+all right so we're gonna only get the
+
+00:41:17,299 --> 00:41:21,109
+overhead when there's no contention
+
+00:41:18,680 --> 00:41:22,460
+there is no one to notify the reason for
+
+00:41:21,109 --> 00:41:25,400
+that is that the free text weight
+
+00:41:22,460 --> 00:41:27,079
+operation is super slow just waking up
+
+00:41:25,400 --> 00:41:29,809
+all the waiters going into the kernel to
+
+00:41:27,079 --> 00:41:31,609
+do that that's hundreds of cycles like a
+
+00:41:29,809 --> 00:41:34,759
+quarter of a microsecond of my pretty
+
+00:41:31,609 --> 00:41:37,369
+old machine okay and now we can compare
+
+00:41:34,759 --> 00:41:39,319
+like a regular classic multi writer
+
+00:41:37,369 --> 00:41:42,049
+event count like say Follies or the
+
+00:41:39,319 --> 00:41:44,809
+multi writer cke see with the single
+
+00:41:42,049 --> 00:41:48,849
+writer specialization the latency here
+
+00:41:44,809 --> 00:41:52,069
+goes from 24 cycles 2046 for a regular
+
+00:41:48,849 --> 00:41:53,660
+multi writer event count because it
+
+00:41:52,069 --> 00:41:56,869
+takes one page and add operation and a
+
+00:41:53,660 --> 00:42:00,319
+fast path versus cke see for the single
+
+00:41:56,869 --> 00:42:02,829
+writer case no atomic eight cycles for
+
+00:42:00,319 --> 00:42:05,329
+per notified on the fast path
+
+00:42:02,829 --> 00:42:07,339
+now this compares pretty well with just
+
+00:42:05,329 --> 00:42:09,410
+a regular increment right where it's on
+
+00:42:07,339 --> 00:42:12,349
+the order of three cycles and again no
+
+00:42:09,410 --> 00:42:13,130
+Atomics so I want to say this is almost
+
+00:42:12,349 --> 00:42:14,839
+zero overhead
+
+00:42:13,130 --> 00:42:16,099
+if you already have I could counter like
+
+00:42:14,839 --> 00:42:17,989
+say in your ring buffer and you want to
+
+00:42:16,099 --> 00:42:22,219
+add sleeping it could just replace that
+
+00:42:17,989 --> 00:42:23,210
+counter by cke see and there you go now
+
+00:42:22,219 --> 00:42:28,309
+you can add
+
+00:42:23,210 --> 00:42:30,349
+os assisted blocking all right so
+
+00:42:28,309 --> 00:42:33,770
+there's been a there's a pattern here in
+
+00:42:30,349 --> 00:42:35,290
+the last two data structures algorithms
+
+00:42:33,770 --> 00:42:38,900
+that we presented right
+
+00:42:35,290 --> 00:42:42,050
+the goal was at PUC without barriers and
+
+00:42:38,900 --> 00:42:43,730
+an event count we said we're gonna wait
+
+00:42:42,050 --> 00:42:45,740
+for one second in order to make sure
+
+00:42:43,730 --> 00:42:49,730
+that the fast path rights are all
+
+00:42:45,740 --> 00:42:51,650
+visible to us so the problem here is
+
+00:42:49,730 --> 00:42:53,210
+that we have to incur complexity in
+
+00:42:51,650 --> 00:42:55,130
+order to make sure that writes on the
+
+00:42:53,210 --> 00:42:57,470
+fast path are visible to the slow path
+
+00:42:55,130 --> 00:42:59,450
+but we don't want to pay for barriers in
+
+00:42:57,470 --> 00:43:01,609
+the fast bad one there's no one on this
+
+00:42:59,450 --> 00:43:03,530
+little pet that needs them so is there a
+
+00:43:01,609 --> 00:43:05,329
+generic approach that we could use to
+
+00:43:03,530 --> 00:43:08,319
+ensure to visibility of rights to
+
+00:43:05,329 --> 00:43:10,220
+readers turns out yes so that's a
+
+00:43:08,319 --> 00:43:12,020
+western deer that's called a reverse
+
+00:43:10,220 --> 00:43:14,630
+barrier and the idea here is that the
+
+00:43:12,020 --> 00:43:17,750
+slow path and go to the kernel and say
+
+00:43:14,630 --> 00:43:19,250
+injected barrier everywhere dynamically
+
+00:43:17,750 --> 00:43:21,319
+when I need it and that will ensure
+
+00:43:19,250 --> 00:43:23,510
+visibility of every right it had been on
+
+00:43:21,319 --> 00:43:26,540
+any other core in your system once
+
+00:43:23,510 --> 00:43:28,010
+traversed by or returns so here's an
+
+00:43:26,540 --> 00:43:29,420
+example used days when you have a
+
+00:43:28,010 --> 00:43:31,099
+reactor that's like well there's no work
+
+00:43:29,420 --> 00:43:33,260
+for me to do I'm gonna start sweeping
+
+00:43:31,099 --> 00:43:34,490
+and release that CPU so it's v of lag
+
+00:43:33,260 --> 00:43:36,920
+says all right enter sleep mode
+
+00:43:34,490 --> 00:43:39,109
+make sure it's globally visible it
+
+00:43:36,920 --> 00:43:41,299
+executes our rivers barrier the goal
+
+00:43:39,109 --> 00:43:43,940
+here is to make sure that if any in cure
+
+00:43:41,299 --> 00:43:47,059
+has just added work on this ring buffer
+
+00:43:43,940 --> 00:43:48,650
+we all notice it and we say all right
+
+00:43:47,059 --> 00:43:51,260
+there's no work for us to do that's
+
+00:43:48,650 --> 00:43:54,230
+great we can sleep then the entry comes
+
+00:43:51,260 --> 00:43:56,480
+in ads work notices the sweep old pad
+
+00:43:54,230 --> 00:44:01,280
+was set and waste up the reactors it can
+
+00:43:56,480 --> 00:44:03,380
+do the work so that's great right and
+
+00:44:01,280 --> 00:44:05,030
+that's why we want reverse barriers so
+
+00:44:03,380 --> 00:44:07,130
+the classic reverse barrier and Lenox
+
+00:44:05,030 --> 00:44:08,240
+and on Windows is synchronous and in
+
+00:44:07,130 --> 00:44:11,210
+general do you seem to come in two
+
+00:44:08,240 --> 00:44:13,549
+flavors when is a very slow that was the
+
+00:44:11,210 --> 00:44:16,220
+original implementation on Linux and
+
+00:44:13,549 --> 00:44:17,960
+when somebody be tried to use it but
+
+00:44:16,220 --> 00:44:18,589
+they found was it introduced so much
+
+00:44:17,960 --> 00:44:20,839
+slow down
+
+00:44:18,589 --> 00:44:22,849
+and they're shut down operation that
+
+00:44:20,839 --> 00:44:24,920
+they had to revert it and they added a
+
+00:44:22,849 --> 00:44:26,869
+new patch to copy the implementation
+
+00:44:24,920 --> 00:44:28,880
+that's on Windows which I like to say
+
+00:44:26,869 --> 00:44:30,680
+it's unscalable because essentially what
+
+00:44:28,880 --> 00:44:31,970
+it does is it send it hard sensor
+
+00:44:30,680 --> 00:44:33,530
+hardware interrupt you every other core
+
+00:44:31,970 --> 00:44:36,060
+in the system to make sure that a
+
+00:44:33,530 --> 00:44:38,370
+barrier is executed
+
+00:44:36,060 --> 00:44:40,380
+all right at this point the question I
+
+00:44:38,370 --> 00:44:42,330
+guess is why do we care that is reverse
+
+00:44:40,380 --> 00:44:44,280
+very very slow we only basic you tit
+
+00:44:42,330 --> 00:44:45,900
+when we want to go to sleep anyway so
+
+00:44:44,280 --> 00:44:48,000
+here's what could happen with a slow
+
+00:44:45,900 --> 00:44:52,950
+reverse barrier you reactor on the right
+
+00:44:48,000 --> 00:44:55,230
+intercede mode the Enquirer ads word the
+
+00:44:52,950 --> 00:44:58,200
+reactor execute its reverse carrier and
+
+00:44:55,230 --> 00:45:00,230
+then it's a very stores barrier ten
+
+00:44:58,200 --> 00:45:02,970
+milliseconds later it's sell me colonel
+
+00:45:00,230 --> 00:45:05,670
+finally it returns and it notices that
+
+00:45:02,970 --> 00:45:07,200
+it has work to do so while the usual
+
+00:45:05,670 --> 00:45:09,210
+latency on a work unit for this record
+
+00:45:07,200 --> 00:45:10,410
+might be one millisecond if it happens
+
+00:45:09,210 --> 00:45:13,590
+to come in in the middle of reverse
+
+00:45:10,410 --> 00:45:15,180
+barrier now we added ten out of more
+
+00:45:13,590 --> 00:45:18,120
+milliseconds of latency that's a ton of
+
+00:45:15,180 --> 00:45:19,740
+jitter not great okay so what are we
+
+00:45:18,120 --> 00:45:22,050
+gonna do about this how can you avoid
+
+00:45:19,740 --> 00:45:25,110
+wasting time in this synchronous reverse
+
+00:45:22,050 --> 00:45:28,350
+barrier well we could just make it
+
+00:45:25,110 --> 00:45:30,360
+asynchronous so what's the basic idea
+
+00:45:28,350 --> 00:45:32,580
+here you have the same reactor that
+
+00:45:30,360 --> 00:45:34,890
+tries to enter sleep mode and then it
+
+00:45:32,580 --> 00:45:36,780
+acquires a watermark your reverse
+
+00:45:34,890 --> 00:45:38,820
+barrier watermark then it starts pulling
+
+00:45:36,780 --> 00:45:43,050
+it pulls for work in a ring buffer
+
+00:45:38,820 --> 00:45:44,580
+imposed to know if the watermark is so
+
+00:45:43,050 --> 00:45:47,490
+far in the past that every right had
+
+00:45:44,580 --> 00:45:49,710
+happened before it are not visible it
+
+00:45:47,490 --> 00:45:50,130
+pulls again finally says all right we're
+
+00:45:49,710 --> 00:45:52,050
+good
+
+00:45:50,130 --> 00:45:53,340
+otherwise I might care about should be
+
+00:45:52,050 --> 00:45:55,350
+visible since there's nothing in the
+
+00:45:53,340 --> 00:45:57,600
+ring buffer it's hope it's safe to go to
+
+00:45:55,350 --> 00:45:59,520
+sleep now the injurer can add work and
+
+00:45:57,600 --> 00:46:02,580
+regular you just wake up the sleeping
+
+00:45:59,520 --> 00:46:04,950
+reactor and what used to be our bad
+
+00:46:02,580 --> 00:46:06,510
+generate case is also fixed because we
+
+00:46:04,950 --> 00:46:09,090
+enter sleep mode right we've got the
+
+00:46:06,510 --> 00:46:11,790
+flag we require a red bear what don't
+
+00:46:09,090 --> 00:46:13,440
+work we start pulling for both data and
+
+00:46:11,790 --> 00:46:15,900
+to know if the watermark is old enough
+
+00:46:13,440 --> 00:46:18,750
+in the past and now immediately the
+
+00:46:15,900 --> 00:46:20,430
+interior adds word and since we're
+
+00:46:18,750 --> 00:46:21,810
+pulling some point for work we
+
+00:46:20,430 --> 00:46:24,720
+immediately notice that there's work to
+
+00:46:21,810 --> 00:46:29,970
+do and we stop the sleeping code that
+
+00:46:24,720 --> 00:46:32,900
+Andrey entered active reactor loop all
+
+00:46:29,970 --> 00:46:35,280
+right can we do that in userspace
+
+00:46:32,900 --> 00:46:36,900
+the main challenge here is that we want
+
+00:46:35,280 --> 00:46:39,210
+to find a way to track when Bears have
+
+00:46:36,900 --> 00:46:41,280
+happened on every CPU without
+
+00:46:39,210 --> 00:46:43,350
+introducing overhead and to map that to
+
+00:46:41,280 --> 00:46:45,000
+some sort of watermark value now we
+
+00:46:43,350 --> 00:46:47,430
+already knew that interrupts of barriers
+
+00:46:45,000 --> 00:46:49,680
+that preemption is an interrupt
+
+00:46:47,430 --> 00:46:52,289
+does you know preemption is a barrier
+
+00:46:49,680 --> 00:46:55,319
+so we could use an expert to track these
+
+00:46:52,289 --> 00:46:57,299
+events and asked for a clock monotonic
+
+00:46:55,319 --> 00:46:59,849
+times them for when these events happen
+
+00:46:57,299 --> 00:47:01,980
+then we can see you know the stream of
+
+00:46:59,849 --> 00:47:04,260
+events that happen on every core the
+
+00:47:01,980 --> 00:47:06,990
+problem here is that these events are
+
+00:47:04,260 --> 00:47:08,819
+extremely frequent right there's a lot
+
+00:47:06,990 --> 00:47:11,299
+of redundant events if we start
+
+00:47:08,819 --> 00:47:13,170
+processing all of these and userspace
+
+00:47:11,299 --> 00:47:15,510
+you're probably kind of waste you see
+
+00:47:13,170 --> 00:47:17,250
+beyond that no good so we're gonna do
+
+00:47:15,510 --> 00:47:19,710
+about this well anytime you want to do
+
+00:47:17,250 --> 00:47:24,210
+something exotic in the kernel we use eb
+
+00:47:19,710 --> 00:47:27,210
+p.m. so we're gonna use an expert to
+
+00:47:24,210 --> 00:47:28,289
+invoke any BPF routine on these events
+
+00:47:27,210 --> 00:47:30,299
+that we're trying to track all these
+
+00:47:28,289 --> 00:47:33,150
+interrupts we're gonna maintain an array
+
+00:47:30,299 --> 00:47:35,250
+of per CPU clock monotonic timestamp of
+
+00:47:33,150 --> 00:47:37,980
+the last interrupt we observed on each
+
+00:47:35,250 --> 00:47:41,250
+CPU and we're going to use conditional
+
+00:47:37,980 --> 00:47:41,940
+logic in BPF to set the synthetic
+
+00:47:41,250 --> 00:47:43,770
+percent
+
+00:47:41,940 --> 00:47:47,279
+whenever the oldest time temp changes
+
+00:47:43,770 --> 00:47:49,170
+and now the userspace can wait on this
+
+00:47:47,279 --> 00:47:51,690
+event with like a person that open file
+
+00:47:49,170 --> 00:47:54,270
+descriptor and no that will most likely
+
+00:47:51,690 --> 00:47:56,579
+only woken up when the oldest worker
+
+00:47:54,270 --> 00:48:00,390
+mark changes as the global system-wide
+
+00:47:56,579 --> 00:48:01,920
+watermark has changed okay
+
+00:48:00,390 --> 00:48:03,329
+so there's an implementation of this
+
+00:48:01,920 --> 00:48:06,510
+it's open source again fighting on
+
+00:48:03,329 --> 00:48:08,400
+github and so the watermark is the clock
+
+00:48:06,510 --> 00:48:10,770
+wanna tag times them we sample a
+
+00:48:08,400 --> 00:48:14,099
+couple's perfect answer it's mostly
+
+00:48:10,770 --> 00:48:15,990
+context switches and prior queues and we
+
+00:48:14,099 --> 00:48:18,210
+remember the time of the last event for
+
+00:48:15,990 --> 00:48:21,770
+each CPU and the global watermark here
+
+00:48:18,210 --> 00:48:23,670
+is the oldest event across all the CPUs
+
+00:48:21,770 --> 00:48:26,579
+now again these are high frequency
+
+00:48:23,670 --> 00:48:29,490
+events we use EBP F to aggregate and to
+
+00:48:26,579 --> 00:48:31,589
+selectively send perf wake-ups and since
+
+00:48:29,490 --> 00:48:33,809
+all of these values are per CPU the not
+
+00:48:31,589 --> 00:48:34,319
+per process we only need one Damon per
+
+00:48:33,809 --> 00:48:35,970
+machine
+
+00:48:34,319 --> 00:48:37,440
+so this is great right you only pay for
+
+00:48:35,970 --> 00:48:38,670
+this overhead one per machine and then
+
+00:48:37,440 --> 00:48:40,859
+doesn't matter how many threads how many
+
+00:48:38,670 --> 00:48:42,990
+processes need to have reverse barriers
+
+00:48:40,859 --> 00:48:46,099
+to get this for free you just have to
+
+00:48:42,990 --> 00:48:49,859
+map this we don't eat Maps Eggman then
+
+00:48:46,099 --> 00:48:51,930
+well that's a bit sad is a you can't use
+
+00:48:49,859 --> 00:48:54,990
+Eve EPF without admin privilege so we
+
+00:48:51,930 --> 00:48:57,029
+had to use a set Tom for situating okay
+
+00:48:54,990 --> 00:48:59,880
+so it doesn't work there are two graphs
+
+00:48:57,029 --> 00:49:01,740
+here on the left you have what happens
+
+00:48:59,880 --> 00:49:02,920
+on an unloaded machine and then we can
+
+00:49:01,740 --> 00:49:05,650
+compare
+
+00:49:02,920 --> 00:49:08,950
+regular man barrier the one that doesn't
+
+00:49:05,650 --> 00:49:12,160
+do IP eyes with this barrier D and we
+
+00:49:08,950 --> 00:49:14,349
+see that when it's unloaded member does
+
+00:49:12,160 --> 00:49:16,269
+great it's much faster to respond and
+
+00:49:14,349 --> 00:49:18,549
+barrier D however the saving grace here
+
+00:49:16,269 --> 00:49:19,750
+is that barrier D is asynchronous so
+
+00:49:18,549 --> 00:49:21,730
+even though it takes a long time to
+
+00:49:19,750 --> 00:49:23,619
+recognize that the watermark has passed
+
+00:49:21,730 --> 00:49:25,690
+you're still linked responsive if you're
+
+00:49:23,619 --> 00:49:28,990
+not stuck in the kernel but I find more
+
+00:49:25,690 --> 00:49:31,029
+interesting as a graph on the right what
+
+00:49:28,990 --> 00:49:35,109
+happens in a loaded system now
+
+00:49:31,029 --> 00:49:37,900
+interested me the scalable system
+
+00:49:35,109 --> 00:49:40,119
+America becomes slower when your system
+
+00:49:37,900 --> 00:49:41,559
+is under load when you would be most
+
+00:49:40,119 --> 00:49:43,000
+interested when you really want to
+
+00:49:41,559 --> 00:49:45,450
+really CPU so that's something else can
+
+00:49:43,000 --> 00:49:45,450
+do useful work
+
+00:49:45,690 --> 00:49:54,039
+so that's life but barrier D now much
+
+00:49:50,529 --> 00:49:55,839
+faster takes almost always five
+
+00:49:54,039 --> 00:49:57,519
+milliseconds or less to respond and
+
+00:49:55,839 --> 00:50:00,309
+again it's asynchronous or you're not
+
+00:49:57,519 --> 00:50:01,990
+stuck blocking for the watermark to pass
+
+00:50:00,309 --> 00:50:05,529
+they're still processing the events in
+
+00:50:01,990 --> 00:50:08,319
+your system normally and here's how you
+
+00:50:05,529 --> 00:50:10,599
+could use berry gordy to simplify the
+
+00:50:08,319 --> 00:50:14,589
+event count that we had earlier and wait
+
+00:50:10,599 --> 00:50:16,420
+here what we do is we still just flip
+
+00:50:14,589 --> 00:50:18,309
+the flag see if the value of the color
+
+00:50:16,420 --> 00:50:20,559
+is as you expect and then we get the
+
+00:50:18,309 --> 00:50:22,029
+timestamp and our goal is to know when
+
+00:50:20,559 --> 00:50:23,440
+the system-wide wall remark will
+
+00:50:22,029 --> 00:50:25,329
+guarantee that every right had happened
+
+00:50:23,440 --> 00:50:29,769
+up to that timestamp our globally
+
+00:50:25,329 --> 00:50:32,259
+visible so we're gonna spin on the main
+
+00:50:29,769 --> 00:50:34,119
+barriers bam segment and load the global
+
+00:50:32,259 --> 00:50:36,369
+watermark and always compare it with our
+
+00:50:34,119 --> 00:50:38,259
+initial time step and what we do so
+
+00:50:36,369 --> 00:50:42,069
+that's a big difference we can still
+
+00:50:38,259 --> 00:50:43,630
+also spin on the epoch counter and see
+
+00:50:42,069 --> 00:50:45,640
+if it's changed if it's changed in
+
+00:50:43,630 --> 00:50:47,349
+doesn't matter that the right is not
+
+00:50:45,640 --> 00:50:49,539
+visible that barrier deep would not have
+
+00:50:47,349 --> 00:50:50,920
+let us return we've noticed a change in
+
+00:50:49,539 --> 00:50:53,980
+our event count and we can return
+
+00:50:50,920 --> 00:50:56,579
+immediately and finally once we notice
+
+00:50:53,980 --> 00:50:59,230
+that the right is definitely visible and
+
+00:50:56,579 --> 00:51:04,750
+the epic value has not changed we can
+
+00:50:59,230 --> 00:51:06,760
+just enter if we - explains okay so that
+
+00:51:04,750 --> 00:51:09,760
+was
+
+00:51:06,760 --> 00:51:13,090
+for data structures here's my takeaway I
+
+00:51:09,760 --> 00:51:15,160
+guess Sammy's as well right if you need
+
+00:51:13,090 --> 00:51:16,869
+concurrency if you need non-blocking
+
+00:51:15,160 --> 00:51:20,680
+algorithms specialize them to your
+
+00:51:16,869 --> 00:51:22,510
+workload right lock-free non-locking
+
+00:51:20,680 --> 00:51:24,970
+code does not have to drown in Atomics
+
+00:51:22,510 --> 00:51:26,740
+if you specialize it for the way your
+
+00:51:24,970 --> 00:51:28,060
+application uses them and for the
+
+00:51:26,740 --> 00:51:30,609
+application for the architecture it's
+
+00:51:28,060 --> 00:51:32,140
+actually going to run on and yes this
+
+00:51:30,609 --> 00:51:35,500
+does mean that we have to pay for this
+
+00:51:32,140 --> 00:51:36,940
+in complexity but after all isn't this
+
+00:51:35,500 --> 00:51:39,369
+why we're all coding in C++
+
+00:51:36,940 --> 00:51:41,650
+the whole point of doing C++ to me is
+
+00:51:39,369 --> 00:51:43,060
+unit tests like this complexity in order
+
+00:51:41,650 --> 00:51:47,859
+to get performance in a way that is
+
+00:51:43,060 --> 00:51:49,990
+still usable all right and here again a
+
+00:51:47,859 --> 00:51:52,330
+reminder of kind of their specialized
+
+00:51:49,990 --> 00:51:54,790
+tool specialization toolkit that we try
+
+00:51:52,330 --> 00:51:56,230
+to present here there are four generic
+
+00:51:54,790 --> 00:51:59,560
+usable tools that you could use to
+
+00:51:56,230 --> 00:52:02,050
+boostrap your own specialized code first
+
+00:51:59,560 --> 00:52:04,869
+one was a generic technique to make a
+
+00:52:02,050 --> 00:52:07,600
+non-locking open address hash table out
+
+00:52:04,869 --> 00:52:09,520
+of any open address hash table even if
+
+00:52:07,600 --> 00:52:12,700
+you have tombstones and the SWAT
+
+00:52:09,520 --> 00:52:16,090
+movement and we are still thinking about
+
+00:52:12,700 --> 00:52:18,580
+the SSE use case like Facebook F 14 or
+
+00:52:16,090 --> 00:52:21,520
+absol we're pretty sure it works we
+
+00:52:18,580 --> 00:52:23,920
+haven't tested it out yet we have an
+
+00:52:21,520 --> 00:52:26,859
+epic reclamation system to avoid racy
+
+00:52:23,920 --> 00:52:29,550
+use after free and zombie pointers if
+
+00:52:26,859 --> 00:52:32,140
+you have a fiber or event based systems
+
+00:52:29,550 --> 00:52:35,560
+you have a single writer event count for
+
+00:52:32,140 --> 00:52:37,720
+zero overhead operating assisted
+
+00:52:35,560 --> 00:52:40,030
+operating system assisted blogging on
+
+00:52:37,720 --> 00:52:41,859
+log few data structures you have an e
+
+00:52:40,030 --> 00:52:44,440
+synchronous traverse barrier with
+
+00:52:41,859 --> 00:52:46,119
+barrier D that lets us wait for bears in
+
+00:52:44,440 --> 00:52:52,920
+a fast path without paying for it with
+
+00:52:46,119 --> 00:52:52,920
+actual hardware fences aren't they
+
+00:52:53,920 --> 00:52:58,290
+[Laughter]
+
+00:52:58,349 --> 00:53:31,559
+Oh No is the man that invented RCU by
+
+00:53:14,759 --> 00:53:37,229
+the way you're taking it right there's a
+
+00:53:31,559 --> 00:53:40,259
+ton of an echo did you get I proposed
+
+00:53:37,229 --> 00:53:41,549
+Paul maybe you could not use the mic and
+
+00:53:40,259 --> 00:53:44,459
+then we'll repeat your question because
+
+00:53:41,549 --> 00:53:47,449
+there's a lot of echo yeah so can you
+
+00:53:44,459 --> 00:53:47,449
+repeat the question we had the mic
+
+00:54:09,930 --> 00:54:14,170
+all right a question was what do you do
+
+00:54:12,130 --> 00:54:17,290
+on tick less systems where you could
+
+00:54:14,170 --> 00:54:19,170
+have a task in userspace that gets a CPU
+
+00:54:17,290 --> 00:54:22,090
+would I didn't interrupt
+
+00:54:19,170 --> 00:54:24,130
+so the first approximation was I just
+
+00:54:22,090 --> 00:54:28,360
+give up the same way that the scalable
+
+00:54:24,130 --> 00:54:30,520
+size memory call does however I have in
+
+00:54:28,360 --> 00:54:31,810
+mind a protocol where the user space
+
+00:54:30,520 --> 00:54:33,580
+thread that does that can regularly
+
+00:54:31,810 --> 00:54:36,280
+check-in and increment like a liveness
+
+00:54:33,580 --> 00:54:37,450
+flag and that way you only have to do
+
+00:54:36,280 --> 00:54:51,370
+this in one place and everyone has can
+
+00:54:37,450 --> 00:54:52,540
+benefit cool thank you these are our
+
+00:54:51,370 --> 00:54:55,450
+emails
+
+00:54:52,540 --> 00:54:57,940
+Twitter's we're also just feel free to
+
+00:54:55,450 --> 00:54:59,260
+grab this gonna talk offline as well and
+
+00:54:57,940 --> 00:55:01,420
+then there are links at the bottom if
+
+00:54:59,260 --> 00:55:05,630
+you want to read more about this stuff
+
+00:55:01,420 --> 00:55:10,169
+or C code alright thank you
+
+00:55:05,630 --> 00:55:10,169
+
+YouTube URL: https://www.youtube.com/watch?v=N07tM7xWF1U
+
+

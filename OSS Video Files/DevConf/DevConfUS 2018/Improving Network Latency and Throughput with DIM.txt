@@ -1,0 +1,2550 @@
+Title: Improving Network Latency and Throughput with DIM
+Publication date: 2019-02-21
+Playlist: DevConfUS 2018
+Description: 
+	Dynamic Interrupt Moderation (DIM) refers to changing the
+interrupt moderation configuration receive queue in order to optimize packet
+processing. The mechanism includes an algorithm which decides if and how to change moderation parameters for a receive queue, usually by performing an analysis on runtime data sampled from the system.
+
+One of the primary benefits of DIM is that a default interrupt coalescing timer can be optimized for low-latency, but as the volume of traffic on a receive queue increases the interrupt timer automatically adjusts to increase CPU efficiency when high-throughput traffic is encountered. Conversely the interrupt timer will adjust back to lower levels when measurements show that the traffic on a receive queue is lower bandwidth again.
+Captions: 
+	00:00:03,290 --> 00:00:07,850
+direct Software Architect at broadcom
+
+00:00:06,440 --> 00:00:09,950
+who will be talking to us about
+
+00:00:07,850 --> 00:00:29,990
+improving network latency and throughput
+
+00:00:09,950 --> 00:00:32,450
+with dynamic interrupt moderation as
+
+00:00:29,990 --> 00:00:35,260
+expected this talk with wide appeal to
+
+00:00:32,450 --> 00:00:38,030
+many conference attendees something is
+
+00:00:35,260 --> 00:00:40,239
+sometimes feels dry like the kernel or
+
+00:00:38,030 --> 00:00:43,280
+doesn't contain the container buzzword
+
+00:00:40,239 --> 00:00:45,710
+might be problematic but I'm really
+
+00:00:43,280 --> 00:00:48,170
+proud of this work we did and really
+
+00:00:45,710 --> 00:00:49,190
+glad that we could that could come here
+
+00:00:48,170 --> 00:00:52,399
+today and share a little bit with it
+
+00:00:49,190 --> 00:00:55,359
+with you on this and in particular I
+
+00:00:52,399 --> 00:00:58,340
+think this is a good fit for this track
+
+00:00:55,359 --> 00:01:02,059
+surprisingly so rather than thinking
+
+00:00:58,340 --> 00:01:04,610
+about calling it what it is which I
+
+00:01:02,059 --> 00:01:05,930
+can't read you know improving that work
+
+00:01:04,610 --> 00:01:08,090
+latency with Jim we're gonna talk about
+
+00:01:05,930 --> 00:01:10,670
+Auto tuning your network so and I
+
+00:01:08,090 --> 00:01:12,500
+thought add a little a little picture of
+
+00:01:10,670 --> 00:01:15,770
+our favorite favorite Auto tuning
+
+00:01:12,500 --> 00:01:18,310
+artists there so what is dynamic
+
+00:01:15,770 --> 00:01:20,210
+interrupt moderation so for those that
+
+00:01:18,310 --> 00:01:21,770
+we've got to go through a little bit of
+
+00:01:20,210 --> 00:01:24,230
+review what this might be
+
+00:01:21,770 --> 00:01:26,420
+people probably maybe maybe aren't
+
+00:01:24,230 --> 00:01:27,980
+familiar with it how the packet how
+
+00:01:26,420 --> 00:01:29,420
+packets in the Linux kernel actually
+
+00:01:27,980 --> 00:01:32,840
+make their way from physical hardware
+
+00:01:29,420 --> 00:01:34,160
+into the kernel stack itself so the main
+
+00:01:32,840 --> 00:01:36,020
+idea here is that we're gonna tune the
+
+00:01:34,160 --> 00:01:37,970
+time between when the first frame
+
+00:01:36,020 --> 00:01:40,610
+arrives on the wire or off the wire
+
+00:01:37,970 --> 00:01:42,560
+completely and and when it interrupts
+
+00:01:40,610 --> 00:01:45,470
+pops and so there's a variety of reasons
+
+00:01:42,560 --> 00:01:46,640
+to do this we'll go into those in a
+
+00:01:45,470 --> 00:01:49,310
+little bit but this is kind of the flow
+
+00:01:46,640 --> 00:01:52,460
+so we have an interrupted pops we
+
+00:01:49,310 --> 00:01:54,290
+schedule a polling event and that
+
+00:01:52,460 --> 00:01:56,840
+polling event and ultimately reads reads
+
+00:01:54,290 --> 00:01:59,600
+the receive ring of the NIC so in this
+
+00:01:56,840 --> 00:02:00,680
+beautiful picture we have frame 0 to
+
+00:01:59,600 --> 00:02:03,290
+frame and
+
+00:02:00,680 --> 00:02:04,550
+and a head and a tail so these are these
+
+00:02:03,290 --> 00:02:07,340
+are essentially considered to be the
+
+00:02:04,550 --> 00:02:08,960
+frames that have not been read and
+
+00:02:07,340 --> 00:02:12,260
+pulled out of hardware yet and marked as
+
+00:02:08,960 --> 00:02:14,450
+complete so it's kind of a typical
+
+00:02:12,260 --> 00:02:18,250
+workflow if our arrow going from left to
+
+00:02:14,450 --> 00:02:20,690
+right indicates time moving on each
+
+00:02:18,250 --> 00:02:24,140
+forward-facing or upward facing arrow
+
+00:02:20,690 --> 00:02:27,410
+would signify an interrupt and the stack
+
+00:02:24,140 --> 00:02:29,060
+of five rectangles indicates five frames
+
+00:02:27,410 --> 00:02:31,160
+that are read out of the ring buffer so
+
+00:02:29,060 --> 00:02:33,260
+in a fairly consistent flow of traffic
+
+00:02:31,160 --> 00:02:35,390
+that you have coming in this interrupt
+
+00:02:33,260 --> 00:02:37,850
+period as I'm waving my hands from this
+
+00:02:35,390 --> 00:02:40,459
+first one to this next arrow would
+
+00:02:37,850 --> 00:02:42,170
+represent the interrupt timing that we
+
+00:02:40,459 --> 00:02:44,060
+would have so we're gonna get a little
+
+00:02:42,170 --> 00:02:46,160
+time with a few frames come in serve as
+
+00:02:44,060 --> 00:02:49,459
+some pop and other interrupts more
+
+00:02:46,160 --> 00:02:53,450
+frames etc etc in a steady state this
+
+00:02:49,459 --> 00:02:55,580
+looks pretty good so if we have a short
+
+00:02:53,450 --> 00:02:56,900
+interrupt time of course this means that
+
+00:02:55,580 --> 00:02:59,900
+we have a really small number of frames
+
+00:02:56,900 --> 00:03:03,860
+process h poling event now that can be
+
+00:02:59,900 --> 00:03:05,750
+good if your concern is latency that can
+
+00:03:03,860 --> 00:03:07,549
+be bad if your concern is throughput
+
+00:03:05,750 --> 00:03:10,190
+because an interrupt is pretty expensive
+
+00:03:07,549 --> 00:03:11,810
+so if we think about doubling the
+
+00:03:10,190 --> 00:03:13,760
+interrupt period with the same traffic
+
+00:03:11,810 --> 00:03:15,200
+flow we'd have a situation like this
+
+00:03:13,760 --> 00:03:17,390
+where instead of just receiving five
+
+00:03:15,200 --> 00:03:20,930
+frames with each polling event we would
+
+00:03:17,390 --> 00:03:25,040
+now receive 10 so this is a great case
+
+00:03:20,930 --> 00:03:29,000
+for a great description of a workload
+
+00:03:25,040 --> 00:03:34,010
+where you want high throughput and also
+
+00:03:29,000 --> 00:03:35,299
+the downside is high latency so as you
+
+00:03:34,010 --> 00:03:36,920
+might be surprised as you might not be
+
+00:03:35,299 --> 00:03:38,299
+surprised to find out this is not a
+
+00:03:36,920 --> 00:03:39,590
+particularly new problem this is
+
+00:03:38,299 --> 00:03:43,459
+something that people have been dealing
+
+00:03:39,590 --> 00:03:44,450
+with for a long time so one of the first
+
+00:03:43,459 --> 00:03:47,000
+attempts to deal with this
+
+00:03:44,450 --> 00:03:50,200
+administrators yeah literally decades I
+
+00:03:47,000 --> 00:03:55,790
+think I first probably came across an
+
+00:03:50,200 --> 00:03:58,870
+issue like this easily in the Knotts
+
+00:03:55,790 --> 00:04:00,859
+this lab the previous decade and
+
+00:03:58,870 --> 00:04:02,659
+regularly would have to talk to
+
+00:04:00,859 --> 00:04:05,810
+customers when I was a Red Hat to try to
+
+00:04:02,659 --> 00:04:07,730
+figure out whether or not how this
+
+00:04:05,810 --> 00:04:09,230
+should tune their devices so the first
+
+00:04:07,730 --> 00:04:12,140
+attempt at really dealing with this was
+
+00:04:09,230 --> 00:04:14,150
+in one of Intel's 101 gig adapters they
+
+00:04:12,140 --> 00:04:17,329
+had a hardware feature called aim or
+
+00:04:14,150 --> 00:04:21,530
+adaptive interrupt moderation and this
+
+00:04:17,329 --> 00:04:23,270
+was actually the source of fairly what
+
+00:04:21,530 --> 00:04:25,910
+ultimately was a fairly long-running bug
+
+00:04:23,270 --> 00:04:27,259
+to try to figure out how why someone was
+
+00:04:25,910 --> 00:04:28,729
+having a particular problem because they
+
+00:04:27,259 --> 00:04:31,039
+were primarily concerned with low
+
+00:04:28,729 --> 00:04:33,530
+latency not with throughput and
+
+00:04:31,039 --> 00:04:35,479
+unfortunately at the time when we were
+
+00:04:33,530 --> 00:04:37,430
+only dealing with a single receive queue
+
+00:04:35,479 --> 00:04:39,199
+most people were concerned with
+
+00:04:37,430 --> 00:04:42,020
+throughput that was the big one of the
+
+00:04:39,199 --> 00:04:43,780
+big tests that was done so one of the
+
+00:04:42,020 --> 00:04:46,340
+things about aim is it was liked by some
+
+00:04:43,780 --> 00:04:48,560
+disabled by many like many of the
+
+00:04:46,340 --> 00:04:50,120
+hardware features that have existed in
+
+00:04:48,560 --> 00:04:54,199
+the past it's always a little bit of
+
+00:04:50,120 --> 00:04:55,930
+angst hardware design of does it it
+
+00:04:54,199 --> 00:04:58,580
+rolls out some software to configure it
+
+00:04:55,930 --> 00:05:00,409
+maybe doesn't work exactly as everybody
+
+00:04:58,580 --> 00:05:02,659
+expects so then there's some significant
+
+00:05:00,409 --> 00:05:07,460
+frustration about you know why does this
+
+00:05:02,659 --> 00:05:09,229
+feature break my network so kind of the
+
+00:05:07,460 --> 00:05:10,909
+same story over and over works for a lot
+
+00:05:09,229 --> 00:05:15,289
+of folks but the lack of flexibility
+
+00:05:10,909 --> 00:05:18,380
+that existed in hardware was not good
+
+00:05:15,289 --> 00:05:19,970
+enough for some they always people
+
+00:05:18,380 --> 00:05:21,970
+always see the default to thinking that
+
+00:05:19,970 --> 00:05:24,680
+software it's more flexible and better
+
+00:05:21,970 --> 00:05:27,050
+for many cases it is so at the time one
+
+00:05:24,680 --> 00:05:28,669
+of the interesting things is that we sat
+
+00:05:27,050 --> 00:05:30,500
+around the office and postulated whether
+
+00:05:28,669 --> 00:05:32,210
+or not it'd be good to have a user space
+
+00:05:30,500 --> 00:05:36,949
+daemon that controlled this interrupt
+
+00:05:32,210 --> 00:05:38,240
+timing so at the time it was at the time
+
+00:05:36,949 --> 00:05:40,039
+this happened is when were first
+
+00:05:38,240 --> 00:05:42,560
+starting to see some of the 2d profiling
+
+00:05:40,039 --> 00:05:44,610
+come out on various Linux distributions
+
+00:05:42,560 --> 00:05:47,370
+most of them read
+
+00:05:44,610 --> 00:05:48,689
+and you could you could tune your
+
+00:05:47,370 --> 00:05:50,430
+workstation for weather or your laptop
+
+00:05:48,689 --> 00:05:51,750
+whether you were most concerned with
+
+00:05:50,430 --> 00:05:53,789
+high performance or whether you were
+
+00:05:51,750 --> 00:05:55,110
+concerned with better battery life or I
+
+00:05:53,789 --> 00:05:57,259
+think there at the time there were even
+
+00:05:55,110 --> 00:05:59,129
+some ever even some some networking
+
+00:05:57,259 --> 00:06:00,539
+configurations that were available and
+
+00:05:59,129 --> 00:06:02,849
+many of these things twiddle bits and
+
+00:06:00,539 --> 00:06:05,400
+intel's power management capabilities at
+
+00:06:02,849 --> 00:06:06,780
+the time and so we thought what if we
+
+00:06:05,400 --> 00:06:08,909
+did a parallel what if we came up with
+
+00:06:06,780 --> 00:06:10,500
+something that could that could really
+
+00:06:08,909 --> 00:06:11,969
+have have a administrator at the
+
+00:06:10,500 --> 00:06:13,800
+beginning of time say you know what this
+
+00:06:11,969 --> 00:06:16,289
+is a this is a workstation where latency
+
+00:06:13,800 --> 00:06:19,680
+is the most important thing so let's
+
+00:06:16,289 --> 00:06:21,449
+tune for that or what if we you know
+
+00:06:19,680 --> 00:06:22,979
+this is a file server where we cared
+
+00:06:21,449 --> 00:06:25,169
+most about moving bulk traffic on a
+
+00:06:22,979 --> 00:06:26,099
+regular basis so sort of sat around the
+
+00:06:25,169 --> 00:06:30,150
+office and pondered whether or not
+
+00:06:26,099 --> 00:06:32,099
+that'd be a good idea and and i think
+
+00:06:30,150 --> 00:06:33,960
+ultimately when i look back on that now
+
+00:06:32,099 --> 00:06:35,460
+we've come to realization that that was
+
+00:06:33,960 --> 00:06:38,219
+completely and totally the wrong
+
+00:06:35,460 --> 00:06:39,629
+strategy so we could say it was blind
+
+00:06:38,219 --> 00:06:41,400
+luck that we didn't implement that but
+
+00:06:39,629 --> 00:06:46,229
+realistically it was probably more about
+
+00:06:41,400 --> 00:06:47,639
+laziness than anything else and so let's
+
+00:06:46,229 --> 00:06:52,430
+fast forward a few years and think about
+
+00:06:47,639 --> 00:06:56,520
+where we are now so machine learning AI
+
+00:06:52,430 --> 00:07:00,659
+everywhere I'm amazed I'm like sadly
+
+00:06:56,520 --> 00:07:03,270
+amazed by how much is on our phones if
+
+00:07:00,659 --> 00:07:04,589
+things automatically presuming a time of
+
+00:07:03,270 --> 00:07:08,940
+day that you want to do something based
+
+00:07:04,589 --> 00:07:10,589
+on where you're physically located like
+
+00:07:08,940 --> 00:07:12,629
+and I don't know it's it's funny to me
+
+00:07:10,589 --> 00:07:15,389
+how impressed I am by just little tiny
+
+00:07:12,629 --> 00:07:17,279
+simple simple things that you're
+
+00:07:15,389 --> 00:07:18,750
+probably never taught in any sort of CS
+
+00:07:17,279 --> 00:07:21,060
+or computer engineering program anywhere
+
+00:07:18,750 --> 00:07:23,370
+and so one of the first things that was
+
+00:07:21,060 --> 00:07:28,379
+the that came to mind is a talk that Tom
+
+00:07:23,370 --> 00:07:31,650
+Herbert gave Annette says in Montreal
+
+00:07:28,379 --> 00:07:32,879
+last year and he talked a little bit in
+
+00:07:31,650 --> 00:07:34,319
+his keynote about the impact of
+
+00:07:32,879 --> 00:07:36,870
+artificial intelligence and you can see
+
+00:07:34,319 --> 00:07:38,370
+I've got a screen grab of his video on
+
+00:07:36,870 --> 00:07:40,680
+YouTube about this with the link here
+
+00:07:38,370 --> 00:07:41,540
+all very clickable for everybody right
+
+00:07:40,680 --> 00:07:45,200
+now
+
+00:07:41,540 --> 00:07:48,650
+and you know it talks about the fact
+
+00:07:45,200 --> 00:07:52,070
+that the machine learning and he's got a
+
+00:07:48,650 --> 00:07:54,050
+new a new company that I think or
+
+00:07:52,070 --> 00:07:55,040
+machine learning will play into this one
+
+00:07:54,050 --> 00:07:57,650
+of the things he talked about is like
+
+00:07:55,040 --> 00:08:02,030
+will the the latest congestion control
+
+00:07:57,650 --> 00:08:04,100
+algorithm TC TC PBB R be the last human
+
+00:08:02,030 --> 00:08:06,200
+written congestion algorithm that exists
+
+00:08:04,100 --> 00:08:09,680
+and it kind of struck me when I was
+
+00:08:06,200 --> 00:08:10,970
+thinking about this like how interesting
+
+00:08:09,680 --> 00:08:13,130
+it would be to think about that being
+
+00:08:10,970 --> 00:08:15,830
+the last one that's written and how
+
+00:08:13,130 --> 00:08:17,300
+through machine learning we could come
+
+00:08:15,830 --> 00:08:19,940
+up with better ways automatically it's a
+
+00:08:17,300 --> 00:08:23,540
+little bit skynet e a little bit scary
+
+00:08:19,940 --> 00:08:26,210
+but at the same time I think the the
+
+00:08:23,540 --> 00:08:29,830
+power that we have massive compute power
+
+00:08:26,210 --> 00:08:32,270
+and their ability software's ability to
+
+00:08:29,830 --> 00:08:34,900
+do the same thing over and over
+
+00:08:32,270 --> 00:08:39,350
+effectively that Mouse is moving around
+
+00:08:34,900 --> 00:08:43,040
+is not good or it's good for us the
+
+00:08:39,350 --> 00:08:45,320
+mouse is not good so coincidentally
+
+00:08:43,040 --> 00:08:49,700
+Mellanox added support for what we're
+
+00:08:45,320 --> 00:08:51,560
+now calling dim in their main twenty
+
+00:08:49,700 --> 00:08:57,340
+five fifty hundred gigabit driver in
+
+00:08:51,560 --> 00:08:59,570
+2016 and bushy and the fact is we were I
+
+00:08:57,340 --> 00:09:01,400
+was trolling around looking at their
+
+00:08:59,570 --> 00:09:03,620
+driver and wondered like now what is
+
+00:09:01,400 --> 00:09:04,640
+this this operation here this doesn't it
+
+00:09:03,620 --> 00:09:05,930
+definitely makes sense they're doing
+
+00:09:04,640 --> 00:09:07,700
+something on receive they're doing a
+
+00:09:05,930 --> 00:09:09,110
+little bit of data gathering it looks
+
+00:09:07,700 --> 00:09:11,270
+like and looks like they're kind of
+
+00:09:09,110 --> 00:09:12,530
+using it to make a decision later and
+
+00:09:11,270 --> 00:09:15,440
+that's exactly what they were doing so
+
+00:09:12,530 --> 00:09:17,540
+that they were calculating how how many
+
+00:09:15,440 --> 00:09:18,860
+bytes were coming in that were counting
+
+00:09:17,540 --> 00:09:21,590
+the number of times an interrupt popped
+
+00:09:18,860 --> 00:09:23,120
+and they were using that data to come up
+
+00:09:21,590 --> 00:09:26,960
+with what they felt like was an optimal
+
+00:09:23,120 --> 00:09:28,970
+setting for their their receive
+
+00:09:26,960 --> 00:09:31,640
+interrupt timer so if we go back here a
+
+00:09:28,970 --> 00:09:33,650
+second remember our two pictures that we
+
+00:09:31,640 --> 00:09:35,960
+had so this one pretty steady state
+
+00:09:33,650 --> 00:09:38,630
+regular interrupts servicing a small
+
+00:09:35,960 --> 00:09:41,210
+chunk of packets at the time this one
+
+00:09:38,630 --> 00:09:42,180
+longer interrupt rates serving more bulk
+
+00:09:41,210 --> 00:09:43,529
+traffic so
+
+00:09:42,180 --> 00:09:47,040
+like they were trying to figure out a
+
+00:09:43,529 --> 00:09:49,380
+way to know which time was the best
+
+00:09:47,040 --> 00:09:50,640
+based on the traffic that came in not
+
+00:09:49,380 --> 00:09:51,990
+pictured in either of these slides is
+
+00:09:50,640 --> 00:09:53,250
+the fact that there's a different each
+
+00:09:51,990 --> 00:09:54,779
+one of these packets could be a
+
+00:09:53,250 --> 00:09:57,470
+different size each one of these frames
+
+00:09:54,779 --> 00:09:59,700
+which also plays into it because again
+
+00:09:57,470 --> 00:10:01,110
+it's easy for us to think when we
+
+00:09:59,700 --> 00:10:04,580
+receive a packet and we just know that
+
+00:10:01,110 --> 00:10:07,350
+it's long it's easy to think they did it
+
+00:10:04,580 --> 00:10:10,440
+it's all the same that a 64 byte packet
+
+00:10:07,350 --> 00:10:12,690
+and a jumbo you know eight k9k frame is
+
+00:10:10,440 --> 00:10:14,250
+the same but realistically they all take
+
+00:10:12,690 --> 00:10:17,399
+a different amount of time to be on the
+
+00:10:14,250 --> 00:10:19,440
+wire because there are discrete bit
+
+00:10:17,399 --> 00:10:21,060
+times required to handle this thing so
+
+00:10:19,440 --> 00:10:24,050
+so I thought I thought that was pretty
+
+00:10:21,060 --> 00:10:26,130
+interesting that Mellanox had that and
+
+00:10:24,050 --> 00:10:29,149
+we started looking at it and this is
+
+00:10:26,130 --> 00:10:31,709
+basically how it works so in this slide
+
+00:10:29,149 --> 00:10:34,339
+credit talget beaufort Mellanox
+
+00:10:31,709 --> 00:10:37,680
+i gave a talk over this year on this
+
+00:10:34,339 --> 00:10:40,620
+take a sample compare that sample to
+
+00:10:37,680 --> 00:10:42,000
+previous runs previous iterations and
+
+00:10:40,620 --> 00:10:44,970
+then decide whether or not you want to
+
+00:10:42,000 --> 00:10:47,550
+make a change so when we dug into it it
+
+00:10:44,970 --> 00:10:50,760
+seemed pretty good so the other cool
+
+00:10:47,550 --> 00:10:53,250
+thing and one of the things that we see
+
+00:10:50,760 --> 00:10:54,839
+as a kernel developer I'm okay with it
+
+00:10:53,250 --> 00:10:56,850
+one of things we see a lot of talk at
+
+00:10:54,839 --> 00:10:58,170
+talks is you know escaping the
+
+00:10:56,850 --> 00:10:59,700
+constraints of the kernel you know
+
+00:10:58,170 --> 00:11:02,700
+people feel that kernel limits them and
+
+00:10:59,700 --> 00:11:05,610
+the DP DK is so much better or some
+
+00:11:02,700 --> 00:11:06,990
+other thing is better for their
+
+00:11:05,610 --> 00:11:09,480
+application for their individual
+
+00:11:06,990 --> 00:11:10,680
+applications i 100% believe that one of
+
+00:11:09,480 --> 00:11:14,010
+the other things that's allowed us to do
+
+00:11:10,680 --> 00:11:16,050
+is by running this in a driver we escape
+
+00:11:14,010 --> 00:11:17,940
+sort of the lock in that the global leaf
+
+00:11:16,050 --> 00:11:20,520
+tool API uses for configuring these
+
+00:11:17,940 --> 00:11:22,200
+interrupt timers so in the past when
+
+00:11:20,520 --> 00:11:24,450
+still today because there's interesting
+
+00:11:22,200 --> 00:11:26,279
+keep a neat tool pretty static if you
+
+00:11:24,450 --> 00:11:28,529
+configure interrupt timing it applies
+
+00:11:26,279 --> 00:11:30,570
+across all queues we of course now live
+
+00:11:28,529 --> 00:11:32,390
+in a networking world where it isn't
+
+00:11:30,570 --> 00:11:34,320
+just a matter of a single queue
+
+00:11:32,390 --> 00:11:40,110
+receiving all these traffic all this
+
+00:11:34,320 --> 00:11:42,270
+traffic multiple multiple scores are
+
+00:11:40,110 --> 00:11:43,610
+tasked with servicing this traffic which
+
+00:11:42,270 --> 00:11:45,950
+is how we can get
+
+00:11:43,610 --> 00:11:49,970
+fifty hundred and pretty soon 200 gig
+
+00:11:45,950 --> 00:11:51,530
+Ethernet on a server so this allows us
+
+00:11:49,970 --> 00:11:55,940
+to escape some of those that kernel
+
+00:11:51,530 --> 00:11:57,710
+kernel lock-in so what we really found
+
+00:11:55,940 --> 00:11:59,600
+is that because it can operate
+
+00:11:57,710 --> 00:12:01,040
+independently we can also have different
+
+00:11:59,600 --> 00:12:03,170
+types of traffic being handled by
+
+00:12:01,040 --> 00:12:05,150
+different cores this is especially
+
+00:12:03,170 --> 00:12:08,030
+useful in a virtualization case where
+
+00:12:05,150 --> 00:12:09,800
+you might have an application that needs
+
+00:12:08,030 --> 00:12:11,780
+to be low latency that's running the in
+
+00:12:09,800 --> 00:12:14,270
+a VM or you might have another
+
+00:12:11,780 --> 00:12:18,860
+application that's ultimately serving as
+
+00:12:14,270 --> 00:12:19,790
+a storage destination so having now all
+
+00:12:18,860 --> 00:12:21,470
+of a sudden we could have the best of
+
+00:12:19,790 --> 00:12:27,770
+both worlds we could run a network test
+
+00:12:21,470 --> 00:12:31,010
+and receive full utilization of of that
+
+00:12:27,770 --> 00:12:33,500
+of that core at maximum at pretty much
+
+00:12:31,010 --> 00:12:35,990
+maximum throughput and we could run a
+
+00:12:33,500 --> 00:12:38,660
+TCP our our test with net perf at the
+
+00:12:35,990 --> 00:12:40,610
+same time and see low latency because
+
+00:12:38,660 --> 00:12:44,000
+their end up being serviced by different
+
+00:12:40,610 --> 00:12:45,290
+CPUs so that was super cool so we'll
+
+00:12:44,000 --> 00:12:48,530
+talk a little bit about the algorithm
+
+00:12:45,290 --> 00:12:50,840
+it's not super amazing and the great
+
+00:12:48,530 --> 00:12:52,250
+thing about it is I'm here talking about
+
+00:12:50,840 --> 00:12:53,840
+an algorithm today that's actually open
+
+00:12:52,250 --> 00:12:55,070
+source it's in the kernel you can look
+
+00:12:53,840 --> 00:12:57,410
+at it so spending a lot of time
+
+00:12:55,070 --> 00:13:00,620
+explaining how it works is not probably
+
+00:12:57,410 --> 00:13:02,210
+super valuable because I know everyone
+
+00:13:00,620 --> 00:13:04,670
+loves reading kernel code I know it's
+
+00:13:02,210 --> 00:13:05,840
+what it helps them sleep at night as
+
+00:13:04,670 --> 00:13:09,590
+well as it's the first thing they read
+
+00:13:05,840 --> 00:13:11,390
+in the morning so in a typical case we
+
+00:13:09,590 --> 00:13:14,990
+have five profiles that exist right now
+
+00:13:11,390 --> 00:13:17,140
+so you can see what's critical at the
+
+00:13:14,990 --> 00:13:20,090
+top is the different timer settings so
+
+00:13:17,140 --> 00:13:22,190
+obviously down here on the far left this
+
+00:13:20,090 --> 00:13:24,500
+would be the low latency case so we want
+
+00:13:22,190 --> 00:13:27,590
+the timer to pop really quickly and on
+
+00:13:24,500 --> 00:13:29,180
+down on the far side the timer of 256
+
+00:13:27,590 --> 00:13:33,410
+microseconds would be the high
+
+00:13:29,180 --> 00:13:35,120
+throughput case so the reference to left
+
+00:13:33,410 --> 00:13:38,660
+and right is something that's baked into
+
+00:13:35,120 --> 00:13:42,170
+this algorithm and everything start us
+
+00:13:38,660 --> 00:13:43,700
+down here at the low latency case I
+
+00:13:42,170 --> 00:13:44,900
+think that makes a lot of sense to start
+
+00:13:43,700 --> 00:13:47,510
+there rather than starting in the middle
+
+00:13:44,900 --> 00:13:49,010
+because typically low latency is going
+
+00:13:47,510 --> 00:13:49,779
+to be small traffic it's typically going
+
+00:13:49,010 --> 00:13:51,339
+to be quick
+
+00:13:49,779 --> 00:13:52,930
+sessions typically gonna be a small
+
+00:13:51,339 --> 00:13:55,360
+number of bytes so it's default to that
+
+00:13:52,930 --> 00:13:56,800
+and the rate at which we sample and the
+
+00:13:55,360 --> 00:14:01,860
+rate at which we make changes quickly
+
+00:13:56,800 --> 00:14:04,089
+moves us down the line to the right so
+
+00:14:01,860 --> 00:14:09,389
+this decision tree is really pretty
+
+00:14:04,089 --> 00:14:12,189
+simple we have our previous decision
+
+00:14:09,389 --> 00:14:14,230
+either right or left we compare the
+
+00:14:12,189 --> 00:14:16,180
+samples that we've collected on every
+
+00:14:14,230 --> 00:14:18,819
+single packet we receive and every
+
+00:14:16,180 --> 00:14:21,730
+single interrupt we process and then we
+
+00:14:18,819 --> 00:14:24,249
+make a decision well is is this better
+
+00:14:21,730 --> 00:14:26,889
+or worse or the same as before if it's
+
+00:14:24,249 --> 00:14:27,970
+the same we park it an algae that
+
+00:14:26,889 --> 00:14:32,829
+probably applies to everybody that
+
+00:14:27,970 --> 00:14:34,240
+drives if it's worse we go left in the
+
+00:14:32,829 --> 00:14:37,449
+case where we were previously going
+
+00:14:34,240 --> 00:14:39,220
+right and if it's better we go the
+
+00:14:37,449 --> 00:14:39,610
+opposite direction we go more to the
+
+00:14:39,220 --> 00:14:45,600
+right
+
+00:14:39,610 --> 00:14:47,800
+so the compare samples piece can also
+
+00:14:45,600 --> 00:14:50,290
+can be tuned a little bit depending on
+
+00:14:47,800 --> 00:14:51,550
+your your workload or your speed but
+
+00:14:50,290 --> 00:14:53,589
+really one of the cool things about this
+
+00:14:51,550 --> 00:14:57,149
+is I've tested this across vast
+
+00:14:53,589 --> 00:14:59,319
+processors and slow processors and
+
+00:14:57,149 --> 00:15:01,360
+superfast processors if we want to have
+
+00:14:59,319 --> 00:15:04,449
+three examples and what really works is
+
+00:15:01,360 --> 00:15:06,100
+this holds up across all of them so this
+
+00:15:04,449 --> 00:15:09,339
+is something that works in a small
+
+00:15:06,100 --> 00:15:10,689
+system maybe if there even a 32-bit ARM
+
+00:15:09,339 --> 00:15:14,470
+case and it's something that works on
+
+00:15:10,689 --> 00:15:16,870
+works well on the latest Intel devices
+
+00:15:14,470 --> 00:15:18,129
+so alright so I mentioned Intel Mellanox
+
+00:15:16,870 --> 00:15:19,750
+but what about Broadcom I mean they're
+
+00:15:18,129 --> 00:15:21,370
+the ones paying paying for me to come
+
+00:15:19,750 --> 00:15:23,170
+here and talk about this so of course
+
+00:15:21,370 --> 00:15:25,769
+this is the the big reason I'm here is
+
+00:15:23,170 --> 00:15:28,750
+that we found this to be interesting
+
+00:15:25,769 --> 00:15:31,889
+we've poured it to our driver and we
+
+00:15:28,750 --> 00:15:34,179
+really liked what we saw in fact it was
+
+00:15:31,889 --> 00:15:36,009
+other people confirmed they really liked
+
+00:15:34,179 --> 00:15:40,660
+what they saw so here's some super fun
+
+00:15:36,009 --> 00:15:42,279
+graphs so in the case of default and
+
+00:15:40,660 --> 00:15:44,500
+adaptive coalescing in this first
+
+00:15:42,279 --> 00:15:46,269
+picture on the left you can see that
+
+00:15:44,500 --> 00:15:48,339
+basically the throughput was unaffected
+
+00:15:46,269 --> 00:15:49,720
+by the number of streams this was a 25
+
+00:15:48,339 --> 00:15:50,160
+gig Nick that's why we're up there at
+
+00:15:49,720 --> 00:15:52,530
+the top
+
+00:15:50,160 --> 00:15:54,660
+so we can almost fully utilize that just
+
+00:15:52,530 --> 00:15:56,520
+with one core and certainly once we hit
+
+00:15:54,660 --> 00:16:00,210
+two cores or two streams we're utilizing
+
+00:15:56,520 --> 00:16:03,120
+it 100% and the graph that the point of
+
+00:16:00,210 --> 00:16:05,220
+this year is to show that even with the
+
+00:16:03,120 --> 00:16:08,670
+small hit that comes with cataloging
+
+00:16:05,220 --> 00:16:10,080
+this information we were pretty much
+
+00:16:08,670 --> 00:16:12,450
+right on my throughput there's no hit
+
+00:16:10,080 --> 00:16:13,830
+there the graph on the right is a little
+
+00:16:12,450 --> 00:16:16,530
+more complicated to understand so I'll
+
+00:16:13,830 --> 00:16:19,380
+explain it a little bit the x-axis
+
+00:16:16,530 --> 00:16:22,170
+represents the number of streams in use
+
+00:16:19,380 --> 00:16:24,750
+the y-axis represents the total CPU
+
+00:16:22,170 --> 00:16:26,970
+utilization so unsurprising with one
+
+00:16:24,750 --> 00:16:30,900
+stream we're utilizing a one core
+
+00:16:26,970 --> 00:16:32,400
+completely it's as the graph is kind of
+
+00:16:30,900 --> 00:16:33,720
+funny that there's a two and a half core
+
+00:16:32,400 --> 00:16:35,670
+example there that wasn't really what we
+
+00:16:33,720 --> 00:16:38,850
+did there's a dot there at two Leuven
+
+00:16:35,670 --> 00:16:40,110
+ISIF s house whatever spreadsheet
+
+00:16:38,850 --> 00:16:41,220
+technology were using to graph this
+
+00:16:40,110 --> 00:16:44,460
+would have chosen to put the lines of
+
+00:16:41,220 --> 00:16:45,750
+two but anyway at two with the default
+
+00:16:44,460 --> 00:16:48,930
+coalescing settings that we have in our
+
+00:16:45,750 --> 00:16:50,610
+driver we saw much higher CPU
+
+00:16:48,930 --> 00:16:52,110
+utilization because there wasn't the
+
+00:16:50,610 --> 00:16:56,070
+ability to adapt and have the interrupt
+
+00:16:52,110 --> 00:16:58,590
+timer move way out and on the case on
+
+00:16:56,070 --> 00:17:00,930
+the right lower is better so adaptive is
+
+00:16:58,590 --> 00:17:05,100
+clearly winning as we scale up towards
+
+00:17:00,930 --> 00:17:07,170
+eight course eight eight course being
+
+00:17:05,100 --> 00:17:09,980
+used for receive traffic uses a 7.0
+
+00:17:07,170 --> 00:17:12,120
+there we're still not even barely over
+
+00:17:09,980 --> 00:17:14,720
+very utilizing two and a half of course
+
+00:17:12,120 --> 00:17:17,010
+completely when you add all that up vs.
+
+00:17:14,720 --> 00:17:19,740
+Costa probably four and a half four and
+
+00:17:17,010 --> 00:17:21,000
+three-quarters with the default settings
+
+00:17:19,740 --> 00:17:26,579
+so we feel like this is going to be a
+
+00:17:21,000 --> 00:17:28,050
+huge win in in the throughput case the
+
+00:17:26,579 --> 00:17:31,220
+other thing we did is we did some TCP
+
+00:17:28,050 --> 00:17:33,060
+our our performance now this is a I
+
+00:17:31,220 --> 00:17:34,530
+hesitate to show rod numbers here
+
+00:17:33,060 --> 00:17:36,240
+because every time I get a new system in
+
+00:17:34,530 --> 00:17:38,160
+with a new processor these numbers all
+
+00:17:36,240 --> 00:17:42,690
+change but we went ahead and put it in
+
+00:17:38,160 --> 00:17:44,610
+anyway so with our original static
+
+00:17:42,690 --> 00:17:46,920
+coalescing at the best rate we could do
+
+00:17:44,610 --> 00:17:48,930
+we could do about 20,000 transactions
+
+00:17:46,920 --> 00:17:51,270
+per second with adaptive we're a little
+
+00:17:48,930 --> 00:17:53,100
+bit less so I'll talk about why there's
+
+00:17:51,270 --> 00:17:54,620
+a 4% reduction but we were really happy
+
+00:17:53,100 --> 00:17:56,840
+with this to be honest
+
+00:17:54,620 --> 00:17:58,669
+that we're paying attention to every
+
+00:17:56,840 --> 00:18:01,730
+interrupt paying attention to everybody
+
+00:17:58,669 --> 00:18:04,270
+that came in and doing computation on
+
+00:18:01,730 --> 00:18:06,140
+those not on every packet but
+
+00:18:04,270 --> 00:18:07,460
+statistically within a certain number of
+
+00:18:06,140 --> 00:18:08,419
+packets we would analyze whether or not
+
+00:18:07,460 --> 00:18:10,970
+we need to make a change
+
+00:18:08,419 --> 00:18:12,740
+the fact that that only caused us in the
+
+00:18:10,970 --> 00:18:15,409
+single stream test of a total of four
+
+00:18:12,740 --> 00:18:17,990
+percent hit we knew was going to be a
+
+00:18:15,409 --> 00:18:19,820
+real positive and at least for the
+
+00:18:17,990 --> 00:18:21,470
+people we were going after for this and
+
+00:18:19,820 --> 00:18:25,700
+they were they were quite pleased
+
+00:18:21,470 --> 00:18:26,960
+so we also confirmed that one receive
+
+00:18:25,700 --> 00:18:29,330
+ring could be optimized for low latency
+
+00:18:26,960 --> 00:18:32,299
+and another for high throughput this was
+
+00:18:29,330 --> 00:18:33,770
+really the case that I think was most
+
+00:18:32,299 --> 00:18:38,480
+interesting to me
+
+00:18:33,770 --> 00:18:40,340
+I think this flexibility just doesn't
+
+00:18:38,480 --> 00:18:42,110
+exist today in the Linux kernel so by
+
+00:18:40,340 --> 00:18:44,720
+adding this feature we were able to
+
+00:18:42,110 --> 00:18:48,380
+provide something that really other than
+
+00:18:44,720 --> 00:18:51,740
+Mellanox no one else could do so I was
+
+00:18:48,380 --> 00:18:53,899
+really happy and what we decided to do
+
+00:18:51,740 --> 00:18:56,450
+was rather than just take Mellanox this
+
+00:18:53,899 --> 00:18:59,240
+code and completely add it to our driver
+
+00:18:56,450 --> 00:19:02,090
+and that seems really weird in some ways
+
+00:18:59,240 --> 00:19:04,610
+I worked with alga Bou Mellanox
+
+00:19:02,090 --> 00:19:06,950
+and we actually made a generic layer and
+
+00:19:04,610 --> 00:19:09,320
+library now yesterday if you if you sat
+
+00:19:06,950 --> 00:19:11,419
+through one of the late afternoon talks
+
+00:19:09,320 --> 00:19:13,340
+where there's a panel and said oh AI is
+
+00:19:11,419 --> 00:19:14,840
+not just about adding a library and
+
+00:19:13,340 --> 00:19:18,049
+thinking that like everything just works
+
+00:19:14,840 --> 00:19:20,330
+magically I won't necessarily refute
+
+00:19:18,049 --> 00:19:21,830
+that but I will say that in this case
+
+00:19:20,330 --> 00:19:24,049
+that's one of the cool things about this
+
+00:19:21,830 --> 00:19:25,220
+is you can just add a library you add
+
+00:19:24,049 --> 00:19:27,350
+the right probe points within your
+
+00:19:25,220 --> 00:19:30,020
+driver you had a function call that can
+
+00:19:27,350 --> 00:19:33,679
+set this value and your hardware and you
+
+00:19:30,020 --> 00:19:36,289
+can just use it and in fact after
+
+00:19:33,679 --> 00:19:38,690
+posting my first patch of stream I got
+
+00:19:36,289 --> 00:19:41,270
+several off list emails about this
+
+00:19:38,690 --> 00:19:42,119
+people who are interested and one of
+
+00:19:41,270 --> 00:19:43,829
+them doesn't
+
+00:19:42,119 --> 00:19:45,449
+working does does happen to work for
+
+00:19:43,829 --> 00:19:47,729
+Broadcom but not on my division so
+
+00:19:45,449 --> 00:19:50,909
+didn't know he was interested but the BC
+
+00:19:47,729 --> 00:19:54,149
+mg net driver used this right away and
+
+00:19:50,909 --> 00:19:56,429
+in fact they also adapted it and wanted
+
+00:19:54,149 --> 00:19:59,339
+to use it for transmit as well this is a
+
+00:19:56,429 --> 00:20:02,969
+great example in my view of the power of
+
+00:19:59,339 --> 00:20:05,849
+this because this is a a driver for an
+
+00:20:02,969 --> 00:20:09,859
+arm SOC it's typically embedded in
+
+00:20:05,849 --> 00:20:14,189
+set-top boxes so if you have used any
+
+00:20:09,859 --> 00:20:16,409
+pretty much many of the triple play
+
+00:20:14,189 --> 00:20:18,179
+offerings from ISPs where you can plug a
+
+00:20:16,409 --> 00:20:21,389
+phone in and you can plug some Ethernet
+
+00:20:18,179 --> 00:20:23,009
+in and it has Wi-Fi built in that's the
+
+00:20:21,389 --> 00:20:25,769
+type of application that this has and
+
+00:20:23,009 --> 00:20:27,989
+this this type of application for this
+
+00:20:25,769 --> 00:20:30,149
+and in their case they've got a wide
+
+00:20:27,989 --> 00:20:32,789
+array of traffic patterns you might have
+
+00:20:30,149 --> 00:20:34,319
+home use traffic that is streaming video
+
+00:20:32,789 --> 00:20:35,369
+and so you're gonna have large frames
+
+00:20:34,319 --> 00:20:36,719
+you're going to want to want to make
+
+00:20:35,369 --> 00:20:38,189
+sure you're optimized for that but
+
+00:20:36,719 --> 00:20:41,939
+you're gonna have other flows that are
+
+00:20:38,189 --> 00:20:43,739
+very small a very short term and as soon
+
+00:20:41,939 --> 00:20:45,349
+as this came out florian Fanelli who's
+
+00:20:43,739 --> 00:20:47,309
+the one that did this work he was
+
+00:20:45,349 --> 00:20:49,349
+excited about it because he'd been
+
+00:20:47,309 --> 00:20:51,689
+they've been pondering the fact they saw
+
+00:20:49,349 --> 00:20:53,159
+such a huge difference in the way their
+
+00:20:51,689 --> 00:20:54,719
+systems performed when they would use
+
+00:20:53,159 --> 00:20:56,819
+different values so the fact that this
+
+00:20:54,719 --> 00:20:58,799
+could do it tune it for them without
+
+00:20:56,819 --> 00:21:00,779
+doing anything they were they were
+
+00:20:58,799 --> 00:21:02,219
+pretty pretty stoked about so more
+
+00:21:00,779 --> 00:21:06,149
+drivers to follow I don't know I've
+
+00:21:02,219 --> 00:21:07,469
+talked to folks at Intel they have they
+
+00:21:06,149 --> 00:21:09,479
+have a little something in their driver
+
+00:21:07,469 --> 00:21:12,539
+that does something similar they also
+
+00:21:09,479 --> 00:21:14,789
+have some hardware that has some fun fun
+
+00:21:12,539 --> 00:21:17,099
+features we additionally have actually
+
+00:21:14,789 --> 00:21:20,149
+amazingly lots of hardware IP blocks to
+
+00:21:17,099 --> 00:21:23,699
+try to handle this situation we have
+
+00:21:20,149 --> 00:21:25,619
+more than just a basic interrupt timer
+
+00:21:23,699 --> 00:21:27,329
+we've got several things that we don't
+
+00:21:25,619 --> 00:21:29,789
+completely expose because there's no API
+
+00:21:27,329 --> 00:21:32,639
+and part of the part of the challenge
+
+00:21:29,789 --> 00:21:34,949
+for this was actually working Michael
+
+00:21:32,639 --> 00:21:37,529
+Chan and I working out which how we
+
+00:21:34,949 --> 00:21:39,899
+should how we should handle this and how
+
+00:21:37,529 --> 00:21:41,399
+we can I would get best you know give
+
+00:21:39,899 --> 00:21:43,379
+customers and more importantly
+
+00:21:41,399 --> 00:21:45,660
+administrators the opportunity to run
+
+00:21:43,379 --> 00:21:48,280
+this no longer are
+
+00:21:45,660 --> 00:21:49,570
+the theory should be when this is when
+
+00:21:48,280 --> 00:21:52,210
+this is working and this is in the
+
+00:21:49,570 --> 00:21:54,910
+district and this is everywhere there
+
+00:21:52,210 --> 00:21:56,710
+should be zero support calls again
+
+00:21:54,910 --> 00:21:58,960
+that's the theory there should be zero
+
+00:21:56,710 --> 00:22:00,670
+support calls to anybody who who says oh
+
+00:21:58,960 --> 00:22:02,320
+my networks not performing in this low
+
+00:22:00,670 --> 00:22:04,180
+latency case oh it's not performing in
+
+00:22:02,320 --> 00:22:05,380
+this this bulk transfer case this should
+
+00:22:04,180 --> 00:22:07,810
+be done this should eliminate those
+
+00:22:05,380 --> 00:22:11,530
+calls so we have we have outsourced this
+
+00:22:07,810 --> 00:22:13,990
+this work to the machines so I want to
+
+00:22:11,530 --> 00:22:18,190
+share just a couple observations some
+
+00:22:13,990 --> 00:22:21,010
+some surprising some not for me this is
+
+00:22:18,190 --> 00:22:22,240
+a fun thing to work on which at this
+
+00:22:21,010 --> 00:22:23,860
+stage in the game that working on the
+
+00:22:22,240 --> 00:22:26,770
+kernel as long as I have that sometimes
+
+00:22:23,860 --> 00:22:28,030
+a little bit rare so one of the first
+
+00:22:26,770 --> 00:22:29,280
+things we came across the zip
+
+00:22:28,030 --> 00:22:32,110
+programming hardware can be expensive
+
+00:22:29,280 --> 00:22:33,460
+and when I say expensive we're still
+
+00:22:32,110 --> 00:22:36,040
+talking about milliseconds or
+
+00:22:33,460 --> 00:22:38,170
+microseconds but it can be and this is a
+
+00:22:36,040 --> 00:22:40,510
+common case across multiple hardware
+
+00:22:38,170 --> 00:22:42,760
+vendors in fact we spent a lot of time
+
+00:22:40,510 --> 00:22:45,400
+tuning and understanding when the ideal
+
+00:22:42,760 --> 00:22:48,010
+point when when's the ideal point to
+
+00:22:45,400 --> 00:22:49,690
+sample when's the ideal point to decide
+
+00:22:48,010 --> 00:22:51,520
+whether or not we should make a new
+
+00:22:49,690 --> 00:22:52,870
+decision because you can do it so
+
+00:22:51,520 --> 00:22:56,080
+frequently that you see a much greater
+
+00:22:52,870 --> 00:23:00,130
+than 4% reduction in your in your low
+
+00:22:56,080 --> 00:23:03,670
+latency tests and and this this expense
+
+00:23:00,130 --> 00:23:05,830
+when running on the same cpu as the
+
+00:23:03,670 --> 00:23:07,540
+traffic as the CPU receiving the traffic
+
+00:23:05,830 --> 00:23:10,420
+does it's gonna cause a small
+
+00:23:07,540 --> 00:23:12,550
+interruption in traffic so we talked
+
+00:23:10,420 --> 00:23:16,480
+about scheduling our other CPUs and we
+
+00:23:12,550 --> 00:23:18,640
+decided that was it was a an experiment
+
+00:23:16,480 --> 00:23:20,200
+that we could look out for another time
+
+00:23:18,640 --> 00:23:21,400
+but but another thing to think about
+
+00:23:20,200 --> 00:23:23,950
+yeah that the cost of doing these
+
+00:23:21,400 --> 00:23:27,450
+operations to hardware is never free so
+
+00:23:23,950 --> 00:23:29,650
+a good thing to remember the other thing
+
+00:23:27,450 --> 00:23:31,810
+we found is that we had a few benefits
+
+00:23:29,650 --> 00:23:35,440
+that appeared sort of unexpectedly so
+
+00:23:31,810 --> 00:23:36,940
+when we were doing some testing we there
+
+00:23:35,440 --> 00:23:38,710
+a typical test case where you have you
+
+00:23:36,940 --> 00:23:40,510
+know a whopping two devices involved and
+
+00:23:38,710 --> 00:23:42,880
+you're doing some transmit from one to
+
+00:23:40,510 --> 00:23:44,620
+another and you know in the case with
+
+00:23:42,880 --> 00:23:45,010
+almost anything you have an experimental
+
+00:23:44,620 --> 00:23:47,940
+group and
+
+00:23:45,010 --> 00:23:51,070
+trol group so we we started with was
+
+00:23:47,940 --> 00:23:54,790
+using our adaptive interrupt moderation
+
+00:23:51,070 --> 00:23:56,140
+on on our test server running an
+
+00:23:54,790 --> 00:23:57,670
+upstream kernel and we had another
+
+00:23:56,140 --> 00:23:59,920
+system just running an upstream kernel
+
+00:23:57,670 --> 00:24:02,560
+with our normal driver which slam
+
+00:23:59,920 --> 00:24:03,820
+traffic at it and watch what happen and
+
+00:24:02,560 --> 00:24:05,260
+one things we found is that we were not
+
+00:24:03,820 --> 00:24:07,540
+getting the throughput that we expected
+
+00:24:05,260 --> 00:24:09,400
+and it was you're sort of scratching our
+
+00:24:07,540 --> 00:24:12,550
+head a little bit saying like well you
+
+00:24:09,400 --> 00:24:13,630
+know I would expect that did we can see
+
+00:24:12,550 --> 00:24:15,760
+that it's moving up to this higher
+
+00:24:13,630 --> 00:24:20,140
+profile we added some debug FS support
+
+00:24:15,760 --> 00:24:22,990
+so we could see this in real time and it
+
+00:24:20,140 --> 00:24:25,600
+just wasn't happening as efficiently as
+
+00:24:22,990 --> 00:24:26,980
+we thought it could and some of it was
+
+00:24:25,600 --> 00:24:28,780
+because I'd previously tested two
+
+00:24:26,980 --> 00:24:29,860
+systems back-to-back so we started doing
+
+00:24:28,780 --> 00:24:31,240
+this control group now what the
+
+00:24:29,860 --> 00:24:32,980
+performance wasn't worse it just wasn't
+
+00:24:31,240 --> 00:24:34,240
+as good as I thought it could be and
+
+00:24:32,980 --> 00:24:36,690
+what I realized is that if you're a
+
+00:24:34,240 --> 00:24:41,200
+sending system despite not having any
+
+00:24:36,690 --> 00:24:44,290
+transmit interrupt moderation features
+
+00:24:41,200 --> 00:24:46,810
+enabled acts basically are classified as
+
+00:24:44,290 --> 00:24:48,670
+low latency traffic acts are small
+
+00:24:46,810 --> 00:24:50,250
+they're coming all the time and the
+
+00:24:48,670 --> 00:24:52,120
+speed at which you receive and act
+
+00:24:50,250 --> 00:24:54,880
+definitely determines how quickly you're
+
+00:24:52,120 --> 00:24:56,850
+going to send that traffic again so we
+
+00:24:54,880 --> 00:24:58,840
+actually did some tuning and so we
+
+00:24:56,850 --> 00:25:01,360
+emulated what we thought the algorithms
+
+00:24:58,840 --> 00:25:03,550
+would have done and on the sender move
+
+00:25:01,360 --> 00:25:05,170
+the low latency back to the sender of
+
+00:25:03,550 --> 00:25:07,570
+both traffic move moved us to a low
+
+00:25:05,170 --> 00:25:11,230
+latency profile and we actually saw
+
+00:25:07,570 --> 00:25:13,090
+improvements in CPU CPU utilization so
+
+00:25:11,230 --> 00:25:14,680
+that was kind of fun and I think to me
+
+00:25:13,090 --> 00:25:16,930
+this is one of the examples one things
+
+00:25:14,680 --> 00:25:19,240
+we can point out that how do I spend
+
+00:25:16,930 --> 00:25:20,320
+head myself or the other folks working
+
+00:25:19,240 --> 00:25:21,790
+on this spend a lot of time thinking
+
+00:25:20,320 --> 00:25:24,370
+about this ahead of time and probably to
+
+00:25:21,790 --> 00:25:25,870
+come to this conclusion maybe maybe not
+
+00:25:24,370 --> 00:25:29,370
+you never know might give ourselves too
+
+00:25:25,870 --> 00:25:31,960
+much credit but the difference was did
+
+00:25:29,370 --> 00:25:34,300
+just trying this enabled something newer
+
+00:25:31,960 --> 00:25:36,130
+and maybe more fun than we thought and
+
+00:25:34,300 --> 00:25:38,920
+it was an improvement so I think this is
+
+00:25:36,130 --> 00:25:41,380
+a for me this is a thing I'm gonna
+
+00:25:38,920 --> 00:25:41,929
+continue to think about as a big win for
+
+00:25:41,380 --> 00:25:43,549
+a
+
+00:25:41,929 --> 00:25:48,440
+showing us something that we didn't
+
+00:25:43,549 --> 00:25:51,470
+think we could do before so the big
+
+00:25:48,440 --> 00:25:54,200
+takeaway from me is that the colonel has
+
+00:25:51,470 --> 00:25:55,789
+a ton of configuration knobs a ton and
+
+00:25:54,200 --> 00:25:58,970
+so many the folks that have worked on
+
+00:25:55,789 --> 00:26:00,169
+the colonel are some of them now no
+
+00:25:58,970 --> 00:26:02,779
+longer working on the colonel they're
+
+00:26:00,169 --> 00:26:05,659
+doing the next the next most interesting
+
+00:26:02,779 --> 00:26:06,860
+thing that they think exists or they're
+
+00:26:05,659 --> 00:26:10,009
+too busy you know working on the next
+
+00:26:06,860 --> 00:26:11,869
+version of hardware or whatever the I
+
+00:26:10,009 --> 00:26:14,139
+think there's a lot of low-hanging fruit
+
+00:26:11,869 --> 00:26:16,190
+out there for us to really examine
+
+00:26:14,139 --> 00:26:17,480
+different colonel configure options I
+
+00:26:16,190 --> 00:26:19,039
+mean take for example just the
+
+00:26:17,480 --> 00:26:22,610
+discussion I had about the the 2d
+
+00:26:19,039 --> 00:26:25,850
+profiles that exist well why do I need
+
+00:26:22,610 --> 00:26:28,399
+to why do any of those need to exist
+
+00:26:25,850 --> 00:26:30,590
+what is it what wouldn't what would it
+
+00:26:28,399 --> 00:26:33,879
+take for us to figure out with any of
+
+00:26:30,590 --> 00:26:36,019
+these things what the ideal number of
+
+00:26:33,879 --> 00:26:37,519
+what the ideal settings are for highest
+
+00:26:36,019 --> 00:26:39,769
+performance or what the ideal settings
+
+00:26:37,519 --> 00:26:43,309
+are for low battery life even take
+
+00:26:39,769 --> 00:26:44,899
+things like you know data plane
+
+00:26:43,309 --> 00:26:47,539
+technologies that are of interest to me
+
+00:26:44,899 --> 00:26:50,539
+right now with a b b PF and x DP or or
+
+00:26:47,539 --> 00:26:52,490
+even d PDK things like why do we have to
+
+00:26:50,539 --> 00:26:54,230
+guess at what it takes to be the proper
+
+00:26:52,490 --> 00:26:56,419
+number of packets that we batch anytime
+
+00:26:54,230 --> 00:26:58,549
+anytime we're doing reception we can
+
+00:26:56,419 --> 00:27:00,519
+improve packet performance by batching
+
+00:26:58,549 --> 00:27:03,559
+well let's figure out how many that is
+
+00:27:00,519 --> 00:27:06,519
+automatically let's not figure out let's
+
+00:27:03,559 --> 00:27:08,659
+not spend four days with the person
+
+00:27:06,519 --> 00:27:10,249
+recompiling and testing over and over
+
+00:27:08,659 --> 00:27:13,970
+again to try to figure it out so that's
+
+00:27:10,249 --> 00:27:16,669
+that's my encouragement for all 11 of
+
+00:27:13,970 --> 00:27:18,740
+you that are here to go forward and
+
+00:27:16,669 --> 00:27:20,450
+figure out and think about whether or
+
+00:27:18,740 --> 00:27:25,580
+not areas you work in can be can be done
+
+00:27:20,450 --> 00:27:26,869
+automatically so I also want to leave a
+
+00:27:25,580 --> 00:27:29,809
+little time for questions but I want to
+
+00:27:26,869 --> 00:27:33,139
+make sure to give a shout out to yo rock
+
+00:27:29,809 --> 00:27:36,080
+our Chad and tau from Mellanox who came
+
+00:27:33,139 --> 00:27:37,580
+up with the initial implementation of
+
+00:27:36,080 --> 00:27:39,289
+this the initial design and push to
+
+00:27:37,580 --> 00:27:40,999
+their driver and Rob rice and Lee Reed
+
+00:27:39,289 --> 00:27:43,579
+and Michael Chan for Broadcom
+
+00:27:40,999 --> 00:27:46,069
+of course copyright holder saw images
+
+00:27:43,579 --> 00:27:55,629
+used in the presentation so that's all
+
+00:27:46,069 --> 00:27:55,629
+I've got questions
+
+00:27:57,550 --> 00:28:00,570
+please say no
+
+00:28:03,630 --> 00:28:09,090
+no that would have been given more time
+
+00:28:07,620 --> 00:28:16,640
+I would have loved to have auto-tune the
+
+00:28:09,090 --> 00:28:16,640
+entire presentation cool well thank you
+
+00:28:21,410 --> 00:28:25,669
+[Music]
+
+00:28:23,100 --> 00:28:25,669
+yeah
+
+00:28:34,720 --> 00:28:41,650
+Oh outside the lab yes absolutely so the
+
+00:28:40,510 --> 00:28:43,409
+question was outside of a lab
+
+00:28:41,650 --> 00:28:47,919
+environment what sort of other
+
+00:28:43,409 --> 00:28:50,590
+applications have been tested and for me
+
+00:28:47,919 --> 00:28:52,510
+that's all I have done because we had a
+
+00:28:50,590 --> 00:28:54,700
+lot of this was motivated by a specific
+
+00:28:52,510 --> 00:28:57,700
+requirement from a potential customer
+
+00:28:54,700 --> 00:28:59,020
+and they had some workloads that they
+
+00:28:57,700 --> 00:29:01,299
+weren't able to emulate with knepper
+
+00:28:59,020 --> 00:29:03,429
+pretty effectively and so they they came
+
+00:29:01,299 --> 00:29:05,200
+up with this recipe and said okay you
+
+00:29:03,429 --> 00:29:08,039
+can do this and you can do this and you
+
+00:29:05,200 --> 00:29:10,120
+can do this and you can do this no touch
+
+00:29:08,039 --> 00:29:13,720
+you know you have a chance at winning
+
+00:29:10,120 --> 00:29:15,460
+and so that was a lot of what about of
+
+00:29:13,720 --> 00:29:17,200
+what I do in my job now is to figure out
+
+00:29:15,460 --> 00:29:18,610
+what it takes to do that and so we
+
+00:29:17,200 --> 00:29:20,440
+looked around and looked at different
+
+00:29:18,610 --> 00:29:22,780
+things and so they came to us with the
+
+00:29:20,440 --> 00:29:24,370
+TCP our our test with net perf and they
+
+00:29:22,780 --> 00:29:29,909
+came to us with some of the TCP stream
+
+00:29:24,370 --> 00:29:32,890
+tests and some other specific things so
+
+00:29:29,909 --> 00:29:34,360
+aside from just a system to system test
+
+00:29:32,890 --> 00:29:37,120
+the other thing that this has been
+
+00:29:34,360 --> 00:29:40,900
+tested on pretty heavily from our own
+
+00:29:37,120 --> 00:29:42,929
+interest for another another reason was
+
+00:29:40,900 --> 00:29:46,809
+actually sinking the traffic into a VM
+
+00:29:42,929 --> 00:29:50,830
+so a regular host that was pounding a VM
+
+00:29:46,809 --> 00:29:52,630
+with traffic both the TCP RR and the TCP
+
+00:29:50,830 --> 00:29:55,120
+stream so the VM was the sink for the
+
+00:29:52,630 --> 00:29:56,620
+traffic and that's actually one of the
+
+00:29:55,120 --> 00:29:59,280
+interesting points to me is that's where
+
+00:29:56,620 --> 00:30:01,390
+this really shines whether using
+
+00:29:59,280 --> 00:30:04,059
+Broadcom Hardware Mellanox hardware
+
+00:30:01,390 --> 00:30:06,039
+because the VM has zero can the VM might
+
+00:30:04,059 --> 00:30:08,890
+be running for do they have zero control
+
+00:30:06,039 --> 00:30:10,450
+over what's happening so now what you've
+
+00:30:08,890 --> 00:30:11,950
+done is you've got a way where it
+
+00:30:10,450 --> 00:30:14,919
+doesn't matter what workload is being
+
+00:30:11,950 --> 00:30:18,100
+run on those VMs you you've given them a
+
+00:30:14,919 --> 00:30:19,780
+chance to to to both be successful
+
+00:30:18,100 --> 00:30:21,520
+because typically both of those separate
+
+00:30:19,780 --> 00:30:23,080
+IP addresses separate streams they're
+
+00:30:21,520 --> 00:30:24,490
+gonna have to step for CPUs so they're
+
+00:30:23,080 --> 00:30:26,200
+gonna be on unless you have really bad
+
+00:30:24,490 --> 00:30:28,120
+luck and then they're gonna we're gonna
+
+00:30:26,200 --> 00:30:28,650
+be received at different rates and
+
+00:30:28,120 --> 00:30:31,110
+that's
+
+00:30:28,650 --> 00:30:34,200
+that I think is the is a big strength
+
+00:30:31,110 --> 00:30:36,300
+and so I look forward to when these
+
+00:30:34,200 --> 00:30:39,390
+upstream kernel changes roll down into
+
+00:30:36,300 --> 00:30:40,740
+the main distros and are used in virtual
+
+00:30:39,390 --> 00:30:42,510
+in virtual environments like that
+
+00:30:40,740 --> 00:30:45,059
+whether it's OpenStack or just other
+
+00:30:42,510 --> 00:30:49,460
+other places I think that's going to be
+
+00:30:45,059 --> 00:30:49,460
+key yeah
+
+00:30:50,149 --> 00:30:58,629
+so it was it landed in January in Dave
+
+00:30:55,429 --> 00:31:06,499
+Miller Street so that probably means
+
+00:30:58,629 --> 00:31:09,189
+4:16 so yes so it's freely available in
+
+00:31:06,499 --> 00:31:14,949
+in everything shipping past that point
+
+00:31:09,189 --> 00:31:14,949
+did you ever oh yeah absolutely
+
+00:31:16,060 --> 00:31:19,060
+tradition
+
+00:31:22,750 --> 00:31:29,660
+so ESXi can definitely say okay I
+
+00:31:26,960 --> 00:31:31,340
+shouldn't say definitely I haven't been
+
+00:31:29,660 --> 00:31:34,100
+asked so brought calm maintains our
+
+00:31:31,340 --> 00:31:36,410
+inversion and collaborates on an ESX
+
+00:31:34,100 --> 00:31:37,850
+driver I don't think I haven't been
+
+00:31:36,410 --> 00:31:39,650
+asked by anybody that maintains the
+
+00:31:37,850 --> 00:31:43,210
+question was related to whether
+
+00:31:39,650 --> 00:31:46,940
+virtualization environments ESX or KBM
+
+00:31:43,210 --> 00:31:49,429
+etc I can't say for sure no one has
+
+00:31:46,940 --> 00:31:51,410
+asked me on the ESX driver team anything
+
+00:31:49,429 --> 00:31:54,470
+about this which is typically a sign
+
+00:31:51,410 --> 00:32:00,500
+that it hasn't been implemented not
+
+00:31:54,470 --> 00:32:02,240
+always but no one's asked on the in a
+
+00:32:00,500 --> 00:32:04,460
+KBM environment if you're running into
+
+00:32:02,240 --> 00:32:05,929
+enough colonel this is available so if
+
+00:32:04,460 --> 00:32:07,640
+you're running if your base colonel on
+
+00:32:05,929 --> 00:32:09,320
+your hypervisor is I'm just gonna go
+
+00:32:07,640 --> 00:32:11,450
+ahead and make a blanket statement and
+
+00:32:09,320 --> 00:32:14,330
+say 417 although I think really for 16
+
+00:32:11,450 --> 00:32:15,799
+or for 15 is probably right like I said
+
+00:32:14,330 --> 00:32:17,929
+it landed in Dave Miller Street or this
+
+00:32:15,799 --> 00:32:19,610
+year and history is always it's a
+
+00:32:17,929 --> 00:32:21,230
+development tree so it's always you know
+
+00:32:19,610 --> 00:32:24,260
+one version of head so if I do like to
+
+00:32:21,230 --> 00:32:25,820
+get described I always have to add one
+
+00:32:24,260 --> 00:32:29,480
+to whatever's there because he keeps
+
+00:32:25,820 --> 00:32:32,540
+Linus's tags so probably should have
+
+00:32:29,480 --> 00:32:33,950
+done that homework but yeah and any I
+
+00:32:32,540 --> 00:32:36,350
+mean if you could go out and run fedora
+
+00:32:33,950 --> 00:32:40,520
+with this right now or even probably I
+
+00:32:36,350 --> 00:32:42,080
+guess 18:04 abun - it's probably got a
+
+00:32:40,520 --> 00:32:44,260
+new enough kernel that it's gonna be
+
+00:32:42,080 --> 00:32:44,260
+there
+
+00:32:46,470 --> 00:32:49,470
+okay
+
+00:32:50,890 --> 00:32:53,670
+mm-hmm
+
+00:32:55,870 --> 00:32:58,990
+[Music]
+
+00:33:00,320 --> 00:33:07,410
+it keeps one it knows the last state and
+
+00:33:04,080 --> 00:33:08,400
+that's it yeah very very low overhead
+
+00:33:07,410 --> 00:33:09,960
+and that's one of things that we really
+
+00:33:08,400 --> 00:33:12,150
+liked about it and why I liked it was
+
+00:33:09,960 --> 00:33:13,680
+kind of crazy how simple the how simple
+
+00:33:12,150 --> 00:33:17,130
+it was and how low overhead it was and
+
+00:33:13,680 --> 00:33:19,650
+how small of an impact it had on I mean
+
+00:33:17,130 --> 00:33:22,100
+the impactful part is actually the
+
+00:33:19,650 --> 00:33:25,500
+couple millisecond delay it you take
+
+00:33:22,100 --> 00:33:26,820
+less than that but the writing to the
+
+00:33:25,500 --> 00:33:30,420
+hardware if you have to make a change
+
+00:33:26,820 --> 00:33:32,190
+then we never had to worry about tuning
+
+00:33:30,420 --> 00:33:34,140
+I mean you're talking about one or two
+
+00:33:32,190 --> 00:33:36,210
+instructions that with a good compiler
+
+00:33:34,140 --> 00:33:38,580
+are probably gonna slide right in with
+
+00:33:36,210 --> 00:33:43,560
+some other delay that you have in the
+
+00:33:38,580 --> 00:33:46,200
+network stack the the cost is always how
+
+00:33:43,560 --> 00:33:47,880
+frequently we wrote to hardware like I
+
+00:33:46,200 --> 00:33:49,260
+can tune that and watch it change like
+
+00:33:47,880 --> 00:33:53,130
+if I write to hardware every hundred
+
+00:33:49,260 --> 00:33:54,840
+packets throughput and latency suffer
+
+00:33:53,130 --> 00:33:58,290
+heavily because you're spending so much
+
+00:33:54,840 --> 00:34:00,740
+time writing out obviously if you do it
+
+00:33:58,290 --> 00:34:02,850
+every million packets it's less useful
+
+00:34:00,740 --> 00:34:06,450
+especially since most flows aren't that
+
+00:34:02,850 --> 00:34:09,050
+long but but yet it's very lightweight I
+
+00:34:06,450 --> 00:34:11,399
+mean I was shocked at how well it worked
+
+00:34:09,050 --> 00:34:12,510
+like it doesn't it and that's that's the
+
+00:34:11,399 --> 00:34:15,690
+thing too is it doesn't have to be
+
+00:34:12,510 --> 00:34:19,620
+complicated like we don't a lot of the
+
+00:34:15,690 --> 00:34:21,330
+base this layer is created in such a way
+
+00:34:19,620 --> 00:34:24,030
+that if you wanted to do a very much
+
+00:34:21,330 --> 00:34:26,220
+more complicated stateful inspection and
+
+00:34:24,030 --> 00:34:28,350
+keep track of you know or preemptively
+
+00:34:26,220 --> 00:34:29,460
+decide based on something that's coming
+
+00:34:28,350 --> 00:34:32,159
+in that you should go one way or the
+
+00:34:29,460 --> 00:34:35,550
+other you could do it but this is such a
+
+00:34:32,159 --> 00:34:37,700
+great easy intro to start the minimal
+
+00:34:35,550 --> 00:34:37,700
+hit
+
+00:34:40,399 --> 00:34:47,089
+thank you Andy but you have a coffee
+
+00:34:43,279 --> 00:34:49,290
+break from now to 11:20 and we will be
+
+00:34:47,089 --> 00:34:52,480
+resuming session then
+
+00:34:49,290 --> 00:34:52,480
+[Music]
+
+00:35:02,930 --> 00:35:05,930
+
+YouTube URL: https://www.youtube.com/watch?v=f5S9gJhwZ-w
+
+

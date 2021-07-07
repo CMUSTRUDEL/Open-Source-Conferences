@@ -1,0 +1,1064 @@
+Title: Google Open Source Live presents Kubernetes (R) | Life of an API request
+Publication date: 2021-01-11
+Playlist: Google Open Source Live
+Description: 
+	
+Captions: 
+	00:00:11,000 --> 00:00:12,920
+Hey there, I'm Kevin Delgado
+
+00:00:12,920 --> 00:00:16,750
+a software engineer that works on open-source Kubernetes here at Google
+
+00:00:16,750 --> 00:00:21,420
+and today I'm going to take us through the life of a Kubernetes API request.
+
+00:00:21,420 --> 00:00:24,170
+The main focus here is to understand
+
+00:00:24,170 --> 00:00:26,720
+what happens when you type kubectl-create
+
+00:00:26,720 --> 00:00:30,100
+and pass in a Kubernetes object with a -f flag.
+
+00:00:30,100 --> 00:00:32,610
+For example, what happens when you call create
+
+00:00:32,610 --> 00:00:36,400
+and pass in a YAML file with a single ReplicaSet object.
+
+00:00:36,400 --> 00:00:39,830
+This is targeted at people with some familiarity using kubectl.
+
+00:00:39,830 --> 00:00:43,030
+While you might know what should happen when you run this command
+
+00:00:43,030 --> 00:00:46,809
+maybe you haven't spent much time trying to understand how it actually happens.
+
+00:00:46,809 --> 00:00:50,730
+Here's the big overview of the main components we'll be looking at
+
+00:00:50,730 --> 00:00:53,710
+as we dive through the life of an API request.
+
+00:00:53,710 --> 00:00:57,649
+As alluded to before, our journey begins in the kubectl command line tool.
+
+00:00:57,649 --> 00:01:02,100
+For many, this is the primary entry point for interacting with a Kubernetes cluster.
+
+00:01:02,100 --> 00:01:06,800
+From here, our kubectl command gets packaged up into an HTTP request
+
+00:01:06,800 --> 00:01:11,140
+that gets sent over the wire to the kube-apiserver.
+
+00:01:11,140 --> 00:01:13,900
+The API server sits at the core of the Kubernetes cluster
+
+00:01:13,900 --> 00:01:15,200
+in the control plane
+
+00:01:15,200 --> 00:01:18,369
+and is responsible for serving all requests
+
+00:01:18,369 --> 00:01:21,760
+for the many Kubernetes resources that a cluster maintains.
+
+00:01:21,760 --> 00:01:25,880
+The persistence of Kubernetes objects is handled by the key–value store etcd.
+
+00:01:25,880 --> 00:01:26,880
+This is where the API server stores
+
+00:01:26,880 --> 00:01:30,830
+in our case, the ReplicaSet object it has created.
+
+00:01:30,830 --> 00:01:34,150
+If you're familiar with Kubernetes, noticeably absent from this picture is
+
+00:01:34,150 --> 00:01:37,700
+any mention of the controllers that operate on objects once they're created
+
+00:01:37,700 --> 00:01:40,369
+the nodes that actually run the containerized workloads
+
+00:01:40,369 --> 00:01:42,369
+and many other components of the Kubernetes ecosystem.
+
+00:01:42,369 --> 00:01:44,960
+Those are all outside the scope of this talk
+
+00:01:44,960 --> 00:01:48,729
+as we want to focus and dive deep on the path an API request takes
+
+00:01:48,729 --> 00:01:49,850
+through the system.
+
+00:01:49,850 --> 00:01:52,939
+A fair warning that we're going to be taking a look
+
+00:01:52,939 --> 00:01:55,950
+at some of the source code that makes up each of these components.
+
+00:01:55,950 --> 00:01:57,979
+For clarity and brevity, the code is highly edited
+
+00:01:57,979 --> 00:01:59,230
+to emphasize the key pieces.
+
+00:01:59,230 --> 00:02:02,540
+At the top of each snippet is a path where you can find it in source.
+
+00:02:02,540 --> 00:02:05,799
+We're going to be looking at code from Kubernetes version 1.19.2
+
+00:02:05,799 --> 00:02:09,700
+I'm well aware that a slide deck is not the best format if you're coding.
+
+00:02:09,700 --> 00:02:11,650
+But looking at the code really is one of the best ways
+
+00:02:11,650 --> 00:02:15,680
+to trace through what happens in an API request.
+
+00:02:15,680 --> 00:02:19,260
+So, starting with the kubectl binary, the few big points we'll touch on here
+
+00:02:19,260 --> 00:02:22,360
+are the setup around creating the kubectl CLI command
+
+00:02:22,360 --> 00:02:24,480
+the actual execution of that command
+
+00:02:24,480 --> 00:02:29,270
+the way in which we create an HTTP request and execute that request
+
+00:02:29,270 --> 00:02:32,489
+sending through API server
+
+00:02:32,489 --> 00:02:34,580
+and lastly, the client-side serialization
+
+00:02:34,580 --> 00:02:36,750
+that takes place to encode the body of the request
+
+00:02:36,750 --> 00:02:39,340
+into a format we can send across the wire
+
+00:02:39,340 --> 00:02:41,849
+that the API server can understand.
+
+00:02:41,849 --> 00:02:45,690
+The first thing that happens when you run any kubectl command
+
+00:02:45,690 --> 00:02:48,510
+is that all the kubectl commands get built.
+
+00:02:48,510 --> 00:02:52,390
+Kubectl uses a ghost-CLI command library called Cobra
+
+00:02:52,390 --> 00:02:54,010
+and in the example on the left
+
+00:02:54,010 --> 00:02:56,980
+we see that to build the specific kubectl create command
+
+00:02:56,980 --> 00:02:58,620
+we generate a new Cobra command
+
+00:02:58,620 --> 00:03:00,870
+populating some of the documentation fields
+
+00:03:00,870 --> 00:03:03,930
+with things like what help info we want to get from the command
+
+00:03:03,930 --> 00:03:06,910
+but most importantly, telling it how to run via its run field.
+
+00:03:06,910 --> 00:03:11,319
+And when this is invoked, it calls a method RunCreate
+
+00:03:11,319 --> 00:03:14,580
+on some options passing in something called a factory.
+
+00:03:14,580 --> 00:03:15,580
+What is this factory?
+
+00:03:15,580 --> 00:03:20,900
+It's basically some drop-in abstractions that are used when executing kubectl.
+
+00:03:20,900 --> 00:03:23,580
+For example, we use the factory to get to various clients
+
+00:03:23,580 --> 00:03:26,400
+such as the REST client when you need to make REST calls.
+
+00:03:26,400 --> 00:03:29,030
+We also use this factory to retrieve something called a builder
+
+00:03:29,030 --> 00:03:31,180
+that we'll take a look at next.
+
+00:03:31,180 --> 00:03:35,780
+That RunCreate call we saw in the run method of the Cobra command
+
+00:03:35,780 --> 00:03:39,830
+is what gets called when we want to execute the kubectl-create command.
+
+00:03:39,830 --> 00:03:42,900
+After doing some initial setup, the factory creates a builder.
+
+00:03:42,900 --> 00:03:45,349
+Now, what this builder is responsible for
+
+00:03:45,349 --> 00:03:49,180
+is taking the data that you pass in via the -f or the -k flags
+
+00:03:49,180 --> 00:03:52,360
+which is usually a YAML file or one or more Kubernetes objects
+
+00:03:52,360 --> 00:03:56,080
+unpacks it, and turns it into an iterable list of objects
+
+00:03:56,080 --> 00:04:00,230
+that for each object will have a generic REST operation performed on it.
+
+00:04:00,230 --> 00:04:03,769
+This happens by calling Visit on the resource created by the builder
+
+00:04:03,769 --> 00:04:05,340
+and for each resource it visits
+
+00:04:05,340 --> 00:04:07,690
+which in our case, might just be the one ReplicaSet
+
+00:04:07,690 --> 00:04:11,510
+if that's all we passed in via the -f flag
+
+00:04:11,510 --> 00:04:13,959
+and for each resource, it creates something called a helper
+
+00:04:13,959 --> 00:04:16,409
+and then calls the generic Create on that helper
+
+00:04:16,409 --> 00:04:18,160
+with the object in question.
+
+00:04:18,160 --> 00:04:20,650
+The helper is just a structure that helps…
+
+00:04:20,650 --> 00:04:23,830
+that provides methods for running generic RESTful operations.
+
+00:04:23,830 --> 00:04:26,560
+It has methods (post, get, list, delete, etc.)
+
+00:04:26,560 --> 00:04:30,000
+that all map to corresponding HTTP operations.
+
+00:04:30,000 --> 00:04:32,480
+This helper executes the HTTP request.
+
+00:04:32,480 --> 00:04:34,940
+In the case of a post request, like we see here
+
+00:04:34,940 --> 00:04:37,320
+a big part of that is building the body of the request
+
+00:04:37,320 --> 00:04:40,280
+and we'll take a look at that next.
+
+00:04:40,280 --> 00:04:44,800
+As we saw, the helper uses its REST client to build and execute the Post request.
+
+00:04:44,800 --> 00:04:46,560
+The REST client lives in client-go
+
+00:04:46,560 --> 00:04:49,990
+which is the same Go library you would use if building some external program
+
+00:04:49,990 --> 00:04:51,479
+to interact with the Kubernetes cluster.
+
+00:04:51,479 --> 00:04:52,479
+Prior to sending…
+
+00:04:52,479 --> 00:04:55,000
+Prior to sending the request
+
+00:04:55,000 --> 00:04:57,360
+it builds the body of the request from an object
+
+00:04:57,360 --> 00:04:59,460
+into the format that gets sent across the wire
+
+00:04:59,460 --> 00:05:02,110
+and understood by the API server.
+
+00:05:02,110 --> 00:05:04,889
+As you can see, the REST client accepts a number of formats
+
+00:05:04,889 --> 00:05:07,020
+string, bites, I/O reader
+
+00:05:07,020 --> 00:05:08,730
+but if you're using the helper like we're doing here
+
+00:05:08,730 --> 00:05:12,820
+then the body's going to be created from a Go Kubernetes object in memory
+
+00:05:12,820 --> 00:05:14,900
+and must be serialized into the proper wire format.
+
+00:05:14,900 --> 00:05:17,500
+For that, we'll take a look at some interfaces
+
+00:05:17,500 --> 00:05:20,639
+from the API machinery runtime package in just a moment.
+
+00:05:20,639 --> 00:05:24,550
+The last step is actually sending the HTTP request across the wire
+
+00:05:24,550 --> 00:05:30,470
+which it does via the due method using a vanilla Go HTTP client.
+
+00:05:30,470 --> 00:05:32,199
+That then gets the response back from the server
+
+00:05:32,199 --> 00:05:33,590
+and bubbles it up to the user
+
+00:05:33,590 --> 00:05:38,289
+in the format outputted by the specific kubectl command.
+
+00:05:38,289 --> 00:05:41,350
+Here we see the interfaces for serialization
+
+00:05:41,350 --> 00:05:44,760
+that get implemented by autogenerated API machinery code.
+
+00:05:44,760 --> 00:05:47,380
+This serializer interface is just an encoder and a decoder.
+
+00:05:47,380 --> 00:05:48,750
+And as you might expect
+
+00:05:48,750 --> 00:05:51,820
+the encoder is responsible for converting a Kubernetes object
+
+00:05:51,820 --> 00:05:55,250
+Go struct in memory into the canonical wire format
+
+00:05:55,250 --> 00:05:58,130
+to send across the network to the API server.
+
+00:05:58,130 --> 00:06:00,960
+And likewise, the decoder takes that wire format
+
+00:06:00,960 --> 00:06:03,840
+and converts it back into a Kubernetes object in Go
+
+00:06:03,840 --> 00:06:04,840
+that lives in memory.
+
+00:06:04,840 --> 00:06:08,000
+A few really interesting things happen here though.
+
+00:06:08,000 --> 00:06:10,550
+First of all, Kubernetes accepts multiple wire types
+
+00:06:10,550 --> 00:06:11,840
+JSON and protobuf.
+
+00:06:11,840 --> 00:06:13,770
+You'll notice a negotiated serializer
+
+00:06:13,770 --> 00:06:16,780
+which like the regular serializer offers encoding and decoding
+
+00:06:16,780 --> 00:06:20,100
+but serves as an abstraction around the multiple supported via types.
+
+00:06:20,100 --> 00:06:22,310
+So, not only in JSON and protobuf
+
+00:06:22,310 --> 00:06:26,010
+but also some more encoding options like Content-Type header
+
+00:06:26,010 --> 00:06:27,680
+or JSON Pretty Printing.
+
+00:06:27,680 --> 00:06:32,259
+You'll also notice the encoder 4 version and decoder 2 version
+
+00:06:32,259 --> 00:06:34,520
+where we can get an encoder or decoder
+
+00:06:34,520 --> 00:06:37,580
+that are aware of how to serialize for a specific object version.
+
+00:06:37,580 --> 00:06:42,539
+Further, you'll see that the codec is the exact same interface as a serializer.
+
+00:06:42,539 --> 00:06:44,250
+The difference is that under the hood
+
+00:06:44,250 --> 00:06:48,680
+a serializer will not modify a Kubernetes object being encoded or decoded
+
+00:06:48,680 --> 00:06:50,120
+while a codec can.
+
+00:06:50,120 --> 00:06:53,850
+This is useful for understanding
+
+00:06:53,850 --> 00:06:57,190
+when looking at how the API server handles the request it receives.
+
+00:06:57,190 --> 00:07:01,819
+This serialization library straddles both the kubectl client and the API server
+
+00:07:01,819 --> 00:07:05,990
+and on the server side is responsible not only for decoding the wire format
+
+00:07:05,990 --> 00:07:06,990
+into a Go struct
+
+00:07:06,990 --> 00:07:08,919
+but also for converting the object to the right version
+
+00:07:08,919 --> 00:07:11,280
+and defaulting any fields the server requires.
+
+00:07:11,280 --> 00:07:13,360
+The idea behind conversion
+
+00:07:13,360 --> 00:07:18,940
+is that older clients are expected to be able to communicate with new API servers.
+
+00:07:18,940 --> 00:07:21,280
+In order for these older clients to continue to work
+
+00:07:21,280 --> 00:07:26,130
+the codec can encode or decode an object to or from a different version.
+
+00:07:26,130 --> 00:07:30,319
+So, something that's V1 on the wire could be V2 in memory or vice versa.
+
+00:07:30,319 --> 00:07:33,039
+There's also the concept of an internal version
+
+00:07:33,039 --> 00:07:35,180
+so the server or storage clients only need to know
+
+00:07:35,180 --> 00:07:36,870
+how to deal with a single version
+
+00:07:36,870 --> 00:07:39,940
+and the codec can convert one version to the internal version
+
+00:07:39,940 --> 00:07:43,030
+and then back to a different version, if needed.
+
+00:07:43,030 --> 00:07:46,590
+Similarly, older clients may not be aware of new API fields
+
+00:07:46,590 --> 00:07:49,009
+and yet these API fields might be mandatory
+
+00:07:49,009 --> 00:07:51,139
+or only accept certain values.
+
+00:07:51,139 --> 00:07:54,610
+With this machinery, newer API servers are able to default those fields
+
+00:07:54,610 --> 00:07:58,330
+on requests that come in from older clients that might have the fields absent.
+
+00:07:58,330 --> 00:08:02,039
+Finally, when we talk about the Go struct of a Kubernetes object
+
+00:08:02,039 --> 00:08:07,620
+what we're talking about is a Go structure that satisfies the runtime.Object interface.
+
+00:08:07,620 --> 00:08:10,310
+That means that all Kubernetes API objects
+
+00:08:10,310 --> 00:08:12,780
+ReplicaSets, pods, services, etc.
+
+00:08:12,780 --> 00:08:14,210
+must implement this interface.
+
+00:08:14,210 --> 00:08:18,620
+You'll see this runtime object type all throughout the code.
+
+00:08:18,620 --> 00:08:20,690
+This interface used to be just one function
+
+00:08:20,690 --> 00:08:22,139
+called isaruntime object
+
+00:08:22,139 --> 00:08:26,020
+that didn't do anything other than signal if a struct was an API object.
+
+00:08:26,020 --> 00:08:28,319
+Now there are a couple of functions
+
+00:08:28,319 --> 00:08:30,830
+that help remove some of the need for reflection
+
+00:08:30,830 --> 00:08:32,550
+and makes operation of the API machinery code
+
+00:08:32,550 --> 00:08:33,550
+much more efficient.
+
+00:08:33,550 --> 00:08:38,310
+So, that's it for the kubectl client.
+
+00:08:38,310 --> 00:08:39,510
+Now that we have a request on the wire
+
+00:08:39,510 --> 00:08:42,430
+it's time to take a look at what happens server side.
+
+00:08:42,430 --> 00:08:44,500
+Within the kube-apiserver
+
+00:08:44,500 --> 00:08:47,050
+we'll take a look at the API server aggregation layer
+
+00:08:47,050 --> 00:08:49,370
+and then see how the API server gets set up
+
+00:08:49,370 --> 00:08:51,990
+and configures routing and dispatching to the right endpoint.
+
+00:08:51,990 --> 00:08:55,110
+And then we'll take a look at the business logic
+
+00:08:55,110 --> 00:08:57,089
+of how the request is actually handled.
+
+00:08:57,089 --> 00:08:58,620
+And lastly, we'll dive into
+
+00:08:58,620 --> 00:09:04,180
+how the newly created object is persisted to etcd.
+
+00:09:04,180 --> 00:09:06,000
+The way the kube-apiserver gets started
+
+00:09:06,000 --> 00:09:08,250
+is actually itself a Cobra command too.
+
+00:09:08,250 --> 00:09:09,250
+Like all Cobra commands
+
+00:09:09,250 --> 00:09:12,260
+it has a run function that is called when executed.
+
+00:09:12,260 --> 00:09:14,519
+This run function kicks off a helper function
+
+00:09:14,519 --> 00:09:16,320
+that creates the server chain.
+
+00:09:16,320 --> 00:09:18,899
+The server chain aggregates an extension server
+
+00:09:18,899 --> 00:09:19,899
+with the kube-apiserver.
+
+00:09:19,899 --> 00:09:23,490
+The API server aggregation is fairly new to Kubernetes
+
+00:09:23,490 --> 00:09:26,080
+and provides some pretty nifty customization.
+
+00:09:26,080 --> 00:09:28,930
+Aggregated API servers let you do things with your API server
+
+00:09:28,930 --> 00:09:31,380
+that you wouldn't be able to achieve out of the box
+
+00:09:31,380 --> 00:09:33,149
+or even with custom resources
+
+00:09:33,149 --> 00:09:36,120
+such as using a different storage API instead of etcd.
+
+00:09:36,120 --> 00:09:38,860
+That aside though, for creating a simple ReplicaSet
+
+00:09:38,860 --> 00:09:40,730
+all we really need is a kube-apiserver.
+
+00:09:40,730 --> 00:09:46,029
+The kube-apiserver that gets created holds all of the state
+
+00:09:46,029 --> 00:09:48,760
+in a struct called a GenericAPIServer.
+
+00:09:48,760 --> 00:09:51,649
+In addition to a lot of state…
+
+00:09:51,649 --> 00:09:54,430
+to a lot of state in creating generic…
+
+00:09:54,430 --> 00:09:56,880
+The GenericAPIServer initializes the handler chain
+
+00:09:56,880 --> 00:09:58,779
+which is a series of HTTP middlewares
+
+00:09:58,779 --> 00:10:02,180
+that every request goes through that is responsible for various things
+
+00:10:02,180 --> 00:10:05,990
+such as authorization, CORS, timeouts, or MaxInFlights
+
+00:10:05,990 --> 00:10:08,330
+and a handful of other functions.
+
+00:10:08,330 --> 00:10:10,451
+Additionally, we call installAPI on the server
+
+00:10:10,451 --> 00:10:12,190
+so we can serve requests
+
+00:10:12,190 --> 00:10:14,980
+for all the various Kubernetes resources consistently.
+
+00:10:14,980 --> 00:10:18,459
+This API installation sets up the routing and dispatch
+
+00:10:18,459 --> 00:10:22,180
+so that request URLs get sent to their correct resource handlers.
+
+00:10:22,180 --> 00:10:23,820
+We'll take a look at routing and dispatch later
+
+00:10:23,820 --> 00:10:27,850
+but first we'll see how the API server actually starts serving.
+
+00:10:27,850 --> 00:10:31,220
+The GenericAPIServer exposes a run method
+
+00:10:31,220 --> 00:10:33,890
+that is run on the API servers invoked.
+
+00:10:33,890 --> 00:10:34,890
+This sets up a shutdown delay
+
+00:10:34,890 --> 00:10:37,779
+so the server can gracefully shut down and terminate it
+
+00:10:37,779 --> 00:10:40,630
+and calls serve on the server's secure serving invoke
+
+00:10:40,630 --> 00:10:41,930
+which sets up TLS
+
+00:10:41,930 --> 00:10:45,990
+and finally invokes serve on a vanilla Go HTTP server
+
+00:10:45,990 --> 00:10:50,140
+which is the entry point for the socket to actually start listening and serving.
+
+00:10:50,140 --> 00:10:53,390
+Coming back to routing and dispatch that we mentioned earlier
+
+00:10:53,390 --> 00:10:56,589
+we use an API installer to register the actual HTTP handlers
+
+00:10:56,589 --> 00:10:58,720
+that process the request that comes in.
+
+00:10:58,720 --> 00:11:05,380
+That install hapi method we saw earlier, called when creating the GenericAPIServer
+
+00:11:05,380 --> 00:11:07,490
+uses a library called go-restful
+
+00:11:07,490 --> 00:11:11,130
+for setting up a muxer that matches the request path with its proper handler.
+
+00:11:11,130 --> 00:11:13,400
+The way we can figure the go-restful muxers
+
+00:11:13,400 --> 00:11:16,790
+by starting with something called an API GroupVersion struct.
+
+00:11:16,790 --> 00:11:20,470
+API resources in Kubernetes are divided by group version.
+
+00:11:20,470 --> 00:11:24,510
+This indicates to the API installer which path these resources live at.
+
+00:11:24,510 --> 00:11:28,000
+It contains a variety of useful fields like a negotiated serializer
+
+00:11:28,000 --> 00:11:31,459
+for encoding and decoding into and from the various formats
+
+00:11:31,459 --> 00:11:33,100
+as well as something called a storage
+
+00:11:33,100 --> 00:11:35,420
+which performs the various REST operations
+
+00:11:35,420 --> 00:11:38,290
+and wraps the actual client used to write the storage.
+
+00:11:38,290 --> 00:11:41,899
+When we use the API GroupVersion to register the resource handlers
+
+00:11:41,899 --> 00:11:45,390
+we program go-restful to link our resources path to its handler
+
+00:11:45,390 --> 00:11:48,300
+for every given HTTP verb
+
+00:11:48,300 --> 00:11:49,480
+along with some other things
+
+00:11:49,480 --> 00:11:53,089
+like giving us autogenerated open API documentation.
+
+00:11:53,089 --> 00:11:55,650
+The registered resource handler snippet you see on the right side
+
+00:11:55,650 --> 00:11:58,170
+is actually a huge several-hundred-line-long function.
+
+00:11:58,170 --> 00:12:01,690
+As the snippet indicates, there's a switch statement
+
+00:12:01,690 --> 00:12:06,330
+with a case per HTTP verb that sets up a route to the given handler.
+
+00:12:06,330 --> 00:12:11,850
+So, all we've seen so far is what gets run when the API server binary has started.
+
+00:12:11,850 --> 00:12:14,161
+We're done with that now and we've finally made it to
+
+00:12:14,161 --> 00:12:16,050
+the code that runs when an actual request comes through.
+
+00:12:16,050 --> 00:12:21,270
+Here in the create handler is where the HTTP request gets handled.
+
+00:12:21,270 --> 00:12:22,270
+As you can see
+
+00:12:22,270 --> 00:12:24,430
+we're using the decoder we've seen previously.
+
+00:12:24,430 --> 00:12:26,570
+This decodes the body from the wire format
+
+00:12:26,570 --> 00:12:29,329
+into the correct version of the Go runtime.Object struct and memory
+
+00:12:29,329 --> 00:12:32,670
+that we pass onto storage.
+
+00:12:32,670 --> 00:12:34,560
+Another interaction that takes place here
+
+00:12:34,560 --> 00:12:36,990
+are the calls out to the admission webhooks.
+
+00:12:36,990 --> 00:12:39,690
+Admission webhooks are calls that the API server makes
+
+00:12:39,690 --> 00:12:40,930
+to external servers
+
+00:12:40,930 --> 00:12:44,470
+that perform an action on the object being handled by the API server.
+
+00:12:44,470 --> 00:12:49,260
+There are two kinds of admission webhooks: mutating webhooks and validating webhooks.
+
+00:12:49,260 --> 00:12:51,410
+The mutating admission webhook gets called first
+
+00:12:51,410 --> 00:12:53,260
+and modifies the incoming object
+
+00:12:53,260 --> 00:12:55,690
+just by adding custom defaults or annotations.
+
+00:12:55,690 --> 00:12:57,830
+Then, the right before storing to etcd
+
+00:12:57,830 --> 00:13:00,540
+the object is passed the validating admission webhook.
+
+00:13:00,540 --> 00:13:02,620
+This can reject requests based on custom policies
+
+00:13:02,620 --> 00:13:04,880
+external to the API server.
+
+00:13:04,880 --> 00:13:08,140
+Lastly, we actually persist the object to storage in etcd
+
+00:13:08,140 --> 00:13:11,660
+before returning the response of the request up the call stack.
+
+00:13:11,660 --> 00:13:14,500
+How this object gets persisted to storage is what we'll look at next.
+
+00:13:14,500 --> 00:13:16,750
+But take note here that it's under create call
+
+00:13:16,750 --> 00:13:19,269
+on something called a named creator.
+
+00:13:19,269 --> 00:13:24,230
+The last part of our journey here, we'll dive deep into how we go from
+
+00:13:24,230 --> 00:13:26,899
+the request handler processing the request body
+
+00:13:26,899 --> 00:13:29,610
+into the final state of the Kubernetes object to be stored
+
+00:13:29,610 --> 00:13:34,360
+and persisting that object to etcd.
+
+00:13:34,360 --> 00:13:35,700
+As mentioned previously
+
+00:13:35,700 --> 00:13:38,590
+the request handler calls a create method on a named creator
+
+00:13:38,590 --> 00:13:41,779
+to persist the Kubernetes object to etcd.
+
+00:13:41,779 --> 00:13:43,730
+Named creator, and more genetic creator
+
+00:13:43,730 --> 00:13:48,410
+are interfaces that map to the corresponding HTTP create method.
+
+00:13:48,410 --> 00:13:51,600
+There exist interfaces for each of the restful verbs
+
+00:13:51,600 --> 00:13:54,019
+get, watch, create, delete, update
+
+00:13:54,019 --> 00:13:55,779
+that act on a single item
+
+00:13:55,779 --> 00:13:58,190
+as well as a separate set of interfaces for each of these verbs
+
+00:13:58,190 --> 00:13:59,950
+that act on a collection of items.
+
+00:13:59,950 --> 00:14:02,110
+Implementing this interface is not trivial though.
+
+00:14:02,110 --> 00:14:04,220
+Also, there's a lot of shared functionality
+
+00:14:04,220 --> 00:14:07,480
+between how the create method should work across all resource types.
+
+00:14:07,480 --> 00:14:08,790
+There are also some differences.
+
+00:14:08,790 --> 00:14:10,630
+To take away some of this complexity
+
+00:14:10,630 --> 00:14:13,110
+there's a built-in implementation called the store
+
+00:14:13,110 --> 00:14:16,560
+that in addition to holding the actual etcd client
+
+00:14:16,560 --> 00:14:18,920
+to fire off etcd transactions
+
+00:14:18,920 --> 00:14:22,070
+takes in a strategy for each type of REST action
+
+00:14:22,070 --> 00:14:24,899
+that's specific to the resources being operated on.
+
+00:14:24,899 --> 00:14:27,910
+On the right-hand side we see how the store implements create
+
+00:14:27,910 --> 00:14:31,630
+utilizing the create strategy prior to actually executing the transaction.
+
+00:14:31,630 --> 00:14:34,410
+Thus, no matter what kind of object you're creating
+
+00:14:34,410 --> 00:14:36,019
+it runs this create method
+
+00:14:36,019 --> 00:14:38,190
+that really only differs by the create strategy
+
+00:14:38,190 --> 00:14:39,940
+it uses for the specific object type.
+
+00:14:39,940 --> 00:14:42,949
+It then generates the etcd key before finally writing to etcd
+
+00:14:42,949 --> 00:14:47,490
+and calling afterCreate on the object that has just been persisted.
+
+00:14:47,490 --> 00:14:49,540
+Before looking at the etcd3 storage client
+
+00:14:49,540 --> 00:14:51,220
+that executes the transaction
+
+00:14:51,220 --> 00:14:53,029
+we'll take a brief look at the create strategy
+
+00:14:53,029 --> 00:14:54,870
+specific to the ReplicaSet resource.
+
+00:14:54,870 --> 00:14:58,600
+In general, a REST create strategy
+
+00:14:58,600 --> 00:15:00,480
+must implement the method you see on the left.
+
+00:15:00,480 --> 00:15:02,660
+These are slightly different for each resource type
+
+00:15:02,660 --> 00:15:05,800
+but as you can see in the unedited PrepareForCreate
+
+00:15:05,800 --> 00:15:07,279
+and Validate methods on the right
+
+00:15:07,279 --> 00:15:09,500
+the specific strategy for a resource is pretty trivial
+
+00:15:09,500 --> 00:15:12,980
+as it should be in order to support the many different resource types
+
+00:15:12,980 --> 00:15:14,430
+that Kubernetes has.
+
+00:15:14,430 --> 00:15:20,320
+And the bulk of the work is done on the store we looked at previously.
+
+00:15:20,320 --> 00:15:23,930
+One aspect that we glossed over when going through API server set up
+
+00:15:23,930 --> 00:15:27,670
+was how the actual ReplicaSet strategy is installed on a cluster.
+
+00:15:27,670 --> 00:15:29,120
+Taking a brief step back
+
+00:15:29,120 --> 00:15:30,350
+during API server setup
+
+00:15:30,350 --> 00:15:34,899
+the GenericAPIServer is wrapped in something called control plane instance.
+
+00:15:34,899 --> 00:15:37,510
+This instance has an InstallAPIs method on it
+
+00:15:37,510 --> 00:15:39,870
+that confusingly is different than the InstallAPI method
+
+00:15:39,870 --> 00:15:43,890
+on the API installer to set up routing and dispatch.
+
+00:15:43,890 --> 00:15:46,889
+This method wires together all the REST storage providers
+
+00:15:46,889 --> 00:15:49,399
+for every API group, such as autoscaling batch
+
+00:15:49,399 --> 00:15:51,079
+and of course, the aps group
+
+00:15:51,079 --> 00:15:53,720
+which is where the ReplicaSet storage provider lives.
+
+00:15:53,720 --> 00:15:55,459
+This is where we configure the storage options
+
+00:15:55,459 --> 00:16:00,290
+and set the ReplicaSet strategy that we took a look at on the last slide.
+
+00:16:00,290 --> 00:16:02,810
+Finally, the very last piece of code we'll look at
+
+00:16:02,810 --> 00:16:05,420
+is how the store uses the actual etcd3 client
+
+00:16:05,420 --> 00:16:07,370
+to execute the etcd request.
+
+00:16:07,370 --> 00:16:11,899
+Once again, we use a codec from the API machinery runtime package
+
+00:16:11,899 --> 00:16:13,890
+that is embedded into the encode call.
+
+00:16:13,890 --> 00:16:17,790
+While an API server can handle requests for many different versions
+
+00:16:17,790 --> 00:16:21,300
+it writes all objects to storage as a single version.
+
+00:16:21,300 --> 00:16:24,839
+This enables more control over storage format upgrades
+
+00:16:24,839 --> 00:16:27,270
+and lets you roll back or roll forward versions.
+
+00:16:27,270 --> 00:16:29,870
+Here the codec does that conversion
+
+00:16:29,870 --> 00:16:32,829
+before finally executing and committing the transaction
+
+00:16:32,829 --> 00:16:34,449
+and surfacing up any errors.
+
+00:16:34,449 --> 00:16:35,850
+And that's it.
+
+00:16:35,850 --> 00:16:38,100
+I hope you've gotten a better picture
+
+00:16:38,100 --> 00:16:42,509
+of what happens when you make a Kubernetes API request.
+
+00:16:42,509 --> 00:16:44,760
+Starting with the invocation of a kubectl command
+
+00:16:44,760 --> 00:16:47,709
+and its building and execution of an HTTP request
+
+00:16:47,709 --> 00:16:50,300
+that gets sent to the kube-apiserver, handled
+
+00:16:50,300 --> 00:16:51,980
+and turned into an object persisted to etcd.
+
+00:16:51,980 --> 00:16:54,129
+
+YouTube URL: https://www.youtube.com/watch?v=h5KcxPWyuf8
+
+

@@ -1,0 +1,1466 @@
+Title: Bazel persistent workers
+Publication date: 2020-11-10
+Playlist: BazelCon 2020
+Description: 
+	These amazing workers are cutting Bazel build times in half! Bazel can amortize startup costs and enable cross-action caching by using long-running worker processes. In this talk, we explain how to use, create and tune workers, introduce multiplex workers, and discuss how the worker protocol is evolving.
+
+Resources:
+Worker docs: https://goo.gle/3ljkqCC
+Multiplex worker docs: https://goo.gle/3klgM9W
+Dynamic scheduling post: https://goo.gle/38yREKD
+Lock handling posts: https://goo.gle/32w3SQq
+
+Speakers: Susan Steinman & Lars Clausen
+
+Watch more:
+BazelCon 2020 playlist → http://goo.gle/BazelCon2020
+
+Subscribe to Google Open Source → http://goo.gle/GOpenSource
+
+#bazelcon #bazel event: Bazelcon 2020; re_ty: Publish; product: Open Source - General; fullname: Susan Steinman & Lars Clausen;
+Captions: 
+	00:00:01,010 --> 00:00:04,950
+[Music]
+
+00:00:05,680 --> 00:00:08,160
+hello
+
+00:00:06,480 --> 00:00:10,320
+and thank you for joining this talk on
+
+00:00:08,160 --> 00:00:12,080
+persistent workers in bazel
+
+00:00:10,320 --> 00:00:14,160
+my name is lars i'm a googler in the
+
+00:00:12,080 --> 00:00:16,800
+munich office i'm susan
+
+00:00:14,160 --> 00:00:18,240
+i am a googler in the new york office
+
+00:00:16,800 --> 00:00:19,920
+and we want to tell you
+
+00:00:18,240 --> 00:00:21,760
+how to get the best performance out of
+
+00:00:19,920 --> 00:00:22,800
+bazel's persistent workers
+
+00:00:21,760 --> 00:00:24,960
+first we're going to give an
+
+00:00:22,800 --> 00:00:26,640
+introduction to the worker concept
+
+00:00:24,960 --> 00:00:28,160
+what the problem they were made to solve
+
+00:00:26,640 --> 00:00:30,080
+and how to solve it
+
+00:00:28,160 --> 00:00:31,359
+then we're going to go through how do
+
+00:00:30,080 --> 00:00:32,800
+you tune the workers for best
+
+00:00:31,359 --> 00:00:34,719
+performance
+
+00:00:32,800 --> 00:00:37,840
+then for rule maintainers we're going to
+
+00:00:34,719 --> 00:00:39,200
+tell you how do you create a worker
+
+00:00:37,840 --> 00:00:41,760
+and then we're going to go over some
+
+00:00:39,200 --> 00:00:45,440
+advanced topics and upcoming work
+
+00:00:41,760 --> 00:00:48,000
+what's it all about performance
+
+00:00:45,440 --> 00:00:50,239
+this slide shows the time it takes to do
+
+00:00:48,000 --> 00:00:53,280
+a clean build of bazel itself
+
+00:00:50,239 --> 00:00:56,800
+on s6 called linux machine
+
+00:00:53,280 --> 00:00:59,840
+on the left the regular
+
+00:00:56,800 --> 00:01:04,320
+non-worker builds and on the right
+
+00:00:59,840 --> 00:01:06,000
+with with workers and as you can see
+
+00:01:04,320 --> 00:01:08,080
+with workers your build is about three
+
+00:01:06,000 --> 00:01:12,960
+times as fast and you can also see that
+
+00:01:08,080 --> 00:01:14,880
+sandboxing isn't actually very expensive
+
+00:01:12,960 --> 00:01:16,479
+this is a clean build for incremental
+
+00:01:14,880 --> 00:01:17,840
+builds you can get even better
+
+00:01:16,479 --> 00:01:20,000
+performance you can get
+
+00:01:17,840 --> 00:01:21,200
+up to six times speed up we've seen in
+
+00:01:20,000 --> 00:01:23,680
+some more incremental
+
+00:01:21,200 --> 00:01:24,960
+benchmarks so let's take a look at
+
+00:01:23,680 --> 00:01:28,720
+what's behind
+
+00:01:24,960 --> 00:01:33,360
+the speed up the basic problem
+
+00:01:28,720 --> 00:01:36,560
+is that bazel runs many actions
+
+00:01:33,360 --> 00:01:37,840
+every single step of a build is a
+
+00:01:36,560 --> 00:01:41,119
+separate action
+
+00:01:37,840 --> 00:01:42,960
+and without workers each action would
+
+00:01:41,119 --> 00:01:44,720
+run at a separate process in the
+
+00:01:42,960 --> 00:01:46,880
+operating system which means
+
+00:01:44,720 --> 00:01:49,280
+you can't do any kind of internal cash
+
+00:01:46,880 --> 00:01:52,720
+or for instance asts
+
+00:01:49,280 --> 00:01:53,520
+but more critically especially for jvm
+
+00:01:52,720 --> 00:01:58,159
+based
+
+00:01:53,520 --> 00:02:02,240
+tools you are not able to
+
+00:01:58,159 --> 00:02:04,560
+benefit any from your just in time
+
+00:02:02,240 --> 00:02:06,719
+and you're going to have your startup
+
+00:02:04,560 --> 00:02:09,520
+costs over and over again
+
+00:02:06,719 --> 00:02:10,239
+this includes creating a jvm reading in
+
+00:02:09,520 --> 00:02:14,000
+classes
+
+00:02:10,239 --> 00:02:15,360
+initializing etc all that takes time
+
+00:02:14,000 --> 00:02:18,640
+that's wasted
+
+00:02:15,360 --> 00:02:22,160
+so workers solve this problem
+
+00:02:18,640 --> 00:02:23,280
+by running process for a long time and
+
+00:02:22,160 --> 00:02:26,560
+each process
+
+00:02:23,280 --> 00:02:30,480
+can handle multiple pieces of work
+
+00:02:26,560 --> 00:02:32,959
+bazel the server manages the lifetime of
+
+00:02:30,480 --> 00:02:36,160
+the workers
+
+00:02:32,959 --> 00:02:38,080
+the creation and the shutdown and
+
+00:02:36,160 --> 00:02:39,360
+communicate over standard and standard
+
+00:02:38,080 --> 00:02:42,800
+out
+
+00:02:39,360 --> 00:02:46,319
+with the workers but the workers
+
+00:02:42,800 --> 00:02:49,280
+write the artifacts directly to disk
+
+00:02:46,319 --> 00:02:50,640
+this is often just a thin wrapper around
+
+00:02:49,280 --> 00:02:52,800
+an existing tool
+
+00:02:50,640 --> 00:02:56,080
+for instance for java c the wrapper
+
+00:02:52,800 --> 00:03:00,000
+calls into the java compilation api
+
+00:02:56,080 --> 00:03:00,720
+and these workers are on by default for
+
+00:03:00,000 --> 00:03:05,040
+any
+
+00:03:00,720 --> 00:03:08,319
+mnemonic that implements them
+
+00:03:05,040 --> 00:03:12,159
+because the worker strategy is
+
+00:03:08,319 --> 00:03:15,599
+the default before local this is useful
+
+00:03:12,159 --> 00:03:19,280
+for any kind of runtime
+
+00:03:15,599 --> 00:03:21,760
+but particularly the jvm
+
+00:03:19,280 --> 00:03:23,040
+benefits a lot from it so we're going to
+
+00:03:21,760 --> 00:03:25,120
+be focusing
+
+00:03:23,040 --> 00:03:26,239
+uh on some of the things that affect the
+
+00:03:25,120 --> 00:03:29,599
+jvm
+
+00:03:26,239 --> 00:03:31,680
+so here's a little schematic view of
+
+00:03:29,599 --> 00:03:33,280
+what happens during a build you do your
+
+00:03:31,680 --> 00:03:34,720
+build from the command line it talks to
+
+00:03:33,280 --> 00:03:37,440
+the rpc
+
+00:03:34,720 --> 00:03:38,159
+to the bazel server and that then talks
+
+00:03:37,440 --> 00:03:40,640
+to
+
+00:03:38,159 --> 00:03:41,840
+the various workers in this case there
+
+00:03:40,640 --> 00:03:44,000
+are two workers
+
+00:03:41,840 --> 00:03:48,159
+but you have a c and one for go and they
+
+00:03:44,000 --> 00:03:51,280
+just sit around and do their work
+
+00:03:48,159 --> 00:03:52,239
+now you may say having two separate
+
+00:03:51,280 --> 00:03:54,720
+workers for
+
+00:03:52,239 --> 00:03:56,480
+java c is again a waste and that is
+
+00:03:54,720 --> 00:03:58,720
+correct
+
+00:03:56,480 --> 00:04:01,360
+we should be using threads or go
+
+00:03:58,720 --> 00:04:04,400
+routines or whatever our system has
+
+00:04:01,360 --> 00:04:05,200
+and recently an external contribution
+
+00:04:04,400 --> 00:04:07,120
+added that
+
+00:04:05,200 --> 00:04:08,959
+we are very grateful for this community
+
+00:04:07,120 --> 00:04:12,480
+contribution
+
+00:04:08,959 --> 00:04:14,640
+basically this is an extension to the
+
+00:04:12,480 --> 00:04:17,680
+worker protocol that allows
+
+00:04:14,640 --> 00:04:20,479
+parallelized works in a single worker
+
+00:04:17,680 --> 00:04:21,440
+this when implemented it's automatically
+
+00:04:20,479 --> 00:04:24,240
+used
+
+00:04:21,440 --> 00:04:25,680
+you can turn it off if you run into
+
+00:04:24,240 --> 00:04:29,120
+problems with the
+
+00:04:25,680 --> 00:04:32,320
+no worker multiplex flag so
+
+00:04:29,120 --> 00:04:35,840
+this allows having a single cache
+
+00:04:32,320 --> 00:04:37,919
+for all your various builds
+
+00:04:35,840 --> 00:04:39,840
+but more importantly it saves the memory
+
+00:04:37,919 --> 00:04:41,440
+overhead especially for having multiple
+
+00:04:39,840 --> 00:04:43,520
+jvms
+
+00:04:41,440 --> 00:04:45,199
+we have a few stability problems that
+
+00:04:43,520 --> 00:04:47,919
+we're currently looking into
+
+00:04:45,199 --> 00:04:50,320
+but we already at google using this
+
+00:04:47,919 --> 00:04:53,360
+internally in some teams
+
+00:04:50,320 --> 00:04:55,520
+there are a few flags that help you tune
+
+00:04:53,360 --> 00:04:57,040
+the behavior of workers to get better
+
+00:04:55,520 --> 00:04:58,880
+performance
+
+00:04:57,040 --> 00:05:01,520
+and the most important one of those
+
+00:04:58,880 --> 00:05:04,560
+flags is worker max instances
+
+00:05:01,520 --> 00:05:06,720
+which sets the number of workers
+
+00:05:04,560 --> 00:05:08,880
+it can take a raw number to set the
+
+00:05:06,720 --> 00:05:10,000
+default and it can also take mnemonic
+
+00:05:08,880 --> 00:05:12,160
+equals value
+
+00:05:10,000 --> 00:05:14,560
+to set the number of workers for a
+
+00:05:12,160 --> 00:05:16,720
+particular action type
+
+00:05:14,560 --> 00:05:19,199
+the default is 4 but you almost
+
+00:05:16,720 --> 00:05:21,120
+certainly want something less than that
+
+00:05:19,199 --> 00:05:24,080
+and the reason for that is that we count
+
+00:05:21,120 --> 00:05:26,000
+the number of workers by worker key
+
+00:05:24,080 --> 00:05:27,759
+and the worker key depends on a lot of
+
+00:05:26,000 --> 00:05:30,880
+different factors
+
+00:05:27,759 --> 00:05:34,160
+arguments the environment the executable
+
+00:05:30,880 --> 00:05:36,479
+and that the number of possible worker
+
+00:05:34,160 --> 00:05:39,360
+keys is potentially unbounded
+
+00:05:36,479 --> 00:05:42,720
+so having a small multiplier can keep
+
+00:05:39,360 --> 00:05:45,600
+the resource usage under control
+
+00:05:42,720 --> 00:05:47,120
+at google we turn workers off by default
+
+00:05:45,600 --> 00:05:49,520
+and then teams configure
+
+00:05:47,120 --> 00:05:50,400
+the use of certain workers to meet their
+
+00:05:49,520 --> 00:05:51,919
+needs
+
+00:05:50,400 --> 00:05:53,759
+that's something that you might want to
+
+00:05:51,919 --> 00:05:55,759
+do or you might want to reduce the
+
+00:05:53,759 --> 00:05:57,919
+default number of workers to one
+
+00:05:55,759 --> 00:06:00,080
+and raise the number of certain
+
+00:05:57,919 --> 00:06:02,319
+mnemonics that you care about
+
+00:06:00,080 --> 00:06:03,440
+um that'll be up to you and the right
+
+00:06:02,319 --> 00:06:05,840
+number of workers
+
+00:06:03,440 --> 00:06:07,039
+varies a lot depending on what your
+
+00:06:05,840 --> 00:06:09,600
+build looks like
+
+00:06:07,039 --> 00:06:11,520
+and the amount of parallelism you have
+
+00:06:09,600 --> 00:06:13,440
+what your machine is like
+
+00:06:11,520 --> 00:06:15,680
+so once you've done the research to
+
+00:06:13,440 --> 00:06:16,400
+determine the right number of workers
+
+00:06:15,680 --> 00:06:18,639
+for which
+
+00:06:16,400 --> 00:06:20,319
+mnemonics for you you can set those
+
+00:06:18,639 --> 00:06:22,560
+values with this flag
+
+00:06:20,319 --> 00:06:24,479
+and they can also be set relative to
+
+00:06:22,560 --> 00:06:26,160
+machine resources so you can give them a
+
+00:06:24,479 --> 00:06:29,440
+number but you can also give them
+
+00:06:26,160 --> 00:06:30,960
+a multiplier of the host cpus or the
+
+00:06:29,440 --> 00:06:32,720
+host ram
+
+00:06:30,960 --> 00:06:34,240
+as you can see from this graph it's
+
+00:06:32,720 --> 00:06:34,720
+important to get the number of workers
+
+00:06:34,240 --> 00:06:37,199
+right
+
+00:06:34,720 --> 00:06:39,199
+um workers can use more memory more
+
+00:06:37,199 --> 00:06:41,759
+workers can use more memory
+
+00:06:39,199 --> 00:06:43,440
+uh this is a build of bazel as you saw
+
+00:06:41,759 --> 00:06:45,039
+in the previous graph
+
+00:06:43,440 --> 00:06:47,280
+and the reason there aren't any more red
+
+00:06:45,039 --> 00:06:48,000
+bars is that the machine ran out of
+
+00:06:47,280 --> 00:06:49,440
+memory and
+
+00:06:48,000 --> 00:06:51,120
+couldn't continue the build with more
+
+00:06:49,440 --> 00:06:54,479
+workers than that
+
+00:06:51,120 --> 00:06:56,880
+uh also the blue bars
+
+00:06:54,479 --> 00:06:59,120
+which are the multiplex workers you
+
+00:06:56,880 --> 00:07:01,360
+don't see that problem for
+
+00:06:59,120 --> 00:07:02,639
+but if you do want to tune the number of
+
+00:07:01,360 --> 00:07:04,960
+multiplex workers
+
+00:07:02,639 --> 00:07:05,759
+you can set them with experimental
+
+00:07:04,960 --> 00:07:08,160
+worker
+
+00:07:05,759 --> 00:07:10,240
+max multiplex instances which is quite a
+
+00:07:08,160 --> 00:07:12,560
+mouthful
+
+00:07:10,240 --> 00:07:14,080
+a few other flags that affect the
+
+00:07:12,560 --> 00:07:17,039
+behavior of workers
+
+00:07:14,080 --> 00:07:17,759
+are here uh lars will tell you a little
+
+00:07:17,039 --> 00:07:20,560
+bit more
+
+00:07:17,759 --> 00:07:21,840
+about what sandboxing is but you can
+
+00:07:20,560 --> 00:07:25,039
+toggle the behavior
+
+00:07:21,840 --> 00:07:27,520
+of that with the worker sandboxing flag
+
+00:07:25,039 --> 00:07:28,319
+high priority workers takes a list of
+
+00:07:27,520 --> 00:07:30,720
+mnemonics
+
+00:07:28,319 --> 00:07:33,280
+that are high priority maybe because
+
+00:07:30,720 --> 00:07:36,000
+those actions are on the critical path
+
+00:07:33,280 --> 00:07:37,280
+and bazel will prioritize those actions
+
+00:07:36,000 --> 00:07:40,800
+while throttling
+
+00:07:37,280 --> 00:07:43,759
+actions of other types worker extra flag
+
+00:07:40,800 --> 00:07:45,680
+allows you to pass an arbitrary list of
+
+00:07:43,759 --> 00:07:47,120
+flags to all of your workers
+
+00:07:45,680 --> 00:07:48,800
+quit after build is what you would
+
+00:07:47,120 --> 00:07:50,240
+expect um
+
+00:07:48,800 --> 00:07:51,919
+and i'm about to tell you a little bit
+
+00:07:50,240 --> 00:07:54,240
+more about creating workers
+
+00:07:51,919 --> 00:07:55,039
+this last flag pertains more to that
+
+00:07:54,240 --> 00:07:57,759
+part
+
+00:07:55,039 --> 00:07:59,039
+um experimental worker allow json
+
+00:07:57,759 --> 00:08:02,400
+protocol
+
+00:07:59,039 --> 00:08:04,560
+uh tells bazel to
+
+00:08:02,400 --> 00:08:05,840
+allow workers to communicate with it
+
+00:08:04,560 --> 00:08:08,479
+using json
+
+00:08:05,840 --> 00:08:10,160
+and instead of requiring them to
+
+00:08:08,479 --> 00:08:12,240
+communicate with proto
+
+00:08:10,160 --> 00:08:14,479
+so it doesn't mean that workers have to
+
+00:08:12,240 --> 00:08:15,840
+speak json but it means that if a worker
+
+00:08:14,479 --> 00:08:19,360
+speaks json
+
+00:08:15,840 --> 00:08:22,000
+bazel will tolerate that so
+
+00:08:19,360 --> 00:08:24,000
+how do you create a worker what a worker
+
+00:08:22,000 --> 00:08:26,960
+is is actually very simple
+
+00:08:24,000 --> 00:08:28,560
+it's a binary it accepts the persistent
+
+00:08:26,960 --> 00:08:31,199
+worker flag
+
+00:08:28,560 --> 00:08:32,000
+it reads work requests from standard in
+
+00:08:31,199 --> 00:08:34,880
+it does some
+
+00:08:32,000 --> 00:08:37,519
+stuff writing any artifacts that it
+
+00:08:34,880 --> 00:08:40,159
+creates directly to the file system
+
+00:08:37,519 --> 00:08:42,320
+and then it writes a work response to
+
+00:08:40,159 --> 00:08:45,040
+standard out
+
+00:08:42,320 --> 00:08:46,560
+notably it shouldn't do anything other
+
+00:08:45,040 --> 00:08:49,440
+than that on the standard in
+
+00:08:46,560 --> 00:08:49,760
+standard out it only reads work requests
+
+00:08:49,440 --> 00:08:52,800
+and
+
+00:08:49,760 --> 00:08:54,000
+writes work responses um it can write
+
+00:08:52,800 --> 00:08:55,680
+errors to standard error
+
+00:08:54,000 --> 00:08:57,839
+but it shouldn't write them to standard
+
+00:08:55,680 --> 00:08:57,839
+out
+
+00:08:58,000 --> 00:09:03,519
+what is a work request it's a structure
+
+00:09:01,040 --> 00:09:04,880
+it has some arguments to the worker
+
+00:09:03,519 --> 00:09:08,640
+that's a list
+
+00:09:04,880 --> 00:09:11,360
+it also has a list of path digest pairs
+
+00:09:08,640 --> 00:09:13,360
+which represent the input files that the
+
+00:09:11,360 --> 00:09:15,040
+worker is allowed to access
+
+00:09:13,360 --> 00:09:18,080
+they're not actually restrictive they're
+
+00:09:15,040 --> 00:09:21,200
+usually just used for cache verification
+
+00:09:18,080 --> 00:09:22,880
+the worker can has access to the files
+
+00:09:21,200 --> 00:09:26,959
+that it needs to
+
+00:09:22,880 --> 00:09:29,120
+use and it also contains a request id
+
+00:09:26,959 --> 00:09:31,279
+which is zero if the worker is not a
+
+00:09:29,120 --> 00:09:34,080
+multiplex worker
+
+00:09:31,279 --> 00:09:36,399
+so the worker interprets the request
+
+00:09:34,080 --> 00:09:38,160
+does what it needs to do writes what it
+
+00:09:36,399 --> 00:09:40,800
+needs to write to the file system
+
+00:09:38,160 --> 00:09:42,000
+and then it returns a work response and
+
+00:09:40,800 --> 00:09:44,800
+a work response
+
+00:09:42,000 --> 00:09:46,560
+contains an exit code just 0 versus
+
+00:09:44,800 --> 00:09:49,680
+non-zero
+
+00:09:46,560 --> 00:09:50,080
+it contains the same request id from the
+
+00:09:49,680 --> 00:09:52,720
+work
+
+00:09:50,080 --> 00:09:53,680
+request and then it also has this output
+
+00:09:52,720 --> 00:09:56,399
+field
+
+00:09:53,680 --> 00:09:58,160
+so as you might remember the worker
+
+00:09:56,399 --> 00:10:00,240
+shouldn't be writing
+
+00:09:58,160 --> 00:10:01,440
+anything to standard out other than this
+
+00:10:00,240 --> 00:10:04,880
+work response
+
+00:10:01,440 --> 00:10:05,839
+so you might have any error messages
+
+00:10:04,880 --> 00:10:08,399
+created
+
+00:10:05,839 --> 00:10:10,160
+put into this output field so that bazel
+
+00:10:08,399 --> 00:10:11,600
+can parse them
+
+00:10:10,160 --> 00:10:14,000
+i'll talk a little bit more about where
+
+00:10:11,600 --> 00:10:17,279
+those go in a minute but
+
+00:10:14,000 --> 00:10:19,839
+first that's the worker part
+
+00:10:17,279 --> 00:10:20,800
+there will also be a rule that uses that
+
+00:10:19,839 --> 00:10:23,360
+worker
+
+00:10:20,800 --> 00:10:24,880
+so you've created this binary that
+
+00:10:23,360 --> 00:10:26,959
+follows those rules
+
+00:10:24,880 --> 00:10:28,000
+you'll have a rule that defines that
+
+00:10:26,959 --> 00:10:31,519
+maybe
+
+00:10:28,000 --> 00:10:34,320
+java binary and then you'll also have
+
+00:10:31,519 --> 00:10:35,120
+a rule this is an example in starlark
+
+00:10:34,320 --> 00:10:38,000
+that
+
+00:10:35,120 --> 00:10:38,800
+refers to that worker that you've
+
+00:10:38,000 --> 00:10:40,240
+created
+
+00:10:38,800 --> 00:10:42,079
+you can imagine that there's another
+
+00:10:40,240 --> 00:10:46,240
+field maybe called worker that
+
+00:10:42,079 --> 00:10:49,200
+has a label that's pertains to the
+
+00:10:46,240 --> 00:10:51,920
+worker binary that you created and then
+
+00:10:49,200 --> 00:10:54,800
+it also needs these two other sections
+
+00:10:51,920 --> 00:10:56,240
+so it also contains a list of arguments
+
+00:10:54,800 --> 00:10:58,320
+which is a list of strings
+
+00:10:56,240 --> 00:10:59,360
+that get passed to the worker and then
+
+00:10:58,320 --> 00:11:02,880
+also this
+
+00:10:59,360 --> 00:11:06,560
+at flag file argument and that
+
+00:11:02,880 --> 00:11:10,959
+is the location of
+
+00:11:06,560 --> 00:11:15,200
+a file that bazel creates that contains
+
+00:11:10,959 --> 00:11:17,279
+the additional arguments to that worker
+
+00:11:15,200 --> 00:11:18,800
+and then it also contains execution
+
+00:11:17,279 --> 00:11:21,680
+requirements which is a
+
+00:11:18,800 --> 00:11:22,959
+key value store that must contain
+
+00:11:21,680 --> 00:11:26,320
+supports workers
+
+00:11:22,959 --> 00:11:27,760
+equals one and may also contain requires
+
+00:11:26,320 --> 00:11:30,800
+worker protocol
+
+00:11:27,760 --> 00:11:32,640
+equals json or proto so it'll default to
+
+00:11:30,800 --> 00:11:35,519
+proto if you don't
+
+00:11:32,640 --> 00:11:37,440
+list requires workers worker protocol
+
+00:11:35,519 --> 00:11:40,480
+but if your worker does communicate
+
+00:11:37,440 --> 00:11:43,920
+using json it needs to have this
+
+00:11:40,480 --> 00:11:46,240
+field and it also needs to have that
+
+00:11:43,920 --> 00:11:50,160
+experimental
+
+00:11:46,240 --> 00:11:53,200
+worker require allow json protocol
+
+00:11:50,160 --> 00:11:56,560
+flag passed to the build
+
+00:11:53,200 --> 00:11:58,800
+in terms of debugging workers there are
+
+00:11:56,560 --> 00:11:59,920
+two main places where you can expect to
+
+00:11:58,800 --> 00:12:02,639
+find the logs
+
+00:11:59,920 --> 00:12:03,040
+so one is in the bazel java logs and the
+
+00:12:02,639 --> 00:12:06,480
+other
+
+00:12:03,040 --> 00:12:09,200
+is in the worker output file files
+
+00:12:06,480 --> 00:12:10,399
+the bazel log includes a few things
+
+00:12:09,200 --> 00:12:12,800
+it'll contain
+
+00:12:10,399 --> 00:12:14,399
+bazel's best guess about what happened
+
+00:12:12,800 --> 00:12:16,399
+so whether there was no response or
+
+00:12:14,399 --> 00:12:18,000
+whether the response wasn't formatted
+
+00:12:16,399 --> 00:12:20,480
+correctly
+
+00:12:18,000 --> 00:12:23,200
+it'll contain the output field of the
+
+00:12:20,480 --> 00:12:26,240
+work response that you saw earlier
+
+00:12:23,200 --> 00:12:28,800
+and it'll also contain a path to the
+
+00:12:26,240 --> 00:12:30,720
+log file which has the standard error of
+
+00:12:28,800 --> 00:12:33,279
+the worker process
+
+00:12:30,720 --> 00:12:34,240
+and bazel will print out all of these if
+
+00:12:33,279 --> 00:12:37,120
+the exit code
+
+00:12:34,240 --> 00:12:38,000
+isn't zero so if there is an issue but
+
+00:12:37,120 --> 00:12:41,519
+if you want to see
+
+00:12:38,000 --> 00:12:44,000
+the path to that log file in
+
+00:12:41,519 --> 00:12:45,040
+cases where there is a zero exit code
+
+00:12:44,000 --> 00:12:47,279
+you can pass
+
+00:12:45,040 --> 00:12:48,800
+worker verbose to your build and bazel
+
+00:12:47,279 --> 00:12:52,720
+will print out the location
+
+00:12:48,800 --> 00:12:53,760
+of that log file and because the worker
+
+00:12:52,720 --> 00:12:55,920
+process is just
+
+00:12:53,760 --> 00:12:57,600
+like any other program you can use
+
+00:12:55,920 --> 00:13:01,360
+whatever tools you'd use
+
+00:12:57,600 --> 00:13:02,399
+to debug another program um to debug the
+
+00:13:01,360 --> 00:13:05,600
+worker process
+
+00:13:02,399 --> 00:13:07,760
+as well and so i'll turn it over
+
+00:13:05,600 --> 00:13:08,639
+to lars who will tell you a bit about
+
+00:13:07,760 --> 00:13:12,000
+sandboxing
+
+00:13:08,639 --> 00:13:15,519
+and dynamic execution some other topics
+
+00:13:12,000 --> 00:13:16,959
+okay so that was how you use workers and
+
+00:13:15,519 --> 00:13:20,240
+how you create workers
+
+00:13:16,959 --> 00:13:23,040
+so let's get into some advanced topics
+
+00:13:20,240 --> 00:13:23,440
+first of all sandboxing as i mentioned
+
+00:13:23,040 --> 00:13:26,959
+this
+
+00:13:23,440 --> 00:13:29,600
+is a very important concept in bazel
+
+00:13:26,959 --> 00:13:30,560
+we want to be able to have hermetic
+
+00:13:29,600 --> 00:13:34,160
+builds
+
+00:13:30,560 --> 00:13:37,120
+and sandboxing is a main part of that
+
+00:13:34,160 --> 00:13:39,360
+now all the tools involved in a build
+
+00:13:37,120 --> 00:13:42,320
+have always been cooperative
+
+00:13:39,360 --> 00:13:42,639
+in their sandboxing uh they could write
+
+00:13:42,320 --> 00:13:45,360
+to
+
+00:13:42,639 --> 00:13:47,279
+files in other places and then a second
+
+00:13:45,360 --> 00:13:49,040
+action could read that but
+
+00:13:47,279 --> 00:13:52,320
+we don't want to do that because that
+
+00:13:49,040 --> 00:13:52,320
+would break the hematicity
+
+00:13:52,560 --> 00:13:56,959
+when we have workers it gets a little
+
+00:13:55,839 --> 00:14:00,320
+more complicated
+
+00:13:56,959 --> 00:14:02,160
+because now you have
+
+00:14:00,320 --> 00:14:04,240
+long processes that might leave
+
+00:14:02,160 --> 00:14:09,120
+something in memory
+
+00:14:04,240 --> 00:14:11,839
+might use a common temp file area
+
+00:14:09,120 --> 00:14:13,440
+or might put its cache in a certain
+
+00:14:11,839 --> 00:14:17,120
+place
+
+00:14:13,440 --> 00:14:20,639
+or it might just expect that
+
+00:14:17,120 --> 00:14:21,360
+once an action has been done the process
+
+00:14:20,639 --> 00:14:24,480
+would exit
+
+00:14:21,360 --> 00:14:26,240
+and so not do a proper cleanup
+
+00:14:24,480 --> 00:14:28,079
+the workers need to handle the cleanup
+
+00:14:26,240 --> 00:14:29,839
+properly
+
+00:14:28,079 --> 00:14:31,360
+now in multiplex workers it gets even
+
+00:14:29,839 --> 00:14:35,120
+worse
+
+00:14:31,360 --> 00:14:37,360
+because they might have temp files
+
+00:14:35,120 --> 00:14:39,040
+that then the different threads could
+
+00:14:37,360 --> 00:14:43,519
+happen to find
+
+00:14:39,040 --> 00:14:47,120
+and it has to be thread safe
+
+00:14:43,519 --> 00:14:48,959
+so there's even more
+
+00:14:47,120 --> 00:14:50,880
+verification that needs to be done to
+
+00:14:48,959 --> 00:14:55,120
+make sure that a multiplex workers
+
+00:14:50,880 --> 00:14:57,199
+is actually probably hermetic
+
+00:14:55,120 --> 00:14:59,440
+on front end so far multiplex workers
+
+00:14:57,199 --> 00:15:03,279
+are implicitly not fully hermetic
+
+00:14:59,440 --> 00:15:04,480
+because they all write into the same
+
+00:15:03,279 --> 00:15:06,399
+directory
+
+00:15:04,480 --> 00:15:08,800
+they only have one output directory per
+
+00:15:06,399 --> 00:15:11,360
+process and now we have
+
+00:15:08,800 --> 00:15:12,959
+many workhorse threads writing into that
+
+00:15:11,360 --> 00:15:15,120
+directory
+
+00:15:12,959 --> 00:15:17,360
+they are not sandboxed yet we are
+
+00:15:15,120 --> 00:15:19,279
+working on how to fix that
+
+00:15:17,360 --> 00:15:20,480
+basically we want the request to be able
+
+00:15:19,279 --> 00:15:25,279
+to specify
+
+00:15:20,480 --> 00:15:28,959
+where to put the results there is also
+
+00:15:25,279 --> 00:15:32,959
+a potential for output races
+
+00:15:28,959 --> 00:15:35,519
+in particular when we use the new
+
+00:15:32,959 --> 00:15:36,720
+dynamic scheduling system this is a
+
+00:15:35,519 --> 00:15:40,480
+system
+
+00:15:36,720 --> 00:15:43,839
+for remote execution frameworks
+
+00:15:40,480 --> 00:15:47,040
+which are becoming more and more useful
+
+00:15:43,839 --> 00:15:48,000
+where you speculative execute an action
+
+00:15:47,040 --> 00:15:51,759
+both locally
+
+00:15:48,000 --> 00:15:56,079
+and remotely and whichever comes first
+
+00:15:51,759 --> 00:15:59,199
+wins since a remote
+
+00:15:56,079 --> 00:16:02,399
+execution framework can be great for
+
+00:15:59,199 --> 00:16:04,160
+massive caching and massive parallelism
+
+00:16:02,399 --> 00:16:07,040
+this is fantastic when you want to do a
+
+00:16:04,160 --> 00:16:08,079
+clean build it's not so great in latency
+
+00:16:07,040 --> 00:16:10,399
+for
+
+00:16:08,079 --> 00:16:12,480
+incremental builds so there the local
+
+00:16:10,399 --> 00:16:16,079
+would be best
+
+00:16:12,480 --> 00:16:19,040
+now the output race is that
+
+00:16:16,079 --> 00:16:20,800
+if the remote execution finishes first
+
+00:16:19,040 --> 00:16:24,320
+we'll have to prevent the workers
+
+00:16:20,800 --> 00:16:27,120
+from overwriting the result files
+
+00:16:24,320 --> 00:16:27,920
+because the workers are still running
+
+00:16:27,120 --> 00:16:30,079
+and
+
+00:16:27,920 --> 00:16:31,040
+we have looked at various ways to add
+
+00:16:30,079 --> 00:16:33,759
+locks to
+
+00:16:31,040 --> 00:16:36,399
+prevent this race but they cost
+
+00:16:33,759 --> 00:16:36,399
+performance
+
+00:16:36,560 --> 00:16:39,680
+what we need to have for this to work
+
+00:16:38,959 --> 00:16:42,240
+well
+
+00:16:39,680 --> 00:16:45,279
+is a way to cancel a worker and a way to
+
+00:16:42,240 --> 00:16:45,279
+sandbox it properly
+
+00:16:45,680 --> 00:16:48,959
+now canceling is not something that the
+
+00:16:47,920 --> 00:16:52,000
+current water pro
+
+00:16:48,959 --> 00:16:54,399
+workup protocol allows doing
+
+00:16:52,000 --> 00:16:55,839
+we want to be able to contact a specific
+
+00:16:54,399 --> 00:16:59,040
+worker or work a thread
+
+00:16:55,839 --> 00:17:00,880
+and say stop working this would make
+
+00:16:59,040 --> 00:17:04,160
+this whole log program
+
+00:17:00,880 --> 00:17:06,799
+much much faster much much simpler
+
+00:17:04,160 --> 00:17:08,240
+and it will allow for faster reuse of
+
+00:17:06,799 --> 00:17:10,079
+the worker itself it can
+
+00:17:08,240 --> 00:17:12,400
+go right ahead and start on the next
+
+00:17:10,079 --> 00:17:15,120
+work request
+
+00:17:12,400 --> 00:17:16,799
+it will also fix the slight annoyance
+
+00:17:15,120 --> 00:17:18,240
+that if you interrupt a build
+
+00:17:16,799 --> 00:17:20,480
+low workers will actually finish their
+
+00:17:18,240 --> 00:17:24,240
+work which could take a lot of time
+
+00:17:20,480 --> 00:17:26,240
+and cpu problem is
+
+00:17:24,240 --> 00:17:28,319
+cancellation is something that we'll
+
+00:17:26,240 --> 00:17:31,039
+need to add to
+
+00:17:28,319 --> 00:17:33,120
+the worker request and the workers need
+
+00:17:31,039 --> 00:17:34,880
+to figure out how to actually support
+
+00:17:33,120 --> 00:17:36,320
+this correctly
+
+00:17:34,880 --> 00:17:38,799
+these are the next things we're going to
+
+00:17:36,320 --> 00:17:40,400
+be working on we want to improve the
+
+00:17:38,799 --> 00:17:43,200
+multiplex stability
+
+00:17:40,400 --> 00:17:44,720
+we want to add sandboxing we want to be
+
+00:17:43,200 --> 00:17:47,840
+able to cancel workers
+
+00:17:44,720 --> 00:17:50,559
+but we also want to be able to cap
+
+00:17:47,840 --> 00:17:53,200
+resource usage by workers currently
+
+00:17:50,559 --> 00:17:56,160
+bazel doesn't know how many
+
+00:17:53,200 --> 00:17:58,320
+resources cpu and memory in particular
+
+00:17:56,160 --> 00:18:01,440
+the workers are using
+
+00:17:58,320 --> 00:18:04,480
+we need to feed that information back
+
+00:18:01,440 --> 00:18:06,240
+so that bazel can balance having the
+
+00:18:04,480 --> 00:18:09,679
+fastest build possible
+
+00:18:06,240 --> 00:18:11,280
+with a box that is still usable in the
+
+00:18:09,679 --> 00:18:12,720
+meantime
+
+00:18:11,280 --> 00:18:14,640
+so these are all things we're going to
+
+00:18:12,720 --> 00:18:17,039
+be working on
+
+00:18:14,640 --> 00:18:18,480
+in the coming months thank you for
+
+00:18:17,039 --> 00:18:20,880
+listening in
+
+00:18:18,480 --> 00:18:22,720
+and we hope this will help you build
+
+00:18:20,880 --> 00:18:26,840
+faster with bazel
+
+00:18:22,720 --> 00:18:28,270
+and make all your builds both fast and
+
+00:18:26,840 --> 00:18:33,390
+correct
+
+00:18:28,270 --> 00:18:33,390
+[Music]
+
+00:18:35,520 --> 00:18:37,600
+
+YouTube URL: https://www.youtube.com/watch?v=d7q1cVLuRhY
+
+

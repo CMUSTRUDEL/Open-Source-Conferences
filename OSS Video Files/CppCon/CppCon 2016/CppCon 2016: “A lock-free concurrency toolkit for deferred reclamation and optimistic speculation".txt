@@ -1,0 +1,4018 @@
+Title: CppCon 2016: “A lock-free concurrency toolkit for deferred reclamation and optimistic speculation"
+Publication date: 2016-10-02
+Playlist: CppCon 2016
+Description: 
+	http://CppCon.org
+—
+Presentation Slides, PDFs, Source Code and other presenter materials are available at: https://github.com/cppcon/cppcon2016
+—
+Paul E. McKenney, Maged Michael, & Michael Wong
+
+This talk introduces the concept of a Concurrency Toolkit that contains the proposed lock-free algorithms on Hazard Pointers and Read-Copy_Update and analyzes their motivation, while showing where they can be useful and their performance differences. 
+Under optimistic concurrency, threads may use shared resources concurrently with other threads that may make such resources unavailable for further use. Care must be taken to reclaim such resources only after it is guaranteed that no threads are concurrently using them or will subsequently use them. 
+
+More specifically, concurrent dynamic data structures that employ optimistic concurrency allow threads to access dynamic objects concurrently with threads that may remove such objects. Without proper precautions, it is generally unsafe to reclaim the removed objects, as they may yet be accessed by threads that hold references to them. Solutions for the safe reclamation problem can also be used to prevent the ABA problem, a common problem under optimistic concurrency. 
+
+There are several methods for safe deferred reclamation. The main methods are garbage collection, reference counting, RCU (read-copy-update), and hazard pointers. Each method has its pros and cons and none of the methods provides the best features in all cases. Therefore, it is desirable to offer users the opportunity to choose the most suitable methods for their use cases. 
+
+This talk will show why we are considering their inclusion (with the exception of garbage collection) in future C++ Standards under SG14/SG1 into the Concurrency TS.
+— 
+Paul E. McKenney
+IBM Linux Technology Center
+Distinguished Engineer
+Hillsboro, OR, USA
+Websiterdrop.com/~paulmck
+Paul E. McKenney has been coding for almost four decades, more than half of that on parallel hardware, where his work has earned him a reputation among some as a flaming heretic. Over the past decade, Paul has been an IBM Distinguished Engineer at the IBM Linux Technology Center. Paul maintains the RCU implementation within the Linux kernel, where the variety of workloads present highly entertaining performance, scalability, real-time response, and energy-efficiency challenges. Prior to that, he worked on the DYNIX/ptx kernel at Sequent, and prior to that on packet-radio and Internet protocols (but long before it was polite to mention Internet at cocktail parties), system administration, business applications, and real-time systems. His hobbies include what passes for running at his age along with the usual house-wife-and-kids habit.
+
+Maged Michael
+Facebook
+New York
+Maged Michael is a software engineer at Facebook. He is the inventor of hazard pointers, lock-free malloc and several algorithms for concurrent data structures. His work is included in several IBM products where he was a Research Staff Member at the IBM T.J. Watson Research Center. He received a Ph.D. in computer science from the University of Rochester. He is an ACM Distinguished Scientist and an ACM Distinguished Speaker. He is an elected member of the Connecticut Academy of Science and Engineering. He received the 2014 ACM SIGPLAN Most Influential PLDI Paper Award for his paper on Scalable Lock-Free Dynamic Memory Allocation.
+
+Michael Wong
+Codeplay Software/ISOCPP
+VP of R&D/Director
+Michael Wong is the CEO of OpenMP. He is the Canadian representative to the C++ Standard and OpenMP Committee. He is also a Director of ISOCPP.org and a VP, Vice-Chair of Programming Languages for Canada’s Standard Council. He has so many titles, it’s a wonder he can get anything done.
+He chairs the WG21 SG5 Transactional Memory and SG14 Games Development/Low Latency, and is the co-author of a number C++11/OpenMP/Transactional Memory features including generalized attributes, user-defined literals, inheriting constructors, weakly ordered memory models, and explicit conversion operators. Having been the past C++ team lead to IBM’s XL C++ compiler means he has been messing around with designing C++ compilers for twenty years. His current research interest, i.e. what he would like to do if he had time is in the area of parallel programming, transactional memory, C++ benchmark performance, object model, generic programming and template metaprogramming. He holds a B.Sc from University of Toronto, and a Masters in Mathematics from University of Waterloo.
+
+He has been asked to speak at ACCU, C++Now, Meeting C++, ADC++, CASCON, Bloomberg, CERN, and many Universities, research centers and companies.
+—
+Videos Filmed & Edited by Bash Films: http://www.BashFilms.com
+Captions: 
+	00:00:00,030 --> 00:00:03,990
+so today's talks going to be about a
+
+00:00:01,949 --> 00:00:06,839
+concurrency toolkit that we're proposing
+
+00:00:03,990 --> 00:00:10,080
+for the C++ standard it follows on as a
+
+00:00:06,839 --> 00:00:12,269
+natural follow ordering beep after that
+
+00:00:10,080 --> 00:00:16,820
+you have share pointers and then of
+
+00:00:12,269 --> 00:00:20,580
+course atomic share pointers from C++ 17
+
+00:00:16,820 --> 00:00:21,900
+well not exactly I guess it's it's it's
+
+00:00:20,580 --> 00:00:23,430
+in the concurrency tier so it's not
+
+00:00:21,900 --> 00:00:24,990
+really it's not really in there yet but
+
+00:00:23,430 --> 00:00:26,789
+it is in the concurrency t-80s
+
+00:00:24,990 --> 00:00:28,410
+and the follow-on after that we think
+
+00:00:26,789 --> 00:00:30,920
+naturally is something called hazard
+
+00:00:28,410 --> 00:00:33,450
+pointers and recopy update I'll see you
+
+00:00:30,920 --> 00:00:35,460
+I'm gonna skip past most of these things
+
+00:00:33,450 --> 00:00:37,170
+I'm essentially giving you a kind of a
+
+00:00:35,460 --> 00:00:39,780
+high-level motivation and then we're
+
+00:00:37,170 --> 00:00:42,420
+going to be followed by the actual
+
+00:00:39,780 --> 00:00:44,640
+authors of hazard pointers and I'll see
+
+00:00:42,420 --> 00:00:46,620
+you coming up to explain what these
+
+00:00:44,640 --> 00:00:48,539
+these interesting objects are but the
+
+00:00:46,620 --> 00:00:51,030
+agenda today is essentially we're gonna
+
+00:00:48,539 --> 00:00:53,460
+start with something of a play on words
+
+00:00:51,030 --> 00:00:56,039
+Ernie Irvan Schrodinger's ooh and Werner
+
+00:00:53,460 --> 00:00:58,620
+Heisenberg's advice the increase that
+
+00:00:56,039 --> 00:01:01,070
+increase uncertainty increase
+
+00:00:58,620 --> 00:01:04,199
+uncertainty can get you performance and
+
+00:01:01,070 --> 00:01:06,479
+scalability so as a result get given
+
+00:01:04,199 --> 00:01:09,780
+that that knowledge procrastinate away
+
+00:01:06,479 --> 00:01:13,770
+and one way we're going to do that is by
+
+00:01:09,780 --> 00:01:15,780
+using structured deferral and we're
+
+00:01:13,770 --> 00:01:16,890
+going to take a look at a table that
+
+00:01:15,780 --> 00:01:18,960
+we've been working for over two years
+
+00:01:16,890 --> 00:01:21,360
+comparing the various features and
+
+00:01:18,960 --> 00:01:23,340
+properties of share pointers atomic
+
+00:01:21,360 --> 00:01:26,630
+share pointers versus hazard pointers
+
+00:01:23,340 --> 00:01:28,680
+and recopy update and then finally
+
+00:01:26,630 --> 00:01:31,560
+maggots gonna come up he's the author
+
+00:01:28,680 --> 00:01:33,420
+the inventor of hazard pointers and paul
+
+00:01:31,560 --> 00:01:35,729
+mckinney it's gonna come up and he's the
+
+00:01:33,420 --> 00:01:37,619
+author and inventor of recopy update and
+
+00:01:35,729 --> 00:01:39,900
+explain to find details for that and
+
+00:01:37,619 --> 00:01:41,759
+we're gonna finish that with a
+
+00:01:39,900 --> 00:01:43,350
+conclusion that this is appropriate with
+
+00:01:41,759 --> 00:01:45,060
+this along with atomic share point
+
+00:01:43,350 --> 00:01:46,979
+integer pointer forms the beginning of
+
+00:01:45,060 --> 00:01:53,340
+an appropriate concurrency toolkit for
+
+00:01:46,979 --> 00:01:56,130
+C++ so no installing glues would like to
+
+00:01:53,340 --> 00:01:58,229
+construct an in-memory database to keep
+
+00:01:56,130 --> 00:01:59,640
+track of the animals in his zoo this is
+
+00:01:58,229 --> 00:02:01,170
+a thought experiment just like many
+
+00:01:59,640 --> 00:02:02,729
+things in physics I have a background in
+
+00:02:01,170 --> 00:02:05,430
+astrophysics so I like these kinds of
+
+00:02:02,729 --> 00:02:07,350
+thought experiments birds would of
+
+00:02:05,430 --> 00:02:09,840
+course result in insertion into this
+
+00:02:07,350 --> 00:02:12,390
+database but deaths would result in
+
+00:02:09,840 --> 00:02:13,800
+deletions the database is also query by
+
+00:02:12,390 --> 00:02:16,520
+those interested in the hell
+
+00:02:13,800 --> 00:02:18,750
+and welfare of shorteners animal
+
+00:02:16,520 --> 00:02:21,150
+Schrodinger's has numerous short lived
+
+00:02:18,750 --> 00:02:23,430
+animals like mice resulting in high
+
+00:02:21,150 --> 00:02:26,010
+update rate high update rates in
+
+00:02:23,430 --> 00:02:28,140
+addition there is a surprising level of
+
+00:02:26,010 --> 00:02:30,690
+interest in the health of Schrodinger's
+
+00:02:28,140 --> 00:02:32,640
+cat so much so that Schrodinger's
+
+00:02:30,690 --> 00:02:34,440
+sometimes wonder whether his mice are
+
+00:02:32,640 --> 00:02:36,660
+responsible for these many many queries
+
+00:02:34,440 --> 00:02:39,930
+is the cat still alive is it similar is
+
+00:02:36,660 --> 00:02:41,610
+it still alive so regardless of the
+
+00:02:39,930 --> 00:02:44,000
+source the database has to handle a
+
+00:02:41,610 --> 00:02:46,470
+large volume of cat related queries
+
+00:02:44,000 --> 00:02:49,640
+without suffering from excessive levels
+
+00:02:46,470 --> 00:02:53,670
+of contention both accesses and updates
+
+00:02:49,640 --> 00:02:55,650
+are typically quite short involving
+
+00:02:53,670 --> 00:02:57,480
+accessing or mutating an in-memory data
+
+00:02:55,650 --> 00:03:02,220
+structure and therefore synchronization
+
+00:02:57,480 --> 00:03:04,140
+overhead cannot be ignored so shorting
+
+00:03:02,220 --> 00:03:06,450
+also understands however that it is
+
+00:03:04,140 --> 00:03:08,430
+impossible to determine exactly when a
+
+00:03:06,450 --> 00:03:10,560
+given animal is born or do or die for
+
+00:03:08,430 --> 00:03:12,990
+example suppose that his cat's passing
+
+00:03:10,560 --> 00:03:15,270
+is to be detected by the heartbeat when
+
+00:03:12,990 --> 00:03:16,980
+a heartbeat stops he's it's dead now set
+
+00:03:15,270 --> 00:03:18,570
+now we use instruments to do that and of
+
+00:03:16,980 --> 00:03:20,100
+course seconds or even minutes would be
+
+00:03:18,570 --> 00:03:22,800
+required to determine the poor cat's
+
+00:03:20,100 --> 00:03:24,120
+state of health so the shorter the
+
+00:03:22,800 --> 00:03:26,550
+measurement of obviously the less
+
+00:03:24,120 --> 00:03:29,430
+certainty the measurement so that a pair
+
+00:03:26,550 --> 00:03:31,410
+of veterinarians my examiner cat and
+
+00:03:29,430 --> 00:03:34,050
+would disagree on the exact moment of
+
+00:03:31,410 --> 00:03:35,850
+the cat's death for example one might
+
+00:03:34,050 --> 00:03:38,010
+declare the death thirty seconds after
+
+00:03:35,850 --> 00:03:39,930
+the last heartbeat well another might
+
+00:03:38,010 --> 00:03:41,730
+insist on waiting a full minute in which
+
+00:03:39,930 --> 00:03:44,580
+case the veterinarians would disagree on
+
+00:03:41,730 --> 00:03:47,640
+the stay that he had during the second
+
+00:03:44,580 --> 00:03:52,709
+half the animal a second half the minute
+
+00:03:47,640 --> 00:03:54,870
+after the last heartbeat fortunately his
+
+00:03:52,709 --> 00:03:57,660
+good friend Werner Heisenberg has taught
+
+00:03:54,870 --> 00:04:00,720
+Schrodinger how to cope with these kinds
+
+00:03:57,660 --> 00:04:02,760
+of uncertainty the delay in detecting
+
+00:04:00,720 --> 00:04:05,580
+the cat's passing actually permits use
+
+00:04:02,760 --> 00:04:07,620
+of synchronization via procrastination
+
+00:04:05,580 --> 00:04:09,720
+we all like to procrastinate so after
+
+00:04:07,620 --> 00:04:12,090
+all given that the two veterinarians
+
+00:04:09,720 --> 00:04:14,130
+pronounced no death were separated by at
+
+00:04:12,090 --> 00:04:16,950
+least a full 30 seconds a few additional
+
+00:04:14,130 --> 00:04:19,049
+milliseconds of software procrastination
+
+00:04:16,950 --> 00:04:20,519
+is perfectly acceptable in this case so
+
+00:04:19,049 --> 00:04:23,100
+in fact Schrodinger's design goes
+
+00:04:20,519 --> 00:04:25,380
+further by actually explicitly it's
+
+00:04:23,100 --> 00:04:27,600
+actually exploiting the ambiguity and
+
+00:04:25,380 --> 00:04:29,670
+uncertainty he does this by
+
+00:04:27,600 --> 00:04:31,530
+refusing to require that queries and
+
+00:04:29,670 --> 00:04:34,530
+insertions and deletions be fully
+
+00:04:31,530 --> 00:04:36,570
+ordered as we will see this design
+
+00:04:34,530 --> 00:04:41,790
+choice is going to enable extremely
+
+00:04:36,570 --> 00:04:42,990
+high-speed queries so now if we step
+
+00:04:41,790 --> 00:04:45,060
+back from read to real life this
+
+00:04:42,990 --> 00:04:47,670
+situation is not limited Schrodinger's
+
+00:04:45,060 --> 00:04:48,930
+Xue xue's database any situation in
+
+00:04:47,670 --> 00:04:50,910
+which data within a computer is a
+
+00:04:48,930 --> 00:04:52,800
+function of events and entities outside
+
+00:04:50,910 --> 00:04:54,180
+the computer for instance similar
+
+00:04:52,800 --> 00:04:56,520
+uncertainty will be enforced by the
+
+00:04:54,180 --> 00:04:58,020
+speed of light delays by the time a
+
+00:04:56,520 --> 00:05:00,540
+given change has been committed to the
+
+00:04:58,020 --> 00:05:02,310
+systems of memory it might well have
+
+00:05:00,540 --> 00:05:03,630
+been superseded by some other change it
+
+00:05:02,310 --> 00:05:06,270
+might not even be possible to determine
+
+00:05:03,630 --> 00:05:08,220
+the time order of several external
+
+00:05:06,270 --> 00:05:10,110
+events at the Sun for instance explode
+
+00:05:08,220 --> 00:05:12,690
+this very minute we would not find out
+
+00:05:10,110 --> 00:05:14,910
+about it for another eight minutes okay
+
+00:05:12,690 --> 00:05:16,710
+worst yet these are situations were
+
+00:05:14,910 --> 00:05:18,660
+protest situations where protocols
+
+00:05:16,710 --> 00:05:20,820
+introduced additional delays for example
+
+00:05:18,660 --> 00:05:22,800
+such delays are commonplace common
+
+00:05:20,820 --> 00:05:24,750
+practice in Internet routing protocols
+
+00:05:22,800 --> 00:05:27,030
+these routing protocols delays are
+
+00:05:24,750 --> 00:05:29,390
+absolutely necessary because we have to
+
+00:05:27,030 --> 00:05:32,010
+use it to preserve Internet stability
+
+00:05:29,390 --> 00:05:34,740
+however they do introduce long periods
+
+00:05:32,010 --> 00:05:36,180
+and this is the key during which a given
+
+00:05:34,740 --> 00:05:39,360
+system connected to the Internet might
+
+00:05:36,180 --> 00:05:42,330
+be uncertain of the Internet's topology
+
+00:05:39,360 --> 00:05:44,940
+the applicability of an order lookup is
+
+00:05:42,330 --> 00:05:53,130
+now quite broad if you follow this
+
+00:05:44,940 --> 00:05:54,960
+analogy so suppose an algorithm uses the
+
+00:05:53,130 --> 00:05:57,570
+common idiom that makes a decision while
+
+00:05:54,960 --> 00:05:59,490
+holding a lock then relies on that
+
+00:05:57,570 --> 00:06:01,770
+decision after releasing the log this
+
+00:05:59,490 --> 00:06:04,770
+algorithm is in fact relying on obsolete
+
+00:06:01,770 --> 00:06:06,900
+information because some other CPU might
+
+00:06:04,770 --> 00:06:08,490
+have acquired a lock and change the data
+
+00:06:06,900 --> 00:06:10,530
+on which the decision was based while
+
+00:06:08,490 --> 00:06:12,300
+the first CPU is still relying on its
+
+00:06:10,530 --> 00:06:14,400
+now obsolete position in short
+
+00:06:12,300 --> 00:06:16,560
+synchronization via procrastination is
+
+00:06:14,400 --> 00:06:19,020
+especially useful when interacting with
+
+00:06:16,560 --> 00:06:21,150
+external states so given that knowledge
+
+00:06:19,020 --> 00:06:22,680
+we've actually looked at a number of
+
+00:06:21,150 --> 00:06:24,150
+algorithms and we've already has
+
+00:06:22,680 --> 00:06:26,220
+something called there's it turns out
+
+00:06:24,150 --> 00:06:27,540
+that there are four key approaches there
+
+00:06:26,220 --> 00:06:30,330
+might be more but right now I just only
+
+00:06:27,540 --> 00:06:31,800
+want to talk about four that can resolve
+
+00:06:30,330 --> 00:06:33,900
+this problem one is actually a fairly
+
+00:06:31,800 --> 00:06:35,250
+common idiom using reference counting
+
+00:06:33,900 --> 00:06:37,590
+and indeed that's what share pointer
+
+00:06:35,250 --> 00:06:39,450
+does the other one is something that we
+
+00:06:37,590 --> 00:06:41,100
+added to the concurrency tiers called
+
+00:06:39,450 --> 00:06:44,160
+atomic share pointer
+
+00:06:41,100 --> 00:06:46,020
+using big using double compare-and-swap
+
+00:06:44,160 --> 00:06:47,400
+reference counts now this is this was
+
+00:06:46,020 --> 00:06:49,020
+quite interesting this took our group
+
+00:06:47,400 --> 00:06:50,730
+quite some time to discover until I
+
+00:06:49,020 --> 00:06:52,110
+talked to Anthony Williams and found out
+
+00:06:50,730 --> 00:06:55,020
+he's pretty much the only ones who was
+
+00:06:52,110 --> 00:06:58,620
+able to implement atomic SharePoint or
+
+00:06:55,020 --> 00:07:00,210
+end-to-end using truly atomic increments
+
+00:06:58,620 --> 00:07:03,150
+at reference counting as well as
+
+00:07:00,210 --> 00:07:05,160
+reclamation the boost one claims it does
+
+00:07:03,150 --> 00:07:06,300
+said the booster Thomas your point of
+
+00:07:05,160 --> 00:07:08,730
+claims it does it but it doesn't really
+
+00:07:06,300 --> 00:07:10,860
+do reclamation folio we talked to P the
+
+00:07:08,730 --> 00:07:12,930
+deema about that as well too so we can
+
+00:07:10,860 --> 00:07:14,670
+see how challenging this is that this is
+
+00:07:12,930 --> 00:07:17,640
+I'm gonna talk a little bit more about
+
+00:07:14,670 --> 00:07:19,020
+that but the third and fourth part is
+
+00:07:17,640 --> 00:07:21,140
+these really are the really interesting
+
+00:07:19,020 --> 00:07:23,430
+part we now have these but these two
+
+00:07:21,140 --> 00:07:25,440
+toolkits additional toolkits hazard
+
+00:07:23,430 --> 00:07:26,850
+pointers and recopy update which we're
+
+00:07:25,440 --> 00:07:29,490
+going to offer up to the C++ standard
+
+00:07:26,850 --> 00:07:31,710
+for Standardization for inclusion into
+
+00:07:29,490 --> 00:07:35,730
+the concurrent CTS which means that it
+
+00:07:31,710 --> 00:07:39,780
+could land in c++ 20 so in short what
+
+00:07:35,730 --> 00:07:41,850
+I'm saying is that synchronization which
+
+00:07:39,780 --> 00:07:43,560
+is the convoy procrastination which is
+
+00:07:41,850 --> 00:07:45,630
+the commonality of all these powders is
+
+00:07:43,560 --> 00:07:50,940
+especially useful whenever you're
+
+00:07:45,630 --> 00:07:52,770
+dealing with external state okay so to
+
+00:07:50,940 --> 00:07:54,270
+see how this edit so this is a common
+
+00:07:52,770 --> 00:07:55,710
+idioms I've talked about the basic
+
+00:07:54,270 --> 00:07:58,170
+problem ultimately it's just about the
+
+00:07:55,710 --> 00:08:01,320
+finite speed of light and of course the
+
+00:07:58,170 --> 00:08:03,590
+fact that atoms and electrons that carry
+
+00:08:01,320 --> 00:08:05,520
+our information can really move any fast
+
+00:08:03,590 --> 00:08:06,930
+even though they've been moving at the
+
+00:08:05,520 --> 00:08:09,240
+same speed every time now we're saying
+
+00:08:06,930 --> 00:08:13,200
+god damnit you gotta get to do it faster
+
+00:08:09,240 --> 00:08:15,600
+so just a little bit recap we you know
+
+00:08:13,200 --> 00:08:17,370
+about the C++ 11 smart pointers they're
+
+00:08:15,600 --> 00:08:19,170
+error-prone there was Beth this was one
+
+00:08:17,370 --> 00:08:21,000
+of the primary reasons why were you add
+
+00:08:19,170 --> 00:08:22,560
+it to them for atomic share pointers now
+
+00:08:21,000 --> 00:08:24,960
+some people think that it was just
+
+00:08:22,560 --> 00:08:27,750
+syntactic sugar that we added at that
+
+00:08:24,960 --> 00:08:29,850
+atomic share pointers and it's it was it
+
+00:08:27,750 --> 00:08:30,900
+wasn't with with the original share
+
+00:08:29,850 --> 00:08:32,400
+pointer it's somewhat inefficient
+
+00:08:30,900 --> 00:08:34,320
+because the atomic compare extrange
+
+00:08:32,400 --> 00:08:36,270
+strong is a free function taking a
+
+00:08:34,320 --> 00:08:38,160
+regular share pointer and we don't want
+
+00:08:36,270 --> 00:08:41,880
+extra synchronization in SharePoint to
+
+00:08:38,160 --> 00:08:43,770
+itself so this slide I actually took
+
+00:08:41,880 --> 00:08:45,240
+from Anthony Williams blog which I
+
+00:08:43,770 --> 00:08:47,580
+thought was really nice a simple
+
+00:08:45,240 --> 00:08:49,770
+solution for showed as showing there's
+
+00:08:47,580 --> 00:08:51,300
+cats showing a zoo it's a place a
+
+00:08:49,770 --> 00:08:53,310
+reference counter of course in each
+
+00:08:51,300 --> 00:08:54,310
+animal's data element within a hash
+
+00:08:53,310 --> 00:08:56,470
+table with
+
+00:08:54,310 --> 00:08:58,029
+collisions handled by chaining so the
+
+00:08:56,470 --> 00:09:00,130
+reader is atomically increment in
+
+00:08:58,029 --> 00:09:02,050
+reference these are the mice before
+
+00:09:00,130 --> 00:09:04,510
+accessing animals data elements and
+
+00:09:02,050 --> 00:09:05,980
+atomically decremented afterwards so
+
+00:09:04,510 --> 00:09:08,290
+this provides synchronization only
+
+00:09:05,980 --> 00:09:09,610
+between readers and updaters updaters
+
+00:09:08,290 --> 00:09:11,740
+has to synchronize among themselves
+
+00:09:09,610 --> 00:09:14,200
+using other alternatives using other
+
+00:09:11,740 --> 00:09:16,060
+mechanisms such as locking non-blocking
+
+00:09:14,200 --> 00:09:17,140
+synchronization or even transactional
+
+00:09:16,060 --> 00:09:19,480
+memory something I'm fairly familiar
+
+00:09:17,140 --> 00:09:22,540
+with so here in this particular example
+
+00:09:19,480 --> 00:09:24,610
+the stood she pointed works great if
+
+00:09:22,540 --> 00:09:27,610
+there's an instance of it in every
+
+00:09:24,610 --> 00:09:29,040
+thread provided so that changes to the
+
+00:09:27,610 --> 00:09:31,180
+reference count are synchronized
+
+00:09:29,040 --> 00:09:33,220
+everything just works if your share data
+
+00:09:31,180 --> 00:09:34,990
+is correctly synchronized you would need
+
+00:09:33,220 --> 00:09:36,700
+to ensure that it's safe to call in this
+
+00:09:34,990 --> 00:09:38,860
+particular example according to Anthony
+
+00:09:36,700 --> 00:09:41,140
+Williams and we agree that it's safe to
+
+00:09:38,860 --> 00:09:43,089
+call my class do stuff and do stuff with
+
+00:09:41,140 --> 00:09:44,770
+from multiple threads concurrently on
+
+00:09:43,089 --> 00:09:46,170
+the same instance but the reference
+
+00:09:44,770 --> 00:09:51,850
+counts are handled okay
+
+00:09:46,170 --> 00:09:52,990
+however the minute you move to some of
+
+00:09:51,850 --> 00:09:55,210
+the words are moved over that's cool
+
+00:09:52,990 --> 00:09:56,529
+that's close enough so here here we I
+
+00:09:55,210 --> 00:09:57,700
+want to go but I want to look at what
+
+00:09:56,529 --> 00:10:00,760
+this really means so when you have
+
+00:09:57,700 --> 00:10:02,500
+deferred reclamation via reference
+
+00:10:00,760 --> 00:10:04,480
+counting what you're doing is you're
+
+00:10:02,500 --> 00:10:05,830
+combining waiter waiting for your
+
+00:10:04,480 --> 00:10:07,990
+combines waiting for readers and
+
+00:10:05,830 --> 00:10:09,940
+multiple versions so the four-state
+
+00:10:07,990 --> 00:10:11,440
+process of removing the data element
+
+00:10:09,940 --> 00:10:13,600
+corresponding the Schrodinger's pork
+
+00:10:11,440 --> 00:10:16,800
+head is shown here the initial state
+
+00:10:13,600 --> 00:10:19,360
+here shows one chain of the hash table
+
+00:10:16,800 --> 00:10:22,570
+representing Schrodinger's boa cat and
+
+00:10:19,360 --> 00:10:24,460
+canoe as indicated by the red color of
+
+00:10:22,570 --> 00:10:26,050
+each box any number readers might be
+
+00:10:24,460 --> 00:10:27,550
+referencing these data elements so
+
+00:10:26,050 --> 00:10:29,440
+therefore updates has to be carried out
+
+00:10:27,550 --> 00:10:32,760
+carefully to avoid disturbing these
+
+00:10:29,440 --> 00:10:35,230
+readers to transition to stay to the
+
+00:10:32,760 --> 00:10:37,930
+updated stores a pointer to the good
+
+00:10:35,230 --> 00:10:40,420
+news data element in the next pointer of
+
+00:10:37,930 --> 00:10:42,070
+the Boas data element so this store has
+
+00:10:40,420 --> 00:10:44,110
+to be atomic in the sense that any
+
+00:10:42,070 --> 00:10:48,100
+concurrent reader has to see either the
+
+00:10:44,110 --> 00:10:50,560
+old value or the new value not some
+
+00:10:48,100 --> 00:10:53,800
+mashup of the two so such a store might
+
+00:10:50,560 --> 00:10:55,660
+be carried out using a C++ 11 at relaxed
+
+00:10:53,800 --> 00:10:57,640
+atomic variable or an Oda compiler some
+
+00:10:55,660 --> 00:11:00,400
+sort of volatile caste know that the
+
+00:10:57,640 --> 00:11:02,050
+cat's next pointer continues referencing
+
+00:11:00,400 --> 00:11:04,450
+the canoes data element to accommodate
+
+00:11:02,050 --> 00:11:06,730
+readers still referencing the cat so
+
+00:11:04,450 --> 00:11:08,260
+from this point on onward there's no
+
+00:11:06,730 --> 00:11:10,480
+path to the cats data element
+
+00:11:08,260 --> 00:11:11,950
+indicated by the yellow color okay at
+
+00:11:10,480 --> 00:11:14,020
+which point we're waiting for reference
+
+00:11:11,950 --> 00:11:15,850
+to drain so now readers cannot gain
+
+00:11:14,020 --> 00:11:18,040
+access to it once the catch reference
+
+00:11:15,850 --> 00:11:19,960
+counter reaches zero transitioning to
+
+00:11:18,040 --> 00:11:21,280
+state three all the readers are had a
+
+00:11:19,960 --> 00:11:23,380
+reference to their caste they have to
+
+00:11:21,280 --> 00:11:25,480
+release their references indicating by
+
+00:11:23,380 --> 00:11:27,730
+the green color of the cat's box and
+
+00:11:25,480 --> 00:11:29,740
+because there's still no path to the
+
+00:11:27,730 --> 00:11:32,170
+data telecast a donor element new
+
+00:11:29,740 --> 00:11:37,450
+readers still cannot gain a reference to
+
+00:11:32,170 --> 00:11:39,850
+that okay so going back to why we needed
+
+00:11:37,450 --> 00:11:41,770
+Atomics share pointers it turns out that
+
+00:11:39,850 --> 00:11:44,380
+if you're going to access this from two
+
+00:11:41,770 --> 00:11:45,580
+threads the ship that there's the
+
+00:11:44,380 --> 00:11:47,680
+sharepoint or from two threads you have
+
+00:11:45,580 --> 00:11:49,660
+really two choices one you could wrap
+
+00:11:47,680 --> 00:11:51,280
+the whole object with a mutex so only
+
+00:11:49,660 --> 00:11:53,260
+one thread is accessing the list at a
+
+00:11:51,280 --> 00:11:54,700
+time a big hammer indeed this is what
+
+00:11:53,260 --> 00:11:57,790
+you have to do with the standard library
+
+00:11:54,700 --> 00:11:59,560
+if it's not thread safe so we could also
+
+00:11:57,790 --> 00:12:01,360
+try and allow concurrent access but
+
+00:11:59,560 --> 00:12:03,100
+there are problems these problems I'm
+
+00:12:01,360 --> 00:12:05,740
+not going to go into them because it's
+
+00:12:03,100 --> 00:12:07,990
+quite broad such things like removing
+
+00:12:05,740 --> 00:12:10,270
+from the front of the list the race the
+
+00:12:07,990 --> 00:12:12,280
+race condition on the head or multiple
+
+00:12:10,270 --> 00:12:13,840
+threats calling pop front although into
+
+00:12:12,280 --> 00:12:17,320
+interestingly it doesn't suffer from the
+
+00:12:13,840 --> 00:12:18,670
+APA problem but with atomic share
+
+00:12:17,320 --> 00:12:20,770
+pointer it turns out that it can
+
+00:12:18,670 --> 00:12:23,220
+guarantee atomic access it can be
+
+00:12:20,770 --> 00:12:25,900
+implemented more or less efficiently and
+
+00:12:23,220 --> 00:12:27,280
+this as we had a conversation with
+
+00:12:25,900 --> 00:12:28,960
+Anthea Williams I'm glad he's here to
+
+00:12:27,280 --> 00:12:30,910
+confirm what I'm saying the
+
+00:12:28,960 --> 00:12:33,100
+implementation may use a mutex to
+
+00:12:30,910 --> 00:12:36,370
+provide a synchronization in atomic
+
+00:12:33,100 --> 00:12:38,050
+shell pointer as we discussed but you
+
+00:12:36,370 --> 00:12:39,760
+can manage it using making a lot free
+
+00:12:38,050 --> 00:12:41,680
+and you can query it with the is lock
+
+00:12:39,760 --> 00:12:44,650
+free function that's common in all
+
+00:12:41,680 --> 00:12:46,390
+atomic variants but with a long but a
+
+00:12:44,650 --> 00:12:48,250
+lot for your Tomic share pointer
+
+00:12:46,390 --> 00:12:50,650
+what he's doing is he's using a split
+
+00:12:48,250 --> 00:12:52,810
+reference count for atomic share pointer
+
+00:12:50,650 --> 00:12:55,210
+this is what is commonly used known as a
+
+00:12:52,810 --> 00:12:56,710
+double word compare and swap so the
+
+00:12:55,210 --> 00:12:58,570
+share point of control block basically
+
+00:12:56,710 --> 00:13:00,760
+holds a count of external counters in
+
+00:12:58,570 --> 00:13:02,410
+addition to the normal reference count
+
+00:13:00,760 --> 00:13:04,240
+and then each atomic share pointer
+
+00:13:02,410 --> 00:13:06,070
+instance that holds a reference has a
+
+00:13:04,240 --> 00:13:08,710
+local count of threads accessing it
+
+00:13:06,070 --> 00:13:11,770
+concurrently what this really means is
+
+00:13:08,710 --> 00:13:14,410
+now we have a su of choices between all
+
+00:13:11,770 --> 00:13:16,060
+these excellent mechanisms and what I'm
+
+00:13:14,410 --> 00:13:17,500
+here to do and what these guys are here
+
+00:13:16,060 --> 00:13:20,920
+to do is show you which technique to
+
+00:13:17,500 --> 00:13:22,190
+choose when so this is a table that we
+
+00:13:20,920 --> 00:13:24,230
+worked on for over two years
+
+00:13:22,190 --> 00:13:26,870
+referencing many talking to many people
+
+00:13:24,230 --> 00:13:28,220
+and it's about beyond performance you
+
+00:13:26,870 --> 00:13:30,110
+also need to choose from other
+
+00:13:28,220 --> 00:13:31,700
+properties of lock-free programming so
+
+00:13:30,110 --> 00:13:33,710
+across the top you have reference
+
+00:13:31,700 --> 00:13:35,840
+counting which is essentially what share
+
+00:13:33,710 --> 00:13:37,160
+pointer does you have reference counting
+
+00:13:35,840 --> 00:13:38,750
+with double compare swab which is
+
+00:13:37,160 --> 00:13:42,470
+essentially what atomic share point to
+
+00:13:38,750 --> 00:13:44,300
+it does and then we have aa Cu recopy
+
+00:13:42,470 --> 00:13:47,060
+update that Paul McKinney is gonna talk
+
+00:13:44,300 --> 00:13:50,300
+about and has a pointer that maggot
+
+00:13:47,060 --> 00:13:51,980
+Michael is gonna talk about I've written
+
+00:13:50,300 --> 00:13:53,090
+red lines across because even though
+
+00:13:51,980 --> 00:13:55,850
+these many of these properties are
+
+00:13:53,090 --> 00:13:57,440
+intertwine you can kind of separate two
+
+00:13:55,850 --> 00:13:59,090
+properties that a little bit of a flip
+
+00:13:57,440 --> 00:14:01,280
+point side of the other each other so
+
+00:13:59,090 --> 00:14:02,810
+you can kind of kind of see so here
+
+00:14:01,280 --> 00:14:06,620
+across the top we have things like
+
+00:14:02,810 --> 00:14:09,620
+unreclaimed objects what do we do in
+
+00:14:06,620 --> 00:14:11,600
+this case I'll see you with is it's
+
+00:14:09,620 --> 00:14:13,040
+unbounded it's a notice of what I need
+
+00:14:11,600 --> 00:14:14,570
+to mention what the colors mean the
+
+00:14:13,040 --> 00:14:17,270
+yellow color means it's a good property
+
+00:14:14,570 --> 00:14:18,860
+the white means it's not so good okay
+
+00:14:17,270 --> 00:14:21,680
+the green one means it's really good
+
+00:14:18,860 --> 00:14:24,020
+okay so when you're making choices you
+
+00:14:21,680 --> 00:14:26,540
+need to think about whether the with
+
+00:14:24,020 --> 00:14:29,210
+whether the unreclaimed objects here are
+
+00:14:26,540 --> 00:14:31,520
+bounded or unbounded in this particular
+
+00:14:29,210 --> 00:14:33,860
+case obviously OCU stands out as being
+
+00:14:31,520 --> 00:14:36,170
+one of the one of the less preferable
+
+00:14:33,860 --> 00:14:37,580
+choices because in Aussie you the
+
+00:14:36,170 --> 00:14:40,340
+unreclaimed objects can be very large
+
+00:14:37,580 --> 00:14:41,780
+but this is what turns around it gives
+
+00:14:40,340 --> 00:14:43,850
+it forward progress which is what the
+
+00:14:41,780 --> 00:14:45,560
+next column about the next column about
+
+00:14:43,850 --> 00:14:48,770
+non-blocking Traverso is about forward
+
+00:14:45,560 --> 00:14:50,930
+progress on traversals the traversal
+
+00:14:48,770 --> 00:14:59,420
+forward progress that's really well if
+
+00:14:50,930 --> 00:15:04,010
+the trade-off here for our c4 RCU 4 has
+
+00:14:59,420 --> 00:15:05,300
+a pointer for 4 for the next 2 we're
+
+00:15:04,010 --> 00:15:08,000
+going to talk about we're talking about
+
+00:15:05,300 --> 00:15:09,860
+what it means to will have forward
+
+00:15:08,000 --> 00:15:11,990
+progress on the reclamation as well as
+
+00:15:09,860 --> 00:15:14,720
+the traversal speed the for progress on
+
+00:15:11,990 --> 00:15:16,880
+welcome information is as identified as
+
+00:15:14,720 --> 00:15:18,890
+really good for hazard hazard pointers
+
+00:15:16,880 --> 00:15:20,420
+because it has a fixed number of hazard
+
+00:15:18,890 --> 00:15:24,380
+pointers and you just basically go walk
+
+00:15:20,420 --> 00:15:27,260
+through it but IndyCars okay it is an
+
+00:15:24,380 --> 00:15:29,450
+atomic operations that can potentially
+
+00:15:27,260 --> 00:15:30,920
+fail as I understand it could starve
+
+00:15:29,450 --> 00:15:34,070
+okay
+
+00:15:30,920 --> 00:15:35,990
+I'll see you is blocking is the less
+
+00:15:34,070 --> 00:15:37,820
+less capable when you is because
+
+00:15:35,990 --> 00:15:39,950
+one reader can get stuck and so you can
+
+00:15:37,820 --> 00:15:42,620
+reclaim so you can't reclaim anything
+
+00:15:39,950 --> 00:15:44,360
+until that reader gets unstuck okay and
+
+00:15:42,620 --> 00:15:45,890
+this is what gives it the Ford
+
+00:15:44,360 --> 00:15:49,070
+properties car goes guarantee property
+
+00:15:45,890 --> 00:15:50,570
+the traversal speed for RC you can just
+
+00:15:49,070 --> 00:15:52,760
+be single thread loads it doesn't even
+
+00:15:50,570 --> 00:15:55,550
+have to be parallel for hazard pointer
+
+00:15:52,760 --> 00:15:57,740
+it has an overhead Putra traversal
+
+00:15:55,550 --> 00:15:59,690
+pointer which might have changed you
+
+00:15:57,740 --> 00:16:01,160
+have to store in the hazard pointer that
+
+00:15:59,690 --> 00:16:02,390
+you would need to check the pointer it
+
+00:16:01,160 --> 00:16:04,550
+hasn't changed and make sure everyone
+
+00:16:02,390 --> 00:16:08,180
+else also see the store hence the slow
+
+00:16:04,550 --> 00:16:10,370
+load fence in that particular case the
+
+00:16:08,180 --> 00:16:13,180
+next area talks about reference
+
+00:16:10,370 --> 00:16:17,149
+acquisition contention among readers and
+
+00:16:13,180 --> 00:16:21,890
+atomic automatic reclamation with
+
+00:16:17,149 --> 00:16:23,839
+regards to reference acquisition it has
+
+00:16:21,890 --> 00:16:26,120
+to do with the chain of pointers that
+
+00:16:23,839 --> 00:16:28,279
+you would have to unzip if you actually
+
+00:16:26,120 --> 00:16:30,950
+finish removing one of them it turns out
+
+00:16:28,279 --> 00:16:33,230
+that reference counting wood decals and
+
+00:16:30,950 --> 00:16:36,950
+also you do really well on these things
+
+00:16:33,230 --> 00:16:38,690
+okay you just do two atomic operations
+
+00:16:36,950 --> 00:16:42,860
+this is essentially it's essentially
+
+00:16:38,690 --> 00:16:45,320
+done with D casts you might have to
+
+00:16:42,860 --> 00:16:47,480
+there is a there's I think there's
+
+00:16:45,320 --> 00:16:48,709
+potentially six atomic operations one to
+
+00:16:47,480 --> 00:16:50,870
+increment a straight cut on a pointer
+
+00:16:48,709 --> 00:16:52,339
+they'll go to the ink and then it would
+
+00:16:50,870 --> 00:16:53,300
+go in and increment the reference
+
+00:16:52,339 --> 00:16:57,200
+counter and you would have to go back
+
+00:16:53,300 --> 00:16:59,420
+and decrement the rough count okay so
+
+00:16:57,200 --> 00:17:02,150
+essentially with the other two with you
+
+00:16:59,420 --> 00:17:04,880
+can tell that both RCU and hazard
+
+00:17:02,150 --> 00:17:07,490
+pointers have very behaved very well
+
+00:17:04,880 --> 00:17:09,530
+with regards to high contention among
+
+00:17:07,490 --> 00:17:11,240
+readers if you have many readers this is
+
+00:17:09,530 --> 00:17:14,390
+where I'll see you and hazard pointers
+
+00:17:11,240 --> 00:17:17,449
+shines and by the flip side of the coin
+
+00:17:14,390 --> 00:17:19,699
+you see that automatic reclamation is
+
+00:17:17,449 --> 00:17:21,290
+better because with reference counting
+
+00:17:19,699 --> 00:17:23,329
+and reference counting with decals they
+
+00:17:21,290 --> 00:17:25,579
+don't it's all automatic whereas you
+
+00:17:23,329 --> 00:17:28,580
+have to manually ask to reclaim objects
+
+00:17:25,579 --> 00:17:30,080
+in RC you and hazard pointers so you can
+
+00:17:28,580 --> 00:17:31,309
+see that all these are essentially
+
+00:17:30,080 --> 00:17:33,170
+different sides of the same coin
+
+00:17:31,309 --> 00:17:35,030
+there's one last report there that isn't
+
+00:17:33,170 --> 00:17:36,559
+really a big performance consideration
+
+00:17:35,030 --> 00:17:39,020
+the domain there are different meanings
+
+00:17:36,559 --> 00:17:41,240
+for domains for RC u and hazard pointers
+
+00:17:39,020 --> 00:17:43,400
+they don't apply in the reference
+
+00:17:41,240 --> 00:17:46,280
+counting case so with that I want to
+
+00:17:43,400 --> 00:17:47,750
+conclude and ask that the as the hazard
+
+00:17:46,280 --> 00:17:49,420
+point to invent a magnet Michael to come
+
+00:17:47,750 --> 00:17:51,730
+up and then
+
+00:17:49,420 --> 00:17:57,550
+you'll be followed by Paul McKinney so
+
+00:17:51,730 --> 00:18:00,520
+I'm gonna see okay well so I'll continue
+
+00:17:57,550 --> 00:18:04,210
+the talk and talk about hazard pointers
+
+00:18:00,520 --> 00:18:07,720
+and describe what the problems are souls
+
+00:18:04,210 --> 00:18:11,080
+and how does so and what we're you know
+
+00:18:07,720 --> 00:18:15,520
+what we're proposing for Standardization
+
+00:18:11,080 --> 00:18:20,050
+and so we'll start with a running
+
+00:18:15,520 --> 00:18:24,340
+example a white comparing set imagine
+
+00:18:20,050 --> 00:18:26,170
+that you have like a very large memory
+
+00:18:24,340 --> 00:18:29,170
+you know memory block that you want to
+
+00:18:26,170 --> 00:18:32,170
+apply compare and set on and it doesn't
+
+00:18:29,170 --> 00:18:34,840
+fit in any standard like atomic
+
+00:18:32,170 --> 00:18:39,460
+operations like on hardware or supported
+
+00:18:34,840 --> 00:18:43,420
+by language so one common solution is to
+
+00:18:39,460 --> 00:18:45,820
+instead of like having the the object
+
+00:18:43,420 --> 00:18:47,290
+embedded in places just you could
+
+00:18:45,820 --> 00:18:49,720
+represent it with a pointer and then
+
+00:18:47,290 --> 00:18:52,480
+copy and copy and write whenever you
+
+00:18:49,720 --> 00:18:54,910
+change it so every new value is just a
+
+00:18:52,480 --> 00:18:58,450
+allocate a new block and you replace the
+
+00:18:54,910 --> 00:19:01,330
+old one so this is kind of a naive
+
+00:18:58,450 --> 00:19:04,780
+implementation it's incorrect but a
+
+00:19:01,330 --> 00:19:09,160
+class for white compare and set so you
+
+00:19:04,780 --> 00:19:12,130
+have like whatever the type is you have
+
+00:19:09,160 --> 00:19:15,010
+the value and you have a point ahead a
+
+00:19:12,130 --> 00:19:17,290
+pointer to a node and when you do
+
+00:19:15,010 --> 00:19:20,110
+compare and set you you load the old
+
+00:19:17,290 --> 00:19:22,360
+value and you try you dare you compare
+
+00:19:20,110 --> 00:19:26,430
+is it you know does it contain a value
+
+00:19:22,360 --> 00:19:29,530
+that that's equal to what you expect and
+
+00:19:26,430 --> 00:19:32,080
+if it does you allocate a new node with
+
+00:19:29,530 --> 00:19:35,500
+a new value and you try to do a compare
+
+00:19:32,080 --> 00:19:37,650
+exchange and you know if you succeed you
+
+00:19:35,500 --> 00:19:41,320
+delete the old one and you return true
+
+00:19:37,650 --> 00:19:45,160
+this is incorrect because of multiple
+
+00:19:41,320 --> 00:19:47,500
+problems when you access the value you
+
+00:19:45,160 --> 00:19:49,570
+actually don't this is unsafe access
+
+00:19:47,500 --> 00:19:50,920
+because you don't know if this block is
+
+00:19:49,570 --> 00:19:54,130
+actually still there and still
+
+00:19:50,920 --> 00:19:58,540
+accessible you're doing compare exchange
+
+00:19:54,130 --> 00:20:00,520
+with like using a value that that you
+
+00:19:58,540 --> 00:20:02,770
+assume that it's actually like if it's
+
+00:20:00,520 --> 00:20:04,510
+still there that means it hasn't the
+
+00:20:02,770 --> 00:20:06,760
+the original pointer hasn't changed but
+
+00:20:04,510 --> 00:20:08,980
+actually it could have changed and the
+
+00:20:06,760 --> 00:20:11,410
+meaning of that pointer has changed so
+
+00:20:08,980 --> 00:20:13,630
+that's the ABA problem and of course if
+
+00:20:11,410 --> 00:20:16,540
+we just do delete P that's you know
+
+00:20:13,630 --> 00:20:18,370
+we're we're reclaiming without really
+
+00:20:16,540 --> 00:20:22,120
+knowing if there are other threads that
+
+00:20:18,370 --> 00:20:27,100
+have reference to that block so that's
+
+00:20:22,120 --> 00:20:29,500
+unsafe reclamation so I'll start by like
+
+00:20:27,100 --> 00:20:31,600
+just going through that okay going
+
+00:20:29,500 --> 00:20:34,350
+through an example of the AV how they'd
+
+00:20:31,600 --> 00:20:36,820
+be a problem would occur in a scenario
+
+00:20:34,350 --> 00:20:39,490
+running this kind of code so is the same
+
+00:20:36,820 --> 00:20:43,750
+the code as was in the previous slide
+
+00:20:39,490 --> 00:20:46,120
+but just like condensed and lines in red
+
+00:20:43,750 --> 00:20:49,540
+these are the responsible lines for
+
+00:20:46,120 --> 00:20:52,270
+causing the problem so we start by
+
+00:20:49,540 --> 00:20:57,400
+having a thread I reading the value a
+
+00:20:52,270 --> 00:21:00,790
+from the pointer P this here you know
+
+00:20:57,400 --> 00:21:05,140
+the point that represents the the object
+
+00:21:00,790 --> 00:21:08,350
+and that's right I will read the value
+
+00:21:05,140 --> 00:21:10,809
+you from from that block a so that's
+
+00:21:08,350 --> 00:21:14,080
+fine it looks like we're gonna it says
+
+00:21:10,809 --> 00:21:17,670
+we're gonna proceed to try to replace
+
+00:21:14,080 --> 00:21:21,130
+that block in the meantime thread J
+
+00:21:17,670 --> 00:21:23,650
+changes the value and actually locates a
+
+00:21:21,130 --> 00:21:26,500
+new Block B that has some different
+
+00:21:23,650 --> 00:21:31,780
+value W or or whatever you know some
+
+00:21:26,500 --> 00:21:34,960
+value W and and also thread J reuses
+
+00:21:31,780 --> 00:21:37,990
+block a to hold the value Z which is
+
+00:21:34,960 --> 00:21:43,300
+different from you that it used to hold
+
+00:21:37,990 --> 00:21:46,179
+before now thread I yeah right so thread
+
+00:21:43,300 --> 00:21:50,500
+J sets up P to a again so now it
+
+00:21:46,179 --> 00:21:53,740
+succeeds in doing that now thread I
+
+00:21:50,500 --> 00:21:55,870
+comes back and allocates a new Block C
+
+00:21:53,740 --> 00:21:57,760
+that holds the value V because it's what
+
+00:21:55,870 --> 00:22:00,250
+you know okay now it's we are going to
+
+00:21:57,760 --> 00:22:04,059
+try to do compare exchange on the
+
+00:22:00,250 --> 00:22:07,300
+pointer so we're preparing the block
+
+00:22:04,059 --> 00:22:10,450
+that holds a new value and we do the
+
+00:22:07,300 --> 00:22:13,960
+compare exchange yes it's like you know
+
+00:22:10,450 --> 00:22:15,690
+the pointer was holding was pointing to
+
+00:22:13,960 --> 00:22:18,450
+block a
+
+00:22:15,690 --> 00:22:20,250
+again and we mistakenly assume that
+
+00:22:18,450 --> 00:22:23,610
+actually that meant that means that the
+
+00:22:20,250 --> 00:22:26,940
+value is still you whereas actually we
+
+00:22:23,610 --> 00:22:29,850
+did a compare comparing set where the
+
+00:22:26,940 --> 00:22:34,639
+old value is Z different from you so I
+
+00:22:29,850 --> 00:22:37,289
+should so this is like incorrect outcome
+
+00:22:34,639 --> 00:22:40,649
+and the problem is that we couldn't tell
+
+00:22:37,289 --> 00:22:43,139
+if the point are changed or not another
+
+00:22:40,649 --> 00:22:44,970
+problem that we'll we'll solve using
+
+00:22:43,139 --> 00:22:47,789
+Heather pointers is unsafe neural
+
+00:22:44,970 --> 00:22:53,129
+reclamation and these two lines in red
+
+00:22:47,789 --> 00:22:55,320
+are the you know the offending lines so
+
+00:22:53,129 --> 00:22:58,889
+we start without having a thread I
+
+00:22:55,320 --> 00:23:03,600
+reading at the pointer a from from I
+
+00:22:58,889 --> 00:23:06,600
+mean the value a from pointer P and it
+
+00:23:03,600 --> 00:23:10,500
+now it's about to dereference that
+
+00:23:06,600 --> 00:23:15,570
+pointer and access the contents of the
+
+00:23:10,500 --> 00:23:21,240
+note in the meantime another Fred J sets
+
+00:23:15,570 --> 00:23:24,240
+P to point to a block B and returns a to
+
+00:23:21,240 --> 00:23:31,159
+the operating system so now block ay is
+
+00:23:24,240 --> 00:23:34,860
+unmapped thread I comes back and yeah
+
+00:23:31,159 --> 00:23:37,169
+has access violation there is just not
+
+00:23:34,860 --> 00:23:39,539
+it had no chance to check anything to
+
+00:23:37,169 --> 00:23:42,539
+see if it you know if it is safe to
+
+00:23:39,539 --> 00:23:44,340
+dereference that pointer or not so
+
+00:23:42,539 --> 00:23:47,759
+that's kind of one case I mean all this
+
+00:23:44,340 --> 00:23:53,190
+case ABA and memory reclamation issues
+
+00:23:47,759 --> 00:23:56,759
+you I mean you could get like all these
+
+00:23:53,190 --> 00:24:00,570
+kind of incorrect result corrupting your
+
+00:23:56,759 --> 00:24:04,250
+data structure corazon SSD structure or
+
+00:24:00,570 --> 00:24:06,509
+access violation so I'm gonna switch to
+
+00:24:04,250 --> 00:24:08,789
+describing has a pointer and it is
+
+00:24:06,509 --> 00:24:12,539
+simplest form it's really very very
+
+00:24:08,789 --> 00:24:15,049
+simple it just a hazard pointer is a
+
+00:24:12,539 --> 00:24:21,259
+single writer multi reader pointer just
+
+00:24:15,049 --> 00:24:21,259
+like you know I need any pointers size
+
+00:24:21,440 --> 00:24:28,769
+location and each has a pointer has one
+
+00:24:25,200 --> 00:24:29,370
+owner at any time that can write to it
+
+00:24:28,769 --> 00:24:31,920
+but then
+
+00:24:29,370 --> 00:24:35,880
+Red's can read from it and basically
+
+00:24:31,920 --> 00:24:37,380
+what what a thread is doing by setting a
+
+00:24:35,880 --> 00:24:41,490
+hazard pointer to the address or an
+
+00:24:37,380 --> 00:24:43,530
+object is telling other threads or or
+
+00:24:41,490 --> 00:24:46,410
+itself even I mean also is telling all
+
+00:24:43,530 --> 00:24:48,720
+threads that if any any thread remove
+
+00:24:46,410 --> 00:24:50,670
+that object from being reachable to
+
+00:24:48,720 --> 00:24:53,610
+create new references now it what if you
+
+00:24:50,670 --> 00:24:56,730
+make that object unreachable after the
+
+00:24:53,610 --> 00:24:58,620
+last time the this thread set the hazard
+
+00:24:56,730 --> 00:25:01,230
+pointer to point to it
+
+00:24:58,620 --> 00:25:04,620
+you must guarantee that you don't
+
+00:25:01,230 --> 00:25:07,410
+reclaim it until I change the value of
+
+00:25:04,620 --> 00:25:10,910
+that hazard pointer so that's kind of
+
+00:25:07,410 --> 00:25:13,890
+the the message that it's sending and
+
+00:25:10,910 --> 00:25:15,350
+that's from the user side the user that
+
+00:25:13,890 --> 00:25:18,900
+the one that is trying to protect
+
+00:25:15,350 --> 00:25:21,600
+objects using hazard pointer from the
+
+00:25:18,900 --> 00:25:24,900
+reclamation side the threads that are
+
+00:25:21,600 --> 00:25:28,200
+actually removing objects and retiring
+
+00:25:24,900 --> 00:25:30,300
+them and want to reclaim them but they
+
+00:25:28,200 --> 00:25:33,300
+cannot reclaim it right away what they
+
+00:25:30,300 --> 00:25:35,520
+do is like in a simplest form they would
+
+00:25:33,300 --> 00:25:37,920
+just like go and check all the hazard
+
+00:25:35,520 --> 00:25:42,150
+pointers if it doesn't match any values
+
+00:25:37,920 --> 00:25:46,110
+it's okay to free but if that's that's
+
+00:25:42,150 --> 00:25:48,630
+inefficient so you would just like read
+
+00:25:46,110 --> 00:25:50,550
+all the hazard pointers try to collect
+
+00:25:48,630 --> 00:25:53,040
+them in some efficient structure that
+
+00:25:50,550 --> 00:25:55,500
+has like you know constant expected time
+
+00:25:53,040 --> 00:25:58,700
+lookup time and now you just have a
+
+00:25:55,500 --> 00:26:02,000
+private list that has so you know
+
+00:25:58,700 --> 00:26:04,290
+sizable enough that you're guaranteed to
+
+00:26:02,000 --> 00:26:06,540
+that to reclaim something because the
+
+00:26:04,290 --> 00:26:09,510
+you you will not fail to reclaim more
+
+00:26:06,540 --> 00:26:11,580
+than more objects than the number of
+
+00:26:09,510 --> 00:26:14,450
+hazard pointers they're only like you
+
+00:26:11,580 --> 00:26:17,850
+know there are only that many choices of
+
+00:26:14,450 --> 00:26:20,600
+values that will prevent reclamation so
+
+00:26:17,850 --> 00:26:25,500
+this kind of algorithms simplest form
+
+00:26:20,600 --> 00:26:27,420
+going back to that example this
+
+00:26:25,500 --> 00:26:29,940
+incorrect would try to make it correct
+
+00:26:27,420 --> 00:26:32,460
+and this is pseudocode this is not C++
+
+00:26:29,940 --> 00:26:35,610
+what I insert it there is that like okay
+
+00:26:32,460 --> 00:26:38,900
+I wear the hazards the header are
+
+00:26:35,610 --> 00:26:42,690
+actually the unsafe access like here and
+
+00:26:38,900 --> 00:26:43,290
+the ABA problem over here so before we
+
+00:26:42,690 --> 00:26:46,710
+get to
+
+00:26:43,290 --> 00:26:48,600
+you know the hazards we actually set the
+
+00:26:46,710 --> 00:26:51,000
+hazard pointer to point to the block
+
+00:26:48,600 --> 00:26:54,510
+that were we want to protect and then
+
+00:26:51,000 --> 00:26:55,260
+that's where the store load fence comes
+
+00:26:54,510 --> 00:26:57,150
+to play
+
+00:26:55,260 --> 00:26:58,950
+so in general we wouldn't make this lock
+
+00:26:57,150 --> 00:27:00,840
+free in a different context we might not
+
+00:26:58,950 --> 00:27:02,700
+not care who might have a lock around
+
+00:27:00,840 --> 00:27:05,010
+and we don't need friends or stuff like
+
+00:27:02,700 --> 00:27:09,690
+that but in this case we want to load
+
+00:27:05,010 --> 00:27:13,530
+again the the source of that reference
+
+00:27:09,690 --> 00:27:15,930
+to check that it's actually it is in it
+
+00:27:13,530 --> 00:27:18,060
+is reachable and by the way this is not
+
+00:27:15,930 --> 00:27:20,610
+susceptible to the ABA problem it's okay
+
+00:27:18,060 --> 00:27:23,100
+between these two lock steps that the
+
+00:27:20,610 --> 00:27:25,530
+object is like you know retired and
+
+00:27:23,100 --> 00:27:27,810
+reclaimed and reinsert it that's okay
+
+00:27:25,530 --> 00:27:30,390
+because what matters is at this point
+
+00:27:27,810 --> 00:27:32,400
+when we're checking that it is reachable
+
+00:27:30,390 --> 00:27:34,500
+we know that the hazard pointer is
+
+00:27:32,400 --> 00:27:40,350
+already pointing to it so it is
+
+00:27:34,500 --> 00:27:42,480
+protected from this point okay and that
+
+00:27:40,350 --> 00:27:45,360
+by doing that then we were guaranteed
+
+00:27:42,480 --> 00:27:48,390
+that through and until we clear the
+
+00:27:45,360 --> 00:27:51,450
+header pointer we have protection that
+
+00:27:48,390 --> 00:27:53,310
+will not be reclaimed and because it's
+
+00:27:51,450 --> 00:27:55,710
+not being claimed and it will not be
+
+00:27:53,310 --> 00:28:00,860
+reinserted so that's worse for the
+
+00:27:55,710 --> 00:28:03,420
+access and for a be a problem so that's
+
+00:28:00,860 --> 00:28:05,070
+this is kind of more like the template
+
+00:28:03,420 --> 00:28:08,310
+interface that we have right now and
+
+00:28:05,070 --> 00:28:10,890
+that would look like like the the node
+
+00:28:08,310 --> 00:28:15,090
+would inherit from some type that you
+
+00:28:10,890 --> 00:28:16,950
+know add some capabilities and we have a
+
+00:28:15,090 --> 00:28:20,490
+hazard pointer owner that automatically
+
+00:28:16,950 --> 00:28:24,390
+acquires a header pointer so this kind
+
+00:28:20,490 --> 00:28:26,010
+of on our AI interface and a protect
+
+00:28:24,390 --> 00:28:28,770
+function that protects the value if it
+
+00:28:26,010 --> 00:28:31,190
+succeeds we can proceed without worrying
+
+00:28:28,770 --> 00:28:35,310
+about the object being reclaimed
+
+00:28:31,190 --> 00:28:38,400
+prematurely when we end the end of the
+
+00:28:35,310 --> 00:28:41,550
+scope of the has a pointer owner it
+
+00:28:38,400 --> 00:28:44,820
+automatically clears and releases the
+
+00:28:41,550 --> 00:28:46,740
+own header pointer from the so this from
+
+00:28:44,820 --> 00:28:51,150
+the user side the user of the hazard
+
+00:28:46,740 --> 00:28:53,580
+pointer this is for the removers point
+
+00:28:51,150 --> 00:28:56,850
+of view when you have an object you
+
+00:28:53,580 --> 00:28:58,769
+don't you don't delete it you retire it
+
+00:28:56,850 --> 00:29:02,279
+basically you're kind of handing it over
+
+00:28:58,769 --> 00:29:04,950
+to the has a pointer library to be
+
+00:29:02,279 --> 00:29:12,720
+responsible for reclaiming it when it is
+
+00:29:04,950 --> 00:29:15,870
+safe okay so I will have yeah some time
+
+00:29:12,720 --> 00:29:17,970
+here so the the point of looking at the
+
+00:29:15,870 --> 00:29:21,690
+system the health pointer system is that
+
+00:29:17,970 --> 00:29:25,950
+you have objects in data structures or
+
+00:29:21,690 --> 00:29:29,100
+represent resources and they can be
+
+00:29:25,950 --> 00:29:31,470
+protected by users threads that use
+
+00:29:29,100 --> 00:29:34,049
+header pointers that's right that own
+
+00:29:31,470 --> 00:29:37,889
+and can write to hazard pointers to
+
+00:29:34,049 --> 00:29:41,370
+protect these objects to have access to
+
+00:29:37,889 --> 00:29:44,159
+them and to protect from a be it to have
+
+00:29:41,370 --> 00:29:47,850
+a be a safe comparison
+
+00:29:44,159 --> 00:29:51,210
+so the removers they have to read the
+
+00:29:47,850 --> 00:29:54,480
+hazard pointers and to decide when when
+
+00:29:51,210 --> 00:29:57,600
+it is safe to move this like to reclaim
+
+00:29:54,480 --> 00:30:01,799
+these removed objects to make them free
+
+00:29:57,600 --> 00:30:03,149
+for reuse and reallocation or well or
+
+00:30:01,799 --> 00:30:05,909
+return to the operating system
+
+00:30:03,149 --> 00:30:09,960
+you know reclamation resolves so it's
+
+00:30:05,909 --> 00:30:13,889
+kind of a system view of of hazard
+
+00:30:09,960 --> 00:30:15,570
+pointers the lifecycle of an object is
+
+00:30:13,889 --> 00:30:18,149
+that you know it's allocated its
+
+00:30:15,570 --> 00:30:22,350
+reachable so we can either like have a
+
+00:30:18,149 --> 00:30:24,799
+shared way of reaching it or threads
+
+00:30:22,350 --> 00:30:27,299
+hanging over references to each other
+
+00:30:24,799 --> 00:30:29,730
+basically you can create new references
+
+00:30:27,299 --> 00:30:33,509
+you can start you can have has a pointer
+
+00:30:29,730 --> 00:30:37,049
+start to protect objects once some
+
+00:30:33,509 --> 00:30:39,330
+thread makes the object unreachable that
+
+00:30:37,049 --> 00:30:41,279
+no new reference can be created then has
+
+00:30:39,330 --> 00:30:46,460
+a friends can continue to protect the
+
+00:30:41,279 --> 00:30:50,100
+object but you cannot really start a new
+
+00:30:46,460 --> 00:30:52,740
+protection and once it's retired then
+
+00:30:50,100 --> 00:30:54,960
+yes it is it can you can still continue
+
+00:30:52,740 --> 00:30:57,179
+to protect it from being reclaimed but
+
+00:30:54,960 --> 00:30:59,009
+also there might be attempts to reclaim
+
+00:30:57,179 --> 00:31:02,759
+it and they will succeed or fail
+
+00:30:59,009 --> 00:31:05,760
+depending on are there references to the
+
+00:31:02,759 --> 00:31:09,600
+object or not once you reclaim it you
+
+00:31:05,760 --> 00:31:10,560
+can reallocate it if you want I wanted
+
+00:31:09,600 --> 00:31:14,540
+to mention domain
+
+00:31:10,560 --> 00:31:17,850
+in the context of other pointers a
+
+00:31:14,540 --> 00:31:21,500
+domain contains a set of header pointers
+
+00:31:17,850 --> 00:31:25,980
+and they that this admin may protect
+
+00:31:21,500 --> 00:31:27,660
+protect a set of objects so I had a
+
+00:31:25,980 --> 00:31:29,160
+point that would belong to one domain
+
+00:31:27,660 --> 00:31:31,740
+because it doesn't make sense in that
+
+00:31:29,160 --> 00:31:35,010
+case to you know to belong to multiple
+
+00:31:31,740 --> 00:31:37,320
+domains we would have a default domain
+
+00:31:35,010 --> 00:31:40,080
+because we don't want to bother the user
+
+00:31:37,320 --> 00:31:42,660
+to define one if they if they're just
+
+00:31:40,080 --> 00:31:45,150
+using the default domain but it's it's
+
+00:31:42,660 --> 00:31:47,040
+good to allow multiple domains because
+
+00:31:45,150 --> 00:31:48,990
+you can think of like you know two
+
+00:31:47,040 --> 00:31:51,060
+threads communicating together in their
+
+00:31:48,990 --> 00:31:53,070
+structure why would they bother by
+
+00:31:51,060 --> 00:31:55,110
+checking the header pointers of like a
+
+00:31:53,070 --> 00:31:55,860
+thousand other threads that are doing
+
+00:31:55,110 --> 00:31:57,810
+something else
+
+00:31:55,860 --> 00:31:59,550
+using hazard pointers that doesn't apply
+
+00:31:57,810 --> 00:32:02,040
+to their like you know the special
+
+00:31:59,550 --> 00:32:06,180
+communication between between them so it
+
+00:32:02,040 --> 00:32:11,370
+really it is like savings in space and
+
+00:32:06,180 --> 00:32:13,050
+time to allow multiple domains a thread
+
+00:32:11,370 --> 00:32:15,600
+might operate in multiple domains
+
+00:32:13,050 --> 00:32:19,260
+depends on what objects they are using
+
+00:32:15,600 --> 00:32:22,290
+at that time I'm not going to get into
+
+00:32:19,260 --> 00:32:26,670
+too much detail of this but this is it's
+
+00:32:22,290 --> 00:32:29,720
+a really multi-dimensional challenge to
+
+00:32:26,670 --> 00:32:31,980
+design like one to have one
+
+00:32:29,720 --> 00:32:34,470
+specification of hazard pointers which
+
+00:32:31,980 --> 00:32:37,440
+just look there are so many I mean there
+
+00:32:34,470 --> 00:32:38,520
+will be users that want different
+
+00:32:37,440 --> 00:32:41,460
+features
+
+00:32:38,520 --> 00:32:43,200
+so I implemented this like many many
+
+00:32:41,460 --> 00:32:47,520
+times and but it's always kind of
+
+00:32:43,200 --> 00:32:50,430
+customized to certain use and but so
+
+00:32:47,520 --> 00:32:51,960
+it's much simpler to do that so here's
+
+00:32:50,430 --> 00:32:53,370
+like you know you have domains you have
+
+00:32:51,960 --> 00:32:56,130
+to wait to have a default domain
+
+00:32:53,370 --> 00:32:58,980
+multiple domains objects reclamation
+
+00:32:56,130 --> 00:33:00,540
+won't be able to customize that metadata
+
+00:32:58,980 --> 00:33:03,540
+do you want it to be embedded with the
+
+00:33:00,540 --> 00:33:06,180
+object or separate hazard pointers I
+
+00:33:03,540 --> 00:33:09,870
+mean that's like there are they fixed
+
+00:33:06,180 --> 00:33:12,030
+number at compile time at runtime or are
+
+00:33:09,870 --> 00:33:14,550
+they dynamic and they have in a link
+
+00:33:12,030 --> 00:33:15,990
+structure they can do you have one them
+
+00:33:14,550 --> 00:33:18,240
+pre-allocated because you don't want
+
+00:33:15,990 --> 00:33:20,430
+exceptions or you know so lots of
+
+00:33:18,240 --> 00:33:23,130
+options here that probably different
+
+00:33:20,430 --> 00:33:24,029
+users will want different support
+
+00:33:23,130 --> 00:33:26,600
+alligators
+
+00:33:24,029 --> 00:33:29,549
+for hazard pointers for metadata
+
+00:33:26,600 --> 00:33:31,289
+progress guarantee it's probably more
+
+00:33:29,549 --> 00:33:33,990
+efficient to have what blocking by
+
+00:33:31,289 --> 00:33:36,570
+default but if a user wants to have an
+
+00:33:33,990 --> 00:33:39,480
+end-to-end lock free path they should be
+
+00:33:36,570 --> 00:33:42,799
+able to do that thread-local that would
+
+00:33:39,480 --> 00:33:45,990
+be you know better for D by default but
+
+00:33:42,799 --> 00:33:50,399
+they can be problem for certain programs
+
+00:33:45,990 --> 00:33:54,840
+so we should allow them to should allow
+
+00:33:50,399 --> 00:33:59,340
+users to heaven you know TLS free path
+
+00:33:54,840 --> 00:34:02,549
+and exceptions also we should allowed
+
+00:33:59,340 --> 00:34:08,129
+users to be able to have no exceptions
+
+00:34:02,549 --> 00:34:10,290
+and to end so I'll skip this and yeah
+
+00:34:08,129 --> 00:34:13,139
+the the template interface that there is
+
+00:34:10,290 --> 00:34:16,829
+a current snapshot of the interface
+
+00:34:13,139 --> 00:34:21,359
+that's public in on github under fully
+
+00:34:16,829 --> 00:34:23,280
+experimental and if the user doesn't do
+
+00:34:21,359 --> 00:34:25,710
+any customization they really don't need
+
+00:34:23,280 --> 00:34:27,119
+to know about the whole interface they
+
+00:34:25,710 --> 00:34:29,040
+just need to know about like the
+
+00:34:27,119 --> 00:34:31,290
+representation of the object that
+
+00:34:29,040 --> 00:34:35,159
+protected by hazard pointer and the
+
+00:34:31,290 --> 00:34:36,750
+owner type that actually kind of does
+
+00:34:35,159 --> 00:34:38,520
+REI
+
+00:34:36,750 --> 00:34:42,810
+an interface to the actual hazard
+
+00:34:38,520 --> 00:34:47,879
+pointers so I'll just go through the
+
+00:34:42,810 --> 00:34:50,129
+owner template as I represented so
+
+00:34:47,879 --> 00:34:52,770
+there's a lot of change and in the
+
+00:34:50,129 --> 00:34:57,990
+interface I should in what couple of
+
+00:34:52,770 --> 00:35:01,609
+minutes so yeah the owner by default use
+
+00:34:57,990 --> 00:35:06,000
+the default domain and you know and
+
+00:35:01,609 --> 00:35:09,990
+doesn't do thread caching it we don't we
+
+00:35:06,000 --> 00:35:11,700
+don't copy or move the owner because it
+
+00:35:09,990 --> 00:35:15,300
+just like it is actually good to have
+
+00:35:11,700 --> 00:35:19,800
+guarantee that the owner owns a header
+
+00:35:15,300 --> 00:35:22,760
+pointer at any time so acquisition it
+
+00:35:19,800 --> 00:35:31,550
+construction it acquires one and
+
+00:35:22,760 --> 00:35:33,780
+destruction it releases it okay oh okay
+
+00:35:31,550 --> 00:35:37,080
+then these are kind of the functions
+
+00:35:33,780 --> 00:35:39,570
+that are that are on behalf of the
+
+00:35:37,080 --> 00:35:41,820
+has a pointer to protect a reference to
+
+00:35:39,570 --> 00:35:44,220
+set the value and appear the value and
+
+00:35:41,820 --> 00:35:47,300
+then there is a free function to swap to
+
+00:35:44,220 --> 00:35:50,880
+owners this is good for hand-over-hand
+
+00:35:47,300 --> 00:35:52,950
+operations yeah this is like if we want
+
+00:35:50,880 --> 00:35:54,770
+to customize there's a way to customize
+
+00:35:52,950 --> 00:35:58,770
+the example I showed you for the
+
+00:35:54,770 --> 00:36:00,840
+comparing set white compare and set I'm
+
+00:35:58,770 --> 00:36:05,160
+gonna end with showing an example of
+
+00:36:00,840 --> 00:36:08,160
+hand over hand traversal so here we you
+
+00:36:05,160 --> 00:36:10,710
+know we have a reader that is like
+
+00:36:08,160 --> 00:36:14,160
+looking for a value in a in an order
+
+00:36:10,710 --> 00:36:18,720
+singly linked list and to do hand over
+
+00:36:14,160 --> 00:36:20,820
+hand traversal it acquires two hazard
+
+00:36:18,720 --> 00:36:23,040
+pointers so one kind of like for the
+
+00:36:20,820 --> 00:36:28,920
+previous node and one for the current
+
+00:36:23,040 --> 00:36:31,170
+node and hand over hand so they it
+
+00:36:28,920 --> 00:36:33,570
+starts by you know have it has a
+
+00:36:31,170 --> 00:36:36,930
+reference to previous and current and
+
+00:36:33,570 --> 00:36:39,510
+now it's like assuming that the previous
+
+00:36:36,930 --> 00:36:41,670
+one is already on solid ground and now
+
+00:36:39,510 --> 00:36:44,340
+it wants to set the current has a
+
+00:36:41,670 --> 00:36:46,020
+pointer to the current node so it's kind
+
+00:36:44,340 --> 00:36:48,480
+of it's always doing one in every
+
+00:36:46,020 --> 00:36:51,810
+iteration it's actually protecting one
+
+00:36:48,480 --> 00:36:55,800
+more node and releasing protection of a
+
+00:36:51,810 --> 00:36:57,510
+previous one so at the end you can see
+
+00:36:55,800 --> 00:36:59,820
+here like I skipped some parts of the
+
+00:36:57,510 --> 00:37:01,980
+loop the code is available in like you
+
+00:36:59,820 --> 00:37:05,100
+know publicly so there are examples and
+
+00:37:01,980 --> 00:37:07,290
+test ok sorry there's a typo here that
+
+00:37:05,100 --> 00:37:11,430
+we it's just swap so you see here that
+
+00:37:07,290 --> 00:37:15,030
+we we set the we kind of advanced that
+
+00:37:11,430 --> 00:37:18,180
+prayer and and curved pointers we also
+
+00:37:15,030 --> 00:37:20,160
+do swapping the owners so by swapping
+
+00:37:18,180 --> 00:37:22,920
+the the ownership is actually we're just
+
+00:37:20,160 --> 00:37:25,530
+swapping the the the header pointers
+
+00:37:22,920 --> 00:37:27,600
+that are owned by the owners but we are
+
+00:37:25,530 --> 00:37:29,790
+not changing the values of the head of
+
+00:37:27,600 --> 00:37:32,250
+pointers themselves because come where
+
+00:37:29,790 --> 00:37:34,440
+we swap them but they they continue to
+
+00:37:32,250 --> 00:37:37,470
+protect the same node that's been
+
+00:37:34,440 --> 00:37:40,620
+protecting and at the end there we what
+
+00:37:37,470 --> 00:37:44,160
+used to protect the previous value it
+
+00:37:40,620 --> 00:37:46,800
+becomes kind of free now that we can
+
+00:37:44,160 --> 00:37:48,740
+reuse it in the next iteration but it is
+
+00:37:46,800 --> 00:37:51,000
+called under like you know the current
+
+00:37:48,740 --> 00:37:54,060
+Orange
+
+00:37:51,000 --> 00:37:58,080
+that's kind of that can be as simple for
+
+00:37:54,060 --> 00:38:01,100
+a user to use as if they don't need any
+
+00:37:58,080 --> 00:38:08,390
+customization I'll leave it okay I'll
+
+00:38:01,100 --> 00:38:08,390
+I'll hand over to Paul but I see you
+
+00:38:08,510 --> 00:38:14,700
+alright we're here so this is just the
+
+00:38:11,970 --> 00:38:16,860
+RCU part and this is just a quick
+
+00:38:14,700 --> 00:38:18,660
+rundown of kind of our skews philosophy
+
+00:38:16,860 --> 00:38:20,250
+the idea is we have a way of publishing
+
+00:38:18,660 --> 00:38:22,530
+new data into a data structure and
+
+00:38:20,250 --> 00:38:24,420
+there's an RS you assign pointer thing
+
+00:38:22,530 --> 00:38:25,560
+that does that and there's things build
+
+00:38:24,420 --> 00:38:28,350
+on top of that for lists and other
+
+00:38:25,560 --> 00:38:29,790
+things and the reader can subscribe to a
+
+00:38:28,350 --> 00:38:31,410
+given version of a given pointer with
+
+00:38:29,790 --> 00:38:32,760
+our 2d reference and again there's ways
+
+00:38:31,410 --> 00:38:35,220
+of handling lists other things like that
+
+00:38:32,760 --> 00:38:36,630
+and the big deal this is very similar to
+
+00:38:35,220 --> 00:38:38,760
+hazard pointers you have to have a way
+
+00:38:36,630 --> 00:38:40,830
+of waiting for all the people that might
+
+00:38:38,760 --> 00:38:42,470
+be interfered with by an update by a
+
+00:38:40,830 --> 00:38:46,560
+destructive portion of the update and
+
+00:38:42,470 --> 00:38:48,330
+here what we do is we we define a reader
+
+00:38:46,560 --> 00:38:50,580
+with hazard pointers the readers are
+
+00:38:48,330 --> 00:38:51,960
+associated with each object and that's
+
+00:38:50,580 --> 00:38:53,340
+why they have a small number of memory
+
+00:38:51,960 --> 00:38:55,440
+because they identify each and every
+
+00:38:53,340 --> 00:38:57,300
+object same with reference counting here
+
+00:38:55,440 --> 00:38:59,180
+what we do is we identify a range of
+
+00:38:57,300 --> 00:39:02,220
+code and say anything that thing reads
+
+00:38:59,180 --> 00:39:05,820
+it might read and that gives us the
+
+00:39:02,220 --> 00:39:07,110
+speed and the weight freedom but it
+
+00:39:05,820 --> 00:39:09,810
+means that we could have a lot of
+
+00:39:07,110 --> 00:39:11,640
+objects hanging out so we identify with
+
+00:39:09,810 --> 00:39:12,840
+our see read lock beginning and ending
+
+00:39:11,640 --> 00:39:14,880
+with a matching our she would unlock
+
+00:39:12,840 --> 00:39:18,000
+they can be nested and anything in there
+
+00:39:14,880 --> 00:39:19,710
+is a reader of course you might want say
+
+00:39:18,000 --> 00:39:21,900
+where's the RAI eye and we'll get to
+
+00:39:19,710 --> 00:39:25,890
+that with a later slide but this is the
+
+00:39:21,900 --> 00:39:27,480
+this is where we started from and an
+
+00:39:25,890 --> 00:39:29,520
+update is gonna have to wait for all the
+
+00:39:27,480 --> 00:39:30,720
+readers that are already in their read
+
+00:39:29,520 --> 00:39:33,300
+side critical section that have already
+
+00:39:30,720 --> 00:39:36,090
+executed there are C read lock to get to
+
+00:39:33,300 --> 00:39:38,130
+that matching are C unlock before they
+
+00:39:36,090 --> 00:39:41,460
+can proceed and that duration of time is
+
+00:39:38,130 --> 00:39:43,140
+a grace period the easiest way is you
+
+00:39:41,460 --> 00:39:45,030
+say synchronize our see you hit blocks
+
+00:39:43,140 --> 00:39:48,630
+and then whenever it is done you've
+
+00:39:45,030 --> 00:39:49,740
+resumed again unfortunately there's a
+
+00:39:48,630 --> 00:39:51,900
+lot of algorithms that don't like
+
+00:39:49,740 --> 00:39:54,000
+waiting and so we have an asynchronous
+
+00:39:51,900 --> 00:39:55,650
+form call RCU where you pass it a
+
+00:39:54,000 --> 00:39:58,230
+function and a pointer to the object
+
+00:39:55,650 --> 00:39:59,610
+sort of and that one is we'll see you
+
+00:39:58,230 --> 00:40:03,360
+later causes a little bit of trouble in
+
+00:39:59,610 --> 00:40:04,560
+C++ but we'll get there fortunately I've
+
+00:40:03,360 --> 00:40:07,950
+had some help from a number of key
+
+00:40:04,560 --> 00:40:11,340
+so with even more help I might get there
+
+00:40:07,950 --> 00:40:12,750
+this is insertion and it's just how we
+
+00:40:11,340 --> 00:40:14,670
+get things inserted this is a very
+
+00:40:12,750 --> 00:40:17,250
+simple data structure it's this is the
+
+00:40:14,670 --> 00:40:19,860
+four states like Michael Wong had in his
+
+00:40:17,250 --> 00:40:21,510
+presentation and we allocate something
+
+00:40:19,860 --> 00:40:23,970
+that's the second state we initialize
+
+00:40:21,510 --> 00:40:26,130
+that that's the third state and if your
+
+00:40:23,970 --> 00:40:27,810
+memory allocator is working nobody else
+
+00:40:26,130 --> 00:40:28,830
+can have reference to that so you can do
+
+00:40:27,810 --> 00:40:31,410
+whatever you want that's why it's
+
+00:40:28,830 --> 00:40:33,510
+colored green as soon as you use RC you
+
+00:40:31,410 --> 00:40:35,400
+assigned pointer to make that pointer
+
+00:40:33,510 --> 00:40:36,480
+point to your new object bang also on
+
+00:40:35,400 --> 00:40:38,040
+the readers might be there for any
+
+00:40:36,480 --> 00:40:40,080
+length of time at any time without
+
+00:40:38,040 --> 00:40:42,570
+telling you about it and so from then on
+
+00:40:40,080 --> 00:40:44,850
+you have to be careful so we have to
+
+00:40:42,570 --> 00:40:47,750
+remove and this looks very similar to
+
+00:40:44,850 --> 00:40:51,180
+what Michael Wong showed you for
+
+00:40:47,750 --> 00:40:52,320
+reference counting and you get just the
+
+00:40:51,180 --> 00:40:54,360
+operations are different but it's the
+
+00:40:52,320 --> 00:40:57,330
+same process and the same sort of a
+
+00:40:54,360 --> 00:41:00,150
+thing going on we remove the cat we use
+
+00:40:57,330 --> 00:41:01,740
+C++ Atomics or we can to make sure that
+
+00:41:00,150 --> 00:41:04,140
+the readers either see the pointer to
+
+00:41:01,740 --> 00:41:05,640
+the cat or the point at the canoe but
+
+00:41:04,140 --> 00:41:07,080
+either way they see a valid list they
+
+00:41:05,640 --> 00:41:08,430
+don't see some moosh of the two pointers
+
+00:41:07,080 --> 00:41:14,070
+that you might get if you fail to use
+
+00:41:08,430 --> 00:41:17,130
+Atomics then you synchronize RC you do a
+
+00:41:14,070 --> 00:41:19,950
+a synchronous wait for all the readers
+
+00:41:17,130 --> 00:41:21,990
+once all the readers are done well the
+
+00:41:19,950 --> 00:41:24,180
+old readers might have reference to the
+
+00:41:21,990 --> 00:41:26,550
+cat any new ones there's no way for them
+
+00:41:24,180 --> 00:41:28,740
+to get to it so once all the old readers
+
+00:41:26,550 --> 00:41:30,120
+are done nobody's looking at the Caddy
+
+00:41:28,740 --> 00:41:32,520
+cup the updater and it can do whatever
+
+00:41:30,120 --> 00:41:34,800
+it wants with it including free it but
+
+00:41:32,520 --> 00:41:36,630
+as Michael pointed out with reference
+
+00:41:34,800 --> 00:41:38,580
+count same thing with RCU we can have
+
+00:41:36,630 --> 00:41:41,420
+two simultaneous things Michael talked
+
+00:41:38,580 --> 00:41:45,000
+about a veterinarian and there they are
+
+00:41:41,420 --> 00:41:47,130
+if we have a cat that's heart beat
+
+00:41:45,000 --> 00:41:48,570
+happened ways ago the two veterinarians
+
+00:41:47,130 --> 00:41:51,360
+might disagree about whether the cats
+
+00:41:48,570 --> 00:41:53,790
+are alive or dead and this again is
+
+00:41:51,360 --> 00:41:55,140
+anything you're representing inside the
+
+00:41:53,790 --> 00:41:57,180
+computer that's outside the computer
+
+00:41:55,140 --> 00:41:59,070
+there's always uncertainty about what
+
+00:41:57,180 --> 00:42:01,710
+happened in what order and what is
+
+00:41:59,070 --> 00:42:03,390
+really finished for example if you
+
+00:42:01,710 --> 00:42:05,790
+suddenly can't access the memory stick
+
+00:42:03,390 --> 00:42:08,550
+the memory stick break or are things
+
+00:42:05,790 --> 00:42:10,950
+just slow it's the same decision is
+
+00:42:08,550 --> 00:42:12,570
+really generally applicable across
+
+00:42:10,950 --> 00:42:17,190
+anything where you're interacting with
+
+00:42:12,570 --> 00:42:18,690
+an outside device all right that's just
+
+00:42:17,190 --> 00:42:19,020
+putting up there saying you can make it
+
+00:42:18,690 --> 00:42:22,470
+really
+
+00:42:19,020 --> 00:42:25,350
+simple thing that acts like RCU this is
+
+00:42:22,470 --> 00:42:27,120
+what a reader looks like in C so we have
+
+00:42:25,350 --> 00:42:28,800
+that our C read lock at the top this
+
+00:42:27,120 --> 00:42:30,720
+starts the critical section we could
+
+00:42:28,800 --> 00:42:32,370
+pick up a pointer and the nice thing is
+
+00:42:30,720 --> 00:42:34,530
+that whatever player we picked up it's
+
+00:42:32,370 --> 00:42:36,120
+guaranteed to still be around sometime
+
+00:42:34,530 --> 00:42:38,670
+might remove from his data structure but
+
+00:42:36,120 --> 00:42:40,200
+it's not gonna be freed until we get to
+
+00:42:38,670 --> 00:42:41,310
+that matching our shoe would unlock down
+
+00:42:40,200 --> 00:42:42,600
+there at the bottom we can do whatever
+
+00:42:41,310 --> 00:42:44,700
+we want with that pointer with that
+
+00:42:42,600 --> 00:42:46,710
+object it'll still be in memory it's not
+
+00:42:44,700 --> 00:42:48,690
+gonna be reused there's no ABA it's
+
+00:42:46,710 --> 00:42:50,010
+there and of course that's why we have
+
+00:42:48,690 --> 00:42:51,150
+so much storage outstanding because it
+
+00:42:50,010 --> 00:42:53,760
+has to leave everything that might be
+
+00:42:51,150 --> 00:42:56,160
+reached there there as well but as soon
+
+00:42:53,760 --> 00:42:59,900
+as we hit that our serial unlock that
+
+00:42:56,160 --> 00:43:02,070
+thing might be freed immediately okay
+
+00:42:59,900 --> 00:43:05,370
+but the nice thing is those primitives
+
+00:43:02,070 --> 00:43:07,680
+all very lightweight and the updaters do
+
+00:43:05,370 --> 00:43:09,600
+something very similar they probably if
+
+00:43:07,680 --> 00:43:10,950
+you have multiple operator updaters they
+
+00:43:09,600 --> 00:43:13,620
+might use a lot to exclude each other
+
+00:43:10,950 --> 00:43:15,030
+they might pick up the old pointer make
+
+00:43:13,620 --> 00:43:16,650
+the new put the new pointer in there
+
+00:43:15,030 --> 00:43:19,410
+which they presumably initialize up
+
+00:43:16,650 --> 00:43:21,080
+earlier and then once they release the
+
+00:43:19,410 --> 00:43:24,120
+lock they can wait for the grace period
+
+00:43:21,080 --> 00:43:26,000
+once synchronized RC returns they know
+
+00:43:24,120 --> 00:43:27,840
+for sure there can't be any reader
+
+00:43:26,000 --> 00:43:30,150
+referencing that old thing that they
+
+00:43:27,840 --> 00:43:33,510
+just yanked out there therefore they can
+
+00:43:30,150 --> 00:43:34,560
+just free it ok so the same structure
+
+00:43:33,510 --> 00:43:36,690
+again as the reference counts the
+
+00:43:34,560 --> 00:43:39,150
+difference is as noted earlier is we
+
+00:43:36,690 --> 00:43:40,680
+have to tell RC you with the
+
+00:43:39,150 --> 00:43:42,270
+synchronized RC hey we're interested in
+
+00:43:40,680 --> 00:43:44,210
+freeing this thing with reference count
+
+00:43:42,270 --> 00:43:48,060
+would happen automatically
+
+00:43:44,210 --> 00:43:49,710
+ok this is a view of what a grace period
+
+00:43:48,060 --> 00:43:51,450
+kind of looks like sort of schematically
+
+00:43:49,710 --> 00:43:54,120
+we change something we wait for grace
+
+00:43:51,450 --> 00:43:55,710
+reading yellow there and the grace
+
+00:43:54,120 --> 00:43:57,210
+period has to extend long enough that
+
+00:43:55,710 --> 00:43:59,040
+any reader that was there before the
+
+00:43:57,210 --> 00:44:01,950
+grace period started so you can see
+
+00:43:59,040 --> 00:44:04,020
+there's two of them that really did that
+
+00:44:01,950 --> 00:44:05,850
+grace for as gatina those readers get
+
+00:44:04,020 --> 00:44:08,160
+done once we get to the green portion
+
+00:44:05,850 --> 00:44:10,620
+any reader that might see the state
+
+00:44:08,160 --> 00:44:12,090
+beforehand they're completed ok so
+
+00:44:10,620 --> 00:44:14,340
+that's just kind of a diagram of what
+
+00:44:12,090 --> 00:44:15,720
+how this looks you could draw a similar
+
+00:44:14,340 --> 00:44:18,530
+diagram for reference counters or
+
+00:44:15,720 --> 00:44:20,700
+Heather pointers if you wanted to now
+
+00:44:18,530 --> 00:44:23,130
+you can go longer than if the grace
+
+00:44:20,700 --> 00:44:26,700
+Creek runs long no big deal there's some
+
+00:44:23,130 --> 00:44:29,340
+memory that hasn't been freed ok if you
+
+00:44:26,700 --> 00:44:33,060
+start the race period late that's still
+
+00:44:29,340 --> 00:44:35,340
+ok because any reader that was there
+
+00:44:33,060 --> 00:44:37,020
+at the early gray spirits either there
+
+00:44:35,340 --> 00:44:38,910
+are gone by time you to the late grace
+
+00:44:37,020 --> 00:44:41,070
+period you may wait a little longer than
+
+00:44:38,910 --> 00:44:44,370
+you need to but things will work nothing
+
+00:44:41,070 --> 00:44:46,350
+will break and this turns out to be
+
+00:44:44,370 --> 00:44:49,770
+really important because if you delay
+
+00:44:46,350 --> 00:44:51,240
+the start of the grace period you can
+
+00:44:49,770 --> 00:44:54,990
+make the grace period cover multiple
+
+00:44:51,240 --> 00:44:56,310
+changes so those two if we just started
+
+00:44:54,990 --> 00:44:58,140
+right when that first change was done
+
+00:44:56,310 --> 00:45:01,200
+we'd have to have two grace periods do
+
+00:44:58,140 --> 00:45:03,420
+the work twice because we waited we were
+
+00:45:01,200 --> 00:45:06,000
+lazy we were rewarded we had to do less
+
+00:45:03,420 --> 00:45:08,040
+work it covered both guys and that means
+
+00:45:06,000 --> 00:45:10,470
+our / update overhead is less and life
+
+00:45:08,040 --> 00:45:13,500
+is good and we do that a lot
+
+00:45:10,470 --> 00:45:15,750
+in fact we do it pretty viciously we
+
+00:45:13,500 --> 00:45:17,430
+started later we get we amortize out and
+
+00:45:15,750 --> 00:45:19,650
+it's not hard to do something in the
+
+00:45:17,430 --> 00:45:22,620
+Linux kernel like make a big tar ball
+
+00:45:19,650 --> 00:45:25,290
+and then remove it and have literally
+
+00:45:22,620 --> 00:45:27,870
+thousands of updates using the same
+
+00:45:25,290 --> 00:45:31,170
+grace period so it's a very good labor
+
+00:45:27,870 --> 00:45:32,610
+saving device however that means if you
+
+00:45:31,170 --> 00:45:34,470
+increase the length of the grace period
+
+00:45:32,610 --> 00:45:37,170
+you're gonna have longer grace raise you
+
+00:45:34,470 --> 00:45:38,610
+wait longer and you also increase the
+
+00:45:37,170 --> 00:45:40,770
+memory usage which of course is one of
+
+00:45:38,610 --> 00:45:43,110
+our so use potential disadvantages if
+
+00:45:40,770 --> 00:45:44,610
+you have a small memory machine so this
+
+00:45:43,110 --> 00:45:49,740
+is a design trade-off but that's the
+
+00:45:44,610 --> 00:45:51,240
+design trade-off RCU is chosen okay now
+
+00:45:49,740 --> 00:45:52,980
+let's get to the kind of the fly in the
+
+00:45:51,240 --> 00:45:55,920
+ointment from c++ standpoint we have
+
+00:45:52,980 --> 00:45:58,020
+this call RCU thing and what it's doing
+
+00:45:55,920 --> 00:45:59,340
+you pass it in RC you head which is
+
+00:45:58,020 --> 00:46:01,920
+normally embedded in your data structure
+
+00:45:59,340 --> 00:46:03,570
+and that allows RC you to track all the
+
+00:46:01,920 --> 00:46:05,970
+stuff that's waiting for a grace period
+
+00:46:03,570 --> 00:46:08,040
+just links them all together and you
+
+00:46:05,970 --> 00:46:09,360
+also pass it a function and that
+
+00:46:08,040 --> 00:46:11,730
+function is gonna be called at the end
+
+00:46:09,360 --> 00:46:14,580
+of grace period so diagrammatically it
+
+00:46:11,730 --> 00:46:16,380
+looks like this so we had a change at
+
+00:46:14,580 --> 00:46:18,780
+the right when the change is done we do
+
+00:46:16,380 --> 00:46:20,070
+call our see you we hand it the pointer
+
+00:46:18,780 --> 00:46:22,860
+to that RC you head structure we've
+
+00:46:20,070 --> 00:46:24,450
+handed a function when the race-free is
+
+00:46:22,860 --> 00:46:27,390
+over that function gets called and has
+
+00:46:24,450 --> 00:46:29,100
+passed that RC head pointer works fairly
+
+00:46:27,390 --> 00:46:29,400
+well we've been doing it for a very long
+
+00:46:29,100 --> 00:46:32,100
+time
+
+00:46:29,400 --> 00:46:33,780
+in fact in Dynex PTX in the 90s we had
+
+00:46:32,100 --> 00:46:41,850
+this but we didn't have the synchronous
+
+00:46:33,780 --> 00:46:44,340
+wait okay the problem is what you'd like
+
+00:46:41,850 --> 00:46:44,970
+and it happens a fair amount of the time
+
+00:46:44,340 --> 00:46:46,970
+but not always
+
+00:46:44,970 --> 00:46:49,670
+what you'd like as you like the
+
+00:46:46,970 --> 00:46:54,050
+shape of that function that thing to be
+
+00:46:49,670 --> 00:46:55,670
+known at compile time and you'd like it
+
+00:46:54,050 --> 00:46:59,330
+at least be known a construction time
+
+00:46:55,670 --> 00:47:01,280
+all right but know a fair amount of time
+
+00:46:59,330 --> 00:47:04,910
+is not known until you actually do the
+
+00:47:01,280 --> 00:47:06,440
+call RC you because what you want to do
+
+00:47:04,910 --> 00:47:08,960
+may depend on the state of the system
+
+00:47:06,440 --> 00:47:10,820
+for example you might have in the lane
+
+00:47:08,960 --> 00:47:12,410
+screw you might have a file it might
+
+00:47:10,820 --> 00:47:14,060
+start off not having attributes and
+
+00:47:12,410 --> 00:47:16,190
+you're using and using it and somebody
+
+00:47:14,060 --> 00:47:17,330
+slams attributes onto it and then when
+
+00:47:16,190 --> 00:47:18,440
+you want to get rid of it you may have
+
+00:47:17,330 --> 00:47:21,290
+to do something different as a result
+
+00:47:18,440 --> 00:47:23,120
+and you certainly didn't know that at
+
+00:47:21,290 --> 00:47:24,770
+construction time let alone compile time
+
+00:47:23,120 --> 00:47:26,390
+what it was going to look like because
+
+00:47:24,770 --> 00:47:29,780
+at that point it was out on a distant
+
+00:47:26,390 --> 00:47:32,960
+where a might not even existed yet okay
+
+00:47:29,780 --> 00:47:35,030
+so sometimes we can do it you know have
+
+00:47:32,960 --> 00:47:36,410
+just have any arbitrary thing lambda
+
+00:47:35,030 --> 00:47:38,480
+capture and all that stuff potentially
+
+00:47:36,410 --> 00:47:39,830
+but there are cases where that and I
+
+00:47:38,480 --> 00:47:43,790
+found it with lots of error message
+
+00:47:39,830 --> 00:47:45,560
+where it does not work okay when F is
+
+00:47:43,790 --> 00:47:47,420
+not knowing it is only knowing it call
+
+00:47:45,560 --> 00:47:49,310
+RC you time you have to have a fixed
+
+00:47:47,420 --> 00:47:51,950
+chunk of storage to put that function
+
+00:47:49,310 --> 00:47:54,530
+pointer in there okay well C++ does a
+
+00:47:51,950 --> 00:47:57,560
+lot of other things you could use but
+
+00:47:54,530 --> 00:47:59,240
+there's another complication and this is
+
+00:47:57,560 --> 00:48:00,500
+the problem with this stuff is it's I've
+
+00:47:59,240 --> 00:48:02,150
+been doing this for 20 years so it's not
+
+00:48:00,500 --> 00:48:07,160
+here it's kind of down here somewhere
+
+00:48:02,150 --> 00:48:08,660
+and so we had a Korean barbecue that
+
+00:48:07,160 --> 00:48:12,830
+helped bring it up to my brain instead
+
+00:48:08,660 --> 00:48:15,260
+of my fingers a couple nights ago and as
+
+00:48:12,830 --> 00:48:18,050
+the title says any type any time any
+
+00:48:15,260 --> 00:48:20,030
+translation unit anywhere I mean are she
+
+00:48:18,050 --> 00:48:22,310
+just gets this stuff dumped on it and it
+
+00:48:20,030 --> 00:48:23,930
+has to deal with it and so we've got the
+
+00:48:22,310 --> 00:48:25,550
+six boxes they're representing six
+
+00:48:23,930 --> 00:48:28,490
+different translation units each
+
+00:48:25,550 --> 00:48:30,950
+translation has four instances and the
+
+00:48:28,490 --> 00:48:33,140
+little a1 b1 so on those are the types
+
+00:48:30,950 --> 00:48:37,280
+so for example translation unit C in the
+
+00:48:33,140 --> 00:48:39,200
+middle on the top there has three
+
+00:48:37,280 --> 00:48:41,360
+instances of C one type and one instance
+
+00:48:39,200 --> 00:48:42,860
+of C to type all right D in the middle
+
+00:48:41,360 --> 00:48:45,710
+of the bottom just has forces of the
+
+00:48:42,860 --> 00:48:48,200
+same type and these have been handed to
+
+00:48:45,710 --> 00:48:50,360
+RC you to clean up in some order and the
+
+00:48:48,200 --> 00:48:51,920
+gray lines show the order it has them on
+
+00:48:50,360 --> 00:48:53,180
+this list that's keeping track but you
+
+00:48:51,920 --> 00:48:54,440
+can see this list just was wandering
+
+00:48:53,180 --> 00:48:55,850
+through the translation you just kind of
+
+00:48:54,440 --> 00:48:58,040
+randomly and it's got all different
+
+00:48:55,850 --> 00:48:59,120
+sorts of types and if it's off somewhere
+
+00:48:58,040 --> 00:49:00,920
+it does have no idea what these types
+
+00:48:59,120 --> 00:49:02,420
+are the only way it can
+
+00:49:00,920 --> 00:49:04,520
+interpret the type so there's two ways
+
+00:49:02,420 --> 00:49:06,050
+one is you get inheritance from an
+
+00:49:04,520 --> 00:49:08,270
+abstract type and have a virtual
+
+00:49:06,050 --> 00:49:09,050
+function pointer which may not be what
+
+00:49:08,270 --> 00:49:11,540
+you want if you have
+
+00:49:09,050 --> 00:49:12,950
+performance-critical code the other ways
+
+00:49:11,540 --> 00:49:17,420
+you have to get the execution into the
+
+00:49:12,950 --> 00:49:18,860
+translation unit somehow okay so one way
+
+00:49:17,420 --> 00:49:20,810
+or another you have to get some kind of
+
+00:49:18,860 --> 00:49:22,340
+hook to get something back into the
+
+00:49:20,810 --> 00:49:27,680
+translation in the nose what the heck
+
+00:49:22,340 --> 00:49:28,910
+this stupid thing is and right now we're
+
+00:49:27,680 --> 00:49:30,170
+kind of at a point where we have to have
+
+00:49:28,910 --> 00:49:32,780
+some kind of a function pointer to do
+
+00:49:30,170 --> 00:49:35,240
+that there may be something come of a
+
+00:49:32,780 --> 00:49:39,890
+better way but that's where we're at
+
+00:49:35,240 --> 00:49:42,470
+right now okay so this is the C language
+
+00:49:39,890 --> 00:49:44,270
+API for RCU I'm only going to worry
+
+00:49:42,470 --> 00:49:45,470
+about the top four are sure we'd lock
+
+00:49:44,270 --> 00:49:46,460
+our series and locks and kind of our
+
+00:49:45,470 --> 00:49:48,560
+sivan call our c we've gone through
+
+00:49:46,460 --> 00:49:51,890
+those there that's just their templates
+
+00:49:48,560 --> 00:49:53,510
+or their prototypes I should say and you
+
+00:49:51,890 --> 00:49:55,220
+can define an RC domain with the current
+
+00:49:53,510 --> 00:49:56,750
+proposal and they're kind of down in the
+
+00:49:55,220 --> 00:49:57,980
+middle I apologize for that being see
+
+00:49:56,750 --> 00:49:59,930
+that there's a read lock read unlock
+
+00:49:57,980 --> 00:50:01,520
+synchronize and call and those are just
+
+00:49:59,930 --> 00:50:03,860
+member functions which allows you to
+
+00:50:01,520 --> 00:50:05,750
+have a domain kind of like kind of like
+
+00:50:03,860 --> 00:50:08,240
+the hazard pointer domains but usually
+
+00:50:05,750 --> 00:50:09,890
+used for different purpose that allows
+
+00:50:08,240 --> 00:50:11,540
+you to have a single translation you
+
+00:50:09,890 --> 00:50:15,350
+deal with different types of RCU or
+
+00:50:11,540 --> 00:50:17,390
+different domains of RC who wants to we
+
+00:50:15,350 --> 00:50:20,720
+talked about wanting scoped readers this
+
+00:50:17,390 --> 00:50:23,270
+is a API for doing that so that you can
+
+00:50:20,720 --> 00:50:24,920
+say this block is reading and then is
+
+00:50:23,270 --> 00:50:29,960
+how weary exited it'll stop reading when
+
+00:50:24,920 --> 00:50:31,520
+you leave I did something for call RC
+
+00:50:29,960 --> 00:50:33,700
+you and I presented on Wednesday and the
+
+00:50:31,520 --> 00:50:36,920
+less said about that the better
+
+00:50:33,700 --> 00:50:39,410
+isabella provided a version this one
+
+00:50:36,920 --> 00:50:43,250
+requires you to know the shape of the
+
+00:50:39,410 --> 00:50:47,300
+function kind of at that construction
+
+00:50:43,250 --> 00:50:49,190
+time and it seems to work she gave me
+
+00:50:47,300 --> 00:50:51,770
+some code I've integrated in at passes
+
+00:50:49,190 --> 00:50:53,600
+test and that's good and our third wire
+
+00:50:51,770 --> 00:50:57,140
+dude another another one that allows you
+
+00:50:53,600 --> 00:50:59,240
+to pass a thing in at call time so you
+
+00:50:57,140 --> 00:51:01,340
+pass the destructor in subject he says
+
+00:50:59,240 --> 00:51:03,710
+the call time and it maybe we want both
+
+00:51:01,340 --> 00:51:05,480
+of these because you know if you can do
+
+00:51:03,710 --> 00:51:07,460
+it at compile time you can use valley
+
+00:51:05,480 --> 00:51:09,200
+capture lambdas for example which you
+
+00:51:07,460 --> 00:51:10,340
+certainly can't unless you want to
+
+00:51:09,200 --> 00:51:11,630
+allocate on the free path which I
+
+00:51:10,340 --> 00:51:13,610
+definitely do not that's a good way to
+
+00:51:11,630 --> 00:51:14,660
+deadlock your system because it needs to
+
+00:51:13,610 --> 00:51:15,980
+allocate memory in order
+
+00:51:14,660 --> 00:51:16,760
+it it's not got any memory that's where
+
+00:51:15,980 --> 00:51:20,330
+you trying to feed memory the first
+
+00:51:16,760 --> 00:51:22,370
+place and I don't like that okay and if
+
+00:51:20,330 --> 00:51:23,330
+you like it you can derive your own sub
+
+00:51:22,370 --> 00:51:25,970
+class and do it yourself
+
+00:51:23,330 --> 00:51:28,670
+alright this is just performance
+
+00:51:25,970 --> 00:51:30,380
+comparison unfortunately I don't have
+
+00:51:28,670 --> 00:51:32,300
+material install so I wasn't able to
+
+00:51:30,380 --> 00:51:34,970
+grab Anthony's thing to put it in there
+
+00:51:32,300 --> 00:51:36,440
+but we'll get there okay I was trying
+
+00:51:34,970 --> 00:51:37,910
+really hard to make it pull a mercurial
+
+00:51:36,440 --> 00:51:39,140
+archive and wasn't sure why it was the
+
+00:51:37,910 --> 00:51:41,180
+yelling at me and I should send me email
+
+00:51:39,140 --> 00:51:45,830
+Isis look you need use material okay
+
+00:51:41,180 --> 00:51:48,020
+fine anyway this is just this is a
+
+00:51:45,830 --> 00:51:51,230
+specialized technique you use it where
+
+00:51:48,020 --> 00:51:53,240
+it makes sense the Linux kernel
+
+00:51:51,230 --> 00:51:55,310
+community tends to be a little bit too
+
+00:51:53,240 --> 00:51:56,720
+contrary so I told them don't use it
+
+00:51:55,310 --> 00:51:58,100
+down there and they silk are so far
+
+00:51:56,720 --> 00:51:59,750
+they've come up with two cases where you
+
+00:51:58,100 --> 00:52:00,920
+actually should use it down there maybe
+
+00:51:59,750 --> 00:52:02,840
+they'll come up with more but for the
+
+00:52:00,920 --> 00:52:04,130
+most part you want it to be in the case
+
+00:52:02,840 --> 00:52:07,250
+where the veterinarian's might disagree
+
+00:52:04,130 --> 00:52:09,320
+and that's okay all right and if some
+
+00:52:07,250 --> 00:52:13,370
+agreement is needed you can impose it in
+
+00:52:09,320 --> 00:52:14,540
+various ways okay anyway this is kind of
+
+00:52:13,370 --> 00:52:16,430
+our future things I'd like to invite
+
+00:52:14,540 --> 00:52:19,610
+maggot and Michael Wong come up here and
+
+00:52:16,430 --> 00:52:21,350
+we got a coldness for questions as
+
+00:52:19,610 --> 00:52:22,640
+Michael said we want to get these things
+
+00:52:21,350 --> 00:52:24,560
+into the concurrency TS and thence
+
+00:52:22,640 --> 00:52:27,500
+perhaps in the C++ standard maybe even
+
+00:52:24,560 --> 00:52:29,420
+in C++ 20 we have some working drafts
+
+00:52:27,500 --> 00:52:30,920
+hazard pointers you can see there we've
+
+00:52:29,420 --> 00:52:32,840
+got the end old version of memory
+
+00:52:30,920 --> 00:52:35,510
+consumed and I've got two papers which I
+
+00:52:32,840 --> 00:52:38,090
+have written up with things that I need
+
+00:52:35,510 --> 00:52:40,880
+to send to John Spicer
+
+00:52:38,090 --> 00:52:44,030
+thank you John Spicer to get numbers for
+
+00:52:40,880 --> 00:52:46,490
+and those should be available for a
+
+00:52:44,030 --> 00:52:48,440
+perusal a little bit questions comments
+
+00:52:46,490 --> 00:52:52,220
+thoughts tomatoes Wow okay I think I saw
+
+00:52:48,440 --> 00:53:05,510
+you first then you then you so please
+
+00:52:52,220 --> 00:53:07,640
+come up okay we have implementations in
+
+00:53:05,510 --> 00:53:10,330
+userspace that work in all sorts of
+
+00:53:07,640 --> 00:53:10,330
+environments go ahead
+
+00:53:17,570 --> 00:53:31,140
+right they do for most of them they do
+
+00:53:27,630 --> 00:53:33,210
+for all of them actually so what happens
+
+00:53:31,140 --> 00:53:36,570
+for the there's some user space RC use
+
+00:53:33,210 --> 00:53:38,520
+that require that require heavier oh I'm
+
+00:53:36,570 --> 00:53:41,010
+sorry the question was hey we've got a
+
+00:53:38,520 --> 00:53:42,570
+we've got a bunch of different user
+
+00:53:41,010 --> 00:53:44,460
+space RCU things they have different
+
+00:53:42,570 --> 00:53:46,530
+properties do they all really fit that
+
+00:53:44,460 --> 00:53:48,540
+table that Michael long presented at the
+
+00:53:46,530 --> 00:53:50,160
+end of his presentation and the answer
+
+00:53:48,540 --> 00:53:52,680
+is yes there are some slight variations
+
+00:53:50,160 --> 00:53:54,599
+for exam when you traverse to a new
+
+00:53:52,680 --> 00:53:55,920
+object it's the same you just use the
+
+00:53:54,599 --> 00:53:57,300
+normal load instruction on the machine
+
+00:53:55,920 --> 00:53:59,849
+there's no memory birds no nothing
+
+00:53:57,300 --> 00:54:03,030
+however to your point our she read lock
+
+00:53:59,849 --> 00:54:05,339
+might have some overhead for example if
+
+00:54:03,030 --> 00:54:07,020
+you use the QSB are the questions see
+
+00:54:05,339 --> 00:54:08,369
+you can bend and blame the us need of
+
+00:54:07,020 --> 00:54:10,440
+toronto guys for that one they named it
+
+00:54:08,369 --> 00:54:14,339
+quiescent state base reclamation there
+
+00:54:10,440 --> 00:54:15,780
+we are q SVR if you use that are she
+
+00:54:14,339 --> 00:54:17,339
+read lock and archery lock are just free
+
+00:54:15,780 --> 00:54:19,830
+just as they are a non pre-emptive Linux
+
+00:54:17,339 --> 00:54:21,660
+kernel there's another one that has
+
+00:54:19,830 --> 00:54:23,700
+explicit memory barriers or stole or
+
+00:54:21,660 --> 00:54:25,260
+load memory barriers but rather than
+
+00:54:23,700 --> 00:54:26,550
+being on each traversal as you'd have
+
+00:54:25,260 --> 00:54:28,290
+with hazard pointers they're only on the
+
+00:54:26,550 --> 00:54:29,730
+arcs you read lock in the area unlock of
+
+00:54:28,290 --> 00:54:31,800
+course if you only if you have less than
+
+00:54:29,730 --> 00:54:34,710
+if you have one traversal you're better
+
+00:54:31,800 --> 00:54:35,640
+off with hazard players anyway I'm sorry
+
+00:54:34,710 --> 00:54:38,460
+about the rest of the questions I just
+
+00:54:35,640 --> 00:54:39,540
+got the session is over sign but will be
+
+00:54:38,460 --> 00:54:41,490
+around for at least a little bit longer
+
+00:54:39,540 --> 00:54:42,750
+and there's a break coming up at some
+
+00:54:41,490 --> 00:54:43,920
+point and we'll go from there
+
+00:54:42,750 --> 00:54:46,260
+thank you all very much for your time
+
+00:54:43,920 --> 00:54:48,500
+and attention and have a great rest of
+
+00:54:46,260 --> 00:54:48,500
+
+YouTube URL: https://www.youtube.com/watch?v=uhgrD_B1RhQ
+
+

@@ -1,0 +1,767 @@
+Title: Google Open Source Live "Knative day" | Evolution of the Knative Broker [Advanced]
+Publication date: 2020-11-02
+Playlist: Google Open Source Live
+Description: 
+	We recommend that participants attend the first 2 sessions of Knative in order to take advantage of this advanced session. The Broker in Knative Eventing hides the details of event routing from event producers to consumers by providing an event ingress and delivery mechanism. Learn how its design and implementation have evolved to efficiently leverage multiple messaging systems.
+Captions: 
+	00:00:11,190 --> 00:00:12,190
+Hi everyone.
+
+00:00:12,190 --> 00:00:13,190
+How are you all doing?
+
+00:00:13,190 --> 00:00:14,820
+I hope you are doing well.
+
+00:00:14,820 --> 00:00:18,859
+Today, we're going to talk about the Knative Broker.
+
+00:00:18,859 --> 00:00:20,090
+Let's get started.
+
+00:00:20,090 --> 00:00:22,930
+First, let me introduce myself.
+
+00:00:22,930 --> 00:00:27,230
+I'm Grant and I'm a Knative Eventing working group lead
+
+00:00:27,230 --> 00:00:31,509
+and a Knative TOC member.
+
+00:00:31,509 --> 00:00:32,599
+Hi everyone.
+
+00:00:32,599 --> 00:00:33,760
+My name is Cong.
+
+00:00:33,760 --> 00:00:36,140
+I am a software engineer at Google.
+
+00:00:36,140 --> 00:00:44,760
+I work activity on Knative Eventing and Knative GCP open-source projects.
+
+00:00:44,760 --> 00:00:48,730
+In this talk we're not going to focus on explaining the Broker concept
+
+00:00:48,730 --> 00:00:50,760
+or convincing you it's useful.
+
+00:00:50,760 --> 00:00:53,739
+Instead, we will explore the history
+
+00:00:53,739 --> 00:00:57,949
+and the current state of broker implementations.
+
+00:00:57,949 --> 00:01:01,390
+We hope to shed some light on the challenges involved
+
+00:01:01,390 --> 00:01:04,190
+the solutions people have come up with
+
+00:01:04,190 --> 00:01:11,610
+and how one might decide which broker implementation to use.
+
+00:01:11,610 --> 00:01:15,940
+We expect most people here are familiar with Knative Eventing concepts.
+
+00:01:15,940 --> 00:01:19,190
+But just in case, here are the "broker" and "trigger" definitions
+
+00:01:19,190 --> 00:01:22,260
+from the original proposal.
+
+00:01:22,260 --> 00:01:25,370
+Publishers send their events to a broker
+
+00:01:25,370 --> 00:01:28,220
+and they expect the broker to reliably route those events
+
+00:01:28,220 --> 00:01:31,860
+to consumers who might be interested in them.
+
+00:01:31,860 --> 00:01:34,740
+On the other side, consumers create triggers
+
+00:01:34,740 --> 00:01:37,970
+to tell the broker which events are interesting
+
+00:01:37,970 --> 00:01:44,410
+and where those interesting events should be delivered.
+
+00:01:44,410 --> 00:01:46,250
+To get a bit more concrete
+
+00:01:46,250 --> 00:01:51,740
+here are the YAML definitions for a basic broker and a basic trigger.
+
+00:01:51,740 --> 00:01:55,530
+The broker has a name, namespace and address.
+
+00:01:55,530 --> 00:02:00,070
+The address is where publishers should send events.
+
+00:02:00,070 --> 00:02:02,920
+The trigger specifies a broker name
+
+00:02:02,920 --> 00:02:07,060
+a filter definition and a subscriber address.
+
+00:02:07,060 --> 00:02:10,830
+It says if an event arrives at the default broker
+
+00:02:10,830 --> 00:02:16,349
+with the type attribute set to calm.example.object.delete
+
+00:02:16,349 --> 00:02:23,380
+then send that event to the delete processor service.
+
+00:02:23,380 --> 00:02:27,640
+The first broker implementation didn't have a name at the time
+
+00:02:27,640 --> 00:02:33,680
+but we'll call it the single-tenant channel broker for now.
+
+00:02:33,680 --> 00:02:36,810
+Its implementation looked like this.
+
+00:02:36,810 --> 00:02:39,660
+And ingress pod receives events from publishers
+
+00:02:39,660 --> 00:02:42,250
+and forwards them to a channel.
+
+00:02:42,250 --> 00:02:45,810
+The dispatcher pod receives every event from the channel
+
+00:02:45,810 --> 00:02:48,510
+checks it against each trigger filter
+
+00:02:48,510 --> 00:02:52,780
+and delivers any matches to the relevant consumers.
+
+00:02:52,780 --> 00:02:55,860
+For simplicity, the ingress and dispatcher pods
+
+00:02:55,860 --> 00:02:59,390
+only handle the events for a single broker
+
+00:02:59,390 --> 00:03:05,730
+and they run in the same namespace in which the broker object was created.
+
+00:03:05,730 --> 00:03:14,260
+I'll pause for a second here to briefly talk about channels.
+
+00:03:14,260 --> 00:03:18,080
+Channel is a Knative Eventing concept that's similar to Broker
+
+00:03:18,080 --> 00:03:21,060
+but doesn't support filtering.
+
+00:03:21,060 --> 00:03:26,849
+It's meant to be a simple interface to an external messaging backend.
+
+00:03:26,849 --> 00:03:31,320
+Publishers send events to a channel's address just like Broker.
+
+00:03:31,320 --> 00:03:35,849
+In this diagram, that's B1 desk channel.
+
+00:03:35,849 --> 00:03:41,310
+To receive events from a channel, we create a subscription object
+
+00:03:41,310 --> 00:03:46,410
+which is like a trigger, except it doesn't have a filter.
+
+00:03:46,410 --> 00:03:52,120
+Each subscription receives every event that's published to a channel.
+
+00:03:52,120 --> 00:03:55,830
+The channel keeps track of event deliveries and failures
+
+00:03:55,830 --> 00:03:58,560
+to make sure that each event is delivered at least once
+
+00:03:58,560 --> 00:04:02,070
+to each subscription's consumer.
+
+00:04:02,070 --> 00:04:05,709
+Now, back to the broker.
+
+00:04:05,709 --> 00:04:10,239
+The publisher delivers an event to ingress address B1-broker
+
+00:04:10,239 --> 00:04:14,300
+which forwards it to channel address B1-channel.
+
+00:04:14,300 --> 00:04:17,030
+For every trigger there's a matching subscription
+
+00:04:17,030 --> 00:04:25,560
+that delivers events to the dispatcher at a trigger-specific path – /T1, /T2, etc.
+
+00:04:25,560 --> 00:04:30,260
+The dispatcher filters each event for the trigger path it came in on.
+
+00:04:30,260 --> 00:04:34,610
+Then, if it matches, delivers the event to the consumer
+
+00:04:34,610 --> 00:04:40,440
+and reports success or failure back to the channel.
+
+00:04:40,440 --> 00:04:43,570
+You can see in this example one of the challenges of this
+
+00:04:43,570 --> 00:04:46,160
+and other broker implementations.
+
+00:04:46,160 --> 00:04:49,740
+I'll call it over-delivery.
+
+00:04:49,740 --> 00:04:52,850
+Three red-dot events are delivered to the dispatcher
+
+00:04:52,850 --> 00:04:55,980
+but only one makes it to a consumer.
+
+00:04:55,980 --> 00:04:59,490
+The other two deliveries are wasted resources
+
+00:04:59,490 --> 00:05:05,070
+and that waste grows as the number of triggers grows.
+
+00:05:05,070 --> 00:05:09,840
+The single tenancy of the single-tenant channel broker
+
+00:05:09,840 --> 00:05:13,300
+was also a resource efficiency challenge.
+
+00:05:13,300 --> 00:05:16,650
+Since it didn't have scale-to-zero auto-scaling
+
+00:05:16,650 --> 00:05:20,460
+the pods for ingress and dispatcher were always running
+
+00:05:20,460 --> 00:05:23,410
+even if the broker was idle.
+
+00:05:23,410 --> 00:05:25,620
+For clusters with many idle brokers
+
+00:05:25,620 --> 00:05:32,470
+this was a lot of pods doing nothing, but taking up space.
+
+00:05:32,470 --> 00:05:36,520
+So we decided to replace the single-tenant channel broker
+
+00:05:36,520 --> 00:05:42,290
+with the multi-tenant channel broker.
+
+00:05:42,290 --> 00:05:46,270
+Its implementation is similar to the single-tenant channel broker
+
+00:05:46,270 --> 00:05:51,760
+but the ingress and dispatcher workloads are shared by all brokers in the cluster
+
+00:05:51,760 --> 00:05:55,750
+and they run in the system namespace.
+
+00:05:55,750 --> 00:05:58,400
+Auto-scaling to zero isn't so critical anymore
+
+00:05:58,400 --> 00:06:01,580
+because our minimum footprint is now two pods per cluster
+
+00:06:01,580 --> 00:06:04,979
+instead of two pods per broker.
+
+00:06:04,979 --> 00:06:08,139
+And because all brokers share the same infrastructure
+
+00:06:08,139 --> 00:06:12,110
+the aggregate resource efficiency of all brokers can theoretically be better
+
+00:06:12,110 --> 00:06:19,460
+than the same number of single-tenant brokers.
+
+00:06:19,460 --> 00:06:21,669
+The event flow through the multi-tenant broker
+
+00:06:21,669 --> 00:06:24,540
+is the same as the single-tenant broker.
+
+00:06:24,540 --> 00:06:28,009
+All events sent to a broker go to a single channel
+
+00:06:28,009 --> 00:06:32,070
+and are delivered once per trigger to the dispatcher.
+
+00:06:32,070 --> 00:06:35,550
+The biggest difference is that publishers use a URI path
+
+00:06:35,550 --> 00:06:40,580
+to send events to a broker instead of a hostname.
+
+00:06:40,580 --> 00:06:45,570
+Note that the over-delivery challenge isn't solved by this implementation.
+
+00:06:45,570 --> 00:06:49,460
+And because the data plane is shared by all brokers in the cluster
+
+00:06:49,460 --> 00:06:52,479
+there's a risk that a single noisy broker
+
+00:06:52,479 --> 00:06:55,030
+will starve the other brokers of resources.
+
+00:06:55,030 --> 00:06:58,210
+This is a trade-off.
+
+00:06:58,210 --> 00:07:02,020
+Multi-tenancy allows for better resource efficiency
+
+00:07:02,020 --> 00:07:08,280
+but isolation is harder to achieve.
+
+00:07:08,280 --> 00:07:09,840
+Now I'll hand off to Cong
+
+00:07:09,840 --> 00:07:14,009
+to talk about the other brokers in our Knative ecosystem.
+
+00:07:14,009 --> 00:07:17,050
+Thanks, Grant.
+
+00:07:17,050 --> 00:07:21,150
+First up is the RabbitMQ broker.
+
+00:07:21,150 --> 00:07:24,789
+The RabbitMQ broker has a very straightforward design.
+
+00:07:24,789 --> 00:07:27,419
+In fact you can find one-to-one mappings
+
+00:07:27,419 --> 00:07:32,150
+between RabbitMQ components and the Knative concepts.
+
+00:07:32,150 --> 00:07:37,150
+Each Knative broker object is mapped to a RabbitMQ exchange
+
+00:07:37,150 --> 00:07:40,220
+with an ingress service as the adapter.
+
+00:07:40,220 --> 00:07:46,169
+Quite similarly, each Knative trigger object corresponds to a RabbitMQ queue
+
+00:07:46,169 --> 00:07:48,210
+and a dispatcher.
+
+00:07:48,210 --> 00:07:54,220
+Recall that in Knative Eventing triggers express interest to events
+
+00:07:54,220 --> 00:07:56,850
+by filtering event attributes.
+
+00:07:56,850 --> 00:08:02,289
+And this is implemented in RabbitMQ using Headers Exchange and bindings.
+
+00:08:02,289 --> 00:08:07,630
+First of all, event attributes are translated to message headers.
+
+00:08:07,630 --> 00:08:11,870
+A binding then connects a queue for a trigger to the exchange
+
+00:08:11,870 --> 00:08:15,300
+by applying filter attributes as binding arguments.
+
+00:08:15,300 --> 00:08:23,840
+In RabbitMQ broker, each broker has its own ingress deployment and exchange.
+
+00:08:23,840 --> 00:08:28,220
+Each trigger has its own dispatcher deployment and queue.
+
+00:08:28,220 --> 00:08:31,590
+The ingress and dispatcher live in the user's namespace
+
+00:08:31,590 --> 00:08:34,740
+where the broker and trigger were created.
+
+00:08:34,740 --> 00:08:37,630
+This is very similar to the single-tenant channel broker
+
+00:08:37,630 --> 00:08:40,120
+that Grant just talked about earlier.
+
+00:08:40,120 --> 00:08:42,740
+Fifth, there is no resource sharing.
+
+00:08:42,740 --> 00:08:45,290
+The resource usage is something to keep in mind
+
+00:08:45,290 --> 00:08:48,670
+if you consider using the RabbitMQ broker
+
+00:08:48,670 --> 00:08:53,580
+especially when you need a lot of brokers or triggers.
+
+00:08:53,580 --> 00:08:56,779
+There is no auto-scaling on the ingress currently.
+
+00:08:56,779 --> 00:09:03,250
+However, on the dispatcher side, KEDA is used to scale dispatchers.
+
+00:09:03,250 --> 00:09:06,100
+Currently it does not support multiple replicas
+
+00:09:06,100 --> 00:09:09,380
+but it does support to scale to zero.
+
+00:09:09,380 --> 00:09:12,300
+So, if most of your triggers are idle
+
+00:09:12,300 --> 00:09:16,110
+you're still fine in terms of resource usage.
+
+00:09:16,110 --> 00:09:21,540
+Next, let me walk you through how events flow in RabbitMQ broker.
+
+00:09:21,540 --> 00:09:25,660
+The publisher sends an event to the broker ingress end point.
+
+00:09:25,660 --> 00:09:29,709
+The ingress translates the event to a RabbitMQ message
+
+00:09:29,709 --> 00:09:33,260
+and it publishes it to the corresponding exchange.
+
+00:09:33,260 --> 00:09:36,080
+A queue is created for each trigger
+
+00:09:36,080 --> 00:09:40,130
+and connected to the exchange via binding.
+
+00:09:40,130 --> 00:09:45,899
+The binding filters the event based on message headers or event attributes.
+
+00:09:45,899 --> 00:09:49,100
+Finally, if the event passes the filter
+
+00:09:49,100 --> 00:09:54,650
+the dispatcher pulls it from the queue and sends it to the consumer.
+
+00:09:54,650 --> 00:09:59,029
+In RabbitMQ, queues can share a single message store
+
+00:09:59,029 --> 00:10:02,750
+therefore there is not a lot of duplicate storage overhead
+
+00:10:02,750 --> 00:10:06,000
+by creating a queue for a trigger.
+
+00:10:06,000 --> 00:10:09,410
+And, besides, the filtering happens within RabbitMQ
+
+00:10:09,410 --> 00:10:13,880
+and therefore there is no wasted delivery of events
+
+00:10:13,880 --> 00:10:20,839
+from the RabbitMQ to the dispatcher if they don't even pass the filter.
+
+00:10:20,839 --> 00:10:29,220
+Next, let's talk about the Kafka broker.
+
+00:10:29,220 --> 00:10:31,550
+Similar to the multi-tenant channel broker
+
+00:10:31,550 --> 00:10:35,760
+the Kafka broker uses a multi-tenant shared data plan.
+
+00:10:35,760 --> 00:10:41,880
+The ingress is sliced to serve multiple brokers by sharing a path.
+
+00:10:41,880 --> 00:10:45,540
+A Kafka topic is created for each broker
+
+00:10:45,540 --> 00:10:50,779
+like a channel is created for each broker in the multi-tenant channel broker case.
+
+00:10:50,779 --> 00:10:55,070
+A multitenant dispatcher is responsible for pulling events from Kafka
+
+00:10:55,070 --> 00:11:00,510
+applying the filter and delivering the events to the consumers.
+
+00:11:00,510 --> 00:11:04,860
+If you look closer, the thick arrow can be split into multiple ones
+
+00:11:04,860 --> 00:11:09,120
+each representing a consumer group or a trigger.
+
+00:11:09,120 --> 00:11:11,370
+An interesting fact on the Kafka broker
+
+00:11:11,370 --> 00:11:15,360
+is that the data plan is implemented in Java.
+
+00:11:15,360 --> 00:11:16,920
+Because the Kafka Java client
+
+00:11:16,920 --> 00:11:23,160
+is better supported than the Go client.
+
+00:11:23,160 --> 00:11:27,180
+There is a single shared data plan that runs in the system namespace
+
+00:11:27,180 --> 00:11:31,110
+and it can be deployed by a YAML file.
+
+00:11:31,110 --> 00:11:33,800
+There is no workload running in the username space
+
+00:11:33,800 --> 00:11:37,010
+where brokers and triggers live.
+
+00:11:37,010 --> 00:11:42,870
+As of today there is no scaling strategy implemented.
+
+00:11:42,870 --> 00:11:45,870
+Let's take a more detailed look at the event flow.
+
+00:11:45,870 --> 00:11:50,360
+The publisher sends an event to the endpoint of the target broker
+
+00:11:50,360 --> 00:11:52,950
+which points to the shared ingress.
+
+00:11:52,950 --> 00:11:59,269
+You notice that the broker endpoint is a path of the ingress.
+
+00:11:59,269 --> 00:12:05,180
+The ingress sends the event to the corresponding Kafka topic.
+
+00:12:05,180 --> 00:12:09,060
+The shared dispatcher pulls the event from the Kafka topics.
+
+00:12:09,060 --> 00:12:12,180
+You then trigger specific consumer groups.
+
+00:12:12,180 --> 00:12:15,110
+It finally sends the event to the target consumer
+
+00:12:15,110 --> 00:12:20,579
+if the event passes the filter.
+
+00:12:20,579 --> 00:12:24,190
+Now let's move on to the GCP broker.
+
+00:12:24,190 --> 00:12:31,519
+The GCP broker uses Google cloud PubSub as a messaging backend.
+
+00:12:31,519 --> 00:12:35,120
+It is similar to Kafka broker on the ingress site
+
+00:12:35,120 --> 00:12:38,740
+where it uses a shared multi-tenant ingress.
+
+00:12:38,740 --> 00:12:42,750
+And a PubSub topic is created for each Knative broker.
+
+00:12:42,750 --> 00:12:47,120
+A unique design aspect of the GCP broker
+
+00:12:47,120 --> 00:12:49,670
+is that the dispatcher is split
+
+00:12:49,670 --> 00:12:52,760
+into separate Fanout and retry stages.
+
+00:12:52,760 --> 00:12:59,399
+For each broker, Fanout pulls the events from the corresponding PubSub topic
+
+00:12:59,399 --> 00:13:04,750
+via a Pull subscription only once and for all triggers.
+
+00:13:04,750 --> 00:13:11,140
+It then attempts to deliver the events to all matching consumers only once.
+
+00:13:11,140 --> 00:13:12,890
+For each failure or timeout
+
+00:13:12,890 --> 00:13:17,820
+the event is published to a trigger-specific retry topic.
+
+00:13:17,820 --> 00:13:22,220
+The retry stage periodically pulls events from those topics
+
+00:13:22,220 --> 00:13:26,340
+and attempts to redeliver to the consumers.
+
+00:13:26,340 --> 00:13:30,730
+What motivated this design is the PubSub pricing model.
+
+00:13:30,730 --> 00:13:36,910
+In PubSub, users are built by the overall ingress and egress traffic.
+
+00:13:36,910 --> 00:13:39,180
+While there is no storage cost
+
+00:13:39,180 --> 00:13:45,769
+therefore it is important to avoid duplicate message deliveries from PubSub
+
+00:13:45,769 --> 00:13:48,709
+for multiple triggers in the happy pass.
+
+00:13:48,709 --> 00:13:52,870
+While in the arrow pass, there is no storage cost
+
+00:13:52,870 --> 00:14:00,690
+for publishing field events to multiple retry topics.
+
+00:14:00,690 --> 00:14:04,600
+While multi-tenant broker designs are great at resource sharing
+
+00:14:04,600 --> 00:14:08,500
+a globally shared data plan reduces the flexibility to apply
+
+00:14:08,500 --> 00:14:13,360
+curated configurations and Auth Scopes for different use cases.
+
+00:14:13,360 --> 00:14:17,310
+For example, an operator may want to apply different resource coders
+
+00:14:17,310 --> 00:14:20,470
+for brokers owned by a specific team.
+
+00:14:20,470 --> 00:14:25,510
+GCP brokers solved this problem by allowing multiple data plans.
+
+00:14:25,510 --> 00:14:32,040
+While each data plan is still multi-tenant and can still serve multiple brokers
+
+00:14:32,040 --> 00:14:33,910
+BrokerCell is a customer resource
+
+00:14:33,910 --> 00:14:38,420
+which manages resources for a multi-tenant broker data plan.
+
+00:14:38,420 --> 00:14:43,440
+A BrokerCell can be created and configured by an operator upfront
+
+00:14:43,440 --> 00:14:48,839
+or a default BrokerCell can be created automatically by the control plan.
+
+00:14:48,839 --> 00:14:55,210
+The default BrokerCell is only created when there is at least one broker.
+
+00:14:55,210 --> 00:15:00,610
+In this diagram, brokers one and two are assigned to the default BrokerCell
+
+00:15:00,610 --> 00:15:04,050
+while broker three is aligned to a customer BrokerCell
+
+00:15:04,050 --> 00:15:07,580
+which has an isolated data plan than the default.
+
+00:15:07,580 --> 00:15:12,529
+Note that the ability to assign brokers to a non-default BrokerCell
+
+00:15:12,529 --> 00:15:18,930
+is not fully implemented yet, but this is a low-hanging fruit.
+
+00:15:18,930 --> 00:15:22,630
+The GCP broker currently uses HPA for auto-scaling.
+
+00:15:22,630 --> 00:15:26,940
+Other scaling mechanisms such as KEDA are under investigation.
+
+00:15:26,940 --> 00:15:29,560
+Back to you, Grant.
+
+00:15:29,560 --> 00:15:31,399
+Thanks, Cong.
+
+00:15:31,399 --> 00:15:35,200
+So, what can we take away from all this?
+
+00:15:35,200 --> 00:15:39,350
+Well if you're a user wondering which broker to choose,
+
+00:15:39,350 --> 00:15:42,990
+ask yourself a few simple questions.
+
+00:15:42,990 --> 00:15:46,160
+Are you more concerned about resource isolation
+
+00:15:46,160 --> 00:15:48,890
+or resource efficiency?
+
+00:15:48,890 --> 00:15:51,580
+Are you interested in using channels?
+
+00:15:51,580 --> 00:15:54,900
+Do you prefer Kafka or PubSub?
+
+00:15:54,900 --> 00:16:00,360
+There are no right answers and each choice has its own trade-offs.
+
+00:16:00,360 --> 00:16:04,560
+But we hope you can find something that fits your needs.
+
+00:16:04,560 --> 00:16:07,540
+If you're a contributor that's implementing a broker
+
+00:16:07,540 --> 00:16:10,570
+here are some basic principles to keep in mind.
+
+00:16:10,570 --> 00:16:15,600
+First, every messaging system has something it does really well.
+
+00:16:15,600 --> 00:16:18,360
+Try to optimize for those strengths.
+
+00:16:18,360 --> 00:16:23,660
+Second, your broker should not be significantly slower or less efficient
+
+00:16:23,660 --> 00:16:26,730
+than using the messaging system directly.
+
+00:16:26,730 --> 00:16:31,389
+To achieve this, use the messaging system as little as possible
+
+00:16:31,389 --> 00:16:34,260
+filter uninteresting events early
+
+00:16:34,260 --> 00:16:36,100
+and avoid over-delivery.
+
+00:16:36,100 --> 00:16:40,899
+Third, be aware of the trade-off you're making
+
+00:16:40,899 --> 00:16:43,760
+between efficiency and isolation.
+
+00:16:43,760 --> 00:16:51,850
+When you choose a multi-tenant versus a single-tenant data plan.
+
+00:16:51,850 --> 00:16:55,260
+Finally if anything we talked about today was interesting to you
+
+00:16:55,260 --> 00:16:59,889
+and you'd like to learn more, or just dive in and start contributing
+
+00:16:59,889 --> 00:17:02,930
+we'd love to continue the conversation.
+
+00:17:02,930 --> 00:17:06,209
+Join the Eventing channel on Knative Slack
+
+00:17:06,209 --> 00:17:09,010
+or head to one of these GitHub repositories
+
+00:17:09,010 --> 00:17:12,990
+to learn how you can get involved.
+
+00:17:12,990 --> 00:17:14,339
+
+YouTube URL: https://www.youtube.com/watch?v=YueaZGK4F6w
+
+

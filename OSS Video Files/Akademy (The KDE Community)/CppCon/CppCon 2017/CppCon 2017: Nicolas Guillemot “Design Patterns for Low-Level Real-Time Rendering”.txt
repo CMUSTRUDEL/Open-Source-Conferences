@@ -1,0 +1,4621 @@
+Title: CppCon 2017: Nicolas Guillemot “Design Patterns for Low-Level Real-Time Rendering”
+Publication date: 2017-10-12
+Playlist: CppCon 2017
+Description: 
+	http://CppCon.org
+—
+Presentation Slides, PDFs, Source Code and other presenter materials are available at: https://github.com/CppCon/CppCon2017
+—
+In recent years, the GPU graphics community has seen the introduction of many new GPU programming APIs like Khronos' Vulkan, Microsoft's Direct3D 12, and Apple's Metal. These APIs present much more control of GPU hardware, but bring with them a great increase in complexity. We need to rethink the way we do graphics programming to take advantage of new features, while also keeping complexity under control. 
+
+This talk presents solutions to recurring programming problems with these new GPU graphics APIs. These solutions are intended to simplify the complexity of the API by an order of magnitude, while simultaneously improving overall performance. This talk aims to discuss some key techniques for other developers to create their own GPU rendering engine. 
+
+Topics covered include using a ring buffer to stream data and descriptors from CPU to GPU, scheduling GPU memory and work from the CPU, designing a multi-pass real-time GPU renderer, and using fork/join parallelism to increase the performance of the CPU code that submits GPU work.
+— 
+Nicolas Guillemot: University of Victoria, MSc Student
+
+Nicolas is a master's student at the University of Victoria, where he searches for solutions to the game industry's real-time rendering problems at the intersection of software and hardware. In the past, Nicolas has worked at Electronic Arts, and in Intel's Visual and Parallel Computing Advanced Technology Group.
+—
+Videos Filmed & Edited by Bash Films: http://www.BashFilms.com
+Captions: 
+	00:00:00,000 --> 00:00:05,730
+all right so hi everyone and thank you
+
+00:00:03,899 --> 00:00:07,710
+for coming today I'm gonna be talking to
+
+00:00:05,730 --> 00:00:09,000
+you about design parents Louisville
+
+00:00:07,710 --> 00:00:13,019
+real-time rendering and my name is
+
+00:00:09,000 --> 00:00:15,330
+Nicolas so the reason why I made this
+
+00:00:13,019 --> 00:00:17,190
+talk are one big reason is because of
+
+00:00:15,330 --> 00:00:19,109
+the introduction in the recent years of
+
+00:00:17,190 --> 00:00:22,310
+brand-new graphics programming API is
+
+00:00:19,109 --> 00:00:25,859
+like bookin and DirectX 12 and metal and
+
+00:00:22,310 --> 00:00:28,260
+these API is give you control that
+
+00:00:25,859 --> 00:00:29,820
+wasn't possible before and so what I
+
+00:00:28,260 --> 00:00:32,130
+think that we need to do at this point
+
+00:00:29,820 --> 00:00:34,350
+is we need to think we need to realize
+
+00:00:32,130 --> 00:00:36,360
+that the rules have changed about what
+
+00:00:34,350 --> 00:00:38,640
+we can do with people with graphics
+
+00:00:36,360 --> 00:00:41,370
+programming and so I want to take a step
+
+00:00:38,640 --> 00:00:43,530
+back and rethink how we can program with
+
+00:00:41,370 --> 00:00:45,690
+GPUs I'm using the new primitives that
+
+00:00:43,530 --> 00:00:48,000
+we have access to and a lot of this talk
+
+00:00:45,690 --> 00:00:49,379
+is I'm trying to kind of boil down
+
+00:00:48,000 --> 00:00:51,449
+things to like a level that can be
+
+00:00:49,379 --> 00:00:53,190
+understood so there may be times where
+
+00:00:51,449 --> 00:00:54,510
+you may disagree about the way that I
+
+00:00:53,190 --> 00:00:56,940
+present the information so I encourage
+
+00:00:54,510 --> 00:00:59,250
+you to look at the nitty-gritty details
+
+00:00:56,940 --> 00:01:01,020
+yourself and try and think if you can
+
+00:00:59,250 --> 00:01:04,199
+think of an even better way of seeing a
+
+00:01:01,020 --> 00:01:06,930
+lot of these problems one of the big
+
+00:01:04,199 --> 00:01:09,540
+motivations I have for what I'm doing
+
+00:01:06,930 --> 00:01:11,700
+here is to try to think of generic
+
+00:01:09,540 --> 00:01:13,140
+solutions to domain-specific problems
+
+00:01:11,700 --> 00:01:15,030
+that are expressed or that can be
+
+00:01:13,140 --> 00:01:17,159
+expressed in domain-specific terms for
+
+00:01:15,030 --> 00:01:18,689
+the solution as well so this is just a
+
+00:01:17,159 --> 00:01:21,240
+little project I did it's a it's a ray
+
+00:01:18,689 --> 00:01:23,790
+tracer implement Hendricks 12 it's
+
+00:01:21,240 --> 00:01:25,140
+nothing super amazing but I thought it
+
+00:01:23,790 --> 00:01:26,670
+was a really great project and I was
+
+00:01:25,140 --> 00:01:28,680
+really happy with the results because I
+
+00:01:26,670 --> 00:01:30,450
+implemented this ray tracer based on a
+
+00:01:28,680 --> 00:01:32,220
+designer from a paper by semi lane and
+
+00:01:30,450 --> 00:01:35,640
+the design of the writer so you can see
+
+00:01:32,220 --> 00:01:37,560
+at the right diagram there so the levite
+
+00:01:35,640 --> 00:01:39,840
+racer itself is kind of like a task
+
+00:01:37,560 --> 00:01:41,369
+graph with data that passes from one
+
+00:01:39,840 --> 00:01:43,409
+node to the other through these queues
+
+00:01:41,369 --> 00:01:44,970
+and so when I started implementing this
+
+00:01:43,409 --> 00:01:46,229
+I started just writing the code you know
+
+00:01:44,970 --> 00:01:47,850
+hard coding just you know here's the
+
+00:01:46,229 --> 00:01:49,560
+function for the logic node here's the
+
+00:01:47,850 --> 00:01:51,090
+function to the material node and just
+
+00:01:49,560 --> 00:01:52,799
+typing in DirectX 12 code and it was
+
+00:01:51,090 --> 00:01:54,090
+really tedious and I realized I was
+
+00:01:52,799 --> 00:01:56,130
+wasting my time because I was typing the
+
+00:01:54,090 --> 00:01:58,259
+same thing over and over again so I just
+
+00:01:56,130 --> 00:02:00,119
+made kind of like a task graph system
+
+00:01:58,259 --> 00:02:02,280
+myself where I could add nodes and
+
+00:02:00,119 --> 00:02:03,479
+declare queues between them and then it
+
+00:02:02,280 --> 00:02:05,130
+kind of all just worked automatically
+
+00:02:03,479 --> 00:02:06,899
+and I could focus on those things that I
+
+00:02:05,130 --> 00:02:08,910
+really care about which is adding new
+
+00:02:06,899 --> 00:02:11,610
+materials and customizing all the nodes
+
+00:02:08,910 --> 00:02:12,180
+so this is kind of like the the general
+
+00:02:11,610 --> 00:02:13,859
+counsel
+
+00:02:12,180 --> 00:02:15,659
+that I think are a great way to use
+
+00:02:13,859 --> 00:02:17,670
+these and EAP is is to use like a
+
+00:02:15,659 --> 00:02:18,930
+low-level API to implement a very high
+
+00:02:17,670 --> 00:02:20,280
+level interface that lets you work at
+
+00:02:18,930 --> 00:02:20,819
+the level at which you're most
+
+00:02:20,280 --> 00:02:23,280
+productive
+
+00:02:20,819 --> 00:02:27,090
+so that's just a motivation kind of like
+
+00:02:23,280 --> 00:02:29,549
+a lofty goal to try to achieve this talk
+
+00:02:27,090 --> 00:02:31,099
+is mostly split into two parts so in the
+
+00:02:29,549 --> 00:02:33,870
+first part I'm going to be talking about
+
+00:02:31,099 --> 00:02:35,849
+some general GPU programming basics from
+
+00:02:33,870 --> 00:02:38,760
+the perspective of like a fresh kind of
+
+00:02:35,849 --> 00:02:39,810
+modern perspective I think and in the
+
+00:02:38,760 --> 00:02:41,579
+second part I'm gonna be talking about
+
+00:02:39,810 --> 00:02:43,920
+how these primitives can be used to
+
+00:02:41,579 --> 00:02:46,980
+implement various data structures that
+
+00:02:43,920 --> 00:02:48,629
+are useful for designing a renderer so
+
+00:02:46,980 --> 00:02:50,459
+let's get on with part 1 so G
+
+00:02:48,629 --> 00:02:53,359
+programming basics the first thing I
+
+00:02:50,459 --> 00:02:56,849
+want to talk about is memory management
+
+00:02:53,359 --> 00:02:58,319
+so I wanted to start with memory
+
+00:02:56,849 --> 00:03:00,030
+management because it's such an
+
+00:02:58,319 --> 00:03:02,250
+important part of everything we do that
+
+00:03:00,030 --> 00:03:06,150
+it feels really important to address how
+
+00:03:02,250 --> 00:03:07,500
+to do that properly first the first
+
+00:03:06,150 --> 00:03:09,719
+thing I want to do is I want to talk
+
+00:03:07,500 --> 00:03:12,599
+about memory management on a discrete
+
+00:03:09,719 --> 00:03:15,629
+GPU so I'll just be GPU the CPU and GPU
+
+00:03:12,599 --> 00:03:18,599
+are relatively separate as far as the
+
+00:03:15,629 --> 00:03:20,819
+CPU concerned the CPU like you can see
+
+00:03:18,599 --> 00:03:22,680
+right here has its own region of memory
+
+00:03:20,819 --> 00:03:24,239
+that we refer to as system memory or
+
+00:03:22,680 --> 00:03:26,970
+their various names for it but this is
+
+00:03:24,239 --> 00:03:28,799
+base tier RAM and the CPU can access
+
+00:03:26,970 --> 00:03:31,379
+this Ram through a memory management
+
+00:03:28,799 --> 00:03:34,949
+unit and this memory management unit
+
+00:03:31,379 --> 00:03:36,840
+does very many fancy things one of the
+
+00:03:34,949 --> 00:03:39,329
+things that it does is it allows you to
+
+00:03:36,840 --> 00:03:42,150
+use virtual memory so for example in
+
+00:03:39,329 --> 00:03:43,530
+this case using virtual memory what's
+
+00:03:42,150 --> 00:03:45,810
+happening here is that the system memory
+
+00:03:43,530 --> 00:03:47,280
+has two pages of memory allocated inside
+
+00:03:45,810 --> 00:03:49,590
+of it as you can see at the bottom and
+
+00:03:47,280 --> 00:03:53,129
+these two pages of memory are not
+
+00:03:49,590 --> 00:03:54,750
+contiguous but when the pages are
+
+00:03:53,129 --> 00:03:56,930
+accessed through a virtual memory which
+
+00:03:54,750 --> 00:03:59,699
+you can see at the top in the MMU block
+
+00:03:56,930 --> 00:04:01,019
+these pages appear to be contiguous so
+
+00:03:59,699 --> 00:04:02,310
+they're not physically contiguous but
+
+00:04:01,019 --> 00:04:04,530
+the contiguous in British memory and
+
+00:04:02,310 --> 00:04:06,180
+this is a theme that we'll we'll see
+
+00:04:04,530 --> 00:04:07,879
+over and over again and the slide and
+
+00:04:06,180 --> 00:04:12,060
+the next slide so that's why I wanted to
+
+00:04:07,879 --> 00:04:13,139
+really deliberate on this point the MMU
+
+00:04:12,060 --> 00:04:14,699
+does actually a whole bunch of pansies
+
+00:04:13,139 --> 00:04:18,599
+things but another fancy thing that it
+
+00:04:14,699 --> 00:04:20,099
+does is it can automatically fall pages
+
+00:04:18,599 --> 00:04:22,229
+into the file system so what I mean by
+
+00:04:20,099 --> 00:04:23,400
+that is to say that for example if you
+
+00:04:22,229 --> 00:04:24,990
+have too many processes running at the
+
+00:04:23,400 --> 00:04:25,910
+same time and you actually exhausted a
+
+00:04:24,990 --> 00:04:27,800
+total amount of RAM
+
+00:04:25,910 --> 00:04:30,230
+you have in your computer it's actually
+
+00:04:27,800 --> 00:04:31,940
+possible to take pages of RAM and put
+
+00:04:30,230 --> 00:04:33,830
+them on the file system and run another
+
+00:04:31,940 --> 00:04:35,150
+process in the meantime this is
+
+00:04:33,830 --> 00:04:37,810
+something that happens kind of
+
+00:04:35,150 --> 00:04:41,120
+automatically and is very interesting
+
+00:04:37,810 --> 00:04:42,650
+and I'll show you why I'm talking about
+
+00:04:41,120 --> 00:04:44,750
+this topic it's kind of all with the GPS
+
+00:04:42,650 --> 00:04:48,830
+as well rather it the fact that it's not
+
+00:04:44,750 --> 00:04:52,250
+relevant is what's relevant so moving
+
+00:04:48,830 --> 00:04:54,140
+onto the GPU part the GPU is is I can
+
+00:04:52,250 --> 00:04:56,210
+you could say in this way it's very
+
+00:04:54,140 --> 00:04:57,740
+similar to the CPU it's also has its own
+
+00:04:56,210 --> 00:04:59,480
+region of memory and that region of
+
+00:04:57,740 --> 00:05:02,570
+memory is called in this case we call it
+
+00:04:59,480 --> 00:05:04,880
+video memory but it has many names this
+
+00:05:02,570 --> 00:05:06,880
+region of memory is also accessed by MMU
+
+00:05:04,880 --> 00:05:10,670
+that is on the GPU side
+
+00:05:06,880 --> 00:05:12,440
+now this MMU is it to do very much of
+
+00:05:10,670 --> 00:05:14,780
+the same functionality such as for
+
+00:05:12,440 --> 00:05:16,490
+example virtual memory so in this case
+
+00:05:14,780 --> 00:05:18,320
+there are physical pages of video memory
+
+00:05:16,490 --> 00:05:20,420
+being allocated which may not be
+
+00:05:18,320 --> 00:05:22,370
+physically contiguous but these
+
+00:05:20,420 --> 00:05:24,320
+physically discontinuous pages can be
+
+00:05:22,370 --> 00:05:26,120
+accessed through a virtual map virtual
+
+00:05:24,320 --> 00:05:27,830
+address range that is appears to be
+
+00:05:26,120 --> 00:05:31,220
+contiguous so this kind of functionality
+
+00:05:27,830 --> 00:05:32,660
+is supported by GPUs as well and now we
+
+00:05:31,220 --> 00:05:34,280
+get to the weird part where the two
+
+00:05:32,660 --> 00:05:37,880
+devices gonna start crossing over each
+
+00:05:34,280 --> 00:05:40,790
+other so one thing you can do for
+
+00:05:37,880 --> 00:05:43,190
+example also is you can have pages of
+
+00:05:40,790 --> 00:05:44,930
+memory in system memory which the CPU
+
+00:05:43,190 --> 00:05:47,570
+can refer to of course using its own
+
+00:05:44,930 --> 00:05:49,280
+virtual memory space but also the GPU
+
+00:05:47,570 --> 00:05:52,910
+can refer to it using its own virtual
+
+00:05:49,280 --> 00:05:54,200
+madras space so this is one way in which
+
+00:05:52,910 --> 00:05:57,530
+you can share memory between the CPU and
+
+00:05:54,200 --> 00:05:59,030
+the GPU and we can actually go in step
+
+00:05:57,530 --> 00:06:01,130
+further and do this the other way around
+
+00:05:59,030 --> 00:06:04,730
+so in this case if you look at the
+
+00:06:01,130 --> 00:06:06,020
+purple boxes that have just appeared in
+
+00:06:04,730 --> 00:06:08,600
+this case the physical memory is in
+
+00:06:06,020 --> 00:06:10,700
+video memory and we have the same kind
+
+00:06:08,600 --> 00:06:12,230
+of situation where the CPU and GPU each
+
+00:06:10,700 --> 00:06:14,060
+have virtual addresses that point to the
+
+00:06:12,230 --> 00:06:17,510
+same physical memory but this time the
+
+00:06:14,060 --> 00:06:18,919
+physical memory is on the GPU side so
+
+00:06:17,510 --> 00:06:21,860
+just yet these scenarios are all
+
+00:06:18,919 --> 00:06:25,640
+possible and another one that's that's
+
+00:06:21,860 --> 00:06:27,919
+also of important notice DMA engines so
+
+00:06:25,640 --> 00:06:29,330
+GPUs have the ability to they have
+
+00:06:27,919 --> 00:06:31,460
+special hardware for doing copies very
+
+00:06:29,330 --> 00:06:33,710
+quickly but between system memory and
+
+00:06:31,460 --> 00:06:37,190
+video memory using the so called CDMA
+
+00:06:33,710 --> 00:06:39,289
+engines and actually one thing I want to
+
+00:06:37,190 --> 00:06:40,230
+highlight is that I deliberately put the
+
+00:06:39,289 --> 00:06:42,540
+DMA and
+
+00:06:40,230 --> 00:06:44,100
+block here at the bottom and it's
+
+00:06:42,540 --> 00:06:45,450
+directly connected to the physical
+
+00:06:44,100 --> 00:06:47,070
+memory of one device the physical memory
+
+00:06:45,450 --> 00:06:48,960
+of the other device to see that in
+
+00:06:47,070 --> 00:06:50,340
+general you can't assume that a DMA
+
+00:06:48,960 --> 00:06:52,140
+engine has the ability to understand
+
+00:06:50,340 --> 00:06:54,750
+with virtual memories which means that
+
+00:06:52,140 --> 00:06:56,430
+for example it can only work at the
+
+00:06:54,750 --> 00:06:58,170
+granularity of pages because they can't
+
+00:06:56,430 --> 00:06:59,760
+go from one page to the other individual
+
+00:06:58,170 --> 00:07:03,240
+weight it has to actually go from one
+
+00:06:59,760 --> 00:07:05,400
+page to the other in a physical way now
+
+00:07:03,240 --> 00:07:07,980
+the is also the case of the integrated
+
+00:07:05,400 --> 00:07:11,580
+GPU in this case the CP and GPU are
+
+00:07:07,980 --> 00:07:13,500
+roughly one unit in this case things
+
+00:07:11,580 --> 00:07:14,850
+that should get a lot simpler but it's
+
+00:07:13,500 --> 00:07:17,580
+not too different at the same at the
+
+00:07:14,850 --> 00:07:19,080
+same time in this case we have both
+
+00:07:17,580 --> 00:07:20,210
+devices sharing the same memory in
+
+00:07:19,080 --> 00:07:22,440
+system memory
+
+00:07:20,210 --> 00:07:23,760
+they don't necessarily share the same
+
+00:07:22,440 --> 00:07:25,190
+address space although that kind of
+
+00:07:23,760 --> 00:07:28,590
+thing is possible with some extensions
+
+00:07:25,190 --> 00:07:30,930
+but in the most general case they each
+
+00:07:28,590 --> 00:07:32,340
+have their own virtual address space in
+
+00:07:30,930 --> 00:07:33,960
+which they each have different addresses
+
+00:07:32,340 --> 00:07:35,850
+to refer to the same locations of
+
+00:07:33,960 --> 00:07:36,900
+physical memory and one thing I want to
+
+00:07:35,850 --> 00:07:38,820
+highlights which I think I forgot to
+
+00:07:36,900 --> 00:07:40,440
+mention the last slide what things I
+
+00:07:38,820 --> 00:07:42,090
+want to highlight is that this memory
+
+00:07:40,440 --> 00:07:45,090
+that that's being accessed by the GPU
+
+00:07:42,090 --> 00:07:46,590
+and the yellow blocks I deliberately did
+
+00:07:45,090 --> 00:07:48,930
+not connect it to the filesystem in
+
+00:07:46,590 --> 00:07:50,760
+these diagrams because what I wanted to
+
+00:07:48,930 --> 00:07:53,280
+say is that the memory that is
+
+00:07:50,760 --> 00:07:55,710
+accessible to the GPU does not support
+
+00:07:53,280 --> 00:07:57,870
+this kind of fancy mechanism of falling
+
+00:07:55,710 --> 00:08:00,030
+pages back to the hard drive like it it
+
+00:07:57,870 --> 00:08:01,140
+may be possible like there there it is
+
+00:08:00,030 --> 00:08:03,330
+physically possible to support its
+
+00:08:01,140 --> 00:08:04,710
+configuration and some do but in the
+
+00:08:03,330 --> 00:08:09,420
+most general case you can't assume that
+
+00:08:04,710 --> 00:08:11,640
+you can do that so moving on I want to
+
+00:08:09,420 --> 00:08:14,250
+talk about command looks a little bit so
+
+00:08:11,640 --> 00:08:16,170
+the way I see command lists from a big
+
+00:08:14,250 --> 00:08:18,090
+picture point of view is that in this
+
+00:08:16,170 --> 00:08:20,130
+case we have two processors mainly the
+
+00:08:18,090 --> 00:08:23,520
+CPU which is an out-of-order processor
+
+00:08:20,130 --> 00:08:26,940
+in most usual cases and GPU which is an
+
+00:08:23,520 --> 00:08:28,170
+inorder processor and so by the nature
+
+00:08:26,940 --> 00:08:30,180
+of you know if you think about the word
+
+00:08:28,170 --> 00:08:32,340
+in order what does that mean is that it
+
+00:08:30,180 --> 00:08:34,410
+means that the the order in which it
+
+00:08:32,340 --> 00:08:36,030
+runs the work that it's given is is in
+
+00:08:34,410 --> 00:08:38,550
+the order in which it was given rather
+
+00:08:36,030 --> 00:08:40,470
+than an order that is more efficient
+
+00:08:38,550 --> 00:08:42,060
+that it can look at compute at runtime
+
+00:08:40,470 --> 00:08:43,020
+which is what you see people do right
+
+00:08:42,060 --> 00:08:44,160
+when we talk about like branch
+
+00:08:43,020 --> 00:08:46,230
+prediction and those kinds of things
+
+00:08:44,160 --> 00:08:48,020
+those are fancy things that a CPU can do
+
+00:08:46,230 --> 00:08:50,760
+because there's an added word processor
+
+00:08:48,020 --> 00:08:52,230
+so the importance of like the thing
+
+00:08:50,760 --> 00:08:53,380
+about being an inorder processor is that
+
+00:08:52,230 --> 00:08:54,820
+it means that you
+
+00:08:53,380 --> 00:08:56,740
+performance depends really on whether
+
+00:08:54,820 --> 00:08:58,420
+the commands you were given were given
+
+00:08:56,740 --> 00:09:01,270
+an order that is actually efficient and
+
+00:08:58,420 --> 00:09:03,240
+so one of the big picture ways that I
+
+00:09:01,270 --> 00:09:05,620
+think about this relationship is that
+
+00:09:03,240 --> 00:09:07,810
+it's very beneficial to think about how
+
+00:09:05,620 --> 00:09:09,730
+we can use the CPU to order the commands
+
+00:09:07,810 --> 00:09:12,820
+that we send to the GPU in a way that is
+
+00:09:09,730 --> 00:09:16,000
+most efficient if you want an analogy
+
+00:09:12,820 --> 00:09:19,330
+here's an analogy so let's suppose the
+
+00:09:16,000 --> 00:09:22,150
+GPU is the train and the dog is the CPU
+
+00:09:19,330 --> 00:09:25,420
+and the CPU is being very careful and
+
+00:09:22,150 --> 00:09:27,250
+being very agile in deploying these
+
+00:09:25,420 --> 00:09:29,560
+train tracks as command lists for the GP
+
+00:09:27,250 --> 00:09:30,580
+to run and actually while I'm on this
+
+00:09:29,560 --> 00:09:33,070
+topic I'm gonna actually take this
+
+00:09:30,580 --> 00:09:34,360
+analogy one step further and I'm going
+
+00:09:33,070 --> 00:09:38,560
+to introduce to you the concept of a
+
+00:09:34,360 --> 00:09:40,570
+fence so a fence is a it's kind of like
+
+00:09:38,560 --> 00:09:42,760
+an operating system object and I also
+
+00:09:40,570 --> 00:09:45,880
+represented a harbor object I suppose
+
+00:09:42,760 --> 00:09:48,430
+and what what it does is it lets you
+
+00:09:45,880 --> 00:09:50,410
+keep track of the progress of the GPU as
+
+00:09:48,430 --> 00:09:52,750
+it makes progress in the list of
+
+00:09:50,410 --> 00:09:55,810
+commands you've given it so for example
+
+00:09:52,750 --> 00:09:57,640
+the fence has a current value and this
+
+00:09:55,810 --> 00:09:59,530
+current value might initially be zero if
+
+00:09:57,640 --> 00:10:02,530
+we assume that the train on the right is
+
+00:09:59,530 --> 00:10:04,720
+the GPU and the tracks are the command
+
+00:10:02,530 --> 00:10:07,210
+list then as the train moves along and
+
+00:10:04,720 --> 00:10:09,250
+reaches the first fence with one then
+
+00:10:07,210 --> 00:10:10,960
+the fence changes when it reaches a
+
+00:10:09,250 --> 00:10:13,210
+defense value of 1 then the fence value
+
+00:10:10,960 --> 00:10:15,640
+changes to 1 and as it keeps moving
+
+00:10:13,210 --> 00:10:17,560
+along the commands and reaches 2 then
+
+00:10:15,640 --> 00:10:21,610
+the fence changes from value 1 to 2 and
+
+00:10:17,560 --> 00:10:23,380
+so on as it reaches number 3 and this
+
+00:10:21,610 --> 00:10:25,090
+mechanism as I'll show you is how you
+
+00:10:23,380 --> 00:10:26,950
+can implement various kinds of
+
+00:10:25,090 --> 00:10:29,440
+synchronization between the CPU and the
+
+00:10:26,950 --> 00:10:31,540
+GPU so I'm actually gonna elaborate on
+
+00:10:29,440 --> 00:10:33,940
+that a little bit more with a slightly
+
+00:10:31,540 --> 00:10:36,010
+more concrete example so in this
+
+00:10:33,940 --> 00:10:38,290
+scenario we have a CPU and a GPU and we
+
+00:10:36,010 --> 00:10:39,610
+have a fence object in the middle the
+
+00:10:38,290 --> 00:10:42,670
+fence object has currently the value of
+
+00:10:39,610 --> 00:10:45,160
+1 just 3 arbitrary and let's suppose we
+
+00:10:42,670 --> 00:10:46,480
+do this the CPU writes I get a list of
+
+00:10:45,160 --> 00:10:49,120
+commands that it wants to sense of the
+
+00:10:46,480 --> 00:10:50,800
+GPU and at the end of this list of
+
+00:10:49,120 --> 00:10:53,140
+commands it outputs a special command
+
+00:10:50,800 --> 00:10:54,480
+which is a signal command which is what
+
+00:10:53,140 --> 00:10:57,280
+changes the value of the fence
+
+00:10:54,480 --> 00:10:59,770
+so after and rice this list of commands
+
+00:10:57,280 --> 00:11:01,870
+and said it's the GPU the GPU takes
+
+00:10:59,770 --> 00:11:04,450
+control of that that Kalista commands
+
+00:11:01,870 --> 00:11:06,890
+and it executes the commands
+
+00:11:04,450 --> 00:11:09,380
+when the GP reaches the signal command
+
+00:11:06,890 --> 00:11:13,010
+it changes the value of the fence from 1
+
+00:11:09,380 --> 00:11:14,870
+to 2 and using this fact we can now
+
+00:11:13,010 --> 00:11:16,700
+synchronize on the fact that this list
+
+00:11:14,870 --> 00:11:18,440
+of commands is completed using the
+
+00:11:16,700 --> 00:11:21,589
+knowledge that completion is indicated
+
+00:11:18,440 --> 00:11:23,480
+by having passed by 2 so for example the
+
+00:11:21,589 --> 00:11:25,130
+CPU can wait for the GPU to finish what
+
+00:11:23,480 --> 00:11:27,740
+it did by checking that the fence is
+
+00:11:25,130 --> 00:11:30,350
+better than or equal to 2 and similarly
+
+00:11:27,740 --> 00:11:31,700
+the GPU can also check that it finish
+
+00:11:30,350 --> 00:11:32,990
+the work by checking of the fences
+
+00:11:31,700 --> 00:11:34,070
+better than or equal to because it's
+
+00:11:32,990 --> 00:11:35,390
+actually possible to have more than one
+
+00:11:34,070 --> 00:11:38,750
+list of commands running concurrently on
+
+00:11:35,390 --> 00:11:39,740
+the GPU in a general case so you need to
+
+00:11:38,750 --> 00:11:41,330
+synchronize some times between these
+
+00:11:39,740 --> 00:11:43,970
+different list of commands so I'm going
+
+00:11:41,330 --> 00:11:45,830
+with this so I've talked a lot about
+
+00:11:43,970 --> 00:11:47,660
+commands but I haven't actually said
+
+00:11:45,830 --> 00:11:49,339
+what the commands kind of are so I'm
+
+00:11:47,660 --> 00:11:51,020
+gonna give you a taste of commands and
+
+00:11:49,339 --> 00:11:53,150
+again this is a very high level so I'm
+
+00:11:51,020 --> 00:11:54,740
+kind of like hiding a lot of details but
+
+00:11:53,150 --> 00:11:56,000
+hopefully it's easier to think about
+
+00:11:54,740 --> 00:11:57,290
+this way that's the way I see it like
+
+00:11:56,000 --> 00:11:59,540
+even for me like I think it's easier to
+
+00:11:57,290 --> 00:12:02,150
+think about it this way so for example
+
+00:11:59,540 --> 00:12:04,010
+we have some commands that may abstract
+
+00:12:02,150 --> 00:12:05,270
+for example the DM an jhin's so you
+
+00:12:04,010 --> 00:12:06,830
+might have a command that just copies
+
+00:12:05,270 --> 00:12:08,960
+memory from a source location to a
+
+00:12:06,830 --> 00:12:10,880
+destination location or a
+
+00:12:08,960 --> 00:12:12,589
+straightforward I think you may also
+
+00:12:10,880 --> 00:12:14,570
+have some commands that are made for
+
+00:12:12,589 --> 00:12:16,460
+executing programs on the GPU so for
+
+00:12:14,570 --> 00:12:18,820
+example the sequence of commands that
+
+00:12:16,460 --> 00:12:21,650
+I'm showing at the bottom left here so
+
+00:12:18,820 --> 00:12:22,820
+like we start by saying the program to
+
+00:12:21,650 --> 00:12:24,890
+say like this is the program you want to
+
+00:12:22,820 --> 00:12:27,710
+use the next time we run a program and
+
+00:12:24,890 --> 00:12:30,410
+then we may have a command that sets the
+
+00:12:27,710 --> 00:12:32,540
+parameters to that program and then we
+
+00:12:30,410 --> 00:12:34,760
+can actually invoke the program using
+
+00:12:32,540 --> 00:12:36,080
+generally like a draw call or a dispatch
+
+00:12:34,760 --> 00:12:38,720
+call those are the two main ways in
+
+00:12:36,080 --> 00:12:42,320
+which you can start a program and you
+
+00:12:38,720 --> 00:12:44,660
+can kind of take these three this this
+
+00:12:42,320 --> 00:12:46,610
+three tuple of commands and boil it down
+
+00:12:44,660 --> 00:12:48,050
+to being from a civil host programming
+
+00:12:46,610 --> 00:12:50,180
+perspective it's like a function call so
+
+00:12:48,050 --> 00:12:51,770
+let me make a function call and every
+
+00:12:50,180 --> 00:12:53,810
+day sequel source code you know you have
+
+00:12:51,770 --> 00:12:56,030
+a function you pass the parameters and
+
+00:12:53,810 --> 00:12:57,020
+then you do a branch right that's like
+
+00:12:56,030 --> 00:12:58,339
+what internally what happens when you
+
+00:12:57,020 --> 00:13:00,080
+make a function call and this is
+
+00:12:58,339 --> 00:13:01,430
+actually pretty much exactly that it's
+
+00:13:00,080 --> 00:13:04,310
+just that it's spread out over multiple
+
+00:13:01,430 --> 00:13:05,930
+statements so sometimes it helps to look
+
+00:13:04,310 --> 00:13:07,550
+at this sequence of statements and think
+
+00:13:05,930 --> 00:13:09,200
+about it more like a function call than
+
+00:13:07,550 --> 00:13:11,390
+to think about it as a separate like I
+
+00:13:09,200 --> 00:13:12,680
+so separate three steps and from an API
+
+00:13:11,390 --> 00:13:14,810
+perspective you can make it look like
+
+00:13:12,680 --> 00:13:17,640
+that and it can be
+
+00:13:14,810 --> 00:13:19,650
+so GPS also have built-in hardware
+
+00:13:17,640 --> 00:13:21,660
+support for various kinds of rendering
+
+00:13:19,650 --> 00:13:22,980
+operations so the commands there are
+
+00:13:21,660 --> 00:13:25,110
+also commands that exist for just
+
+00:13:22,980 --> 00:13:26,790
+controlling how this Harvard renderer
+
+00:13:25,110 --> 00:13:28,410
+works so for example you might have a
+
+00:13:26,790 --> 00:13:29,640
+command it sets the render target to say
+
+00:13:28,410 --> 00:13:31,770
+like where should the renderer be
+
+00:13:29,640 --> 00:13:33,540
+drawing pixels to you may have a command
+
+00:13:31,770 --> 00:13:34,860
+that allows you to set the graphics
+
+00:13:33,540 --> 00:13:36,750
+pipeline to say that you can configure
+
+00:13:34,860 --> 00:13:39,030
+the way in which the renderer should
+
+00:13:36,750 --> 00:13:40,590
+render triangles for example it's very
+
+00:13:39,030 --> 00:13:43,950
+there's a wide variety of configurations
+
+00:13:40,590 --> 00:13:46,290
+possible and finally this is one of the
+
+00:13:43,950 --> 00:13:47,490
+most abstract regions that are abstract
+
+00:13:46,290 --> 00:13:49,890
+set of commands and I'm trying to
+
+00:13:47,490 --> 00:13:53,130
+basically pull up a quick one on you or
+
+00:13:49,890 --> 00:13:55,290
+something so there are our commands for
+
+00:13:53,130 --> 00:13:57,720
+managing the memory model and I call it
+
+00:13:55,290 --> 00:13:59,040
+the object model to see that for example
+
+00:13:57,720 --> 00:14:01,230
+if you want to deal with data hazards
+
+00:13:59,040 --> 00:14:03,300
+you may need for example a memory
+
+00:14:01,230 --> 00:14:04,410
+barrier to see that like the writes that
+
+00:14:03,300 --> 00:14:05,850
+have happened previously you should be
+
+00:14:04,410 --> 00:14:07,080
+done before we move on those are the
+
+00:14:05,850 --> 00:14:08,880
+kinds of things that you have to care
+
+00:14:07,080 --> 00:14:12,030
+about swing when you write some kinds of
+
+00:14:08,880 --> 00:14:14,160
+programs I also have this this command
+
+00:14:12,030 --> 00:14:15,990
+here which I called transition to say
+
+00:14:14,160 --> 00:14:18,720
+that it transitions an object from state
+
+00:14:15,990 --> 00:14:21,390
+a to state B which is to say that like
+
+00:14:18,720 --> 00:14:23,010
+some operations on some objects can only
+
+00:14:21,390 --> 00:14:26,070
+be done when the object is in a certain
+
+00:14:23,010 --> 00:14:27,420
+state and so to be able to do a certain
+
+00:14:26,070 --> 00:14:29,070
+operation you need the object to be in a
+
+00:14:27,420 --> 00:14:30,750
+certain stage but if it was not in that
+
+00:14:29,070 --> 00:14:32,100
+state beforehand then you have to
+
+00:14:30,750 --> 00:14:33,450
+transition it to that state before you
+
+00:14:32,100 --> 00:14:35,850
+can do the operation this is like a
+
+00:14:33,450 --> 00:14:37,460
+slightly more flexible I would say I
+
+00:14:35,850 --> 00:14:39,540
+think about it as a slightly more
+
+00:14:37,460 --> 00:14:41,220
+flexible way of doing them every barrier
+
+00:14:39,540 --> 00:14:44,270
+in the sense that the barrier does more
+
+00:14:41,220 --> 00:14:46,830
+than just wait for memory to finish I
+
+00:14:44,270 --> 00:14:48,870
+also have these these are the sneakiest
+
+00:14:46,830 --> 00:14:50,100
+once is constructed destruct if you look
+
+00:14:48,870 --> 00:14:51,660
+in the documentation you will probably
+
+00:14:50,100 --> 00:14:53,970
+not find a fan looks like a command that
+
+00:14:51,660 --> 00:14:55,290
+structured destructs and I think about
+
+00:14:53,970 --> 00:14:57,060
+it a bit more like thinking about a
+
+00:14:55,290 --> 00:14:58,230
+little more like a place menu maybe our
+
+00:14:57,060 --> 00:15:01,410
+placement your place when you apply
+
+00:14:58,230 --> 00:15:03,900
+spend delete I'll talk more about that
+
+00:15:01,410 --> 00:15:05,790
+topic later and I think I want to talk
+
+00:15:03,900 --> 00:15:07,530
+about is just a very common pattern that
+
+00:15:05,790 --> 00:15:10,050
+you'll find in this kind of programs is
+
+00:15:07,530 --> 00:15:11,550
+relating to commands is whether the
+
+00:15:10,050 --> 00:15:12,870
+command arguments should be read at the
+
+00:15:11,550 --> 00:15:14,640
+time in which the commands are recorded
+
+00:15:12,870 --> 00:15:16,050
+or whether the command arguments should
+
+00:15:14,640 --> 00:15:18,390
+be read at the time at which the command
+
+00:15:16,050 --> 00:15:20,730
+is executed and so there's kind of a
+
+00:15:18,390 --> 00:15:23,280
+trade-off between these two ways of
+
+00:15:20,730 --> 00:15:25,350
+doing it if you for example on the left
+
+00:15:23,280 --> 00:15:26,329
+if you pass the number of threads that
+
+00:15:25,350 --> 00:15:28,399
+you want to run
+
+00:15:26,329 --> 00:15:30,970
+by value then the number of threads is
+
+00:15:28,399 --> 00:15:33,279
+stored within the command and then
+
+00:15:30,970 --> 00:15:35,869
+hopefully that can give more
+
+00:15:33,279 --> 00:15:37,429
+opportunities for the driver and the GPU
+
+00:15:35,869 --> 00:15:39,350
+and all that to know that what's coming
+
+00:15:37,429 --> 00:15:40,579
+up ahead of time on the other hand
+
+00:15:39,350 --> 00:15:40,999
+another thing you can do is this
+
+00:15:40,579 --> 00:15:43,489
+so-called
+
+00:15:40,999 --> 00:15:44,989
+indirect way of making command making
+
+00:15:43,489 --> 00:15:47,509
+draw calls for example at dispatch calls
+
+00:15:44,989 --> 00:15:49,249
+where instead of passing the number of
+
+00:15:47,509 --> 00:15:51,679
+threads by value you pass it by
+
+00:15:49,249 --> 00:15:53,480
+reference and then just before the
+
+00:15:51,679 --> 00:15:54,829
+command is executed it's going to read
+
+00:15:53,480 --> 00:15:56,209
+from memory the number of threads
+
+00:15:54,829 --> 00:15:58,759
+setting is to run actually at runtime
+
+00:15:56,209 --> 00:16:00,379
+and run that number of heads at the time
+
+00:15:58,759 --> 00:16:01,910
+so there's a kind of like a performance
+
+00:16:00,379 --> 00:16:02,869
+versus flexibility trade-off in I want
+
+00:16:01,910 --> 00:16:04,730
+to bring this up because there's
+
+00:16:02,869 --> 00:16:05,779
+actually a I think if you if you look
+
+00:16:04,730 --> 00:16:07,489
+through stuff you'll find that this is a
+
+00:16:05,779 --> 00:16:09,199
+very common trade-off of recurring
+
+00:16:07,489 --> 00:16:10,699
+things ahead of time or doing things on
+
+00:16:09,199 --> 00:16:12,259
+the last second and the trade-offs and
+
+00:16:10,699 --> 00:16:16,309
+performance and flexibility but that
+
+00:16:12,259 --> 00:16:17,929
+involves one last thing I want to talk
+
+00:16:16,309 --> 00:16:21,829
+about when it comes to GPU programming
+
+00:16:17,929 --> 00:16:23,689
+for encode basics is descriptors so
+
+00:16:21,829 --> 00:16:26,029
+descriptors the way I think about it is
+
+00:16:23,689 --> 00:16:28,309
+something like the Harvard view of what
+
+00:16:26,029 --> 00:16:30,019
+an object is and when I say object I
+
+00:16:28,309 --> 00:16:31,669
+mean mostly things like buffers and
+
+00:16:30,019 --> 00:16:32,929
+textures although there are various
+
+00:16:31,669 --> 00:16:36,679
+kinds of buffers and there are various
+
+00:16:32,929 --> 00:16:39,079
+kinds of textures so it's a bit more
+
+00:16:36,679 --> 00:16:41,689
+complicated but the way I see it mainly
+
+00:16:39,079 --> 00:16:44,419
+is it's a small struct that source
+
+00:16:41,689 --> 00:16:46,549
+something like an address plus some
+
+00:16:44,419 --> 00:16:48,799
+metadata that is relevant to how that
+
+00:16:46,549 --> 00:16:51,199
+object should be accessed so for example
+
+00:16:48,799 --> 00:16:52,459
+a concrete example is from the
+
+00:16:51,199 --> 00:16:55,669
+documentation here's what a description
+
+00:16:52,459 --> 00:16:58,220
+looks like on AMD's processors GPU
+
+00:16:55,669 --> 00:17:00,049
+processors I mean so there's a bunch of
+
+00:16:58,220 --> 00:17:01,429
+stuff it's like hard on 28 bits it's not
+
+00:17:00,049 --> 00:17:02,869
+the only texture descriptor that they
+
+00:17:01,429 --> 00:17:05,809
+support there's more than one kind of
+
+00:17:02,869 --> 00:17:08,059
+format but in this case you can actually
+
+00:17:05,809 --> 00:17:10,549
+clearly see that it begins with an
+
+00:17:08,059 --> 00:17:12,799
+address to the resource that this object
+
+00:17:10,549 --> 00:17:14,059
+represents and then later on it
+
+00:17:12,799 --> 00:17:16,370
+describes the width and the height of
+
+00:17:14,059 --> 00:17:17,720
+the object that's been referenced or the
+
+00:17:16,370 --> 00:17:19,610
+texture that's being referenced
+
+00:17:17,720 --> 00:17:21,769
+so there's three view an idea that this
+
+00:17:19,610 --> 00:17:24,709
+is roughly what I expect to see when I
+
+00:17:21,769 --> 00:17:26,990
+think about my descriptor and then these
+
+00:17:24,709 --> 00:17:28,669
+actually kind of map relatively closely
+
+00:17:26,990 --> 00:17:29,870
+to the assembly code in the sense that
+
+00:17:28,669 --> 00:17:31,340
+if you look at the assembly code you'll
+
+00:17:29,870 --> 00:17:34,100
+see that it'll take the descriptor and
+
+00:17:31,340 --> 00:17:35,240
+pass in as an argument to an instruction
+
+00:17:34,100 --> 00:17:38,059
+that may sample from a texture for
+
+00:17:35,240 --> 00:17:38,990
+example so this is a concept that is
+
+00:17:38,059 --> 00:17:40,700
+very
+
+00:17:38,990 --> 00:17:45,230
+see tied to to the architecture I would
+
+00:17:40,700 --> 00:17:47,710
+say so that is all for the first part of
+
+00:17:45,230 --> 00:17:50,300
+this talk which was about GPU basics and
+
+00:17:47,710 --> 00:17:50,840
+now I'm gonna talk more about designing
+
+00:17:50,300 --> 00:17:52,820
+a renderer
+
+00:17:50,840 --> 00:17:54,679
+at a higher level using the primitives
+
+00:17:52,820 --> 00:17:59,030
+that I talked about in the first part of
+
+00:17:54,679 --> 00:18:00,800
+this talk so before I go too much into
+
+00:17:59,030 --> 00:18:03,170
+the nitty-gritty I want to introduce you
+
+00:18:00,800 --> 00:18:05,300
+to what I see as a decent way to
+
+00:18:03,170 --> 00:18:07,850
+architect a real-time renderer at a high
+
+00:18:05,300 --> 00:18:10,010
+level so usually the way I see it as I
+
+00:18:07,850 --> 00:18:11,090
+start from the simulation which is for
+
+00:18:10,010 --> 00:18:12,320
+example if you're making a video game
+
+00:18:11,090 --> 00:18:15,530
+this is the part where maybe the game
+
+00:18:12,320 --> 00:18:17,870
+logic happens and the game logic happens
+
+00:18:15,530 --> 00:18:20,240
+in terms of so-called game objects and
+
+00:18:17,870 --> 00:18:22,280
+so the term game object is not relating
+
+00:18:20,240 --> 00:18:23,540
+to any specific implementation every
+
+00:18:22,280 --> 00:18:26,030
+game engine has its own idea of what a
+
+00:18:23,540 --> 00:18:28,460
+game object is so that's kind of like a
+
+00:18:26,030 --> 00:18:30,290
+very general term but the point is that
+
+00:18:28,460 --> 00:18:32,000
+like at every update of the game somehow
+
+00:18:30,290 --> 00:18:33,920
+you're taking all the state of the game
+
+00:18:32,000 --> 00:18:37,010
+objects and moving them around based on
+
+00:18:33,920 --> 00:18:38,750
+the game logic and and so this kind of
+
+00:18:37,010 --> 00:18:40,880
+like happens in I see it as like two
+
+00:18:38,750 --> 00:18:42,710
+separate parts where like in one sense
+
+00:18:40,880 --> 00:18:44,990
+you have like some objects that are
+
+00:18:42,710 --> 00:18:46,790
+updated based purely on time as the time
+
+00:18:44,990 --> 00:18:49,190
+passes in a relatively continuous way
+
+00:18:46,790 --> 00:18:50,420
+and another sense you have things that
+
+00:18:49,190 --> 00:18:51,530
+are more like advanced we're like you
+
+00:18:50,420 --> 00:18:53,600
+might receive a message from another
+
+00:18:51,530 --> 00:18:55,160
+object or maybe you press the keyboard
+
+00:18:53,600 --> 00:18:56,330
+key and then that keyboard key is like a
+
+00:18:55,160 --> 00:18:58,550
+discrete event that just you have to
+
+00:18:56,330 --> 00:18:59,780
+handle like on that one frame so that's
+
+00:18:58,550 --> 00:19:02,960
+just like one way I think about breaking
+
+00:18:59,780 --> 00:19:06,950
+down that problem that you might like so
+
+00:19:02,960 --> 00:19:08,809
+as a simulation happens the way I see it
+
+00:19:06,950 --> 00:19:10,100
+is that the simulation should make
+
+00:19:08,809 --> 00:19:11,300
+updates to a data structure that
+
+00:19:10,100 --> 00:19:13,309
+represents the current state of the
+
+00:19:11,300 --> 00:19:15,950
+scene so as objects have being moved
+
+00:19:13,309 --> 00:19:17,660
+around you would take like for example
+
+00:19:15,950 --> 00:19:19,220
+the position of a mesh and move it
+
+00:19:17,660 --> 00:19:21,710
+forward based on some game logic and
+
+00:19:19,220 --> 00:19:24,260
+this is all happening at the level of
+
+00:19:21,710 --> 00:19:26,270
+what I call the scene which exposes some
+
+00:19:24,260 --> 00:19:29,300
+high-level concepts such as geometry and
+
+00:19:26,270 --> 00:19:33,350
+materials and instances of meshes and
+
+00:19:29,300 --> 00:19:34,730
+cameras and lights and so these are all
+
+00:19:33,350 --> 00:19:37,580
+like not related strictly to any like
+
+00:19:34,730 --> 00:19:38,900
+GPU concepts but are kind of like a
+
+00:19:37,580 --> 00:19:42,170
+high-level interface for the simulation
+
+00:19:38,900 --> 00:19:44,450
+to describe what it wants to render from
+
+00:19:42,170 --> 00:19:46,960
+there the render itself is in charge of
+
+00:19:44,450 --> 00:19:49,299
+reading the data in the scene
+
+00:19:46,960 --> 00:19:50,679
+and converting that's kind of like hello
+
+00:19:49,299 --> 00:19:52,270
+a presentation of what it needs to be
+
+00:19:50,679 --> 00:19:54,640
+done into a presentation that makes
+
+00:19:52,270 --> 00:19:55,990
+sense for talking to a GPU such as for
+
+00:19:54,640 --> 00:19:58,750
+example you know this is where you bring
+
+00:19:55,990 --> 00:20:02,620
+out the buffers and the textures and the
+
+00:19:58,750 --> 00:20:04,149
+shaders and the rendering passes so you
+
+00:20:02,620 --> 00:20:06,159
+know it's a bit more level and at the
+
+00:20:04,149 --> 00:20:08,140
+same time it kind of gives you a
+
+00:20:06,159 --> 00:20:09,220
+separation of like how the scene is
+
+00:20:08,140 --> 00:20:12,190
+described versus how the scene is
+
+00:20:09,220 --> 00:20:13,690
+rendered and the separation can get a
+
+00:20:12,190 --> 00:20:15,250
+bit blurry so it's not always
+
+00:20:13,690 --> 00:20:17,620
+straightforward but this is just a
+
+00:20:15,250 --> 00:20:20,200
+mental model for how to mentally
+
+00:20:17,620 --> 00:20:22,029
+separate it if it helps you so the
+
+00:20:20,200 --> 00:20:24,130
+renderer will read the data in the scene
+
+00:20:22,029 --> 00:20:25,809
+and then presumably create a list of
+
+00:20:24,130 --> 00:20:27,669
+commands that it'll sense the GPU to
+
+00:20:25,809 --> 00:20:29,289
+actually render the scene so this list
+
+00:20:27,669 --> 00:20:32,110
+of commands makes its way to the GPU and
+
+00:20:29,289 --> 00:20:33,549
+the GP will run those commands at the
+
+00:20:32,110 --> 00:20:34,929
+end of this at the end of the running
+
+00:20:33,549 --> 00:20:36,760
+all those commands it'll probably output
+
+00:20:34,929 --> 00:20:39,640
+an image to the screen which we call
+
+00:20:36,760 --> 00:20:41,080
+like presenting and so this present this
+
+00:20:39,640 --> 00:20:42,940
+this presented image actually gets put
+
+00:20:41,080 --> 00:20:45,250
+in the so called swap chain is it's like
+
+00:20:42,940 --> 00:20:46,390
+the DirectX vocabulary anyways the swap
+
+00:20:45,250 --> 00:20:47,890
+chain represents the double buffering
+
+00:20:46,390 --> 00:20:50,830
+mechanism supported by the operating
+
+00:20:47,890 --> 00:20:52,929
+system the when you put in the soft
+
+00:20:50,830 --> 00:20:54,669
+chain gets composited onto your desktop
+
+00:20:52,929 --> 00:20:56,200
+along with the rest of what's on your
+
+00:20:54,669 --> 00:20:58,059
+desktop or directly to your screen if
+
+00:20:56,200 --> 00:21:00,940
+you're in full-screen mode and finally
+
+00:20:58,059 --> 00:21:02,620
+that makes its way to your display so in
+
+00:21:00,940 --> 00:21:03,940
+the context of real-time rendering we
+
+00:21:02,620 --> 00:21:06,399
+actually want this this kind of this
+
+00:21:03,940 --> 00:21:08,799
+whole procedure to happen within 10 200
+
+00:21:06,399 --> 00:21:10,539
+milliseconds so if you're working on a
+
+00:21:08,799 --> 00:21:12,159
+shooting game or you're working on a
+
+00:21:10,539 --> 00:21:13,440
+virtual reality game you probably want
+
+00:21:12,159 --> 00:21:15,399
+to be on the lower end of that spectrum
+
+00:21:13,440 --> 00:21:16,809
+but you know if you're making something
+
+00:21:15,399 --> 00:21:17,320
+that's like you know maybe like an
+
+00:21:16,809 --> 00:21:18,970
+editor
+
+00:21:17,320 --> 00:21:21,429
+maybe it's acceptable to have a hundred
+
+00:21:18,970 --> 00:21:23,860
+milliseconds if it makes it easier to
+
+00:21:21,429 --> 00:21:25,480
+see like a good visualization of what
+
+00:21:23,860 --> 00:21:26,559
+you're working on so you know depending
+
+00:21:25,480 --> 00:21:27,490
+on exactly what kind of game you're
+
+00:21:26,559 --> 00:21:29,649
+making about kind of project you're
+
+00:21:27,490 --> 00:21:35,110
+making you can afford some some some
+
+00:21:29,649 --> 00:21:36,789
+latency so the next thing I want to talk
+
+00:21:35,110 --> 00:21:38,710
+about is rebuffed errs because I think
+
+00:21:36,789 --> 00:21:42,100
+they're a very useful primitive for
+
+00:21:38,710 --> 00:21:43,480
+implementing all sorts of stuff I'm
+
+00:21:42,100 --> 00:21:46,059
+gonna give you a very basic example of
+
+00:21:43,480 --> 00:21:48,039
+what a ring buffer is so in this case
+
+00:21:46,059 --> 00:21:50,710
+I'm showing you the ring buffer in the
+
+00:21:48,039 --> 00:21:52,690
+context of streaming data from the CPU
+
+00:21:50,710 --> 00:21:54,130
+to the GPU although it could happen the
+
+00:21:52,690 --> 00:21:55,360
+other way around a key it's a very
+
+00:21:54,130 --> 00:21:56,919
+general data structure so you don't have
+
+00:21:55,360 --> 00:21:58,450
+to be tied to this exact use case but
+
+00:21:56,919 --> 00:22:01,030
+for the sake of example let's think
+
+00:21:58,450 --> 00:22:03,100
+about a CPU streaming data
+
+00:22:01,030 --> 00:22:04,840
+so what happens is that you've got the
+
+00:22:03,100 --> 00:22:07,299
+storage of memory that is the rain
+
+00:22:04,840 --> 00:22:09,190
+buffer itself and the CPU will allocate
+
+00:22:07,299 --> 00:22:12,580
+a range of that memory and write data to
+
+00:22:09,190 --> 00:22:15,309
+it then this data that was just written
+
+00:22:12,580 --> 00:22:17,440
+gets passed on to the GPU and the GPU
+
+00:22:15,309 --> 00:22:20,530
+can read it and while the GPU is reading
+
+00:22:17,440 --> 00:22:22,150
+that data the CPU can write more data so
+
+00:22:20,530 --> 00:22:24,370
+you've got this kind of like back and
+
+00:22:22,150 --> 00:22:26,950
+forth going on where the CPU and GPU are
+
+00:22:24,370 --> 00:22:28,510
+both able to work in parallel and this
+
+00:22:26,950 --> 00:22:30,130
+pattern kind of just repeats itself so
+
+00:22:28,510 --> 00:22:31,690
+the corpus remember the CPU again gets
+
+00:22:30,130 --> 00:22:35,110
+passed to the GPU and the CPU can keep
+
+00:22:31,690 --> 00:22:37,780
+writing the next Jam data now I think
+
+00:22:35,110 --> 00:22:38,910
+that the API you make for accessing so
+
+00:22:37,780 --> 00:22:41,980
+Hadiya treasurer can be actually
+
+00:22:38,910 --> 00:22:43,660
+beautifully simple so for example when
+
+00:22:41,980 --> 00:22:44,860
+I'm proposing here it's kind of like a
+
+00:22:43,660 --> 00:22:46,540
+little bit of an extension on the
+
+00:22:44,860 --> 00:22:48,580
+typical allocators you see in C++ code
+
+00:22:46,540 --> 00:22:51,340
+where I'm proposing something like an
+
+00:22:48,580 --> 00:22:52,809
+alligator where you take your ring data
+
+00:22:51,340 --> 00:22:54,640
+structure and you call it a lock on it
+
+00:22:52,809 --> 00:22:56,290
+in this case passing at a type to see
+
+00:22:54,640 --> 00:22:58,690
+how you want to allocate an object or a
+
+00:22:56,290 --> 00:23:00,820
+struct and instead of just returning
+
+00:22:58,690 --> 00:23:03,640
+just a CPU virtual address which is what
+
+00:23:00,820 --> 00:23:05,410
+an everyday C++ alligator does this
+
+00:23:03,640 --> 00:23:08,320
+alligator returns both the CPU virtual
+
+00:23:05,410 --> 00:23:09,610
+address and the GPU virtual address so
+
+00:23:08,320 --> 00:23:11,260
+in this case what you can do with this
+
+00:23:09,610 --> 00:23:13,360
+with this kind of allocation is you can
+
+00:23:11,260 --> 00:23:15,370
+use the CPU virtual address to write the
+
+00:23:13,360 --> 00:23:17,020
+data you want to upload and then you can
+
+00:23:15,370 --> 00:23:19,330
+take the GPU virtual address and you can
+
+00:23:17,020 --> 00:23:21,850
+pass that on to the render through a
+
+00:23:19,330 --> 00:23:23,370
+command now I think some people will
+
+00:23:21,850 --> 00:23:25,570
+look at this and also throw in that
+
+00:23:23,370 --> 00:23:28,960
+suggestion that you should probably
+
+00:23:25,570 --> 00:23:30,640
+consider copying that memory to proper
+
+00:23:28,960 --> 00:23:32,530
+video memory before making a command to
+
+00:23:30,640 --> 00:23:34,540
+making a draw command so that some
+
+00:23:32,530 --> 00:23:36,250
+people are some people are really strict
+
+00:23:34,540 --> 00:23:39,610
+about that so depending on you feel
+
+00:23:36,250 --> 00:23:41,049
+there's some trade-offs and moving on at
+
+00:23:39,610 --> 00:23:42,880
+the bottom part of the slide you can see
+
+00:23:41,049 --> 00:23:44,530
+that I'm applying the same idea but
+
+00:23:42,880 --> 00:23:46,090
+instead of allocating just plain memory
+
+00:23:44,530 --> 00:23:47,590
+I'm allocating descriptors so you can
+
+00:23:46,090 --> 00:23:49,270
+make a ring buffer of descriptors and
+
+00:23:47,590 --> 00:23:51,429
+just have a function that allocates like
+
+00:23:49,270 --> 00:23:53,530
+you know n descriptors you get back a
+
+00:23:51,429 --> 00:23:55,120
+CPU virtual address to the descriptors
+
+00:23:53,530 --> 00:23:57,910
+you allocated a GPU virtual address to
+
+00:23:55,120 --> 00:24:00,010
+the CPUs to the descriptors a located so
+
+00:23:57,910 --> 00:24:02,470
+you can write the descriptors metadata
+
+00:24:00,010 --> 00:24:03,820
+using the CPU virtual address and then
+
+00:24:02,470 --> 00:24:06,880
+you can take the GPU virtual address and
+
+00:24:03,820 --> 00:24:08,080
+pass that on for your rendering now
+
+00:24:06,880 --> 00:24:10,960
+there's a bunch of tricky cases with
+
+00:24:08,080 --> 00:24:12,220
+ring buffers there's a lot of butts so
+
+00:24:10,960 --> 00:24:13,610
+for example you know but what happens
+
+00:24:12,220 --> 00:24:15,799
+when you run out of memory
+
+00:24:13,610 --> 00:24:18,620
+this is a tricky case and I think
+
+00:24:15,799 --> 00:24:20,450
+ideally you want to avoid it so I'll
+
+00:24:18,620 --> 00:24:22,580
+talk about that a little bit so what
+
+00:24:20,450 --> 00:24:23,990
+happens if the buffer is full the GPU is
+
+00:24:22,580 --> 00:24:26,480
+still reading the yellow blocks on the
+
+00:24:23,990 --> 00:24:28,640
+right but the CPU wants to read the next
+
+00:24:26,480 --> 00:24:30,200
+Ram data and a can't because the GPU is
+
+00:24:28,640 --> 00:24:31,880
+still reading that memory in this case
+
+00:24:30,200 --> 00:24:33,440
+the CPU might just have to wait for that
+
+00:24:31,880 --> 00:24:36,140
+block of memory to be available which
+
+00:24:33,440 --> 00:24:37,900
+you might do using a fence and so once
+
+00:24:36,140 --> 00:24:41,809
+the GPU finishes processing that data
+
+00:24:37,900 --> 00:24:43,580
+the CPU can take control of it and start
+
+00:24:41,809 --> 00:24:45,110
+writing again that's that's one way of
+
+00:24:43,580 --> 00:24:46,790
+handling out of memory situations using
+
+00:24:45,110 --> 00:24:53,510
+a fence for example to synchronize that
+
+00:24:46,790 --> 00:24:55,130
+access so another big problem is how do
+
+00:24:53,510 --> 00:24:57,020
+you handle wraparound which conveniently
+
+00:24:55,130 --> 00:25:00,020
+you might have noticed I avoided in all
+
+00:24:57,020 --> 00:25:01,850
+of my animations so there are some
+
+00:25:00,020 --> 00:25:04,880
+tricks that can make it a little bit
+
+00:25:01,850 --> 00:25:06,950
+sane so for example one thing that I
+
+00:25:04,880 --> 00:25:09,080
+highly recommend is to make something
+
+00:25:06,950 --> 00:25:12,530
+like a virtual offset in the ring buffer
+
+00:25:09,080 --> 00:25:15,500
+so like in reality your ring buffer has
+
+00:25:12,530 --> 00:25:17,270
+a limited size probably but with this
+
+00:25:15,500 --> 00:25:18,530
+virtual offset you just pretend that the
+
+00:25:17,270 --> 00:25:20,330
+ring buffer actually has an infinite
+
+00:25:18,530 --> 00:25:21,200
+size so even when you get past the end
+
+00:25:20,330 --> 00:25:24,799
+you're just keeping commencing your
+
+00:25:21,200 --> 00:25:25,940
+current iterator and keep going but then
+
+00:25:24,799 --> 00:25:27,169
+when you actually want to access the
+
+00:25:25,940 --> 00:25:29,330
+memory that corresponds to one of these
+
+00:25:27,169 --> 00:25:31,490
+virtual offsets you you mask it by the
+
+00:25:29,330 --> 00:25:32,840
+size of that by the other size of the
+
+00:25:31,490 --> 00:25:35,179
+buffer and here we're assuming that the
+
+00:25:32,840 --> 00:25:38,390
+buffer size is a power of two so that's
+
+00:25:35,179 --> 00:25:41,510
+why this masking trick works this
+
+00:25:38,390 --> 00:25:43,850
+simplifies a lot of math relating to
+
+00:25:41,510 --> 00:25:44,720
+ring buffers another thing that is kind
+
+00:25:43,850 --> 00:25:46,940
+of convenient is that it simplifies
+
+00:25:44,720 --> 00:25:49,190
+working with fences too because the
+
+00:25:46,940 --> 00:25:50,450
+fences increase monotonically and in
+
+00:25:49,190 --> 00:25:52,040
+this case the virtual offset also
+
+00:25:50,450 --> 00:25:53,360
+increases monotonically so it's kind of
+
+00:25:52,040 --> 00:25:55,090
+easier to match them up if you want to
+
+00:25:53,360 --> 00:25:58,090
+use fences and and the ring buffer
+
+00:25:55,090 --> 00:25:58,090
+together
+
+00:25:59,200 --> 00:26:03,080
+one thing you can do is actually I do
+
+00:26:01,970 --> 00:26:05,150
+this almost all the time it's just
+
+00:26:03,080 --> 00:26:06,530
+disallow wraparound so you just like
+
+00:26:05,150 --> 00:26:09,200
+allocate enough memory that you know
+
+00:26:06,530 --> 00:26:10,940
+you're not gonna need any more and you
+
+00:26:09,200 --> 00:26:12,650
+just you just run with that and if it
+
+00:26:10,940 --> 00:26:14,450
+fails like you actually run em every
+
+00:26:12,650 --> 00:26:16,010
+just a sorry and then if you hit that
+
+00:26:14,450 --> 00:26:17,840
+assert just double the amount of memory
+
+00:26:16,010 --> 00:26:20,059
+and it's kind of you know it's kind of
+
+00:26:17,840 --> 00:26:22,880
+dumb but it'll get you very very far so
+
+00:26:20,059 --> 00:26:25,370
+that can be a very uh it could be a
+
+00:26:22,880 --> 00:26:26,750
+worthwhile engineering trade-off let's
+
+00:26:25,370 --> 00:26:28,070
+I mean if you're actually implementing
+
+00:26:26,750 --> 00:26:29,840
+this in the wild I recommend you
+
+00:26:28,070 --> 00:26:32,000
+consider reading this article by Fabian
+
+00:26:29,840 --> 00:26:33,440
+it actually has a lot of a really nice
+
+00:26:32,000 --> 00:26:35,149
+breakdown of the invariants that are
+
+00:26:33,440 --> 00:26:37,039
+related to a buffer and some proofs
+
+00:26:35,149 --> 00:26:38,919
+about how the Virtual offset for example
+
+00:26:37,039 --> 00:26:41,779
+makes things a lot simpler
+
+00:26:38,919 --> 00:26:43,009
+so moving on another anything about
+
+00:26:41,779 --> 00:26:44,330
+rebuff errs is you can actually do
+
+00:26:43,009 --> 00:26:46,549
+allocations with them in a locker
+
+00:26:44,330 --> 00:26:47,990
+fashion so let's suppose that the
+
+00:26:46,549 --> 00:26:50,960
+virtual offset and last slide is now
+
+00:26:47,990 --> 00:26:52,759
+anatomic in this case it's actually very
+
+00:26:50,960 --> 00:26:55,429
+straightforward to allocate memory with
+
+00:26:52,759 --> 00:26:57,740
+it in a lock free fashion for example if
+
+00:26:55,429 --> 00:27:01,309
+the ring buffers offset represents an
+
+00:26:57,740 --> 00:27:02,480
+index in an array it's very easy to do a
+
+00:27:01,309 --> 00:27:04,370
+lock for allocation because all you have
+
+00:27:02,480 --> 00:27:06,470
+to do is do a fetch ad so when you do a
+
+00:27:04,370 --> 00:27:07,850
+fetch ad what that does is it increments
+
+00:27:06,470 --> 00:27:09,620
+the current offset by the number you
+
+00:27:07,850 --> 00:27:13,070
+said so it'll allocate them in entries
+
+00:27:09,620 --> 00:27:14,299
+and it returns the old value so by
+
+00:27:13,070 --> 00:27:15,620
+returning the old value that's what
+
+00:27:14,299 --> 00:27:17,690
+that's what tells you like here's the
+
+00:27:15,620 --> 00:27:19,730
+start of the range you allocated and it
+
+00:27:17,690 --> 00:27:22,039
+bumps the pointer forward or the offset
+
+00:27:19,730 --> 00:27:23,330
+forward by that amount so that's a
+
+00:27:22,039 --> 00:27:27,080
+relatively straightforward application
+
+00:27:23,330 --> 00:27:28,220
+of lockrey allocation the more
+
+00:27:27,080 --> 00:27:30,919
+complicated case is when you're
+
+00:27:28,220 --> 00:27:32,539
+allocating bytes so in the case for
+
+00:27:30,919 --> 00:27:34,519
+example earlier when I had like a lock
+
+00:27:32,539 --> 00:27:36,590
+of camera this is supposedly an
+
+00:27:34,519 --> 00:27:41,149
+interface that can allocate any struct
+
+00:27:36,590 --> 00:27:43,730
+of any size so it tends to be that some
+
+00:27:41,149 --> 00:27:45,440
+different interfaces for working with
+
+00:27:43,730 --> 00:27:49,220
+the GPU required different alignments
+
+00:27:45,440 --> 00:27:51,320
+for the data you pass in and so you need
+
+00:27:49,220 --> 00:27:52,639
+to align your allocations which makes it
+
+00:27:51,320 --> 00:27:55,549
+a little bit more complicated than
+
+00:27:52,639 --> 00:27:57,769
+simply bumping a pointer forward and
+
+00:27:55,549 --> 00:27:59,389
+what I suggest to do here is just pick
+
+00:27:57,769 --> 00:28:00,679
+the worst case alignment that is
+
+00:27:59,389 --> 00:28:02,269
+relevant to the platform you're working
+
+00:28:00,679 --> 00:28:06,049
+on which for example for DirectX is
+
+00:28:02,269 --> 00:28:10,070
+basically 512 and just Pat up your
+
+00:28:06,049 --> 00:28:12,470
+allocations to that size so you know
+
+00:28:10,070 --> 00:28:14,000
+it's it's not it you know maybe there's
+
+00:28:12,470 --> 00:28:16,549
+a lot of waste in this kind of approach
+
+00:28:14,000 --> 00:28:19,820
+I haven't really measured it but it's
+
+00:28:16,549 --> 00:28:21,169
+convenient it's especially like it's
+
+00:28:19,820 --> 00:28:23,000
+very easy to forget that you need to
+
+00:28:21,169 --> 00:28:24,440
+align something if you don't do it men
+
+00:28:23,000 --> 00:28:26,360
+or like automatically like this so this
+
+00:28:24,440 --> 00:28:29,509
+is actually pretty convenient for a lot
+
+00:28:26,360 --> 00:28:32,929
+of reasons and yeah so that's why I
+
+00:28:29,509 --> 00:28:36,080
+understand so there's some pros and cons
+
+00:28:32,929 --> 00:28:37,340
+like I mentioned so for example I think
+
+00:28:36,080 --> 00:28:38,460
+one of the biggest pros for me is that
+
+00:28:37,340 --> 00:28:39,990
+this interface
+
+00:28:38,460 --> 00:28:41,910
+takes memory management which is a
+
+00:28:39,990 --> 00:28:43,020
+relatively complex problem where you
+
+00:28:41,910 --> 00:28:46,110
+have to create like a bunch of buffers
+
+00:28:43,020 --> 00:28:47,990
+everywhere and it was it down to being a
+
+00:28:46,110 --> 00:28:50,820
+very very very simple NPAPI
+
+00:28:47,990 --> 00:28:52,050
+and also like a voice fragmentation
+
+00:28:50,820 --> 00:28:53,790
+because all your allocations are tightly
+
+00:28:52,050 --> 00:28:56,550
+packed in the string buffer so it can be
+
+00:28:53,790 --> 00:28:58,650
+a very nice way to use memory I think
+
+00:28:56,550 --> 00:29:00,390
+it's a I say a powerful building block
+
+00:28:58,650 --> 00:29:01,710
+to build all sorts of higher level
+
+00:29:00,390 --> 00:29:03,090
+abstractions like when you find the ebb
+
+00:29:01,710 --> 00:29:05,400
+the string buffer you you find all sorts
+
+00:29:03,090 --> 00:29:06,690
+of uses for it so I'll suggest you know
+
+00:29:05,400 --> 00:29:08,640
+procedural geometry if you want to
+
+00:29:06,690 --> 00:29:10,260
+generate some stuff on the fly a texture
+
+00:29:08,640 --> 00:29:11,700
+streaming so for example you allocate
+
+00:29:10,260 --> 00:29:13,350
+like pixels into your ring buffer and
+
+00:29:11,700 --> 00:29:15,690
+then kick off a copy into a texture
+
+00:29:13,350 --> 00:29:17,280
+objects in the GPU and also this like so
+
+00:29:15,690 --> 00:29:18,810
+called sprite match abstraction for
+
+00:29:17,280 --> 00:29:20,220
+rendering sprites in a 2d game for
+
+00:29:18,810 --> 00:29:21,540
+example it's something you can implement
+
+00:29:20,220 --> 00:29:26,040
+very easily if you have a ring buffer
+
+00:29:21,540 --> 00:29:27,690
+handy the main cons I can think of is
+
+00:29:26,040 --> 00:29:30,060
+that it's hard to allocate memory fruit
+
+00:29:27,690 --> 00:29:32,070
+so for example if you make it too small
+
+00:29:30,060 --> 00:29:32,910
+then either your performance is gonna be
+
+00:29:32,070 --> 00:29:34,080
+bad because you're gonna be
+
+00:29:32,910 --> 00:29:35,670
+synchronizing on these fences all the
+
+00:29:34,080 --> 00:29:38,040
+time or you're just gonna crash because
+
+00:29:35,670 --> 00:29:40,770
+you put in a cert there so that's kind
+
+00:29:38,040 --> 00:29:42,390
+of tough and if you make it too big then
+
+00:29:40,770 --> 00:29:44,130
+you're just wasting memory so it's not
+
+00:29:42,390 --> 00:29:46,020
+straightforward to solve this problem in
+
+00:29:44,130 --> 00:29:47,190
+a general way I think although I'm open
+
+00:29:46,020 --> 00:29:48,810
+if anybody in the audience has any
+
+00:29:47,190 --> 00:29:52,590
+solutions like please write a blog post
+
+00:29:48,810 --> 00:29:54,090
+or something about it so another big
+
+00:29:52,590 --> 00:29:55,530
+problem I think is that the memory
+
+00:29:54,090 --> 00:29:58,260
+configuration itself is not
+
+00:29:55,530 --> 00:29:59,370
+one-size-fits-all in the sense that this
+
+00:29:58,260 --> 00:30:02,370
+whole time I've been talking about this
+
+00:29:59,370 --> 00:30:04,470
+ring buffer like memory region but I
+
+00:30:02,370 --> 00:30:06,840
+haven't talked about should this memory
+
+00:30:04,470 --> 00:30:09,330
+region be in system memory should it be
+
+00:30:06,840 --> 00:30:10,650
+in video memory and you know what should
+
+00:30:09,330 --> 00:30:12,300
+the cache properties of this memory be
+
+00:30:10,650 --> 00:30:14,340
+should it be right combine cache should
+
+00:30:12,300 --> 00:30:15,630
+be right back cache should be right
+
+00:30:14,340 --> 00:30:18,150
+through cache I don't know
+
+00:30:15,630 --> 00:30:19,950
+so and these things really matter a lot
+
+00:30:18,150 --> 00:30:21,570
+because for example you know if you do
+
+00:30:19,950 --> 00:30:24,960
+procedural if you run a procedural
+
+00:30:21,570 --> 00:30:27,120
+geometry algorithm in in place in a
+
+00:30:24,960 --> 00:30:28,620
+buffer that you've allocated with right
+
+00:30:27,120 --> 00:30:30,930
+combined cache you're gonna have a
+
+00:30:28,620 --> 00:30:32,700
+really bad day so it's important to
+
+00:30:30,930 --> 00:30:34,170
+think about these details when you're
+
+00:30:32,700 --> 00:30:37,290
+implementing or when you're using a ring
+
+00:30:34,170 --> 00:30:40,170
+buffer so then I say I'm gonna talk
+
+00:30:37,290 --> 00:30:43,170
+about is parallel command recording
+
+00:30:40,170 --> 00:30:46,140
+which is a really big feature of a lot
+
+00:30:43,170 --> 00:30:48,510
+of these new api's here's the big idea
+
+00:30:46,140 --> 00:30:50,730
+so the big idea is that it turns out
+
+00:30:48,510 --> 00:30:52,680
+that writing command lists is actually
+
+00:30:50,730 --> 00:30:54,840
+quite CPU intensive
+
+00:30:52,680 --> 00:30:57,540
+so one of the ways in which that
+
+00:30:54,840 --> 00:30:59,820
+overhead has been mitigated in recent
+
+00:30:57,540 --> 00:31:02,360
+api's is they make it possible to write
+
+00:30:59,820 --> 00:31:04,920
+commands in multiple threads in parallel
+
+00:31:02,360 --> 00:31:06,630
+so in this scenario the CPU creates
+
+00:31:04,920 --> 00:31:08,340
+multiple threads and each of these
+
+00:31:06,630 --> 00:31:10,410
+threads can record command lists in
+
+00:31:08,340 --> 00:31:11,730
+parallel and when they're all done
+
+00:31:10,410 --> 00:31:13,530
+creating the command lists you can
+
+00:31:11,730 --> 00:31:16,320
+bundle them up together and submit them
+
+00:31:13,530 --> 00:31:18,210
+all to the GPU all at once and this has
+
+00:31:16,320 --> 00:31:20,370
+been proven to to make some pretty big
+
+00:31:18,210 --> 00:31:23,310
+advantages when you have a lot of work
+
+00:31:20,370 --> 00:31:27,110
+to do so if we actually want to apply
+
+00:31:23,310 --> 00:31:29,370
+this let's first approach the easy case
+
+00:31:27,110 --> 00:31:30,840
+and before actually before I even talk
+
+00:31:29,370 --> 00:31:32,310
+about this I just want to say if you
+
+00:31:30,840 --> 00:31:35,190
+don't have if you don't need to make it
+
+00:31:32,310 --> 00:31:36,540
+like multi-threaded don't but like if
+
+00:31:35,190 --> 00:31:38,510
+you have like 10,000 objects you know
+
+00:31:36,540 --> 00:31:41,030
+maybe it starts getting interesting so
+
+00:31:38,510 --> 00:31:44,190
+my point is like don't over engineer it
+
+00:31:41,030 --> 00:31:45,660
+but anyways this is a relatively simple
+
+00:31:44,190 --> 00:31:48,240
+case when it comes to multi-threading
+
+00:31:45,660 --> 00:31:49,560
+the command writing in this case I'll
+
+00:31:48,240 --> 00:31:52,260
+we've done is you know say we have a
+
+00:31:49,560 --> 00:31:53,820
+whole bunch of asteroids to draw and we
+
+00:31:52,260 --> 00:31:55,830
+want to draw them as fast as possible
+
+00:31:53,820 --> 00:31:57,270
+and writing the commands is expensive
+
+00:31:55,830 --> 00:31:59,640
+because we have a whole lot of asteroids
+
+00:31:57,270 --> 00:32:02,190
+in this case what we can do is we can
+
+00:31:59,640 --> 00:32:05,400
+split the list of asteroids into several
+
+00:32:02,190 --> 00:32:07,620
+jobs and send each job to a different
+
+00:32:05,400 --> 00:32:09,540
+thread in this case each thread will
+
+00:32:07,620 --> 00:32:10,680
+read the commands independently so it
+
+00:32:09,540 --> 00:32:12,780
+each one will start by setting the
+
+00:32:10,680 --> 00:32:14,400
+render target and then submit the the
+
+00:32:12,780 --> 00:32:15,690
+changes of geometry and material and
+
+00:32:14,400 --> 00:32:18,630
+make the draw calls for each of the
+
+00:32:15,690 --> 00:32:20,400
+objects that are being drawn and at the
+
+00:32:18,630 --> 00:32:22,410
+end of this parallel for loop all the
+
+00:32:20,400 --> 00:32:26,160
+lists are grouped together and submitted
+
+00:32:22,410 --> 00:32:28,080
+all at once so this is the easy case and
+
+00:32:26,160 --> 00:32:30,810
+in the next few slides I'm going to
+
+00:32:28,080 --> 00:32:34,110
+explore the difficult case which is kind
+
+00:32:30,810 --> 00:32:35,040
+of adventurous and almost academic so if
+
+00:32:34,110 --> 00:32:38,100
+you cringe it's okay
+
+00:32:35,040 --> 00:32:39,510
+I've been in the clouds right now so the
+
+00:32:38,100 --> 00:32:42,090
+difficult case is what if you're not
+
+00:32:39,510 --> 00:32:43,890
+working with regular work regularly like
+
+00:32:42,090 --> 00:32:45,000
+regularly shaped objects so for example
+
+00:32:43,890 --> 00:32:46,860
+maybe you have a render you want to be
+
+00:32:45,000 --> 00:32:48,720
+extremely general and you want to handle
+
+00:32:46,860 --> 00:32:50,850
+like blob shaped objects with require
+
+00:32:48,720 --> 00:32:52,170
+like marching cubes you want to have
+
+00:32:50,850 --> 00:32:53,460
+like subdivision objects which require
+
+00:32:52,170 --> 00:32:55,680
+like some kind of triangle subdivision
+
+00:32:53,460 --> 00:32:57,480
+algorithm and then you wanna have
+
+00:32:55,680 --> 00:32:58,860
+particles which require like bidding and
+
+00:32:57,480 --> 00:33:01,320
+sorting all sorts of stuff to make them
+
+00:32:58,860 --> 00:33:02,400
+look right so if you want to have all
+
+00:33:01,320 --> 00:33:04,600
+sorts of different objects running like
+
+00:33:02,400 --> 00:33:05,890
+this then the amount of CPU work that is
+
+00:33:04,600 --> 00:33:07,900
+prior to render one of these objects
+
+00:33:05,890 --> 00:33:10,210
+changes depending on what type of object
+
+00:33:07,900 --> 00:33:11,650
+it is and maybe other things that are
+
+00:33:10,210 --> 00:33:13,150
+hard to measure like how far it is from
+
+00:33:11,650 --> 00:33:14,590
+the camera or how much of it can you see
+
+00:33:13,150 --> 00:33:17,260
+like how much is actually visible to the
+
+00:33:14,590 --> 00:33:18,490
+camera in these cases we have to adopt a
+
+00:33:17,260 --> 00:33:21,070
+slightly more sophisticated approach
+
+00:33:18,490 --> 00:33:22,840
+than a parallel for each if you want to
+
+00:33:21,070 --> 00:33:25,030
+be efficient I suppose
+
+00:33:22,840 --> 00:33:27,220
+and so the solution I'm going to propose
+
+00:33:25,030 --> 00:33:31,090
+for this problem is to use fork/join
+
+00:33:27,220 --> 00:33:32,590
+parallelism so to try to summarize for
+
+00:33:31,090 --> 00:33:34,780
+each one parallelism in a relatively
+
+00:33:32,590 --> 00:33:36,940
+Aqaba way I have this image on the right
+
+00:33:34,780 --> 00:33:38,410
+here so the idea is that we start off
+
+00:33:36,940 --> 00:33:42,100
+with a big list that contains all the
+
+00:33:38,410 --> 00:33:44,050
+objects in the scene and then we first
+
+00:33:42,100 --> 00:33:45,610
+begin by checking like is this list big
+
+00:33:44,050 --> 00:33:47,590
+enough that it's worth splitting among
+
+00:33:45,610 --> 00:33:49,300
+multiple cores and if it's worth
+
+00:33:47,590 --> 00:33:51,850
+splitting my multiple cores then we
+
+00:33:49,300 --> 00:33:53,530
+split it in half and we actually apply
+
+00:33:51,850 --> 00:33:54,940
+this recursively so like every time the
+
+00:33:53,530 --> 00:33:56,290
+list appears to still be too like big
+
+00:33:54,940 --> 00:33:58,510
+enough that it's worth putting among the
+
+00:33:56,290 --> 00:33:59,980
+cores you split it again and at the end
+
+00:33:58,510 --> 00:34:03,010
+of the day you get a bunch of tasks that
+
+00:33:59,980 --> 00:34:06,310
+are hopefully roughly well size to be
+
+00:34:03,010 --> 00:34:08,140
+run on their own core by themselves if
+
+00:34:06,310 --> 00:34:09,730
+this interests you I highly recommend
+
+00:34:08,140 --> 00:34:11,410
+that you watch the talk by Pablo Halpern
+
+00:34:09,730 --> 00:34:14,530
+come see VP con 2015 I thought that was
+
+00:34:11,410 --> 00:34:17,320
+a brilliant talk and really explains all
+
+00:34:14,530 --> 00:34:18,700
+this slide in more detail but actually
+
+00:34:17,320 --> 00:34:20,440
+what I'm gonna do here is I'm gonna go
+
+00:34:18,700 --> 00:34:22,210
+one step deeper and I'm gonna talk to
+
+00:34:20,440 --> 00:34:25,180
+you about a solution to the to another
+
+00:34:22,210 --> 00:34:29,350
+problem with with this fork/join thing
+
+00:34:25,180 --> 00:34:32,530
+so zooming in to the part of the the
+
+00:34:29,350 --> 00:34:35,050
+fork join the fork join graph I showed
+
+00:34:32,530 --> 00:34:37,930
+earlier where there was a cube and the
+
+00:34:35,050 --> 00:34:40,990
+green cloud in the case that I showed in
+
+00:34:37,930 --> 00:34:42,160
+the last slide the cube commands you
+
+00:34:40,990 --> 00:34:43,570
+write the rendering commands were
+
+00:34:42,160 --> 00:34:45,250
+drawing the cube are written into their
+
+00:34:43,570 --> 00:34:47,170
+own command list and the commands for
+
+00:34:45,250 --> 00:34:49,980
+rendering the green cloud are written
+
+00:34:47,170 --> 00:34:53,110
+into their own commands as well and so
+
+00:34:49,980 --> 00:34:54,430
+you know I should say like you generally
+
+00:34:53,110 --> 00:34:55,510
+want to avoid creating too many command
+
+00:34:54,430 --> 00:34:57,340
+lists because there is some overhead
+
+00:34:55,510 --> 00:34:59,800
+associated to submitting many command
+
+00:34:57,340 --> 00:35:03,460
+lists and one case where this is
+
+00:34:59,800 --> 00:35:05,380
+especially an obvious loss is for
+
+00:35:03,460 --> 00:35:07,180
+example if we find out that the two
+
+00:35:05,380 --> 00:35:09,280
+tasks that were created for these two
+
+00:35:07,180 --> 00:35:12,340
+objects actually ended up running on the
+
+00:35:09,280 --> 00:35:13,870
+same CPU core so like for example if
+
+00:35:12,340 --> 00:35:15,490
+they if they both ran on the same CPU
+
+00:35:13,870 --> 00:35:17,080
+core we don't need to have two separate
+
+00:35:15,490 --> 00:35:17,680
+command lists we can actually just have
+
+00:35:17,080 --> 00:35:19,780
+one command
+
+00:35:17,680 --> 00:35:21,130
+that will write the commands of both of
+
+00:35:19,780 --> 00:35:22,480
+those objects and that reduces the
+
+00:35:21,130 --> 00:35:25,869
+number of command lists that we need in
+
+00:35:22,480 --> 00:35:28,930
+total so what I'm saying here is like
+
+00:35:25,869 --> 00:35:30,430
+why not for the second task if we're in
+
+00:35:28,930 --> 00:35:32,079
+the circumstance where the second task
+
+00:35:30,430 --> 00:35:34,990
+is run on the same core why not
+
+00:35:32,079 --> 00:35:37,900
+automatically use list number one again
+
+00:35:34,990 --> 00:35:39,670
+for the second object now this is
+
+00:35:37,900 --> 00:35:41,650
+actually possible to do in a relatively
+
+00:35:39,670 --> 00:35:44,829
+elegant way using this so-called hyper
+
+00:35:41,650 --> 00:35:48,490
+object idea and with this hyper object
+
+00:35:44,829 --> 00:35:50,319
+idea implemented the final result is
+
+00:35:48,490 --> 00:35:52,839
+that in those circumstances where the
+
+00:35:50,319 --> 00:35:55,510
+same CPU is used and for subsequent draw
+
+00:35:52,839 --> 00:35:59,650
+calls the two lists of draw calls are
+
+00:35:55,510 --> 00:36:01,450
+combined into one single list now the
+
+00:35:59,650 --> 00:36:03,280
+key idea well I don't know if I want to
+
+00:36:01,450 --> 00:36:04,690
+go into too much detail but I think this
+
+00:36:03,280 --> 00:36:06,069
+is a really neat idea and if it
+
+00:36:04,690 --> 00:36:07,900
+interests you I highly recommend that
+
+00:36:06,069 --> 00:36:09,130
+you read this paper actually I would say
+
+00:36:07,900 --> 00:36:10,599
+this paper is really interesting even in
+
+00:36:09,130 --> 00:36:13,540
+general because it explains a lot about
+
+00:36:10,599 --> 00:36:15,490
+the internals of how they're five-six so
+
+00:36:13,540 --> 00:36:17,200
+closest code scheduler works because it
+
+00:36:15,490 --> 00:36:19,030
+explains how this whole hyper object
+
+00:36:17,200 --> 00:36:21,460
+idea actually integrates super nicely
+
+00:36:19,030 --> 00:36:23,020
+into their scheduler so a very
+
+00:36:21,460 --> 00:36:25,030
+interesting paper that I recommend to
+
+00:36:23,020 --> 00:36:26,829
+read if you're interested in this topic
+
+00:36:25,030 --> 00:36:28,510
+and another thing specifically about
+
+00:36:26,829 --> 00:36:30,549
+rendering is that if you apply this this
+
+00:36:28,510 --> 00:36:32,410
+kind of hyper optics idea it still keeps
+
+00:36:30,549 --> 00:36:33,670
+the order of the draw calls intact which
+
+00:36:32,410 --> 00:36:36,130
+is actually very important because it
+
+00:36:33,670 --> 00:36:37,930
+turns out that if the order of the draw
+
+00:36:36,130 --> 00:36:40,990
+calls changes between frames for example
+
+00:36:37,930 --> 00:36:42,760
+it may have issues of aesthetics like
+
+00:36:40,990 --> 00:36:43,960
+for example if the order of the draw
+
+00:36:42,760 --> 00:36:46,780
+calls change you might see objects
+
+00:36:43,960 --> 00:36:48,190
+flickering and also changing the order
+
+00:36:46,780 --> 00:36:49,900
+of draw calls may change the performance
+
+00:36:48,190 --> 00:36:52,329
+so it's important to have a stable
+
+00:36:49,900 --> 00:36:53,500
+performance for each frame so keeping
+
+00:36:52,329 --> 00:36:54,760
+the order of the draw calls intact
+
+00:36:53,500 --> 00:36:57,460
+despite the parallelism and you're
+
+00:36:54,760 --> 00:37:03,309
+adding here is actually a nice nice
+
+00:36:57,460 --> 00:37:05,049
+bonus so now one of the last parts of
+
+00:37:03,309 --> 00:37:08,530
+this talk that I'm going to show you
+
+00:37:05,049 --> 00:37:11,650
+today is about scheduling GPU work in
+
+00:37:08,530 --> 00:37:14,380
+memory so going back again to the big
+
+00:37:11,650 --> 00:37:16,960
+picture the big picture here is that you
+
+00:37:14,380 --> 00:37:19,630
+can decompose a frame of rendering in a
+
+00:37:16,960 --> 00:37:22,329
+real-time scenario into something like a
+
+00:37:19,630 --> 00:37:23,920
+bunch of passes where each pass has a
+
+00:37:22,329 --> 00:37:26,680
+certain set of inputs and a certain set
+
+00:37:23,920 --> 00:37:27,790
+of outputs and you can kind of like take
+
+00:37:26,680 --> 00:37:31,290
+a step back and visualize this whole
+
+00:37:27,790 --> 00:37:31,290
+thing as a big kind of graph
+
+00:37:31,299 --> 00:37:34,569
+when we make a scheduler what we want to
+
+00:37:32,890 --> 00:37:36,489
+do conceptually is we want to take as
+
+00:37:34,569 --> 00:37:38,739
+input this graph and somehow find a way
+
+00:37:36,489 --> 00:37:40,419
+to execute that work in a way that is
+
+00:37:38,739 --> 00:37:43,569
+you know first of all valid in the sense
+
+00:37:40,419 --> 00:37:47,640
+that like dependencies are respected but
+
+00:37:43,569 --> 00:37:49,989
+also ideally efficient as much as we can
+
+00:37:47,640 --> 00:37:52,869
+another thing is that for example if you
+
+00:37:49,989 --> 00:37:55,329
+look at the the middle of this this
+
+00:37:52,869 --> 00:37:57,279
+graph there's a texture to object which
+
+00:37:55,329 --> 00:38:00,130
+is the output of past one and it's the
+
+00:37:57,279 --> 00:38:02,859
+input of past two so actually like this
+
+00:38:00,130 --> 00:38:04,929
+texture r2 object is no longer relevant
+
+00:38:02,859 --> 00:38:07,959
+after those two nodes are done using it
+
+00:38:04,929 --> 00:38:09,969
+so what I mean by managing allocation
+
+00:38:07,959 --> 00:38:12,159
+and lifetime is that there exists some
+
+00:38:09,969 --> 00:38:15,819
+resources that exist for only a small
+
+00:38:12,159 --> 00:38:17,409
+period of the the graph and it is
+
+00:38:15,819 --> 00:38:19,149
+interesting to think about how we can
+
+00:38:17,409 --> 00:38:21,279
+best do these allocations and
+
+00:38:19,149 --> 00:38:24,219
+deallocations of those objects as we
+
+00:38:21,279 --> 00:38:27,369
+execute the graph and finally I want to
+
+00:38:24,219 --> 00:38:28,599
+say that I'm putting it as respect
+
+00:38:27,369 --> 00:38:30,339
+dynamic nature or real time rendering
+
+00:38:28,599 --> 00:38:31,749
+what I mean by that is that it's very
+
+00:38:30,339 --> 00:38:34,449
+tempting to look at something like this
+
+00:38:31,749 --> 00:38:36,099
+and to make an API where you build a
+
+00:38:34,449 --> 00:38:37,899
+whole like a whole graph of the frame
+
+00:38:36,099 --> 00:38:39,399
+upfront I was like a big data structure
+
+00:38:37,899 --> 00:38:42,069
+and like an init function somewhere and
+
+00:38:39,399 --> 00:38:44,169
+then just like let that run and that can
+
+00:38:42,069 --> 00:38:47,219
+be no that can work and it has some nice
+
+00:38:44,169 --> 00:38:49,269
+advantages but I want to make sure that
+
+00:38:47,219 --> 00:38:51,279
+there's some respect given to the fact
+
+00:38:49,269 --> 00:38:52,630
+that in a real time scenario the
+
+00:38:51,279 --> 00:38:54,069
+contents of what's shown on the screen
+
+00:38:52,630 --> 00:38:56,829
+changes a lot from one frame to the
+
+00:38:54,069 --> 00:38:58,299
+other potentially so and you know what
+
+00:38:56,829 --> 00:39:00,579
+happens that a game can change a lot so
+
+00:38:58,299 --> 00:39:02,429
+it's hard to come up with one big static
+
+00:39:00,579 --> 00:39:05,469
+data structure that represents a frame
+
+00:39:02,429 --> 00:39:08,049
+in these kinds of scenarios so there has
+
+00:39:05,469 --> 00:39:10,089
+to be some kind of thought put into the
+
+00:39:08,049 --> 00:39:12,729
+level of like flexibility that you want
+
+00:39:10,089 --> 00:39:14,319
+to allow for this the generation of this
+
+00:39:12,729 --> 00:39:16,299
+graph and in the most general case I
+
+00:39:14,319 --> 00:39:17,769
+think a very common case is to actually
+
+00:39:16,299 --> 00:39:20,649
+just regenerate the whole graph every
+
+00:39:17,769 --> 00:39:22,749
+frame this is a common approach but it's
+
+00:39:20,649 --> 00:39:27,219
+not necessary so you make your own
+
+00:39:22,749 --> 00:39:29,109
+decisions so this is this kind of pseudo
+
+00:39:27,219 --> 00:39:32,229
+code here is is roughly how you might
+
+00:39:29,109 --> 00:39:34,569
+have done it in for example OpenGL and
+
+00:39:32,229 --> 00:39:35,829
+DirectX 11 so this is kind of a sudden
+
+00:39:34,569 --> 00:39:38,979
+school approach of how to do the problem
+
+00:39:35,829 --> 00:39:40,630
+but it illustrates a lot of the problems
+
+00:39:38,979 --> 00:39:41,889
+that we have to deal with when we
+
+00:39:40,630 --> 00:39:44,710
+implement some more general solution to
+
+00:39:41,889 --> 00:39:46,420
+this problem so for example the corner
+
+00:39:44,710 --> 00:39:47,800
+slide is split into two parts we have
+
+00:39:46,420 --> 00:39:50,170
+the the higher part in the lower part
+
+00:39:47,800 --> 00:39:53,050
+both of these parts of code represent
+
+00:39:50,170 --> 00:39:56,770
+the pass of rendering the first pass of
+
+00:39:53,050 --> 00:39:59,170
+rendering outputs a death buffer in the
+
+00:39:56,770 --> 00:40:00,130
+form of a shadow map so the word shadow
+
+00:39:59,170 --> 00:40:01,359
+map that I've highlighted there in the
+
+00:40:00,130 --> 00:40:02,650
+first part that's the output of this
+
+00:40:01,359 --> 00:40:04,150
+pass and if you don't understand what a
+
+00:40:02,650 --> 00:40:05,740
+shadow map is that's fine just imagine
+
+00:40:04,150 --> 00:40:09,460
+it's just the output of that pass of
+
+00:40:05,740 --> 00:40:11,109
+rendering meanwhile in the bottom part
+
+00:40:09,460 --> 00:40:12,310
+of the code we have another pass of
+
+00:40:11,109 --> 00:40:14,410
+rendering and this pass of rendering
+
+00:40:12,310 --> 00:40:16,599
+takes the shadow map as an input now
+
+00:40:14,410 --> 00:40:19,270
+so this render map where from being an
+
+00:40:16,599 --> 00:40:21,339
+output to being an input and more
+
+00:40:19,270 --> 00:40:23,619
+precisely it went from being a death
+
+00:40:21,339 --> 00:40:27,130
+buffer which has like this Riaan rights
+
+00:40:23,619 --> 00:40:30,570
+kind of permissions to being a texture
+
+00:40:27,130 --> 00:40:34,030
+that is only read as a depth texture and
+
+00:40:30,570 --> 00:40:35,890
+so if you're working with OpenGL or if
+
+00:40:34,030 --> 00:40:39,010
+you're working a DirectX this kind of
+
+00:40:35,890 --> 00:40:41,230
+vertex 11 this this kind of like change
+
+00:40:39,010 --> 00:40:43,570
+of an object going from being like Rin
+
+00:40:41,230 --> 00:40:45,040
+to to being read and changing from being
+
+00:40:43,570 --> 00:40:46,300
+a deaf muhurta to being something like a
+
+00:40:45,040 --> 00:40:48,099
+texture that's a depth texture that's
+
+00:40:46,300 --> 00:40:50,500
+being read this kinds of transitions we
+
+00:40:48,099 --> 00:40:54,609
+handle a manky for you and the driver
+
+00:40:50,500 --> 00:40:55,660
+may even be able to build a graph like a
+
+00:40:54,609 --> 00:40:58,060
+graph very similar to what I show the
+
+00:40:55,660 --> 00:40:59,890
+last slide automatically from what
+
+00:40:58,060 --> 00:41:01,869
+you're submitting but these are the
+
+00:40:59,890 --> 00:41:04,210
+kinds of responsibilities is that now
+
+00:41:01,869 --> 00:41:05,380
+we're on our plates so we have to figure
+
+00:41:04,210 --> 00:41:07,960
+out the solution to this automatically
+
+00:41:05,380 --> 00:41:10,060
+but if you are using OpenGL and DirectX
+
+00:41:07,960 --> 00:41:11,980
+11 you can probably actually make your
+
+00:41:10,060 --> 00:41:13,630
+your real code very similar to the code
+
+00:41:11,980 --> 00:41:16,240
+that I showed in the slide and it's
+
+00:41:13,630 --> 00:41:17,890
+going to be just fine so I think
+
+00:41:16,240 --> 00:41:20,290
+actually this is a nice way to architect
+
+00:41:17,890 --> 00:41:21,640
+OpenGL code for example in general if
+
+00:41:20,290 --> 00:41:24,640
+you're not going to come up with a
+
+00:41:21,640 --> 00:41:26,890
+really fancy astronaut solution like the
+
+00:41:24,640 --> 00:41:29,560
+test graph that minutes or the rendering
+
+00:41:26,890 --> 00:41:32,020
+graph I'm going to talk about so when it
+
+00:41:29,560 --> 00:41:33,880
+comes to scheduling a GPU work in memory
+
+00:41:32,020 --> 00:41:35,200
+there is actually some previous work on
+
+00:41:33,880 --> 00:41:37,630
+this topic which is I think very
+
+00:41:35,200 --> 00:41:38,770
+interesting so if you're interested in
+
+00:41:37,630 --> 00:41:41,050
+this topic I definitely recommend that
+
+00:41:38,770 --> 00:41:44,080
+you look at the work on frame graph by
+
+00:41:41,050 --> 00:41:46,060
+URI from frostbite and also the work on
+
+00:41:44,080 --> 00:41:47,440
+render graphs with Vulcan by Hans
+
+00:41:46,060 --> 00:41:48,640
+Christian and so if you're interested in
+
+00:41:47,440 --> 00:41:49,660
+Vulcan I especially recommend that you
+
+00:41:48,640 --> 00:41:51,310
+look at the second one there it's
+
+00:41:49,660 --> 00:41:51,980
+actually open source as well so you can
+
+00:41:51,310 --> 00:41:54,380
+go and look
+
+00:41:51,980 --> 00:41:56,150
+how its implemented I don't wanna repeat
+
+00:41:54,380 --> 00:41:58,190
+everything they said but today I'm gonna
+
+00:41:56,150 --> 00:41:59,720
+try and give you a summary that I tried
+
+00:41:58,190 --> 00:42:01,880
+to boil down like the core ideas and
+
+00:41:59,720 --> 00:42:04,010
+some of the fundamental challenges to
+
+00:42:01,880 --> 00:42:07,700
+make it a bit easy to understand some of
+
+00:42:04,010 --> 00:42:10,700
+the details so first I want to talk
+
+00:42:07,700 --> 00:42:13,130
+about submitting work and those various
+
+00:42:10,700 --> 00:42:14,570
+operations that we can over I would say
+
+00:42:13,130 --> 00:42:17,290
+various problems that we can solve in
+
+00:42:14,570 --> 00:42:20,300
+the process of submitting work using a
+
+00:42:17,290 --> 00:42:22,850
+work scheduler that that I'm proposing
+
+00:42:20,300 --> 00:42:24,560
+so for example I'll see you in general
+
+00:42:22,850 --> 00:42:27,140
+you can implement compiler like
+
+00:42:24,560 --> 00:42:29,510
+optimizations and so one example of this
+
+00:42:27,140 --> 00:42:31,160
+is that code elimination so let's
+
+00:42:29,510 --> 00:42:33,140
+suppose if you have the graph that's run
+
+00:42:31,160 --> 00:42:35,090
+on the right here where you can see this
+
+00:42:33,140 --> 00:42:38,000
+past one and past two and actually past
+
+00:42:35,090 --> 00:42:39,650
+one is that putting a texture but that
+
+00:42:38,000 --> 00:42:42,200
+texture is not connected to anything
+
+00:42:39,650 --> 00:42:44,540
+else so we're creating this texture and
+
+00:42:42,200 --> 00:42:45,980
+then we're just throwing it away so an
+
+00:42:44,540 --> 00:42:48,020
+obvious solution to this problem is
+
+00:42:45,980 --> 00:42:50,210
+eight make the worst kilcher make the
+
+00:42:48,020 --> 00:42:52,040
+work scheduler realize that this output
+
+00:42:50,210 --> 00:42:54,800
+is actually useless and remove that
+
+00:42:52,040 --> 00:42:56,119
+entire part of the graph and then you
+
+00:42:54,800 --> 00:42:57,950
+know at this point you might be asking
+
+00:42:56,119 --> 00:42:59,450
+well you know why did you even write
+
+00:42:57,950 --> 00:43:01,460
+that code like just delete the code why
+
+00:42:59,450 --> 00:43:03,020
+should it even be there but you know it
+
+00:43:01,460 --> 00:43:04,460
+happens that sometimes for example you
+
+00:43:03,020 --> 00:43:06,830
+might have a node that I put some debug
+
+00:43:04,460 --> 00:43:08,390
+information and then you want to be able
+
+00:43:06,830 --> 00:43:10,369
+to like conditionally display that debug
+
+00:43:08,390 --> 00:43:11,630
+information and so there are the risk
+
+00:43:10,369 --> 00:43:13,520
+cases like that where like you have like
+
+00:43:11,630 --> 00:43:15,680
+these output these optional outputs and
+
+00:43:13,520 --> 00:43:16,970
+you you ideally want to not I put it
+
+00:43:15,680 --> 00:43:19,100
+when nobody needs it but you don't know
+
+00:43:16,970 --> 00:43:21,230
+that nobody needs it until the end of
+
+00:43:19,100 --> 00:43:22,790
+the frame so just to say that it's not
+
+00:43:21,230 --> 00:43:26,210
+always obvious to know that some code is
+
+00:43:22,790 --> 00:43:28,100
+dead ahead of time another thing that's
+
+00:43:26,210 --> 00:43:30,200
+very important I think that your
+
+00:43:28,100 --> 00:43:32,090
+schedulers your handle is handling the
+
+00:43:30,200 --> 00:43:34,310
+data hazards when it comes to both
+
+00:43:32,090 --> 00:43:35,720
+memory barriers just to handle like
+
+00:43:34,310 --> 00:43:37,160
+transitions between reads and writes or
+
+00:43:35,720 --> 00:43:39,109
+changing between an object that's being
+
+00:43:37,160 --> 00:43:42,619
+read and written or written read and so
+
+00:43:39,109 --> 00:43:44,000
+on and also bears that are relating to
+
+00:43:42,619 --> 00:43:47,080
+the render because there are various
+
+00:43:44,000 --> 00:43:49,010
+kinds of I'll say various kinds of
+
+00:43:47,080 --> 00:43:50,930
+operators that are more advanced that
+
+00:43:49,010 --> 00:43:52,700
+are relating to the way that a the
+
+00:43:50,930 --> 00:43:54,500
+rendering pipeline works so for example
+
+00:43:52,700 --> 00:43:56,150
+in this arrow that I've shown we have
+
+00:43:54,500 --> 00:43:58,730
+one blue node which is a task to note
+
+00:43:56,150 --> 00:44:00,770
+that writes to some memory which is
+
+00:43:58,730 --> 00:44:04,100
+outputted in this texture and then the
+
+00:44:00,770 --> 00:44:05,700
+next node will read that texture so in
+
+00:44:04,100 --> 00:44:08,250
+this situation we have a read
+
+00:44:05,700 --> 00:44:10,170
+to write data hazard and so in between
+
+00:44:08,250 --> 00:44:12,960
+these two nodes we have to make sure we
+
+00:44:10,170 --> 00:44:14,460
+insert a barrier that says that all
+
+00:44:12,960 --> 00:44:16,230
+rights before this point must have
+
+00:44:14,460 --> 00:44:19,830
+finished before we can move on and read
+
+00:44:16,230 --> 00:44:21,210
+the data that we just wrote another I
+
+00:44:19,830 --> 00:44:23,910
+guess I guess this is kind of tricky
+
+00:44:21,210 --> 00:44:28,500
+aspect is managing the lien c15 passes
+
+00:44:23,910 --> 00:44:32,190
+so for example I've shown two schedules
+
+00:44:28,500 --> 00:44:34,410
+here on the Left we have a and a
+
+00:44:32,190 --> 00:44:36,540
+followed quickly by B and C followed
+
+00:44:34,410 --> 00:44:38,580
+quickly by D and on the other side on
+
+00:44:36,540 --> 00:44:40,440
+the right we start a as early as
+
+00:44:38,580 --> 00:44:42,990
+possible and then only run be like very
+
+00:44:40,440 --> 00:44:45,540
+late so the trade-off here is that if
+
+00:44:42,990 --> 00:44:47,310
+you run a and then B immediately then
+
+00:44:45,540 --> 00:44:49,050
+hopefully you get some cache coherency
+
+00:44:47,310 --> 00:44:52,260
+from running like the outputs and then
+
+00:44:49,050 --> 00:44:53,670
+using the APIs immediately as inputs but
+
+00:44:52,260 --> 00:44:55,230
+you may have to wait for a to finish
+
+00:44:53,670 --> 00:44:58,140
+before you can do that so there might be
+
+00:44:55,230 --> 00:45:02,160
+some extra like cost to that whereas in
+
+00:44:58,140 --> 00:45:04,740
+the other case we start a soon and do be
+
+00:45:02,160 --> 00:45:06,510
+like very late and as a result like it's
+
+00:45:04,740 --> 00:45:08,160
+very likely that what a started has been
+
+00:45:06,510 --> 00:45:10,440
+mostly finished by now so we won't have
+
+00:45:08,160 --> 00:45:12,030
+to wait for a for very long but it may
+
+00:45:10,440 --> 00:45:15,000
+be that the memory that a produced is
+
+00:45:12,030 --> 00:45:17,070
+now longer in cache so it's kind of a
+
+00:45:15,000 --> 00:45:18,570
+difficult trade-off and also I'll add
+
+00:45:17,070 --> 00:45:20,100
+that on the right side there's more
+
+00:45:18,570 --> 00:45:21,030
+tasks running at the same time so it
+
+00:45:20,100 --> 00:45:23,610
+means that the total amount of memory
+
+00:45:21,030 --> 00:45:25,170
+necessary is greater so lots of
+
+00:45:23,610 --> 00:45:26,360
+non-obvious kind of heuristic trade-offs
+
+00:45:25,170 --> 00:45:28,410
+are necessary here
+
+00:45:26,360 --> 00:45:32,130
+and finally when your scheduler has
+
+00:45:28,410 --> 00:45:33,840
+finished deciding what tasks actually to
+
+00:45:32,130 --> 00:45:36,510
+be run it has to saman traverse this
+
+00:45:33,840 --> 00:45:39,300
+graph and invoke some code that somehow
+
+00:45:36,510 --> 00:45:41,190
+well record the commands that are
+
+00:45:39,300 --> 00:45:44,370
+relevant to that note of rendering or
+
+00:45:41,190 --> 00:45:45,450
+that passive rendering now I want to get
+
+00:45:44,370 --> 00:45:47,610
+a little bit more concrete about the
+
+00:45:45,450 --> 00:45:49,710
+algorithms that you can use to schedule
+
+00:45:47,610 --> 00:45:51,660
+this work so the closest thing I could
+
+00:45:49,710 --> 00:45:53,700
+think I could I could find to describe
+
+00:45:51,660 --> 00:45:56,250
+this algorithm is like Lisp scheduling
+
+00:45:53,700 --> 00:45:58,440
+so called this is a very simple
+
+00:45:56,250 --> 00:46:00,270
+algorithm so the algorithm itself is
+
+00:45:58,440 --> 00:46:03,120
+simple but the heuristics are the tricky
+
+00:46:00,270 --> 00:46:05,310
+part basically so the algorithm itself
+
+00:46:03,120 --> 00:46:08,280
+is something like a low key priorities
+
+00:46:05,310 --> 00:46:09,840
+to all the tasks and then in a loop just
+
+00:46:08,280 --> 00:46:13,320
+take the highest priority task that you
+
+00:46:09,840 --> 00:46:14,850
+can actually run and schedule it and
+
+00:46:13,320 --> 00:46:17,070
+then just repeat that until you've
+
+00:46:14,850 --> 00:46:18,390
+hopefully scheduled everything so in
+
+00:46:17,070 --> 00:46:19,030
+this case to illustrate that concept
+
+00:46:18,390 --> 00:46:21,460
+I've
+
+00:46:19,030 --> 00:46:25,090
+created a small task graph here and I've
+
+00:46:21,460 --> 00:46:27,190
+ordered them by priority so ABCDE is the
+
+00:46:25,090 --> 00:46:29,080
+order of priority and let's suppose that
+
+00:46:27,190 --> 00:46:30,280
+we want to run this schedule so first we
+
+00:46:29,080 --> 00:46:34,150
+begin by running the highest priority
+
+00:46:30,280 --> 00:46:35,410
+task which is a so it gets scheduled and
+
+00:46:34,150 --> 00:46:39,580
+then let's suppose that the next highest
+
+00:46:35,410 --> 00:46:41,380
+priority task is B but maybe B needs to
+
+00:46:39,580 --> 00:46:43,000
+allocate some memory that it can't
+
+00:46:41,380 --> 00:46:45,760
+satisfy like there's actually not enough
+
+00:46:43,000 --> 00:46:48,400
+memory available to run B so we skipped
+
+00:46:45,760 --> 00:46:50,230
+B because it's not a valid runnable task
+
+00:46:48,400 --> 00:46:52,780
+and move on to the next highest priority
+
+00:46:50,230 --> 00:46:55,630
+task which is C and maybe C as possible
+
+00:46:52,780 --> 00:46:57,790
+to run so C gets scheduled and maybe now
+
+00:46:55,630 --> 00:47:00,460
+after CS finished it may be possible to
+
+00:46:57,790 --> 00:47:01,600
+alqaeda Mary for B because it has used
+
+00:47:00,460 --> 00:47:03,100
+up its inputs so we can schedule the
+
+00:47:01,600 --> 00:47:05,350
+rest of the graph that's kind of how I
+
+00:47:03,100 --> 00:47:06,580
+see it and again like the tricky part
+
+00:47:05,350 --> 00:47:07,840
+about this is how to come up with the
+
+00:47:06,580 --> 00:47:09,220
+right curious ticks which I don't know
+
+00:47:07,840 --> 00:47:10,540
+if there's a solved problem although if
+
+00:47:09,220 --> 00:47:14,840
+you look at the blog post that I linked
+
+00:47:10,540 --> 00:47:15,990
+there are some suggested heuristics
+
+00:47:14,840 --> 00:47:19,000
+[Music]
+
+00:47:15,990 --> 00:47:20,410
+another aspect is uh I talked about this
+
+00:47:19,000 --> 00:47:23,440
+little bit before but just like managing
+
+00:47:20,410 --> 00:47:26,020
+the lifetime of objects as the flows of
+
+00:47:23,440 --> 00:47:27,640
+tasks come in so for example if you have
+
+00:47:26,020 --> 00:47:30,940
+a very simple task graph like this one
+
+00:47:27,640 --> 00:47:33,370
+or texture one is an input to pass a and
+
+00:47:30,940 --> 00:47:35,740
+then pass a outputs texture to which is
+
+00:47:33,370 --> 00:47:37,360
+an input to pass B which then up it's
+
+00:47:35,740 --> 00:47:40,180
+finally the final output of the of the
+
+00:47:37,360 --> 00:47:42,820
+frame one potential way you could
+
+00:47:40,180 --> 00:47:44,560
+schedule this is something like this so
+
+00:47:42,820 --> 00:47:49,210
+in this case what's happening is that
+
+00:47:44,560 --> 00:47:51,640
+before I run a I first allocates texture
+
+00:47:49,210 --> 00:47:52,810
+1 and texture to because it's both its
+
+00:47:51,640 --> 00:47:54,250
+inputs and its outputs need to be
+
+00:47:52,810 --> 00:47:58,180
+allocated before the task can actually
+
+00:47:54,250 --> 00:47:59,440
+run but then maybe after a has run the
+
+00:47:58,180 --> 00:48:01,210
+memory for texture one isn't longer
+
+00:47:59,440 --> 00:48:02,710
+necessary so it can be deleted and again
+
+00:48:01,210 --> 00:48:04,480
+like earlier when I see a new and delete
+
+00:48:02,710 --> 00:48:06,460
+I'm talking about something that is a
+
+00:48:04,480 --> 00:48:07,180
+little bit abstract and it's more
+
+00:48:06,460 --> 00:48:10,510
+concrete if you look at the
+
+00:48:07,180 --> 00:48:14,370
+documentation you'll find it it's like a
+
+00:48:10,510 --> 00:48:18,070
+sequence of specific commands I'll say
+
+00:48:14,370 --> 00:48:19,900
+but moving on so then before running B
+
+00:48:18,070 --> 00:48:21,310
+we have to make sure that the output is
+
+00:48:19,900 --> 00:48:24,730
+also allocated so make sure that that
+
+00:48:21,310 --> 00:48:27,070
+memory is available and then run B and
+
+00:48:24,730 --> 00:48:28,600
+finally we can delete that extra two
+
+00:48:27,070 --> 00:48:31,150
+because it's no longer necessary and we
+
+00:48:28,600 --> 00:48:32,710
+have the final output and part of what
+
+00:48:31,150 --> 00:48:35,290
+your scheduler can do is
+
+00:48:32,710 --> 00:48:38,140
+timaeus scenarios like this one if for
+
+00:48:35,290 --> 00:48:39,310
+example it may be that the same memory
+
+00:48:38,140 --> 00:48:41,470
+can be reused for texture when in
+
+00:48:39,310 --> 00:48:42,849
+texture too so for example if texture 1
+
+00:48:41,470 --> 00:48:44,230
+and texture to have the same size and
+
+00:48:42,849 --> 00:48:46,420
+format and it turns out that the
+
+00:48:44,230 --> 00:48:48,310
+operation done by pass a actually like
+
+00:48:46,420 --> 00:48:50,950
+takes every pixel from texture 1 and
+
+00:48:48,310 --> 00:48:53,230
+just makes a calculation on it and puts
+
+00:48:50,950 --> 00:48:54,609
+a new pixel at the same place it may be
+
+00:48:53,230 --> 00:48:56,320
+that you can reuse the same texture for
+
+00:48:54,609 --> 00:48:58,000
+both of those operations rather than
+
+00:48:56,320 --> 00:49:00,490
+doing a copy from one region of memory
+
+00:48:58,000 --> 00:49:03,580
+to the other in this case you can have a
+
+00:49:00,490 --> 00:49:05,619
+slightly more compact schedule where you
+
+00:49:03,580 --> 00:49:07,750
+only allocate the one texture and reuse
+
+00:49:05,619 --> 00:49:09,099
+it for both texture 1 and texture 2 so
+
+00:49:07,750 --> 00:49:11,470
+these are some kinds of things that you
+
+00:49:09,099 --> 00:49:14,170
+can do with the task scheduler as
+
+00:49:11,470 --> 00:49:17,560
+identified resources that can be merged
+
+00:49:14,170 --> 00:49:18,670
+or reused I think that the well one of
+
+00:49:17,560 --> 00:49:20,170
+the places where you can find most of
+
+00:49:18,670 --> 00:49:21,820
+like the actual concrete details of how
+
+00:49:20,170 --> 00:49:23,320
+you implement this I'll say is the
+
+00:49:21,820 --> 00:49:26,260
+documentation to create place resource
+
+00:49:23,320 --> 00:49:27,640
+in DirectX 12 so that's actually have
+
+00:49:26,260 --> 00:49:33,760
+quite a beefy amount of documentation
+
+00:49:27,640 --> 00:49:35,740
+and then article so in summary in part 1
+
+00:49:33,760 --> 00:49:37,359
+today I talked about three main topics
+
+00:49:35,740 --> 00:49:39,400
+first I talked about memory management
+
+00:49:37,359 --> 00:49:41,470
+where I talked about the separation
+
+00:49:39,400 --> 00:49:43,510
+between system memory and video memory
+
+00:49:41,470 --> 00:49:44,950
+and I talked about how personally we can
+
+00:49:43,510 --> 00:49:48,130
+we used the bridge between them as well
+
+00:49:44,950 --> 00:49:51,250
+as DMA then I talked about command lists
+
+00:49:48,130 --> 00:49:52,869
+where I thought I proposed a big idea
+
+00:49:51,250 --> 00:49:54,670
+where the CPU builds a schedule for the
+
+00:49:52,869 --> 00:49:58,000
+GPU to consume in order that is
+
+00:49:54,670 --> 00:49:59,500
+efficient and ideally correct and then I
+
+00:49:58,000 --> 00:50:03,040
+talked about how we can use fences to
+
+00:49:59,500 --> 00:50:04,180
+synchronize that document or synchronize
+
+00:50:03,040 --> 00:50:07,030
+the flow of commands between the two
+
+00:50:04,180 --> 00:50:08,410
+processors finally in that part of the
+
+00:50:07,030 --> 00:50:10,450
+talk I talked about descriptors very
+
+00:50:08,410 --> 00:50:13,359
+briefly just to say that descriptors are
+
+00:50:10,450 --> 00:50:14,859
+I I say the the view a Harvard view of
+
+00:50:13,359 --> 00:50:17,560
+an object which is something like an
+
+00:50:14,859 --> 00:50:20,109
+address to the memory plus some metadata
+
+00:50:17,560 --> 00:50:23,320
+that describes how the how the the
+
+00:50:20,109 --> 00:50:27,280
+research should be accessed then in part
+
+00:50:23,320 --> 00:50:29,380
+two I talked about ring buffers - and I
+
+00:50:27,280 --> 00:50:32,080
+proposed them as a CPU to GPU issuing
+
+00:50:29,380 --> 00:50:33,400
+primitive although they have more uses
+
+00:50:32,080 --> 00:50:35,589
+than that you can go backwards to like
+
+00:50:33,400 --> 00:50:38,740
+GP CPU or just lots of kinds of
+
+00:50:35,589 --> 00:50:39,940
+different code I would say and then I
+
+00:50:38,740 --> 00:50:41,320
+talked about parallel command recording
+
+00:50:39,940 --> 00:50:42,609
+to say that it's possible with these an
+
+00:50:41,320 --> 00:50:44,200
+API is to record command lists in
+
+00:50:42,609 --> 00:50:46,420
+parallel and submit them all at once to
+
+00:50:44,200 --> 00:50:47,950
+the GPU and then I with a little
+
+00:50:46,420 --> 00:50:49,569
+deep and talking about the differences
+
+00:50:47,950 --> 00:50:51,099
+between regular and irregular cases and
+
+00:50:49,569 --> 00:50:54,880
+proposed some I think maybe academic
+
+00:50:51,099 --> 00:50:57,250
+solutions to the irregular cases finally
+
+00:50:54,880 --> 00:50:59,680
+I talked about scheduling working memory
+
+00:50:57,250 --> 00:51:01,240
+to talk about how we can take a graph
+
+00:50:59,680 --> 00:51:03,430
+that represents a frame being rendered
+
+00:51:01,240 --> 00:51:06,190
+and efficiently convert that into a list
+
+00:51:03,430 --> 00:51:08,099
+of commands a sense the GPU that both
+
+00:51:06,190 --> 00:51:10,030
+optimizes the frame globally and
+
+00:51:08,099 --> 00:51:11,920
+managers like the lifetime of the
+
+00:51:10,030 --> 00:51:13,390
+objects throughout the frame I think
+
+00:51:11,920 --> 00:51:15,339
+actually some people will say that if
+
+00:51:13,390 --> 00:51:16,900
+you don't optimize the frame globally
+
+00:51:15,339 --> 00:51:18,069
+then you're not using these new api's to
+
+00:51:16,900 --> 00:51:20,829
+their full potential so I think this is
+
+00:51:18,069 --> 00:51:22,390
+something that's relatively important so
+
+00:51:20,829 --> 00:51:23,829
+before I finish this talk I'd like to
+
+00:51:22,390 --> 00:51:26,470
+acknowledge a lot of people who helped
+
+00:51:23,829 --> 00:51:29,290
+me I guess prepared this talk Scott and
+
+00:51:26,470 --> 00:51:30,609
+Mauricio namely help me help me review
+
+00:51:29,290 --> 00:51:32,619
+like early versions of this talk that I
+
+00:51:30,609 --> 00:51:34,000
+pitched them and then there's always
+
+00:51:32,619 --> 00:51:36,160
+people here who just answered various
+
+00:51:34,000 --> 00:51:37,599
+questions and inspired various ideas
+
+00:51:36,160 --> 00:51:40,569
+that I've shared today so I like to
+
+00:51:37,599 --> 00:51:41,559
+thank them all for their time if you
+
+00:51:40,569 --> 00:51:42,940
+look at the slides later you'll be able
+
+00:51:41,559 --> 00:51:44,319
+to skim through these references if you
+
+00:51:42,940 --> 00:51:46,390
+want to see all the papers and slides
+
+00:51:44,319 --> 00:51:48,369
+that I've talked about but for now
+
+00:51:46,390 --> 00:51:49,809
+that's all for today so thank you for
+
+00:51:48,369 --> 00:51:51,420
+listening and I'll accept any questions
+
+00:51:49,809 --> 00:52:00,019
+or comments you may have
+
+00:51:51,420 --> 00:52:00,019
+[Applause]
+
+00:52:09,630 --> 00:52:18,459
+hello so despite all the talk you made
+
+00:52:14,759 --> 00:52:21,150
+about data in general do you think that
+
+00:52:18,459 --> 00:52:24,489
+so far there is room today to have
+
+00:52:21,150 --> 00:52:27,039
+abstractions and game engine to how you
+
+00:52:24,489 --> 00:52:28,989
+organize data on the GPU or is it always
+
+00:52:27,039 --> 00:52:31,299
+the case that for example I know I have
+
+00:52:28,989 --> 00:52:33,939
+a game with a lot of trees so I have to
+
+00:52:31,299 --> 00:52:36,249
+make all my rendering code consider it
+
+00:52:33,939 --> 00:52:38,709
+considered that do you think there's
+
+00:52:36,249 --> 00:52:41,949
+room for an extraction layer there where
+
+00:52:38,709 --> 00:52:46,119
+a game might not need to care about how
+
+00:52:41,949 --> 00:52:48,339
+data is put on the GPU I mean it's a
+
+00:52:46,119 --> 00:52:50,380
+it's a very situational thing to
+
+00:52:48,339 --> 00:52:53,589
+consider depending on what kind of game
+
+00:52:50,380 --> 00:52:55,180
+you work you and I suppose some things
+
+00:52:53,589 --> 00:52:57,039
+like for example the the frame graph
+
+00:52:55,180 --> 00:52:59,079
+that I showed like that's something that
+
+00:52:57,039 --> 00:53:00,519
+existed with frostbite so you know
+
+00:52:59,079 --> 00:53:03,069
+people do have I would say like some
+
+00:53:00,519 --> 00:53:06,160
+little abstraction and it's a bit of a
+
+00:53:03,069 --> 00:53:07,569
+it's almost like to quote like a Gore
+
+00:53:06,160 --> 00:53:08,890
+like it's a good negative abstraction
+
+00:53:07,569 --> 00:53:10,089
+sometimes like it's an abstraction that
+
+00:53:08,890 --> 00:53:12,160
+actually improves the performance in a
+
+00:53:10,089 --> 00:53:13,479
+lot of ways so I think that this is
+
+00:53:12,160 --> 00:53:15,039
+something we can import to create
+
+00:53:13,479 --> 00:53:18,309
+abstractions that actually improve the
+
+00:53:15,039 --> 00:53:19,539
+performance although you know it's hard
+
+00:53:18,309 --> 00:53:21,489
+to say like if you want them to trees
+
+00:53:19,539 --> 00:53:22,599
+like you know it might involve a lot
+
+00:53:21,489 --> 00:53:25,029
+tricky work and it might be hard to
+
+00:53:22,599 --> 00:53:26,949
+actually organize all sorts of different
+
+00:53:25,029 --> 00:53:28,029
+concepts including rendering trees and
+
+00:53:26,949 --> 00:53:29,439
+rendering all sorts of other kinds of
+
+00:53:28,029 --> 00:53:31,709
+objects into the same framework that may
+
+00:53:29,439 --> 00:53:33,999
+not be straightforward so hard to say
+
+00:53:31,709 --> 00:53:37,239
+but I think it's I think it's a noble
+
+00:53:33,999 --> 00:53:39,939
+goal so alright yeah so actually I've
+
+00:53:37,239 --> 00:53:42,039
+it's a practice like when thing is to
+
+00:53:39,939 --> 00:53:44,289
+consider also the cost of like the time
+
+00:53:42,039 --> 00:53:45,429
+to even implement such an abstraction so
+
+00:53:44,289 --> 00:53:46,420
+like if you sit down today and you start
+
+00:53:45,429 --> 00:53:48,579
+programming something like that like
+
+00:53:46,420 --> 00:53:50,380
+you'd be way better off like not trying
+
+00:53:48,579 --> 00:53:51,910
+to abstract it hopefully until you
+
+00:53:50,380 --> 00:53:53,979
+realize that that it may be useful but
+
+00:53:51,910 --> 00:53:55,390
+oh just say like it's sometimes better
+
+00:53:53,979 --> 00:53:56,650
+to just like ignore like no you don't
+
+00:53:55,390 --> 00:54:00,009
+need a frame graph to like code
+
+00:53:56,650 --> 00:54:01,599
+something simple so right the goal is
+
+00:54:00,009 --> 00:54:03,429
+not to write a new abstraction on every
+
+00:54:01,599 --> 00:54:05,739
+project right the goal is for example if
+
+00:54:03,429 --> 00:54:08,289
+I add my company I have 10 projects I
+
+00:54:05,739 --> 00:54:09,630
+should write the rendering code once for
+
+00:54:08,289 --> 00:54:12,300
+all my project in the bed
+
+00:54:09,630 --> 00:54:14,990
+case right I guess so anyway thank you
+
+00:54:12,300 --> 00:54:14,990
+yeah thanks
+
+00:54:18,650 --> 00:54:27,280
+and your the questions so I guess we're
+
+00:54:25,050 --> 00:54:33,880
+gonna call it
+
+00:54:27,280 --> 00:54:33,880
+
+YouTube URL: https://www.youtube.com/watch?v=mdPeXJ0eiGc
+
+

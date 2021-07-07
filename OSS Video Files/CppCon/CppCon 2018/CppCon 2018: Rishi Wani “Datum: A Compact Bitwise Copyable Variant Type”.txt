@@ -1,0 +1,1457 @@
+Title: CppCon 2018: Rishi Wani “Datum: A Compact Bitwise Copyable Variant Type”
+Publication date: 2018-10-15
+Playlist: CppCon 2018
+Description: 
+	http://CppCon.org
+—
+Presentation Slides, PDFs, Source Code and other presenter materials are available at: https://github.com/CppCon/CppCon2018
+—
+Datum is a value-semantic variant type used at Bloomberg. It has trivial construction, destruction, copy-construction and copy-assignment semantics. It encodes values of many frequently used types, such as doubles, integers, Booleans, and pointers inside a double value on a 32 bit platform without requiring any memory allocations. Values of more complex types like strings and arrays are allocated on the heap and a pointer to the memory is stored inside the Datum. 
+
+Due to Datum's compact representation, it reduces the memory footprint of applications. Datum's trivial initialization and copy semantics ensure that there is a negligible cost to default-constructing and moving around a large number of such objects, thus reducing the overall CPU usage of applications. In this talk, we will look into the implementation of Datum and benchmarks comparing Datum with a few other variant types. 
+— 
+Rishi Wani
+Senior Software Engineer, Bloomberg
+Rishi is a senior software engineer at Bloomberg. He has been programming in C++ since 2002.
+—
+Videos Filmed & Edited by Bash Films: http://www.BashFilms.com
+Captions: 
+	00:00:00,160 --> 00:00:01,640
+- Good afternoon everyone.
+
+00:00:01,640 --> 00:00:05,460
+My name is Rishi Wani and I work as an engineer
+
+00:00:05,460 --> 00:00:08,130
+in the infrastructure department at Bloomberg.
+
+00:00:08,130 --> 00:00:12,060
+And today I'm going to talk about a trivial compact variant
+
+00:00:12,060 --> 00:00:14,683
+type called Datum, that we deal with at Bloomberg.
+
+00:00:16,420 --> 00:00:18,880
+Here is the agenda of today's presentation.
+
+00:00:18,880 --> 00:00:22,100
+First I'll talk about the motivation behind creating
+
+00:00:22,100 --> 00:00:24,780
+a compact variant type like Datum.
+
+00:00:24,780 --> 00:00:27,390
+Next I'm going to introduce Datum
+
+00:00:27,390 --> 00:00:30,170
+and talk about some of its salient features.
+
+00:00:30,170 --> 00:00:34,444
+And then before we look into the actual implementation
+
+00:00:34,444 --> 00:00:38,280
+we will digress a little bit and talk about
+
+00:00:38,280 --> 00:00:41,240
+the IEEE floating point format a little bit.
+
+00:00:41,240 --> 00:00:44,310
+And then we will look into the implementation of Datum
+
+00:00:44,310 --> 00:00:47,170
+on 32-bit platforms in detail.
+
+00:00:47,170 --> 00:00:49,970
+I will also briefly talk about the implementation
+
+00:00:49,970 --> 00:00:51,592
+on 64-bit platform.
+
+00:00:51,592 --> 00:00:54,030
+And then in the second part of the talk,
+
+00:00:54,030 --> 00:00:57,970
+I'm going to compare Datum with std variant
+
+00:00:57,970 --> 00:01:00,450
+and show you some benchmarks that I did
+
+00:01:00,450 --> 00:01:03,130
+to compare the memory and CPU performance.
+
+00:01:03,130 --> 00:01:06,193
+And then we'll conclude the talk with any questions.
+
+00:01:08,410 --> 00:01:12,090
+So what was the motivation behind creating Datum?
+
+00:01:12,090 --> 00:01:14,620
+So data inside Bloomberg applications
+
+00:01:14,620 --> 00:01:17,660
+is mostly represented as a two dimensional table.
+
+00:01:17,660 --> 00:01:20,120
+Here you can see one such table,
+
+00:01:20,120 --> 00:01:25,120
+these tables are gigantic and the table that you see
+
+00:01:25,500 --> 00:01:29,220
+on the screen has more than a million cells.
+
+00:01:29,220 --> 00:01:32,550
+And each of these cells can represent different
+
+00:01:32,550 --> 00:01:33,990
+types of values.
+
+00:01:33,990 --> 00:01:37,870
+Majority of the values that these cells represent
+
+00:01:37,870 --> 00:01:42,730
+are mostly doubles, Bools, integers, and strings.
+
+00:01:42,730 --> 00:01:44,930
+The strings are generally of short length,
+
+00:01:44,930 --> 00:01:47,530
+like stock tickers and things like that.
+
+00:01:47,530 --> 00:01:51,480
+So if you use the (mumbling) approach
+
+00:01:51,480 --> 00:01:54,180
+and created a discriminatory union for example
+
+00:01:54,180 --> 00:01:57,543
+of all these four types, the size of that variant type
+
+00:01:57,543 --> 00:01:59,540
+will be completely dominated
+
+00:01:59,540 --> 00:02:01,410
+by the size of std string.
+
+00:02:01,410 --> 00:02:04,520
+So on a 32-bit Windows platform,
+
+00:02:04,520 --> 00:02:06,960
+this comes out to be 40 bytes.
+
+00:02:06,960 --> 00:02:10,770
+So now majority of these values,
+
+00:02:10,770 --> 00:02:13,020
+like around 70% as you can see,
+
+00:02:13,020 --> 00:02:16,010
+are double precision floating point numbers.
+
+00:02:16,010 --> 00:02:19,400
+So instead of storing just values as doubles,
+
+00:02:19,400 --> 00:02:20,970
+if you store this double values
+
+00:02:20,970 --> 00:02:23,900
+inside this naive variant type,
+
+00:02:23,900 --> 00:02:27,816
+we would be wasting 32 bytes per cell.
+
+00:02:27,816 --> 00:02:31,650
+And you can imagine for a gigantic table like this,
+
+00:02:31,650 --> 00:02:36,650
+it could be around 20Mb per table, of wasted space.
+
+00:02:37,070 --> 00:02:39,650
+So on a typical trader's machine,
+
+00:02:39,650 --> 00:02:43,770
+there could be a few of these applications
+
+00:02:43,770 --> 00:02:47,100
+running on a 32-bit Windows machine.
+
+00:02:47,100 --> 00:02:51,140
+So we needed a compact variant type
+
+00:02:51,140 --> 00:02:54,391
+that could store our most used type that was double,
+
+00:02:54,391 --> 00:02:58,260
+completely in line, without doing any allocations.
+
+00:02:58,260 --> 00:03:00,533
+And not wasting any space.
+
+00:03:01,830 --> 00:03:05,960
+Also these tables are backed by spreadsheets,
+
+00:03:05,960 --> 00:03:09,840
+so you could write equations and then the equation
+
+00:03:09,840 --> 00:03:13,466
+would execute inside the evaluation engine,
+
+00:03:13,466 --> 00:03:18,466
+and when these equations execute,
+
+00:03:19,016 --> 00:03:23,730
+all the arguments to these formulas are evaluated
+
+00:03:23,730 --> 00:03:28,020
+and a lot of temporary values are frequently created,
+
+00:03:28,020 --> 00:03:29,880
+copied around, and then thrown away.
+
+00:03:29,880 --> 00:03:32,971
+So, what we do is we use an arena allocations strategy,
+
+00:03:32,971 --> 00:03:36,210
+because we don't want to pay the cost of destruction
+
+00:03:36,210 --> 00:03:37,610
+of these values.
+
+00:03:37,610 --> 00:03:40,308
+So we allocate a pre-allocated buffer, use that
+
+00:03:40,308 --> 00:03:43,930
+for evaluation, then just throw away the buffer.
+
+00:03:43,930 --> 00:03:47,950
+So we also needed a type that was bitwise copyable
+
+00:03:47,950 --> 00:03:51,210
+and trivially destructible.
+
+00:03:51,210 --> 00:03:54,650
+So to recap, we needed a compact type that could store
+
+00:03:54,650 --> 00:03:59,070
+doubles in line, that was trivially destructible,
+
+00:03:59,070 --> 00:04:00,503
+and bitwise copyable.
+
+00:04:01,470 --> 00:04:03,840
+Hence we created Datum.
+
+00:04:03,840 --> 00:04:05,800
+So what is Datum?
+
+00:04:05,800 --> 00:04:09,493
+Datum is a trivial standard layout compact variant type.
+
+00:04:10,630 --> 00:04:13,160
+It has trivial construction, destruction,
+
+00:04:13,160 --> 00:04:15,270
+and copy-construction semantics.
+
+00:04:15,270 --> 00:04:18,130
+It is bitwise copyable.
+
+00:04:18,130 --> 00:04:22,270
+It has a fixed size, irrespective of what data it stores.
+
+00:04:22,270 --> 00:04:26,050
+And it supports a fixed set of types.
+
+00:04:26,050 --> 00:04:29,880
+And it is optimized to source certain specific types.
+
+00:04:29,880 --> 00:04:33,610
+Now the size of Datum is eight bytes on a 32-bit platform,
+
+00:04:33,610 --> 00:04:36,420
+which is the same as a size of a double.
+
+00:04:36,420 --> 00:04:40,900
+So Datum does some tricks to store
+
+00:04:40,900 --> 00:04:43,490
+the whole range of double values
+
+00:04:43,490 --> 00:04:47,690
+as well as non double data, inside those eight bytes.
+
+00:04:47,690 --> 00:04:50,420
+So to understand these tricks better,
+
+00:04:50,420 --> 00:04:54,610
+let's first look at the IEEE-754 double precision
+
+00:04:54,610 --> 00:04:56,360
+floating point format.
+
+00:04:56,360 --> 00:05:00,560
+So, ignore the (mumbling), to make things simpler,
+
+00:05:00,560 --> 00:05:03,413
+a double is 64 bits, one bit for Sin,
+
+00:05:03,413 --> 00:05:06,120
+11 bits for exponent in the blue box,
+
+00:05:06,120 --> 00:05:09,370
+and 52 bits for significant.
+
+00:05:09,370 --> 00:05:14,370
+Now there are two types of double values,
+
+00:05:14,465 --> 00:05:16,560
+I categorize them into two types,
+
+00:05:16,560 --> 00:05:19,602
+one I call them special double values,
+
+00:05:19,602 --> 00:05:22,550
+those are infinity and NaNs, not numbers.
+
+00:05:22,550 --> 00:05:25,760
+And the other ones are the regualr double values
+
+00:05:25,760 --> 00:05:30,170
+that represent valid floating point numbers.
+
+00:05:30,170 --> 00:05:35,170
+So according to the format, the special double values
+
+00:05:35,550 --> 00:05:38,550
+need to have all ones in their exponent.
+
+00:05:38,550 --> 00:05:40,960
+All the bits in the exponent need to be one.
+
+00:05:40,960 --> 00:05:45,290
+While for the regular double values,
+
+00:05:45,290 --> 00:05:49,170
+at least one bit in the exponent has to be zero.
+
+00:05:49,170 --> 00:05:52,340
+So let's look at actual bit representations,
+
+00:05:52,340 --> 00:05:54,060
+to understand this more.
+
+00:05:54,060 --> 00:05:56,920
+So if you look on the screen, the top part,
+
+00:05:56,920 --> 00:06:00,190
+you see the range of positive and negative double values.
+
+00:06:00,190 --> 00:06:03,590
+If you notice there is at least one bit that is zero
+
+00:06:03,590 --> 00:06:04,870
+in both of them.
+
+00:06:04,870 --> 00:06:06,330
+The Sin bit indicates whether
+
+00:06:06,330 --> 00:06:08,250
+the number is negative or positive.
+
+00:06:08,250 --> 00:06:12,120
+Now infinity has all its bits in the exponent
+
+00:06:12,120 --> 00:06:14,090
+set to one, additionally all the bits
+
+00:06:14,090 --> 00:06:16,820
+in the significant are zero.
+
+00:06:16,820 --> 00:06:20,930
+And for NaNs, to differentiate them from infinity,
+
+00:06:20,930 --> 00:06:24,660
+at least one bit in the significant has to be one.
+
+00:06:24,660 --> 00:06:29,490
+Quiet NaN, it has the first bit in the significant
+
+00:06:29,490 --> 00:06:31,829
+trailing the exponent set to one,
+
+00:06:31,829 --> 00:06:34,500
+that is called a quiet Nan bit basically.
+
+00:06:34,500 --> 00:06:36,356
+And signaling NaNs,
+
+00:06:36,356 --> 00:06:40,630
+the implementation is platform dependent.
+
+00:06:40,630 --> 00:06:44,300
+So we could have a range of signaling NaN values based
+
+00:06:44,300 --> 00:06:46,900
+on what platform we're running on.
+
+00:06:46,900 --> 00:06:51,420
+So essentially you can see only the first bit
+
+00:06:51,420 --> 00:06:53,900
+in the significant, which is the quiet Nan bit
+
+00:06:53,900 --> 00:06:56,670
+has to be zero, otherwise any of the bits can be one.
+
+00:06:56,670 --> 00:06:59,940
+Or more than one bit can be one,
+
+00:06:59,940 --> 00:07:01,453
+for a signaling NaN.
+
+00:07:02,780 --> 00:07:05,920
+So most applications do not care
+
+00:07:05,920 --> 00:07:08,510
+about the signaling NaN values.
+
+00:07:08,510 --> 00:07:10,520
+And also these NaNs can have payloads
+
+00:07:10,520 --> 00:07:13,470
+in the significant part, which most applications
+
+00:07:13,470 --> 00:07:14,930
+do not care about.
+
+00:07:14,930 --> 00:07:19,330
+So if we could normalize all the signaling NaN values,
+
+00:07:19,330 --> 00:07:23,540
+into one quiet NaN value, and ignore the payload,
+
+00:07:23,540 --> 00:07:26,770
+then we free up all these bits in the significant
+
+00:07:26,770 --> 00:07:31,770
+to store data that could be non-double, basically.
+
+00:07:33,020 --> 00:07:37,100
+So that is what Datum does on a 32-bit platform.
+
+00:07:37,100 --> 00:07:41,143
+It uses this NaN space to store non double data.
+
+00:07:42,030 --> 00:07:45,810
+Let's look at the representation of values in Datum,
+
+00:07:45,810 --> 00:07:47,233
+to understand this more.
+
+00:07:48,620 --> 00:07:53,620
+So the regular floating point values as you can see,
+
+00:07:53,870 --> 00:07:56,510
+are stored according to the IEEE format,
+
+00:07:56,510 --> 00:07:59,470
+so there's not much of a difference here.
+
+00:07:59,470 --> 00:08:01,680
+Just to be clear with the color scheme,
+
+00:08:01,680 --> 00:08:04,050
+the yellow is the exponent part, the blue is the Sin bit,
+
+00:08:04,050 --> 00:08:08,970
+and the purple is the significant part.
+
+00:08:08,970 --> 00:08:12,780
+So you see here one and minus one are stored
+
+00:08:12,780 --> 00:08:15,680
+as they would be according to the IEEE format,
+
+00:08:15,680 --> 00:08:17,700
+so that's not very interesting.
+
+00:08:17,700 --> 00:08:20,860
+What's interesting is how Datum stores
+
+00:08:20,860 --> 00:08:22,790
+the non double values.
+
+00:08:22,790 --> 00:08:25,664
+So for the non double values, what it does,
+
+00:08:25,664 --> 00:08:30,140
+it has to have all the exponents be set to one,
+
+00:08:30,140 --> 00:08:32,230
+because we are using the NaN trick.
+
+00:08:32,230 --> 00:08:35,160
+So what it does is it uses the first four bits
+
+00:08:35,160 --> 00:08:40,160
+in the significant part to discriminate between values.
+
+00:08:40,550 --> 00:08:43,520
+So the green box you see, is the first four bits
+
+00:08:43,520 --> 00:08:44,730
+in the significant,
+
+00:08:44,730 --> 00:08:46,550
+which is used to discriminate the values.
+
+00:08:46,550 --> 00:08:48,230
+And then the rest of the six bytes,
+
+00:08:48,230 --> 00:08:52,800
+which is the purple part, is used to store any data.
+
+00:08:52,800 --> 00:08:54,350
+So essentially you can store
+
+00:08:54,350 --> 00:08:57,920
+any four byte aligned data inside Datum.
+
+00:08:57,920 --> 00:09:00,590
+Now if you are storing a four byte line data,
+
+00:09:00,590 --> 00:09:04,130
+the rest of the two bytes are not important,
+
+00:09:04,130 --> 00:09:05,090
+so they are grayed out.
+
+00:09:05,090 --> 00:09:07,970
+So any grayed out bits indicate
+
+00:09:07,970 --> 00:09:11,513
+that they do not contribute to the value of the Datum.
+
+00:09:12,900 --> 00:09:15,413
+If there are any questions about these bits,
+
+00:09:15,413 --> 00:09:17,940
+just let me know.
+
+00:09:17,940 --> 00:09:21,370
+So let's look at how actual values are stored.
+
+00:09:21,370 --> 00:09:24,860
+So first of all, again, infinity is stored
+
+00:09:24,860 --> 00:09:29,240
+as it would be according to the IEEE formats.
+
+00:09:29,240 --> 00:09:32,320
+So all bits in the significant are zero,
+
+00:09:32,320 --> 00:09:34,260
+which means that even the four bits
+
+00:09:34,260 --> 00:09:36,350
+in the discriminator are zero.
+
+00:09:36,350 --> 00:09:39,670
+So this means that the first discriminator value
+
+00:09:39,670 --> 00:09:42,190
+is actually taken away by infinity.
+
+00:09:42,190 --> 00:09:45,643
+So we can only represent 15 values and not 16.
+
+00:09:48,260 --> 00:09:50,810
+Here's how Booleans are stored.
+
+00:09:50,810 --> 00:09:52,751
+Basically we use the last four bytes.
+
+00:09:52,751 --> 00:09:55,750
+And we have a different discriminator value,
+
+00:09:55,750 --> 00:09:57,320
+zero, zero, one, zero.
+
+00:09:57,320 --> 00:10:00,970
+And this is how an integer value would be stored.
+
+00:10:00,970 --> 00:10:05,960
+So it uses the last four bytes of the significant part,
+
+00:10:05,960 --> 00:10:08,990
+when the first two bytes are not used.
+
+00:10:08,990 --> 00:10:12,180
+Also pointers would be stored like this,
+
+00:10:12,180 --> 00:10:14,421
+just the way integers are stored.
+
+00:10:14,421 --> 00:10:18,480
+Let's look at how strings are stored.
+
+00:10:18,480 --> 00:10:23,480
+So as you know string can be of variable lengths,
+
+00:10:24,490 --> 00:10:27,240
+so we allocate the string on the heap.
+
+00:10:27,240 --> 00:10:29,900
+It can not be stored in line inside the Datum.
+
+00:10:29,900 --> 00:10:32,760
+So we allocate the string in the heap,
+
+00:10:32,760 --> 00:10:34,300
+along with the length of the string.
+
+00:10:34,300 --> 00:10:37,260
+So we allocate a buffer which has the length,
+
+00:10:37,260 --> 00:10:40,520
+and the actual string, and then we store a pointer
+
+00:10:40,520 --> 00:10:45,120
+to that buffer inside the four bytes.
+
+00:10:45,120 --> 00:10:48,510
+But as I mentioned before, most of the strings
+
+00:10:48,510 --> 00:10:52,170
+used in the Bloomberg system are shorter length strings.
+
+00:10:52,170 --> 00:10:53,720
+So we did this optimization,
+
+00:10:53,720 --> 00:10:57,040
+we realized that we have some free by server levels,
+
+00:10:57,040 --> 00:11:02,040
+so if the string were to have six characters or less,
+
+00:11:02,520 --> 00:11:06,190
+then it would be completely stored in line.
+
+00:11:06,190 --> 00:11:10,280
+Also any strings that are five characters or less,
+
+00:11:10,280 --> 00:11:12,710
+we did not want to pay the cost of zeroing
+
+00:11:12,710 --> 00:11:14,900
+the rest the bits out.
+
+00:11:14,900 --> 00:11:18,580
+So what we did was, we used this fourth byte
+
+00:11:18,580 --> 00:11:20,590
+to store the length of the string,
+
+00:11:20,590 --> 00:11:24,270
+so that we don't have to zero out the rest of the bytes.
+
+00:11:24,270 --> 00:11:26,780
+So you see how an empty string is stored.
+
+00:11:26,780 --> 00:11:29,440
+We just store the length in the first byte
+
+00:11:29,440 --> 00:11:31,330
+and then the rest of the bytes do not matter.
+
+00:11:31,330 --> 00:11:34,740
+We don't fiddle with those bits.
+
+00:11:34,740 --> 00:11:38,610
+So this is how a string with length one would be stored,
+
+00:11:38,610 --> 00:11:41,124
+so you see for these we just use the one byte
+
+00:11:41,124 --> 00:11:43,570
+in the significant.
+
+00:11:43,570 --> 00:11:48,410
+And then the first one byte to store the length.
+
+00:11:48,410 --> 00:11:51,747
+This is a string of length five,
+
+00:11:51,747 --> 00:11:53,960
+it basically occupies all six bytes,
+
+00:11:53,960 --> 00:11:57,180
+but the first byte is storing the length.
+
+00:11:57,180 --> 00:12:00,470
+And this is how a string of length six would be stored,
+
+00:12:00,470 --> 00:12:03,480
+so it's completely stored in line.
+
+00:12:03,480 --> 00:12:05,840
+We do not store the null terminator
+
+00:12:05,840 --> 00:12:08,730
+and if you see the discriminator value
+
+00:12:08,730 --> 00:12:11,270
+for a string of length six,
+
+00:12:11,270 --> 00:12:14,445
+is different than a discriminator for a string
+
+00:12:14,445 --> 00:12:17,140
+having length five or less.
+
+00:12:17,140 --> 00:12:20,253
+And again, it's different than the allocated string.
+
+00:12:23,020 --> 00:12:27,240
+Now Datum is extensible, so apart from this 15 types,
+
+00:12:27,240 --> 00:12:29,920
+we could represent more types, so what we did
+
+00:12:29,920 --> 00:12:32,410
+was we reserved one discriminator value,
+
+00:12:32,410 --> 00:12:35,784
+the last one, one, one, one, one, if you see the green box.
+
+00:12:35,784 --> 00:12:39,680
+To represent more types, so then what we do
+
+00:12:39,680 --> 00:12:44,290
+is we use the first two bytes in the significant
+
+00:12:44,290 --> 00:12:49,290
+to store the additional discrimination values.
+
+00:12:49,500 --> 00:12:52,670
+So essentially we expand the number of types
+
+00:12:52,670 --> 00:12:54,350
+by two raised to 16.
+
+00:12:54,350 --> 00:12:57,030
+And then the rest of the four bytes is used
+
+00:12:57,030 --> 00:12:59,373
+to store any data.
+
+00:13:00,617 --> 00:13:04,414
+So far I haven't discussed how NaNs are stored,
+
+00:13:04,414 --> 00:13:08,250
+so NaNs are stored as an extended type.
+
+00:13:08,250 --> 00:13:11,370
+So if yo see that in the green box we have one, one,
+
+00:13:11,370 --> 00:13:16,370
+one, one, then there is a two in the extended discriminator,
+
+00:13:17,540 --> 00:13:19,680
+which indicates that it is a NaN.
+
+00:13:19,680 --> 00:13:23,410
+What this means is that every time we store a double value,
+
+00:13:23,410 --> 00:13:26,470
+we have to do an explicit NaN check.
+
+00:13:26,470 --> 00:13:29,360
+And when we re trail the value back,
+
+00:13:29,360 --> 00:13:31,721
+we give you back a quiet NaN.
+
+00:13:31,721 --> 00:13:35,660
+You lose all the other information, no payload,
+
+00:13:35,660 --> 00:13:37,479
+no signaling NaN information.
+
+00:13:37,479 --> 00:13:42,479
+And also applications can store what is called
+
+00:13:43,090 --> 00:13:45,460
+user defined types.
+
+00:13:45,460 --> 00:13:48,410
+So essentially the application just stores
+
+00:13:48,410 --> 00:13:52,900
+a white pointer, but we could do better, right.
+
+00:13:52,900 --> 00:13:54,940
+Because there are two free bytes of a level,
+
+00:13:54,940 --> 00:13:58,410
+so we allow the applications to store
+
+00:13:58,410 --> 00:14:01,420
+additional type information in those two bytes,
+
+00:14:01,420 --> 00:14:03,670
+so that the application can differentiate
+
+00:14:03,670 --> 00:14:06,000
+between all the user defined types it stores.
+
+00:14:06,000 --> 00:14:09,760
+Now the type information is completely application dependent
+
+00:14:09,760 --> 00:14:13,490
+and Datum does not care what type it is.
+
+00:14:13,490 --> 00:14:16,940
+Now one thing I need to mention is that
+
+00:14:16,940 --> 00:14:19,010
+anything that is allocated on the heap,
+
+00:14:19,010 --> 00:14:23,120
+for example, long strings, have to be de allocated.
+
+00:14:23,120 --> 00:14:25,400
+Now Datum has a trivial destructor, remember,
+
+00:14:25,400 --> 00:14:30,260
+so nothing is gonna be cleaned up if a Datum is destroyed.
+
+00:14:30,260 --> 00:14:32,990
+So Datum has an explicit destroy method,
+
+00:14:32,990 --> 00:14:35,715
+which allows us to clean the memory
+
+00:14:35,715 --> 00:14:38,390
+that was allocated for long strings.
+
+00:14:38,390 --> 00:14:41,590
+So for a user defined type, the memory that
+
+00:14:41,590 --> 00:14:44,120
+it is pointed to, by this white pointer,
+
+00:14:44,120 --> 00:14:45,880
+will not get cleaned up.
+
+00:14:45,880 --> 00:14:48,390
+Because it is completely owned by the application
+
+00:14:48,390 --> 00:14:52,510
+and Datum does not care about that memory.
+
+00:14:52,510 --> 00:14:55,610
+So one of the applications that we have
+
+00:14:55,610 --> 00:14:59,510
+for user defined types, is inside the binding layer
+
+00:14:59,510 --> 00:15:03,020
+that binds NATO C ++ objects into JavaScript engines.
+
+00:15:03,020 --> 00:15:06,210
+So any JavaScript engine managed objects
+
+00:15:06,210 --> 00:15:07,900
+are stored as user defined types.
+
+00:15:07,900 --> 00:15:11,650
+So, like arrays and different types of objects
+
+00:15:11,650 --> 00:15:14,050
+are stored with different type values
+
+00:15:14,050 --> 00:15:16,773
+inside the user defined field.
+
+00:15:17,930 --> 00:15:19,870
+String views:
+
+00:15:19,870 --> 00:15:24,200
+So Datum can store string views in two different ways.
+
+00:15:24,200 --> 00:15:25,870
+Again we did some optimization,
+
+00:15:25,870 --> 00:15:28,750
+so if the length of the string view can fit
+
+00:15:28,750 --> 00:15:31,760
+within those two bytes, the first two bytes,
+
+00:15:31,760 --> 00:15:36,090
+then we store the length inside the first two bytes,
+
+00:15:36,090 --> 00:15:37,740
+and then the pointer to the string
+
+00:15:37,740 --> 00:15:40,870
+is stored in the last four bytes.
+
+00:15:40,870 --> 00:15:45,870
+But if the string is larger than 16 bytes length,
+
+00:15:47,690 --> 00:15:51,630
+then we have to allocate a buffer
+
+00:15:51,630 --> 00:15:53,570
+for the pointer and the length.
+
+00:15:53,570 --> 00:15:56,120
+And then the pointer to that buffer is stored
+
+00:15:56,120 --> 00:15:59,880
+inside the string, inside the Datum.
+
+00:15:59,880 --> 00:16:03,475
+So as you see, both are different types.
+
+00:16:03,475 --> 00:16:08,475
+So the longer string view has an extended type basically,
+
+00:16:09,300 --> 00:16:11,680
+while the shorter string uses those two bytes
+
+00:16:11,680 --> 00:16:13,280
+to store the length.
+
+00:16:13,280 --> 00:16:15,770
+Now similarly we did some optimization
+
+00:16:15,770 --> 00:16:17,910
+for 64-bit integers.
+
+00:16:17,910 --> 00:16:21,950
+Any 64-bit integer that could fit within the six bytes,
+
+00:16:21,950 --> 00:16:26,950
+is stored in line, while the larger 64-bit integers
+
+00:16:27,520 --> 00:16:30,200
+are allocated on the heap,
+
+00:16:30,200 --> 00:16:31,700
+and the pointer is (mumbling)them.
+
+00:16:31,700 --> 00:16:34,670
+So again, the larger 64-bit integers are stored
+
+00:16:34,670 --> 00:16:39,670
+as extended type, and both this 64-bit types
+
+00:16:41,650 --> 00:16:43,700
+have different types as you notice there.
+
+00:16:46,110 --> 00:16:48,170
+Datum also supports other types,
+
+00:16:48,170 --> 00:16:50,170
+like date, time, time interval.
+
+00:16:50,170 --> 00:16:52,410
+We again do some optimizations for time interval
+
+00:16:52,410 --> 00:16:54,290
+that we are not gonna talk about.
+
+00:16:54,290 --> 00:16:58,850
+We also store binary data, decimal 64, error values.
+
+00:16:58,850 --> 00:17:01,230
+Also Datum can store aggregate values,
+
+00:17:01,230 --> 00:17:04,110
+so you can store array of Datums
+
+00:17:04,110 --> 00:17:08,421
+or maps of Datums with strings or integer keys.
+
+00:17:08,421 --> 00:17:13,030
+The Datum can own the string keys
+
+00:17:13,030 --> 00:17:16,260
+or the string keys can be allocated under static storage
+
+00:17:16,260 --> 00:17:19,270
+and Datum can just hold a reference to them.
+
+00:17:19,270 --> 00:17:21,573
+So essentially Datum is a recursive type.
+
+00:17:22,630 --> 00:17:26,090
+Now let's talk about the 64-bit implementation briefly.
+
+00:17:26,090 --> 00:17:28,750
+So it's 16 bytes in size.
+
+00:17:28,750 --> 00:17:31,103
+First two bytes are used for discrimination.
+
+00:17:32,030 --> 00:17:34,290
+So any four byte or eight byte aligned types
+
+00:17:34,290 --> 00:17:36,550
+are completely stored in line.
+
+00:17:36,550 --> 00:17:39,040
+Variable length types are again allocated on the heap
+
+00:17:39,040 --> 00:17:40,940
+and a pointer is stored.
+
+00:17:40,940 --> 00:17:43,150
+It has a larger short string optimization
+
+00:17:43,150 --> 00:17:44,700
+as we have more space.
+
+00:17:44,700 --> 00:17:48,510
+And it could be made more compact in the future,
+
+00:17:48,510 --> 00:17:53,130
+since all the platforms we support currently
+
+00:17:53,130 --> 00:17:55,700
+only use the last 48 bits of the pointers,
+
+00:17:55,700 --> 00:18:00,700
+so we can fit a 64-bit Datum into eight bytes.
+
+00:18:05,020 --> 00:18:10,020
+Now let's compare Datum with the variant.
+
+00:18:10,290 --> 00:18:13,030
+So Datum has a well-known fixed size,
+
+00:18:13,030 --> 00:18:16,540
+while the size of the variant is the maximum size
+
+00:18:16,540 --> 00:18:18,233
+of the underlying types.
+
+00:18:19,544 --> 00:18:23,010
+Datum is more compact and cache friendly,
+
+00:18:23,010 --> 00:18:25,130
+especially the 32-bit implementation,
+
+00:18:25,130 --> 00:18:29,600
+so it improves the performance of the application basically.
+
+00:18:29,600 --> 00:18:34,600
+While in case of variant, if you are storing larger types,
+
+00:18:35,410 --> 00:18:40,410
+then the variant is gonna grow, so like for example,
+
+00:18:40,540 --> 00:18:43,480
+if you had just double, Bool, and integer,
+
+00:18:43,480 --> 00:18:45,120
+Datum would still be eight bytes.
+
+00:18:45,120 --> 00:18:47,900
+While a variant would have four bytes more
+
+00:18:47,900 --> 00:18:50,913
+and if you add a string, then it's gonna explode.
+
+00:18:52,070 --> 00:18:54,220
+Datum may allocate memory on the heaps
+
+00:18:54,220 --> 00:18:56,040
+since it cannot store everything in line,
+
+00:18:56,040 --> 00:18:59,261
+variant never allocates memory on the heap,
+
+00:18:59,261 --> 00:19:02,120
+unless the underlying type itself
+
+00:19:02,120 --> 00:19:04,310
+allocates while construction.
+
+00:19:04,310 --> 00:19:05,810
+And Datum is bitwise copyable,
+
+00:19:07,350 --> 00:19:09,730
+so there are no allocations when you assign a Datum
+
+00:19:09,730 --> 00:19:11,350
+into another Datum.
+
+00:19:11,350 --> 00:19:15,790
+But variant may trigger allocations
+
+00:19:15,790 --> 00:19:20,453
+based on the underlying types like allocation strategy.
+
+00:19:21,430 --> 00:19:26,430
+To heap copied Datums, we do have a method called clone,
+
+00:19:26,600 --> 00:19:31,080
+which allows actually copying the like creating
+
+00:19:31,080 --> 00:19:36,080
+a new memory and copying the contents into the new memory,
+
+00:19:36,088 --> 00:19:38,897
+to get around the shallow copying basically.
+
+00:19:38,897 --> 00:19:41,670
+Now Datum has a trivial constructor,
+
+00:19:41,670 --> 00:19:44,190
+so this allows us to create a large area
+
+00:19:44,190 --> 00:19:45,860
+of uninitialized objects,
+
+00:19:45,860 --> 00:19:48,882
+without paying the cost of construction basically.
+
+00:19:48,882 --> 00:19:52,320
+Variant can not do that, it has to initialize
+
+00:19:52,320 --> 00:19:55,290
+the first type we're calling the constructor.
+
+00:19:55,290 --> 00:19:57,400
+And Datum has trivial destructors,
+
+00:19:57,400 --> 00:20:01,690
+so you can use a manual memory management strategy
+
+00:20:01,690 --> 00:20:05,280
+and just throw away a whole range of values,
+
+00:20:05,280 --> 00:20:08,950
+without paying the cost of calling the destructor.
+
+00:20:08,950 --> 00:20:12,410
+While std variant has to call the destructor
+
+00:20:12,410 --> 00:20:14,360
+for the underlying types.
+
+00:20:14,360 --> 00:20:16,770
+And Datum supports a limited number of types,
+
+00:20:16,770 --> 00:20:19,090
+while std variant is the general purpose types,
+
+00:20:19,090 --> 00:20:22,733
+so it can support a potentially large number of types.
+
+00:20:25,750 --> 00:20:28,120
+So here is just some benchmarks that I did.
+
+00:20:28,120 --> 00:20:30,840
+So I used a simple variant, which has
+
+00:20:30,840 --> 00:20:34,150
+bool, int, double, std string,
+
+00:20:34,150 --> 00:20:35,703
+and a std string view.
+
+00:20:36,541 --> 00:20:41,541
+And compiled with level two optimization with gcc 8.
+
+00:20:43,110 --> 00:20:46,850
+And I ran each test 10 000 times in a loop,
+
+00:20:46,850 --> 00:20:50,230
+threw away the first 10% of the results,
+
+00:20:50,230 --> 00:20:53,213
+and the rest were averaged out.
+
+00:20:54,490 --> 00:20:56,530
+And then I created 100 000 objects,
+
+00:20:56,530 --> 00:20:59,700
+whether they be Datums or variants.
+
+00:20:59,700 --> 00:21:03,498
+One thing to note is that I only used
+
+00:21:03,498 --> 00:21:08,498
+strings with 100 characters or less, to be more realistic.
+
+00:21:08,790 --> 00:21:13,790
+And I measured the creation, access and destruction times.
+
+00:21:13,940 --> 00:21:17,840
+And I measured the size on the stack
+
+00:21:17,840 --> 00:21:19,680
+as well as any allocations that happened,
+
+00:21:19,680 --> 00:21:23,660
+especially when we were creating strings basically.
+
+00:21:23,660 --> 00:21:28,030
+So, here's the first chart.
+
+00:21:28,030 --> 00:21:31,280
+The blue is Datum, green is variant,
+
+00:21:31,280 --> 00:21:35,930
+so the unit on the Y axis is micro seconds,
+
+00:21:35,930 --> 00:21:40,000
+and you'll see it shows the creation and access
+
+00:21:40,000 --> 00:21:43,423
+of doubles, integers, Booleans, and string views.
+
+00:21:44,285 --> 00:21:48,210
+As you see Datum performs much better in all cases
+
+00:21:48,210 --> 00:21:50,230
+except the string view case.
+
+00:21:50,230 --> 00:21:52,180
+Because in the string view case,
+
+00:21:52,180 --> 00:21:55,640
+remember we just stored the pointer and the lengths
+
+00:21:55,640 --> 00:21:58,460
+so when we retrail the string view back,
+
+00:21:58,460 --> 00:22:02,513
+we have to create this temporary string view object.
+
+00:22:02,513 --> 00:22:06,217
+In the Bloomberg environment our string view
+
+00:22:06,217 --> 00:22:09,290
+representation is called string ref, so we have
+
+00:22:09,290 --> 00:22:12,498
+to create this temporary string ref object,
+
+00:22:12,498 --> 00:22:17,498
+and then give it back so that's why the string view access
+
+00:22:17,910 --> 00:22:19,470
+is slower for Datum,
+
+00:22:19,470 --> 00:22:22,130
+but otherwise Datum performs much better,
+
+00:22:22,130 --> 00:22:25,070
+compared to our variant.
+
+00:22:25,070 --> 00:22:29,290
+This is the string case, so as you can see again,
+
+00:22:29,290 --> 00:22:31,143
+the access is a little slower,
+
+00:22:31,143 --> 00:22:35,840
+and the destruction takes a longer time.
+
+00:22:35,840 --> 00:22:40,840
+So if all the strings were just six characters or less,
+
+00:22:42,890 --> 00:22:45,720
+so they could fit in line inside the Datum,
+
+00:22:45,720 --> 00:22:50,720
+then Datum would perform better
+
+00:22:51,610 --> 00:22:53,313
+because of its compact size.
+
+00:22:54,460 --> 00:22:57,930
+And if the strings were of larger length,
+
+00:22:57,930 --> 00:23:01,420
+than what the std string optimization supports,
+
+00:23:04,990 --> 00:23:09,170
+then again both Datum and variant
+
+00:23:09,170 --> 00:23:11,300
+would make allocations on the heap.
+
+00:23:11,300 --> 00:23:14,780
+So they would be equally slower.
+
+00:23:14,780 --> 00:23:19,220
+But if the strings are in between range
+
+00:23:19,220 --> 00:23:21,660
+where it can not fit in line inside Datum,
+
+00:23:21,660 --> 00:23:24,900
+but it can fit in line inside std string,
+
+00:23:24,900 --> 00:23:29,900
+then Datum would be slower than variant.
+
+00:23:30,590 --> 00:23:32,933
+So here's the memory chart.
+
+00:23:33,770 --> 00:23:38,770
+You can see Datum is way more compact than the variant.
+
+00:23:40,310 --> 00:23:43,650
+And you see the allocations in the last chart,
+
+00:23:43,650 --> 00:23:45,170
+the last bar chart.
+
+00:23:45,170 --> 00:23:49,800
+And as you see, since I was using strings
+
+00:23:49,800 --> 00:23:54,294
+of 100 characters or less, the variation is not too much
+
+00:23:54,294 --> 00:23:58,363
+in terms of allocations between Datum and variant.
+
+00:24:01,160 --> 00:24:02,333
+So to conclude:
+
+00:24:03,660 --> 00:24:07,350
+Datum is a compact and cache friendly type
+
+00:24:07,350 --> 00:24:10,520
+that reduces memory footprint of applications.
+
+00:24:10,520 --> 00:24:12,880
+It has trivial construction, destruction,
+
+00:24:12,880 --> 00:24:15,430
+and copy construction semantics.
+
+00:24:15,430 --> 00:24:19,010
+And Datum has comparable better runtime performance
+
+00:24:19,010 --> 00:24:22,111
+to std variant, especially if you are using
+
+00:24:22,111 --> 00:24:24,470
+mostly numerical types.
+
+00:24:24,470 --> 00:24:28,590
+So the thing is, if you're dealing in large number
+
+00:24:28,590 --> 00:24:32,040
+of data, which is mostly numerical types,
+
+00:24:32,040 --> 00:24:34,534
+you should consider using a specialized variant,
+
+00:24:34,534 --> 00:24:39,534
+like Datum, instead of just a general purpose variant,
+
+00:24:39,680 --> 00:24:40,913
+like a std variant.
+
+00:24:42,000 --> 00:24:43,980
+You can also consider using Datum.
+
+00:24:43,980 --> 00:24:48,600
+Datum is available on GitHub, if you wish to use Datum.
+
+00:24:48,600 --> 00:24:53,073
+It is this link, (mumbling)
+
+00:24:55,080 --> 00:24:57,150
+and there's some additional components
+
+00:24:57,150 --> 00:24:58,730
+and helper classes that Datum uses.
+
+00:24:58,730 --> 00:25:01,075
+Everything is in that package, BDLD,
+
+00:25:01,075 --> 00:25:02,913
+so you can check it out.
+
+00:25:03,800 --> 00:25:07,920
+And I want to thank some people, Alistair and Atilar
+
+00:25:07,920 --> 00:25:09,720
+in the audience.
+
+00:25:09,720 --> 00:25:13,880
+Atilar maintains Datum now, so any new type requests
+
+00:25:13,880 --> 00:25:15,410
+go to him.
+
+00:25:15,410 --> 00:25:19,193
+And that brings us to any questions.
+
+00:25:21,508 --> 00:25:24,630
+- (audience members speak off mic)
+
+00:25:24,630 --> 00:25:26,610
+- What is the license on Datum?
+
+00:25:26,610 --> 00:25:30,230
+I think it's a BD license, probably John or Atilar
+
+00:25:30,230 --> 00:25:32,920
+would be better able to answer it.
+
+00:25:32,920 --> 00:25:35,030
+- It's Apache version 2.0.
+
+00:25:35,030 --> 00:25:36,813
+- It's Apache version 2.0.
+
+00:25:45,309 --> 00:25:46,259
+Any more questions?
+
+00:25:47,810 --> 00:25:50,010
+- Just something you said in passing
+
+00:25:50,010 --> 00:25:51,680
+that didn't come out, I think it was worth calling
+
+00:25:51,680 --> 00:25:54,560
+attention to was are there limited types of things
+
+00:25:54,560 --> 00:25:57,380
+that Datum knows about, it knows about more Datum
+
+00:25:57,380 --> 00:25:59,550
+so we can build recursive data structures.
+
+00:25:59,550 --> 00:26:00,383
+- Yes.
+
+00:26:00,383 --> 00:26:02,294
+- And std variant doesn't support that yet.
+
+00:26:02,294 --> 00:26:05,613
+- Yes, thank you Alistair.
+
+00:26:08,750 --> 00:26:11,430
+Okay, I guess no more questions.
+
+00:26:11,430 --> 00:26:14,113
+Thank you everyone for attending the talk.
+
+00:26:14,113 --> 00:26:17,113
+
+YouTube URL: https://www.youtube.com/watch?v=YdzbrFerlRY
+
+

@@ -1,0 +1,1846 @@
+Title: Kernel Techniques to Optimize Memory Bandwidth with Predictable Latency
+Publication date: 2020-10-06
+Playlist: DevConfUS 2020
+Description: 
+	Speaker: Parul Sohal
+
+Consolidating multiple applications on the same multi-core platform while preserving their performance is of the utmost importance in real-time systems. A similar problem has emerged in cloud computing systems. Meeting SLAs requires isolating the performance of primary workloads from co-located noisy neighbors. Lack of performance isolation arises due to contention over shared memory resources, such as last-level cache space, main memory bandwidth, and DRAM banks. Hardware vendors like Intel have started introducing techniques like Resource Director Technology (RDT) to manage shared memory resources. In the context of RDT, a promising feature is Memory Bandwidth Allocation (MBA).
+
+In this presentation, we study whether MBA is capable of providing strong isolation via main memory bandwidth management. In doing so, we make a series of surprising discoveries. Come to the presentation to have a look at these and see joint management of main memory and LLC bandwidth by combining MBA and budget-based regulation.
+Captions: 
+	00:00:00,160 --> 00:00:04,880
+um hello i'm like a part-time research
+
+00:00:02,879 --> 00:00:07,440
+intern at red hat and i'm pursuing my
+
+00:00:04,880 --> 00:00:10,080
+phd at boston university
+
+00:00:07,440 --> 00:00:12,000
+um i'll be talking about how to provide
+
+00:00:10,080 --> 00:00:14,320
+isolation guarantees while
+
+00:00:12,000 --> 00:00:16,880
+co-running applications and saturating
+
+00:00:14,320 --> 00:00:19,920
+the main memory subsystem
+
+00:00:16,880 --> 00:00:21,840
+so um when many workloads are running in
+
+00:00:19,920 --> 00:00:23,519
+parallel on modern architectures you
+
+00:00:21,840 --> 00:00:25,359
+have no control on what is
+
+00:00:23,519 --> 00:00:26,720
+happening in the memory hierarchy and
+
+00:00:25,359 --> 00:00:28,480
+furthermore you have no
+
+00:00:26,720 --> 00:00:30,320
+intuition to what is happening to your
+
+00:00:28,480 --> 00:00:33,280
+program's runtime
+
+00:00:30,320 --> 00:00:35,360
+and for some application it is important
+
+00:00:33,280 --> 00:00:37,360
+to provide guarantees and like some sort
+
+00:00:35,360 --> 00:00:39,680
+of quality of service
+
+00:00:37,360 --> 00:00:40,399
+and contention causes a lot of problems
+
+00:00:39,680 --> 00:00:43,360
+here
+
+00:00:40,399 --> 00:00:45,120
+so here are a couple of cases use cases
+
+00:00:43,360 --> 00:00:47,840
+where having solutions to provide
+
+00:00:45,120 --> 00:00:49,360
+isolation and determinism helps
+
+00:00:47,840 --> 00:00:51,360
+so let's take a look at the cloud
+
+00:00:49,360 --> 00:00:53,920
+computing world suppose there's a
+
+00:00:51,360 --> 00:00:55,840
+customer that has an sla or cares about
+
+00:00:53,920 --> 00:00:57,840
+99 percent tail latency
+
+00:00:55,840 --> 00:01:00,160
+the premium customer not only cares
+
+00:00:57,840 --> 00:01:02,640
+about fast execution but also about
+
+00:01:00,160 --> 00:01:04,720
+deterministic time
+
+00:01:02,640 --> 00:01:06,400
+also there are non-critical tasks
+
+00:01:04,720 --> 00:01:08,400
+running on the same cloud
+
+00:01:06,400 --> 00:01:10,240
+how do we solve this problem because
+
+00:01:08,400 --> 00:01:12,080
+depending on the number of cores active
+
+00:01:10,240 --> 00:01:13,760
+and what workload is running we will see
+
+00:01:12,080 --> 00:01:15,280
+different changes in performance to the
+
+00:01:13,760 --> 00:01:17,520
+premium user
+
+00:01:15,280 --> 00:01:19,280
+like similarly in the real-time
+
+00:01:17,520 --> 00:01:21,040
+community missing a deadline
+
+00:01:19,280 --> 00:01:22,960
+can be catastrophic event and
+
+00:01:21,040 --> 00:01:23,840
+deterministic performance is super
+
+00:01:22,960 --> 00:01:26,000
+important
+
+00:01:23,840 --> 00:01:28,159
+like think about self-driving cars a
+
+00:01:26,000 --> 00:01:29,439
+simple multi-controller system is not
+
+00:01:28,159 --> 00:01:32,320
+possible anymore
+
+00:01:29,439 --> 00:01:33,520
+you need a multi-control you need a
+
+00:01:32,320 --> 00:01:35,040
+multi-core system
+
+00:01:33,520 --> 00:01:37,200
+but at the same time how do you
+
+00:01:35,040 --> 00:01:38,400
+guarantee each critical tasks will meet
+
+00:01:37,200 --> 00:01:40,479
+their deadlines
+
+00:01:38,400 --> 00:01:42,000
+so like sharing of resources seems like
+
+00:01:40,479 --> 00:01:43,040
+a problem many workloads are
+
+00:01:42,000 --> 00:01:45,200
+encountering
+
+00:01:43,040 --> 00:01:49,520
+and one of the biggest bottlenecks in
+
+00:01:45,200 --> 00:01:49,520
+this area is the main memory
+
+00:01:49,600 --> 00:01:54,159
+so and most of the solutions currently
+
+00:01:52,960 --> 00:01:56,320
+are to under
+
+00:01:54,159 --> 00:01:58,000
+utilize resources so that they don't
+
+00:01:56,320 --> 00:02:01,680
+cause any interference by
+
+00:01:58,000 --> 00:02:03,439
+basically not sharing resources so
+
+00:02:01,680 --> 00:02:05,280
+a lot of thought has been given to this
+
+00:02:03,439 --> 00:02:07,280
+problem and couple of industries have
+
+00:02:05,280 --> 00:02:10,399
+tried to come up with their solutions
+
+00:02:07,280 --> 00:02:10,800
+and um let me talk about a couple of
+
+00:02:10,399 --> 00:02:13,680
+them
+
+00:02:10,800 --> 00:02:15,840
+and then i'll focus on one of them so
+
+00:02:13,680 --> 00:02:16,400
+intel solution to this problem of main
+
+00:02:15,840 --> 00:02:18,720
+memory
+
+00:02:16,400 --> 00:02:20,400
+uh being the bottleneck is called memory
+
+00:02:18,720 --> 00:02:24,800
+bandwidth allocation
+
+00:02:20,400 --> 00:02:24,800
+so this version of mba um
+
+00:02:25,120 --> 00:02:29,840
+this version of mba basically uses a
+
+00:02:27,440 --> 00:02:36,319
+programmable rate control
+
+00:02:29,840 --> 00:02:38,879
+the for l2 cache
+
+00:02:36,319 --> 00:02:41,120
+the other parts of the processor so
+
+00:02:38,879 --> 00:02:43,280
+based on the settings of the mba a delay
+
+00:02:41,120 --> 00:02:48,959
+value is added to your request
+
+00:02:43,280 --> 00:02:48,959
+so we run here between l2 and l
+
+00:02:49,120 --> 00:02:55,360
+because of how the processor is
+
+00:02:53,440 --> 00:02:57,760
+so there are like cpu cores there are
+
+00:02:55,360 --> 00:02:58,800
+memory controllers there are pcl lanes
+
+00:02:57,760 --> 00:03:01,599
+etc and they're
+
+00:02:58,800 --> 00:03:03,440
+all connected in a mesh architecture so
+
+00:03:01,599 --> 00:03:07,040
+hence except for the memory controllers
+
+00:03:03,440 --> 00:03:07,040
+themselves there's no component
+
+00:03:13,920 --> 00:03:17,840
+furthermore if memory bandwidth as a
+
+00:03:16,000 --> 00:03:20,319
+whole is supposed to be controlled not
+
+00:03:17,840 --> 00:03:22,879
+even the memory controllers
+
+00:03:20,319 --> 00:03:33,840
+at a global level have this information
+
+00:03:22,879 --> 00:03:33,840
+so the current implementation of
+
+00:04:38,560 --> 00:04:43,040
+hey everyone sorry for the interruption
+
+00:04:40,560 --> 00:04:44,240
+i think we lost the speaker here for a
+
+00:04:43,040 --> 00:04:47,120
+minute
+
+00:04:44,240 --> 00:04:48,160
+i am quickly checking with them to make
+
+00:04:47,120 --> 00:04:57,840
+sure
+
+00:04:48,160 --> 00:04:57,840
+they can rejoin
+
+00:04:59,280 --> 00:05:04,240
+hey parul i think we lost you there for
+
+00:05:01,280 --> 00:05:07,199
+a second you can probably
+
+00:05:04,240 --> 00:05:09,280
+i'm so sorry i don't know what happened
+
+00:05:07,199 --> 00:05:13,120
+um
+
+00:05:09,280 --> 00:05:17,120
+but yeah um is my internet better now
+
+00:05:13,120 --> 00:05:19,759
+yeah we can hear you good it's mine okay
+
+00:05:17,120 --> 00:05:22,160
+okay um let me uh i don't know when
+
+00:05:19,759 --> 00:05:22,160
+people
+
+00:05:22,840 --> 00:05:26,000
+were
+
+00:05:24,160 --> 00:05:29,039
+people lost me maybe you can re-share
+
+00:05:26,000 --> 00:05:32,000
+your slides and then we can
+
+00:05:29,039 --> 00:05:32,000
+figure out from there
+
+00:05:32,560 --> 00:05:36,479
+okay so i talked about intel solution i
+
+00:05:35,919 --> 00:05:38,400
+also
+
+00:05:36,479 --> 00:05:40,080
+gave a little bit of overview about the
+
+00:05:38,400 --> 00:05:43,919
+arm solution
+
+00:05:40,080 --> 00:05:44,479
+um and basically the gist of this i'm
+
+00:05:43,919 --> 00:05:47,120
+just going to
+
+00:05:44,479 --> 00:05:52,320
+quickly recap the gist of it if people
+
+00:05:47,120 --> 00:05:55,759
+can still hear me
+
+00:05:52,320 --> 00:05:56,080
+okay so so basically arm solution lets
+
+00:05:55,759 --> 00:05:58,240
+you
+
+00:05:56,080 --> 00:06:00,400
+uh control traffic from different like
+
+00:05:58,240 --> 00:06:01,360
+peripheral devices like gpus which make
+
+00:06:00,400 --> 00:06:04,319
+intense
+
+00:06:01,360 --> 00:06:05,759
+uh memory transactions but intel's lets
+
+00:06:04,319 --> 00:06:08,080
+you do parkour
+
+00:06:05,759 --> 00:06:09,840
+so that does that doesn't seem to be
+
+00:06:08,080 --> 00:06:12,400
+like one mechanism that does
+
+00:06:09,840 --> 00:06:12,960
+both for at least for the time being but
+
+00:06:12,400 --> 00:06:15,280
+i'm sure
+
+00:06:12,960 --> 00:06:17,759
+things are progressing so far and
+
+00:06:15,280 --> 00:06:19,520
+because so fast in this domain because
+
+00:06:17,759 --> 00:06:21,840
+everybody realizes there's a need for
+
+00:06:19,520 --> 00:06:21,840
+this
+
+00:06:26,460 --> 00:06:29,510
+[Music]
+
+00:06:34,720 --> 00:06:36,880
+i
+
+00:06:38,319 --> 00:06:43,600
+traffic within cpus um it's called
+
+00:06:41,600 --> 00:06:45,120
+uh it's a software-based technique it's
+
+00:06:43,600 --> 00:06:48,319
+called memgar
+
+00:06:45,120 --> 00:06:50,400
+it basically has a global regulation
+
+00:06:48,319 --> 00:06:51,120
+period and at the end of a period the
+
+00:06:50,400 --> 00:06:53,520
+budget gets
+
+00:06:51,120 --> 00:06:55,440
+replenished by an interrupt for each
+
+00:06:53,520 --> 00:06:58,160
+course simultaneously
+
+00:06:55,440 --> 00:06:58,880
+so each core has its value for the
+
+00:06:58,160 --> 00:07:01,440
+budget
+
+00:06:58,880 --> 00:07:03,360
+score is stopped for the remaining time
+
+00:07:01,440 --> 00:07:06,160
+left in that period
+
+00:07:03,360 --> 00:07:07,840
+so for all our experiments we statically
+
+00:07:06,160 --> 00:07:09,199
+set the global period to be one
+
+00:07:07,840 --> 00:07:12,160
+millisecond
+
+00:07:09,199 --> 00:07:13,919
+so this problem of main memory being a
+
+00:07:12,160 --> 00:07:15,599
+bottleneck has been there for a while
+
+00:07:13,919 --> 00:07:16,800
+and a lot of communities are giving it
+
+00:07:15,599 --> 00:07:17,759
+thought and trying to come up with
+
+00:07:16,800 --> 00:07:19,599
+solution
+
+00:07:17,759 --> 00:07:22,160
+the rest of the presentation i will
+
+00:07:19,599 --> 00:07:22,560
+focus on an embedded system where we try
+
+00:07:22,160 --> 00:07:25,280
+to
+
+00:07:22,560 --> 00:07:27,440
+provide deterministic determinism using
+
+00:07:25,280 --> 00:07:29,280
+arm qos and memgard and it
+
+00:07:27,440 --> 00:07:31,840
+focuses mostly on the real-time
+
+00:07:29,280 --> 00:07:31,840
+community
+
+00:07:32,000 --> 00:07:36,240
+so let me briefly describe the memory
+
+00:07:34,080 --> 00:07:36,720
+model of the application running in this
+
+00:07:36,240 --> 00:07:39,199
+work
+
+00:07:36,720 --> 00:07:41,919
+um so we consider a model where an
+
+00:07:39,199 --> 00:07:44,400
+application runs not only on the cpu
+
+00:07:41,919 --> 00:07:46,240
+but other processing elements as well as
+
+00:07:44,400 --> 00:07:49,120
+an accelerator
+
+00:07:46,240 --> 00:07:50,080
+uh in this particular figure you can see
+
+00:07:49,120 --> 00:07:52,080
+um
+
+00:07:50,080 --> 00:07:53,680
+uh you can see that how our application
+
+00:07:52,080 --> 00:07:53,919
+is going through different stages first
+
+00:07:53,680 --> 00:07:56,240
+it
+
+00:07:53,919 --> 00:07:57,840
+does some workload on the cpu then in
+
+00:07:56,240 --> 00:08:00,000
+the green part it swaps to the
+
+00:07:57,840 --> 00:08:02,000
+accelerator and on the way back
+
+00:08:00,000 --> 00:08:03,520
+and at the last part it goes back to the
+
+00:08:02,000 --> 00:08:06,080
+cpu itself
+
+00:08:03,520 --> 00:08:06,639
+and um on the lower half of the diagram
+
+00:08:06,080 --> 00:08:10,319
+you can see
+
+00:08:06,639 --> 00:08:12,560
+m1 and m2 m1 is tracking basically
+
+00:08:10,319 --> 00:08:13,840
+the memory transactions made by the
+
+00:08:12,560 --> 00:08:17,440
+application
+
+00:08:13,840 --> 00:08:21,039
+only on the cpu and m2 is tr tracking
+
+00:08:17,440 --> 00:08:22,400
+um the memory transactions made only on
+
+00:08:21,039 --> 00:08:24,720
+the accelerator so
+
+00:08:22,400 --> 00:08:26,000
+as you can see in the first segment when
+
+00:08:24,720 --> 00:08:28,639
+the application is just
+
+00:08:26,000 --> 00:08:30,400
+running on the cpu the cumulative memory
+
+00:08:28,639 --> 00:08:32,560
+transactions are increasing
+
+00:08:30,400 --> 00:08:35,919
+um on the middle graph but they're not
+
+00:08:32,560 --> 00:08:38,080
+increasing on the lower most graph
+
+00:08:35,919 --> 00:08:40,159
+and when it switch when the application
+
+00:08:38,080 --> 00:08:43,200
+switches on the green segment the
+
+00:08:40,159 --> 00:08:46,320
+middle graph stays flat and
+
+00:08:43,200 --> 00:08:49,440
+um the bottom graph suddenly starts uh
+
+00:08:46,320 --> 00:08:50,240
+seeing memory transactions and we use
+
+00:08:49,440 --> 00:08:53,680
+the
+
+00:08:50,240 --> 00:08:56,720
+profiler to achieve all these results
+
+00:08:53,680 --> 00:08:57,360
+so profiling was a key part of this
+
+00:08:56,720 --> 00:09:00,240
+project
+
+00:08:57,360 --> 00:09:02,399
+and let me define what the goals of the
+
+00:09:00,240 --> 00:09:03,200
+profiler were when we started working on
+
+00:09:02,399 --> 00:09:06,640
+it
+
+00:09:03,200 --> 00:09:08,399
+so firstly the profiler helps gather
+
+00:09:06,640 --> 00:09:10,240
+all the variations in the runs of the
+
+00:09:08,399 --> 00:09:12,320
+application and build the memory
+
+00:09:10,240 --> 00:09:14,399
+envelopes that encapsulate the worst
+
+00:09:12,320 --> 00:09:16,000
+case execution time because that is
+
+00:09:14,399 --> 00:09:17,440
+very important for the real-time
+
+00:09:16,000 --> 00:09:19,839
+community because
+
+00:09:17,440 --> 00:09:20,640
+you don't want you always make sure that
+
+00:09:19,839 --> 00:09:23,279
+you're
+
+00:09:20,640 --> 00:09:23,920
+capturing the worst case execution time
+
+00:09:23,279 --> 00:09:26,959
+and
+
+00:09:23,920 --> 00:09:28,240
+not making wrong predictions because it
+
+00:09:26,959 --> 00:09:31,200
+can be um
+
+00:09:28,240 --> 00:09:32,880
+fatal in the real-time community uh so
+
+00:09:31,200 --> 00:09:33,360
+as you can see that's why when we have
+
+00:09:32,880 --> 00:09:36,080
+these
+
+00:09:33,360 --> 00:09:37,200
+graphs we have a lower envelope and a
+
+00:09:36,080 --> 00:09:39,920
+bottom envelope
+
+00:09:37,200 --> 00:09:41,360
+which cap which captures all these
+
+00:09:39,920 --> 00:09:44,640
+variations
+
+00:09:41,360 --> 00:09:47,760
+um and it does not only cop
+
+00:09:44,640 --> 00:09:48,720
+like do that for the cpu but it also
+
+00:09:47,760 --> 00:09:51,120
+does
+
+00:09:48,720 --> 00:09:52,880
+for all the memory transactions made at
+
+00:09:51,120 --> 00:09:55,440
+the ddr controller so there could be all
+
+00:09:52,880 --> 00:09:57,760
+the peripheral devices as well
+
+00:09:55,440 --> 00:10:00,080
+so secondly the profiler helps with
+
+00:09:57,760 --> 00:10:02,480
+consolidating multiple works
+
+00:10:00,080 --> 00:10:04,560
+loads on a system while still providing
+
+00:10:02,480 --> 00:10:07,360
+isolation guarantees
+
+00:10:04,560 --> 00:10:09,200
+um it helps you figure out the settings
+
+00:10:07,360 --> 00:10:11,600
+for both the arm qos
+
+00:10:09,200 --> 00:10:14,000
+and memga and see how the utilization of
+
+00:10:11,600 --> 00:10:16,720
+the ddr controller changes
+
+00:10:14,000 --> 00:10:19,839
+and also it helps us keep the entire
+
+00:10:16,720 --> 00:10:23,680
+system below the sustainable utilization
+
+00:10:19,839 --> 00:10:25,760
+limit so before i move on i do want to
+
+00:10:23,680 --> 00:10:27,680
+say a few more words about profiling as
+
+00:10:25,760 --> 00:10:29,200
+these can be extended to other platforms
+
+00:10:27,680 --> 00:10:31,839
+and setups as well
+
+00:10:29,200 --> 00:10:33,519
+and we do we in our future work we hope
+
+00:10:31,839 --> 00:10:34,959
+to incorporate some of these in a cloud
+
+00:10:33,519 --> 00:10:37,600
+environment as well
+
+00:10:34,959 --> 00:10:39,600
+so to precisely measure these quantities
+
+00:10:37,600 --> 00:10:42,720
+the profile then must be designed to
+
+00:10:39,600 --> 00:10:45,079
+uh have two specific um
+
+00:10:42,720 --> 00:10:47,120
+attributes so the it should have a
+
+00:10:45,079 --> 00:10:49,760
+transparency requirement
+
+00:10:47,120 --> 00:10:50,880
+which means that the task under optimum
+
+00:10:49,760 --> 00:10:53,279
+observation is
+
+00:10:50,880 --> 00:10:55,279
+not or very minimally impacted by the
+
+00:10:53,279 --> 00:10:57,040
+activity of the profiler
+
+00:10:55,279 --> 00:10:59,360
+and on the other hand the higher the
+
+00:10:57,040 --> 00:11:00,720
+granularity of the profiler the smaller
+
+00:10:59,360 --> 00:11:03,360
+will be the pessimism
+
+00:11:00,720 --> 00:11:03,760
+of the worst case execution estimates or
+
+00:11:03,360 --> 00:11:05,680
+you can
+
+00:11:03,760 --> 00:11:07,839
+in the cloud environment the better
+
+00:11:05,680 --> 00:11:11,200
+predictions will be able to give about
+
+00:11:07,839 --> 00:11:13,760
+sla agreements and etc so
+
+00:11:11,200 --> 00:11:15,839
+the one problem with this is that these
+
+00:11:13,760 --> 00:11:17,360
+two objectives the fine grade and the
+
+00:11:15,839 --> 00:11:19,279
+transparent
+
+00:11:17,360 --> 00:11:21,279
+are kind of like competing so you need
+
+00:11:19,279 --> 00:11:21,920
+to find a good balance to be able to
+
+00:11:21,279 --> 00:11:27,839
+achieve
+
+00:11:21,920 --> 00:11:31,200
+both so let's take a look at our part
+
+00:11:27,839 --> 00:11:33,120
+the embarrassment so to ensure that our
+
+00:11:31,200 --> 00:11:35,920
+profiler is super transparent
+
+00:11:33,120 --> 00:11:37,600
+we let it have access to its own ddr
+
+00:11:35,920 --> 00:11:39,519
+controller and in this particular case
+
+00:11:37,600 --> 00:11:42,800
+you can see that cpu4 is
+
+00:11:39,519 --> 00:11:43,680
+acting as a profiler and it is accessing
+
+00:11:42,800 --> 00:11:46,880
+its own
+
+00:11:43,680 --> 00:11:49,120
+ddr controller one it keeps track of all
+
+00:11:46,880 --> 00:11:49,920
+the transactions made to ddr controller
+
+00:11:49,120 --> 00:11:53,440
+00:11:49,920 --> 00:11:56,000
+and but stores them ensure that the
+
+00:11:53,440 --> 00:11:58,560
+application under an analysis is not
+
+00:11:56,000 --> 00:12:01,120
+impacted in any form or so
+
+00:11:58,560 --> 00:12:04,160
+secondly you can see that the us can
+
+00:12:01,120 --> 00:12:07,200
+differentiate traffic between cpus jeep
+
+00:12:04,160 --> 00:12:09,760
+gpus apex they're like um more
+
+00:12:07,200 --> 00:12:10,639
+like cores that are more performance
+
+00:12:09,760 --> 00:12:13,600
+oriented
+
+00:12:10,639 --> 00:12:14,880
+but within cpus there needs to be some
+
+00:12:13,600 --> 00:12:16,880
+form of management
+
+00:12:14,880 --> 00:12:18,399
+which for our particular case we're
+
+00:12:16,880 --> 00:12:20,160
+going to use the software-based
+
+00:12:18,399 --> 00:12:22,839
+technique that i mentioned a couple of
+
+00:12:20,160 --> 00:12:25,360
+slides earlier called
+
+00:12:22,839 --> 00:12:27,680
+memgard so
+
+00:12:25,360 --> 00:12:29,440
+before i show the final results i just
+
+00:12:27,680 --> 00:12:30,399
+want to put all the moving parts
+
+00:12:29,440 --> 00:12:32,480
+together to
+
+00:12:30,399 --> 00:12:34,639
+understand the requirements for having a
+
+00:12:32,480 --> 00:12:36,480
+full system experiment and still show
+
+00:12:34,639 --> 00:12:39,839
+deterministic results
+
+00:12:36,480 --> 00:12:42,480
+so firstly we run the application
+
+00:12:39,839 --> 00:12:44,079
+multiple of times in isolation without
+
+00:12:42,480 --> 00:12:46,320
+memory bandwidth regulation
+
+00:12:44,079 --> 00:12:47,360
+and we capture the worst case execution
+
+00:12:46,320 --> 00:12:50,560
+time and the
+
+00:12:47,360 --> 00:12:54,160
+dram usage of that application
+
+00:12:50,560 --> 00:12:56,240
+then using that algorithm we um
+
+00:12:54,160 --> 00:12:58,240
+we because the algo basically the
+
+00:12:56,240 --> 00:13:00,320
+profiler gives you just raw numbers and
+
+00:12:58,240 --> 00:13:02,399
+using our algorithm we take the
+
+00:13:00,320 --> 00:13:04,959
+profiles and convert it into upper and
+
+00:13:02,399 --> 00:13:07,519
+lower memory transaction curves
+
+00:13:04,959 --> 00:13:08,639
+um or the task model that i described
+
+00:13:07,519 --> 00:13:10,880
+earlier
+
+00:13:08,639 --> 00:13:12,959
+once this is done we can now predict how
+
+00:13:10,880 --> 00:13:14,560
+the application run time will change
+
+00:13:12,959 --> 00:13:16,560
+under different settings
+
+00:13:14,560 --> 00:13:18,320
+and throttling levels of both memgard or
+
+00:13:16,560 --> 00:13:21,680
+qs and that was a key part for
+
+00:13:18,320 --> 00:13:23,440
+ours because um in real time community
+
+00:13:21,680 --> 00:13:24,880
+predicting how the application is going
+
+00:13:23,440 --> 00:13:28,240
+to change when other things
+
+00:13:24,880 --> 00:13:30,000
+enter the system is very important so
+
+00:13:28,240 --> 00:13:31,519
+there are like multiple overheads that
+
+00:13:30,000 --> 00:13:33,920
+we had to take into account
+
+00:13:31,519 --> 00:13:34,959
+for like why i'll mention one of them
+
+00:13:33,920 --> 00:13:37,040
+which is like
+
+00:13:34,959 --> 00:13:39,440
+when we set memgard to a particular
+
+00:13:37,040 --> 00:13:41,519
+budget for each core
+
+00:13:39,440 --> 00:13:43,519
+it uses some of the assigned budget
+
+00:13:41,519 --> 00:13:45,920
+budget for doing its own
+
+00:13:43,519 --> 00:13:46,880
+bookkeeping so like keeping track of how
+
+00:13:45,920 --> 00:13:48,800
+many cash line
+
+00:13:46,880 --> 00:13:51,040
+fills have already happened how many are
+
+00:13:48,800 --> 00:13:53,680
+left in that particular period
+
+00:13:51,040 --> 00:13:56,079
+and saving some for like sending the
+
+00:13:53,680 --> 00:13:58,240
+interrupt etc so basically we had to
+
+00:13:56,079 --> 00:13:59,440
+make sure that the actual budget that we
+
+00:13:58,240 --> 00:14:02,399
+were assigning to the
+
+00:13:59,440 --> 00:14:04,480
+application could track the fact that
+
+00:14:02,399 --> 00:14:06,639
+mem got used some of the
+
+00:14:04,480 --> 00:14:08,800
+budget because we didn't want to say
+
+00:14:06,639 --> 00:14:10,639
+that oh it we had give mem guard was set
+
+00:14:08,800 --> 00:14:13,120
+to x amount and the application was
+
+00:14:10,639 --> 00:14:14,639
+x using x amount but in reality the
+
+00:14:13,120 --> 00:14:17,440
+application was getting
+
+00:14:14,639 --> 00:14:17,839
+something less than x so there were
+
+00:14:17,440 --> 00:14:21,040
+other
+
+00:14:17,839 --> 00:14:23,600
+such details and that we had to take an
+
+00:14:21,040 --> 00:14:25,279
+account in our algorithm and for more
+
+00:14:23,600 --> 00:14:27,040
+details um
+
+00:14:25,279 --> 00:14:29,199
+you can find them in the paper we just
+
+00:14:27,040 --> 00:14:31,360
+published
+
+00:14:29,199 --> 00:14:32,480
+once we have the necessary elements for
+
+00:14:31,360 --> 00:14:35,680
+the application
+
+00:14:32,480 --> 00:14:38,079
+we focus on the dram utilization so we
+
+00:14:35,680 --> 00:14:40,399
+experimentally first captured how much
+
+00:14:38,079 --> 00:14:43,519
+maximum utilization can be
+
+00:14:40,399 --> 00:14:46,399
+tolerated by the ddr controller so
+
+00:14:43,519 --> 00:14:48,399
+each uh the like you all every ddr
+
+00:14:46,399 --> 00:14:49,199
+controller has like a theoretical limit
+
+00:14:48,399 --> 00:14:52,480
+on like
+
+00:14:49,199 --> 00:14:53,279
+it's manual or something but you we all
+
+00:14:52,480 --> 00:14:55,440
+know that
+
+00:14:53,279 --> 00:14:56,880
+the actual amount or actual stress that
+
+00:14:55,440 --> 00:14:59,040
+it can take is usually
+
+00:14:56,880 --> 00:15:01,120
+less than that so experimentally first
+
+00:14:59,040 --> 00:15:03,680
+we calculate captured that
+
+00:15:01,120 --> 00:15:06,000
+so for and then furthermore we what we
+
+00:15:03,680 --> 00:15:07,360
+did was for each setting of memgard and
+
+00:15:06,000 --> 00:15:10,240
+qos setting
+
+00:15:07,360 --> 00:15:12,639
+we ran a bunch of experiment and using
+
+00:15:10,240 --> 00:15:14,639
+the profiler calculated how much
+
+00:15:12,639 --> 00:15:16,560
+each setting had an impact on the
+
+00:15:14,639 --> 00:15:18,800
+utilization of the dram
+
+00:15:16,560 --> 00:15:21,040
+so we were always tracking like if an if
+
+00:15:18,800 --> 00:15:22,000
+i set an application on x amount of
+
+00:15:21,040 --> 00:15:26,720
+setting
+
+00:15:22,000 --> 00:15:29,279
+for um mem guard and buy setting on um
+
+00:15:26,720 --> 00:15:30,639
+uh qos then what would be the impact of
+
+00:15:29,279 --> 00:15:32,639
+it on the
+
+00:15:30,639 --> 00:15:34,320
+dram because we nev we always want to
+
+00:15:32,639 --> 00:15:36,000
+make sure that we were actually saying
+
+00:15:34,320 --> 00:15:39,440
+below the sustainable
+
+00:15:36,000 --> 00:15:41,360
+saturation level and
+
+00:15:39,440 --> 00:15:44,320
+once we have all these metrics we can
+
+00:15:41,360 --> 00:15:47,839
+run a full system set of experiment and
+
+00:15:44,320 --> 00:15:50,800
+hope to get predictable outcomes so
+
+00:15:47,839 --> 00:15:51,600
+that before before i end my presentation
+
+00:15:50,800 --> 00:15:53,440
+let me just show
+
+00:15:51,600 --> 00:15:54,959
+some of these results that we gathered
+
+00:15:53,440 --> 00:15:58,320
+when we ran everything
+
+00:15:54,959 --> 00:16:00,800
+uh concurrently on our system so
+
+00:15:58,320 --> 00:16:02,320
+first we took a result for one
+
+00:16:00,800 --> 00:16:03,440
+particular benchmark that i'm trying to
+
+00:16:02,320 --> 00:16:05,759
+show here
+
+00:16:03,440 --> 00:16:08,000
+our profiler gathered the raw data and
+
+00:16:05,759 --> 00:16:10,639
+then we converted into into upper and
+
+00:16:08,000 --> 00:16:13,120
+lower cumulative memory transaction so
+
+00:16:10,639 --> 00:16:16,320
+you can see that image on the top
+
+00:16:13,120 --> 00:16:17,759
+on the y-axis we have the number of
+
+00:16:16,320 --> 00:16:19,360
+memory transactions
+
+00:16:17,759 --> 00:16:21,839
+which are always increasing because
+
+00:16:19,360 --> 00:16:24,000
+these are cumulative memory transactions
+
+00:16:21,839 --> 00:16:26,320
+and on the x-axis we have
+
+00:16:24,000 --> 00:16:28,160
+the entire execution time period of the
+
+00:16:26,320 --> 00:16:30,240
+application and we attract
+
+00:16:28,160 --> 00:16:31,600
+and we basically run the profiler for
+
+00:16:30,240 --> 00:16:34,320
+the entire length
+
+00:16:31,600 --> 00:16:36,000
+of the application and as any
+
+00:16:34,320 --> 00:16:37,920
+application we can see this goes
+
+00:16:36,000 --> 00:16:39,680
+through parts or the applications makes
+
+00:16:37,920 --> 00:16:42,160
+many memory transactions
+
+00:16:39,680 --> 00:16:44,240
+but then there are also parts or
+
+00:16:42,160 --> 00:16:44,959
+segments where it mostly is just doing
+
+00:16:44,240 --> 00:16:47,440
+compute
+
+00:16:44,959 --> 00:16:48,480
+and does not have a steep incline
+
+00:16:47,440 --> 00:16:50,240
+because
+
+00:16:48,480 --> 00:16:52,240
+by what i mean by not having a steep
+
+00:16:50,240 --> 00:16:54,160
+incline is that it stays flat that means
+
+00:16:52,240 --> 00:16:55,279
+that that particular instance in the
+
+00:16:54,160 --> 00:16:57,600
+application
+
+00:16:55,279 --> 00:17:00,320
+even though the time went forward the
+
+00:16:57,600 --> 00:17:02,720
+application did not make any access
+
+00:17:00,320 --> 00:17:04,240
+up in the dram it might have used the
+
+00:17:02,720 --> 00:17:08,160
+cache but it did not make
+
+00:17:04,240 --> 00:17:10,480
+any dram traffic
+
+00:17:08,160 --> 00:17:12,559
+once we have that we use our algorithm
+
+00:17:10,480 --> 00:17:14,880
+to make predictions on the execution
+
+00:17:12,559 --> 00:17:16,559
+time with different mem guard settings
+
+00:17:14,880 --> 00:17:18,160
+so you can see that on the graph on the
+
+00:17:16,559 --> 00:17:21,760
+below this
+
+00:17:18,160 --> 00:17:24,799
+on the y-axis uh now i have the
+
+00:17:21,760 --> 00:17:25,760
+execution time or how long the
+
+00:17:24,799 --> 00:17:29,360
+application took
+
+00:17:25,760 --> 00:17:31,280
+to complete and on the x-axis is the
+
+00:17:29,360 --> 00:17:32,000
+knob we control and in this particular
+
+00:17:31,280 --> 00:17:36,160
+case it's the
+
+00:17:32,000 --> 00:17:38,799
+mem guards memgard budget
+
+00:17:36,160 --> 00:17:39,600
+did you can change this memcard budget
+
+00:17:38,799 --> 00:17:42,720
+um
+
+00:17:39,600 --> 00:17:43,840
+from a cash line refill to a bandwidth
+
+00:17:42,720 --> 00:17:46,880
+value
+
+00:17:43,840 --> 00:17:51,440
+and we do that for our in our paper but
+
+00:17:46,880 --> 00:17:51,440
+uh what you can see is that um
+
+00:17:51,840 --> 00:17:54,960
+when we compare our results our
+
+00:17:53,440 --> 00:17:58,080
+predictions
+
+00:17:54,960 --> 00:18:00,080
+um are always over and never under
+
+00:17:58,080 --> 00:18:01,679
+but while they're always over they're
+
+00:18:00,080 --> 00:18:03,600
+not overly pessimistic
+
+00:18:01,679 --> 00:18:05,440
+pessimistic they're very close to the
+
+00:18:03,600 --> 00:18:06,320
+actual results that we measured with the
+
+00:18:05,440 --> 00:18:08,080
+profiler
+
+00:18:06,320 --> 00:18:09,760
+and that is also important because you
+
+00:18:08,080 --> 00:18:11,840
+don't want to like you don't
+
+00:18:09,760 --> 00:18:13,440
+basically if you were over predicting
+
+00:18:11,840 --> 00:18:16,000
+then it's like you can just run the
+
+00:18:13,440 --> 00:18:17,760
+one application on the entire system and
+
+00:18:16,000 --> 00:18:19,600
+then for sure there is nothing else
+
+00:18:17,760 --> 00:18:20,240
+competing and your predictions would be
+
+00:18:19,600 --> 00:18:21,760
+fine
+
+00:18:20,240 --> 00:18:23,360
+but you want to be able to make sure
+
+00:18:21,760 --> 00:18:26,880
+that you're actually utilizing the
+
+00:18:23,360 --> 00:18:26,880
+system to its full potential
+
+00:18:27,200 --> 00:18:31,440
+um now i just want to show you some of
+
+00:18:29,760 --> 00:18:32,320
+the results for the full system
+
+00:18:31,440 --> 00:18:34,320
+integration with
+
+00:18:32,320 --> 00:18:36,000
+all four cores that we had running
+
+00:18:34,320 --> 00:18:38,400
+applications time internally
+
+00:18:36,000 --> 00:18:40,720
+simultaneously so we use one of the
+
+00:18:38,400 --> 00:18:41,039
+cores to execute the roy benchmark which
+
+00:18:40,720 --> 00:18:44,320
+uh
+
+00:18:41,039 --> 00:18:47,039
+uses both the accelerator and the cpu
+
+00:18:44,320 --> 00:18:48,720
+uh and on one other core we run emser
+
+00:18:47,039 --> 00:18:51,600
+benchmark which is a
+
+00:18:48,720 --> 00:18:52,559
+machine learning benchmark with a vga
+
+00:18:51,600 --> 00:18:54,960
+input
+
+00:18:52,559 --> 00:18:57,360
+and lastly on the other two remaining
+
+00:18:54,960 --> 00:18:59,840
+cores we just run two memory bombs
+
+00:18:57,360 --> 00:19:01,200
+which are basically accessing the dram
+
+00:18:59,840 --> 00:19:05,520
+continuously
+
+00:19:01,200 --> 00:19:07,760
+um fine so basically after we did a lot
+
+00:19:05,520 --> 00:19:11,280
+of analysis and math we figured out
+
+00:19:07,760 --> 00:19:12,720
+at what particulars uh we set the kos to
+
+00:19:11,280 --> 00:19:15,440
+a fixed amount
+
+00:19:12,720 --> 00:19:17,360
+uh at a fixed value and at that fixed
+
+00:19:15,440 --> 00:19:18,320
+value we knew that it was contributing
+
+00:19:17,360 --> 00:19:20,960
+to around
+
+00:19:18,320 --> 00:19:21,520
+uh 30 percent of the utilization there
+
+00:19:20,960 --> 00:19:23,600
+was an
+
+00:19:21,520 --> 00:19:25,039
+uh having the profiler actually also
+
+00:19:23,600 --> 00:19:26,480
+helped us a lot because
+
+00:19:25,039 --> 00:19:28,400
+what we realized that when the
+
+00:19:26,480 --> 00:19:29,120
+accelerator was playing there was
+
+00:19:28,400 --> 00:19:31,120
+another
+
+00:19:29,120 --> 00:19:33,120
+uh component on the hardware which was
+
+00:19:31,120 --> 00:19:35,919
+the display control unit
+
+00:19:33,120 --> 00:19:36,840
+which also turned on and started making
+
+00:19:35,919 --> 00:19:38,799
+dram
+
+00:19:36,840 --> 00:19:40,640
+transactions if we didn't have the
+
+00:19:38,799 --> 00:19:42,400
+profiler that would have no way for us
+
+00:19:40,640 --> 00:19:44,320
+to exactly know and our results would
+
+00:19:42,400 --> 00:19:46,240
+not have matched our experiments and we
+
+00:19:44,320 --> 00:19:48,400
+would have been very confused about it
+
+00:19:46,240 --> 00:19:49,840
+but the fact that we had the profiler it
+
+00:19:48,400 --> 00:19:52,000
+helped us analyze
+
+00:19:49,840 --> 00:19:53,919
+that there is a display control unit
+
+00:19:52,000 --> 00:19:55,919
+even though it's not plugged into an i o
+
+00:19:53,919 --> 00:19:56,880
+port it's making transactions to the
+
+00:19:55,919 --> 00:19:59,840
+dram and
+
+00:19:56,880 --> 00:20:03,200
+contributing to the ddr utilization and
+
+00:19:59,840 --> 00:20:05,840
+that was around 36 percent
+
+00:20:03,200 --> 00:20:07,679
+and then all the four cores together
+
+00:20:05,840 --> 00:20:08,720
+have access to the remaining thirty
+
+00:20:07,679 --> 00:20:11,760
+percent
+
+00:20:08,720 --> 00:20:12,799
+which basically corresponds to a member
+
+00:20:11,760 --> 00:20:16,240
+setting of around
+
+00:20:12,799 --> 00:20:18,960
+uh five thousand and what we do with
+
+00:20:16,240 --> 00:20:20,000
+around what we did was we split that
+
+00:20:18,960 --> 00:20:23,280
+evenly and we
+
+00:20:20,000 --> 00:20:25,919
+set the e for each cpu budget we gave
+
+00:20:23,280 --> 00:20:27,200
+around five thousand divided by four and
+
+00:20:25,919 --> 00:20:30,559
+that was the
+
+00:20:27,200 --> 00:20:32,799
+maximum bandwidth that could be um
+
+00:20:30,559 --> 00:20:35,039
+mem card setting that could be given and
+
+00:20:32,799 --> 00:20:35,760
+still ensure that the saturation was
+
+00:20:35,039 --> 00:20:38,240
+below
+
+00:20:35,760 --> 00:20:40,799
+the sustainable amount and as you can
+
+00:20:38,240 --> 00:20:44,559
+see in this figure
+
+00:20:40,799 --> 00:20:45,600
+where um on the x-axis we slowly
+
+00:20:44,559 --> 00:20:47,200
+increase the
+
+00:20:45,600 --> 00:20:49,200
+increase the mem guard setting so you
+
+00:20:47,200 --> 00:20:52,000
+can see it goes from 492
+
+00:20:49,200 --> 00:20:53,840
+to 819 that is basically the mem guard
+
+00:20:52,000 --> 00:20:55,919
+knob that we are controlling
+
+00:20:53,840 --> 00:20:57,520
+and like i mentioned earlier we could go
+
+00:20:55,919 --> 00:21:01,360
+up to around uh
+
+00:20:57,520 --> 00:21:05,200
+5 000 ish divided by um
+
+00:21:01,360 --> 00:21:08,240
+four and without having any
+
+00:21:05,200 --> 00:21:10,960
+problems and on the y-axis um
+
+00:21:08,240 --> 00:21:12,880
+on the y-axis on the right we have um
+
+00:21:10,960 --> 00:21:13,600
+how the execution time of both these
+
+00:21:12,880 --> 00:21:17,440
+benchmarks
+
+00:21:13,600 --> 00:21:19,559
+msr and roy is changing and on the
+
+00:21:17,440 --> 00:21:22,400
+y-axis on the left we have the
+
+00:21:19,559 --> 00:21:24,720
+utilization
+
+00:21:22,400 --> 00:21:26,480
+and the dotted lines are our predictions
+
+00:21:24,720 --> 00:21:28,320
+and the non-daughter lines are what we
+
+00:21:26,480 --> 00:21:30,960
+observed with the profiler
+
+00:21:28,320 --> 00:21:32,080
+as you can see that our predictions are
+
+00:21:30,960 --> 00:21:35,120
+going
+
+00:21:32,080 --> 00:21:36,480
+in par with the actual results and
+
+00:21:35,120 --> 00:21:38,559
+they're slightly above
+
+00:21:36,480 --> 00:21:39,600
+above and i'm as i mentioned earlier
+
+00:21:38,559 --> 00:21:41,440
+it's very important
+
+00:21:39,600 --> 00:21:42,720
+in the real-time community that we would
+
+00:21:41,440 --> 00:21:45,440
+rather be it's
+
+00:21:42,720 --> 00:21:46,480
+better to be safe than to have under
+
+00:21:45,440 --> 00:21:50,960
+predictions
+
+00:21:46,480 --> 00:21:52,080
+but but as soon as the black line that
+
+00:21:50,960 --> 00:21:54,240
+is that the
+
+00:21:52,080 --> 00:21:56,320
+predicted value of utilization goes
+
+00:21:54,240 --> 00:21:59,440
+above 100 percent
+
+00:21:56,320 --> 00:22:00,880
+all our predictions stop working this
+
+00:21:59,440 --> 00:22:04,480
+makes sense as we
+
+00:22:00,880 --> 00:22:06,559
+push the ddr beyond its capabilities and
+
+00:22:04,480 --> 00:22:07,600
+introduce levels of noise that it can't
+
+00:22:06,559 --> 00:22:10,080
+be tolerated
+
+00:22:07,600 --> 00:22:10,799
+this particular ddr can't control
+
+00:22:10,080 --> 00:22:13,360
+controller
+
+00:22:10,799 --> 00:22:15,919
+cannot manage the system very well and
+
+00:22:13,360 --> 00:22:19,280
+there is a lot of contention happening
+
+00:22:15,919 --> 00:22:22,080
+at the ddr controller and as you can see
+
+00:22:19,280 --> 00:22:23,840
+there is a huge spike in what happens to
+
+00:22:22,080 --> 00:22:26,159
+both the applications
+
+00:22:23,840 --> 00:22:29,039
+and their execution time as soon as you
+
+00:22:26,159 --> 00:22:32,480
+push beyond those limits
+
+00:22:29,039 --> 00:22:34,480
+so some concluding remarks um so each
+
+00:22:32,480 --> 00:22:36,400
+system has a theoretical and experiment
+
+00:22:34,480 --> 00:22:37,039
+sustainable bandwidth or utilized in
+
+00:22:36,400 --> 00:22:38,640
+level
+
+00:22:37,039 --> 00:22:40,799
+at the memory controller and it is
+
+00:22:38,640 --> 00:22:43,200
+extremely important to experimentally
+
+00:22:40,799 --> 00:22:45,520
+gather where these data points lie
+
+00:22:43,200 --> 00:22:46,720
+and no matter how many applications with
+
+00:22:45,520 --> 00:22:49,600
+peripheral devices
+
+00:22:46,720 --> 00:22:50,960
+included should not exceed this
+
+00:22:49,600 --> 00:22:54,000
+threshold or this
+
+00:22:50,960 --> 00:22:56,080
+saturation level profiling is
+
+00:22:54,000 --> 00:22:57,919
+very important and can help help us
+
+00:22:56,080 --> 00:23:00,799
+understand the different stages of the
+
+00:22:57,919 --> 00:23:02,559
+application provide us insight into
+
+00:23:00,799 --> 00:23:04,559
+like selecting different controls for
+
+00:23:02,559 --> 00:23:05,600
+the new memory bandwidth controls that
+
+00:23:04,559 --> 00:23:08,640
+are coming
+
+00:23:05,600 --> 00:23:09,760
+and with the profiling tool
+
+00:23:08,640 --> 00:23:12,080
+but we have to make sure that the
+
+00:23:09,760 --> 00:23:13,440
+profiling trueness uh tool is
+
+00:23:12,080 --> 00:23:17,520
+transparent and
+
+00:23:13,440 --> 00:23:19,200
+has fine gr granularity so
+
+00:23:17,520 --> 00:23:22,000
+we are currently working on a profiler
+
+00:23:19,200 --> 00:23:24,320
+that will also work on cloud workloads
+
+00:23:22,000 --> 00:23:26,000
+and hope to be able to present that in
+
+00:23:24,320 --> 00:23:28,080
+the next devco
+
+00:23:26,000 --> 00:23:30,559
+hope you found this presentation in five
+
+00:23:28,080 --> 00:23:31,679
+insightful and thank you guys for coming
+
+00:23:30,559 --> 00:23:34,400
+here
+
+00:23:31,679 --> 00:23:36,240
+thank you for the great talk parol i
+
+00:23:34,400 --> 00:23:38,400
+request everybody to carry on the
+
+00:23:36,240 --> 00:23:39,520
+discussion in the breakout room belly
+
+00:23:38,400 --> 00:23:46,159
+the link to which i
+
+00:23:39,520 --> 00:23:46,159
+
+YouTube URL: https://www.youtube.com/watch?v=aBm8hKkNHIU
+
+

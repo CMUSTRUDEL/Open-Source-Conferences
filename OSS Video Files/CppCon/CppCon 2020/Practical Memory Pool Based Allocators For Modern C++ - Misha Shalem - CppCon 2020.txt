@@ -1,0 +1,4839 @@
+Title: Practical Memory Pool Based Allocators For Modern C++ - Misha Shalem - CppCon 2020
+Publication date: 2020-09-28
+Playlist: CppCon 2020
+Description: 
+	https://cppcon.org/
+https://github.com/CppCon/CppCon2020/blob/main/Presentations/practical_memory_pool_based_allocators_for_modern_cpp/practical_memory_pool_based_allocators_for_modern_cpp__misha_shalem__cppcon_2020.pdf
+---
+Runtime-deterministic memory allocations are a crucial aspect of any safety-critical real-time system. One of the simplest and widely adopted allocation mechanisms used in such systems is a memory pool with fixed block sizes. Unfortunately, the need to know the exact sizes of the memory blocks makes any practical usage of memory pools with standard C++ allocator-based approach rather problematic since users often “hide” real properties of allocations which are made under the hood. For example: STL’s node-based containers like 'std::map' as well as other standard mechanisms like 'std::promise' or 'std::allocate_shared'.
+
+Being a company which focuses on real-time safety-critical applications, we still see a significant value in keeping compatibility with the standard allocator model as well as in following common conventions which are familiar to every C++ developer.
+
+This talk presents an approach which uses a combination of a memory allocator implementation which instruments the code, and an external LLVM-based tool which extracts the instrumentation information and generates static memory pool definitions, allowing the allocator to switch from the heap to a memory pool without any further changes to the code. The presentation will walk through a simplest possible implementation of this approach.
+
+---
+Misha Shalem
+C++ Architect, Apex.AI
+C++ developer with 16+ years of experience. Currently holds position of C++ Architect at Apex.AI, Palo Alto, CA
+
+---
+Streamed & Edited by Digital Medium Ltd - events.digital-medium.co.uk
+events@digital-medium.co.uk
+Captions: 
+	00:00:08,800 --> 00:00:11,200
+hello
+
+00:00:09,360 --> 00:00:12,559
+my name is misha shalem and i work at
+
+00:00:11,200 --> 00:00:15,280
+epix ai
+
+00:00:12,559 --> 00:00:16,080
+we use modern c plus plus to create a
+
+00:00:15,280 --> 00:00:19,039
+safe real-time
+
+00:00:16,080 --> 00:00:19,520
+version of robotics operating system ros
+
+00:00:19,039 --> 00:00:22,240
+00:00:19,520 --> 00:00:23,760
+is a focus on autonomous driving and
+
+00:00:22,240 --> 00:00:26,160
+today we're going to talk about
+
+00:00:23,760 --> 00:00:28,840
+practical memory pool based allocators
+
+00:00:26,160 --> 00:00:31,039
+for modern c
+
+00:00:28,840 --> 00:00:34,559
+plus
+
+00:00:31,039 --> 00:00:35,840
+now last year uh my good friend and a
+
+00:00:34,559 --> 00:00:38,320
+former colleague of mine
+
+00:00:35,840 --> 00:00:38,879
+andreas pasternak presented a talk
+
+00:00:38,320 --> 00:00:40,719
+called
+
+00:00:38,879 --> 00:00:43,440
+safe software for autonomous mobility
+
+00:00:40,719 --> 00:00:46,320
+with modern c plus plus
+
+00:00:43,440 --> 00:00:47,840
+uh where he gave an overview of many
+
+00:00:46,320 --> 00:00:50,320
+things we do
+
+00:00:47,840 --> 00:00:52,399
+and among other things he talked about
+
+00:00:50,320 --> 00:00:54,879
+memory locations and
+
+00:00:52,399 --> 00:00:55,920
+many things we do to avoid them like
+
+00:00:54,879 --> 00:00:59,280
+static strings
+
+00:00:55,920 --> 00:01:02,000
+and static containers and
+
+00:00:59,280 --> 00:01:04,000
+local memory areas things like this and
+
+00:01:02,000 --> 00:01:06,080
+one exact quote from this presentation
+
+00:01:04,000 --> 00:01:08,240
+is memory pools and allocators only one
+
+00:01:06,080 --> 00:01:10,400
+piece of the solution which is true
+
+00:01:08,240 --> 00:01:14,080
+but today we are going to talk about
+
+00:01:10,400 --> 00:01:14,080
+this one piece and more depth
+
+00:01:15,200 --> 00:01:20,960
+so what's so special
+
+00:01:18,640 --> 00:01:24,400
+about memory allocations in real time
+
+00:01:20,960 --> 00:01:24,400
+safety critical environment
+
+00:01:24,479 --> 00:01:27,520
+well solution should be safe and
+
+00:01:26,080 --> 00:01:29,680
+certifiable and
+
+00:01:27,520 --> 00:01:32,240
+uh for exact definition of these two
+
+00:01:29,680 --> 00:01:35,119
+terms i again invite you to check out
+
+00:01:32,240 --> 00:01:38,840
+andreas presentation
+
+00:01:35,119 --> 00:01:41,920
+uh he defines it pretty pretty well
+
+00:01:38,840 --> 00:01:43,040
+uh but what does it mean practically for
+
+00:01:41,920 --> 00:01:45,520
+c plus before
+
+00:01:43,040 --> 00:01:47,360
+for me as a c plus plus a developer as
+
+00:01:45,520 --> 00:01:50,399
+an engineer what should i do
+
+00:01:47,360 --> 00:01:54,399
+or what shouldn't i do now we asked
+
+00:01:50,399 --> 00:01:57,200
+a third-party safety accessor
+
+00:01:54,399 --> 00:01:58,079
+and the answer was kind of
+
+00:01:57,200 --> 00:02:00,000
+straightforward
+
+00:01:58,079 --> 00:02:02,079
+it should comply to autosal c plus plus
+
+00:02:00,000 --> 00:02:03,840
+14 encoding guidelines regarding memory
+
+00:02:02,079 --> 00:02:06,719
+allocations
+
+00:02:03,840 --> 00:02:09,280
+and uh maybe auto star c plus plus 14
+
+00:02:06,719 --> 00:02:10,160
+coding guidelines a bit outdated as the
+
+00:02:09,280 --> 00:02:12,080
+name suggests
+
+00:02:10,160 --> 00:02:14,560
+but regarding memory allocations it's
+
+00:02:12,080 --> 00:02:17,680
+still very relevant i think
+
+00:02:14,560 --> 00:02:20,080
+so at autosar we have like three
+
+00:02:17,680 --> 00:02:21,840
+main rules and two of them is basically
+
+00:02:20,080 --> 00:02:22,560
+the same thing put in a little bit
+
+00:02:21,840 --> 00:02:26,239
+different
+
+00:02:22,560 --> 00:02:29,200
+wording now these five bullets are
+
+00:02:26,239 --> 00:02:29,200
+important actually
+
+00:02:29,360 --> 00:02:34,319
+we should strive for deterministic
+
+00:02:30,959 --> 00:02:36,560
+behavior avoiding memory fragmentation
+
+00:02:34,319 --> 00:02:38,000
+avoiding running out of memory avoiding
+
+00:02:36,560 --> 00:02:40,319
+mismatched allocations
+
+00:02:38,000 --> 00:02:42,959
+audi allocations and no dependence on
+
+00:02:40,319 --> 00:02:45,840
+non-deterministic calls to kernel
+
+00:02:42,959 --> 00:02:46,480
+now running out of memory and avoiding
+
+00:02:45,840 --> 00:02:48,800
+mismatched
+
+00:02:46,480 --> 00:02:50,319
+locations or the allocations is not
+
+00:02:48,800 --> 00:02:51,440
+something we can actually provide as a
+
+00:02:50,319 --> 00:02:55,440
+middleware
+
+00:02:51,440 --> 00:02:58,480
+it's always something user can do
+
+00:02:55,440 --> 00:02:59,040
+can run out out of memory or can misuse
+
+00:02:58,480 --> 00:03:02,080
+api
+
+00:02:59,040 --> 00:03:03,280
+and and get mismatched locations or deal
+
+00:03:02,080 --> 00:03:05,200
+locations
+
+00:03:03,280 --> 00:03:07,440
+but other three things we can address
+
+00:03:05,200 --> 00:03:11,040
+and we are going to
+
+00:03:07,440 --> 00:03:12,720
+now another important rule
+
+00:03:11,040 --> 00:03:15,280
+which is kind of relevant for our
+
+00:03:12,720 --> 00:03:18,159
+presentation is that we actually allowed
+
+00:03:15,280 --> 00:03:19,360
+to allocate dynamic memory but we can do
+
+00:03:18,159 --> 00:03:22,159
+it only in
+
+00:03:19,360 --> 00:03:24,560
+our init stage in the beginning and when
+
+00:03:22,159 --> 00:03:27,440
+we go into operational mode like full
+
+00:03:24,560 --> 00:03:28,239
+full working mode we cannot do it
+
+00:03:27,440 --> 00:03:30,400
+anymore
+
+00:03:28,239 --> 00:03:33,280
+so we are allowed to pre-allocate and
+
+00:03:30,400 --> 00:03:36,879
+this is a good thing
+
+00:03:33,280 --> 00:03:37,200
+now memory pool is known as a a solution
+
+00:03:36,879 --> 00:03:41,360
+for
+
+00:03:37,200 --> 00:03:42,799
+for for most of these points
+
+00:03:41,360 --> 00:03:45,200
+and i'm talking about memory pool with
+
+00:03:42,799 --> 00:03:46,799
+fixed block sizes
+
+00:03:45,200 --> 00:03:48,319
+now it provides constant time the
+
+00:03:46,799 --> 00:03:51,200
+allocations and
+
+00:03:48,319 --> 00:03:52,239
+uh sorry allocations and deal locations
+
+00:03:51,200 --> 00:03:55,680
+um
+
+00:03:52,239 --> 00:03:57,519
+it avoids memory fragmentation um
+
+00:03:55,680 --> 00:03:59,280
+it's easy to implement understand and
+
+00:03:57,519 --> 00:04:01,360
+reason the bound which is
+
+00:03:59,280 --> 00:04:02,720
+actually very important in certification
+
+00:04:01,360 --> 00:04:05,519
+process
+
+00:04:02,720 --> 00:04:07,040
+so a memory pool with fixed bucket sizes
+
+00:04:05,519 --> 00:04:07,439
+looks something like this we have like
+
+00:04:07,040 --> 00:04:11,920
+this
+
+00:04:07,439 --> 00:04:16,239
+buckets and the sizes of the buckets
+
+00:04:11,920 --> 00:04:18,239
+are predefined in in two in two
+
+00:04:16,239 --> 00:04:20,799
+in two aspects it's a the bucket itself
+
+00:04:18,239 --> 00:04:23,600
+is a fixed size
+
+00:04:20,799 --> 00:04:24,560
+and uh the things we can put into
+
+00:04:23,600 --> 00:04:27,120
+buckets are all
+
+00:04:24,560 --> 00:04:27,600
+should be of the same size so we see
+
+00:04:27,120 --> 00:04:30,080
+here
+
+00:04:27,600 --> 00:04:31,120
+like the bucket of of the things which
+
+00:04:30,080 --> 00:04:34,240
+take eight bytes
+
+00:04:31,120 --> 00:04:36,960
+and we have placed for three of them and
+
+00:04:34,240 --> 00:04:37,280
+64 byte slots and we have four of them
+
+00:04:36,960 --> 00:04:41,280
+and
+
+00:04:37,280 --> 00:04:41,280
+and so on so
+
+00:04:41,759 --> 00:04:49,360
+this is this is a this is a memory pool
+
+00:04:45,440 --> 00:04:54,160
+uh a collection of buckets right
+
+00:04:49,360 --> 00:04:54,160
+now in c plus plus
+
+00:04:54,840 --> 00:04:59,040
+uh
+
+00:04:56,720 --> 00:04:59,840
+we have a problem and this problem
+
+00:04:59,040 --> 00:05:03,199
+starts with
+
+00:04:59,840 --> 00:05:05,600
+with actually the
+
+00:05:03,199 --> 00:05:08,000
+this need to know the dimension of all
+
+00:05:05,600 --> 00:05:10,479
+buckets in advance
+
+00:05:08,000 --> 00:05:13,120
+a bucket size is actually a combination
+
+00:05:10,479 --> 00:05:15,919
+of block size and blow count right
+
+00:05:13,120 --> 00:05:17,840
+and a blow count is something which
+
+00:05:15,919 --> 00:05:18,880
+depends on runtime and users usually
+
+00:05:17,840 --> 00:05:22,479
+have some kind of
+
+00:05:18,880 --> 00:05:24,400
+a hard coded limitation uh
+
+00:05:22,479 --> 00:05:25,919
+so for example it may depend on the
+
+00:05:24,400 --> 00:05:26,960
+input it might depend on something
+
+00:05:25,919 --> 00:05:30,080
+something
+
+00:05:26,960 --> 00:05:31,759
+really not known in compile time and in
+
+00:05:30,080 --> 00:05:33,520
+embedded systems
+
+00:05:31,759 --> 00:05:35,919
+there are usually hard coded limits for
+
+00:05:33,520 --> 00:05:37,840
+many things but block sizes should be
+
+00:05:35,919 --> 00:05:39,120
+known at compile time right to be in a
+
+00:05:37,840 --> 00:05:42,960
+strictly typed language
+
+00:05:39,120 --> 00:05:46,400
+and we should know how many bytes
+
+00:05:42,960 --> 00:05:49,039
+everything we allocate actually takes
+
+00:05:46,400 --> 00:05:50,080
+but the problem is that c plus plus
+
+00:05:49,039 --> 00:05:53,039
+constructs often
+
+00:05:50,080 --> 00:05:54,479
+hide the real sizes of allocations if
+
+00:05:53,039 --> 00:05:56,880
+you take a look at
+
+00:05:54,479 --> 00:05:58,160
+things like stood map list promise
+
+00:05:56,880 --> 00:06:01,199
+shared ptr
+
+00:05:58,160 --> 00:06:03,520
+they all accept a user-provided
+
+00:06:01,199 --> 00:06:05,360
+allocator
+
+00:06:03,520 --> 00:06:06,800
+in some form or another as a template
+
+00:06:05,360 --> 00:06:10,720
+argument or
+
+00:06:06,800 --> 00:06:10,720
+constructor argument
+
+00:06:11,520 --> 00:06:16,800
+but they never use it
+
+00:06:14,560 --> 00:06:18,160
+they actually never use our locator
+
+00:06:16,800 --> 00:06:21,520
+directly
+
+00:06:18,160 --> 00:06:24,800
+so we cannot derive our uh
+
+00:06:21,520 --> 00:06:27,199
+block sizes from um
+
+00:06:24,800 --> 00:06:28,560
+from allocator we we provide with
+
+00:06:27,199 --> 00:06:31,919
+constructs
+
+00:06:28,560 --> 00:06:35,919
+and the reason for that actually is
+
+00:06:31,919 --> 00:06:36,960
+that a if you think about it stood least
+
+00:06:35,919 --> 00:06:38,800
+never allocates
+
+00:06:36,960 --> 00:06:41,520
+uh the thing we actually asked it to
+
+00:06:38,800 --> 00:06:45,600
+allocate so if it stood list of integers
+
+00:06:41,520 --> 00:06:45,600
+right it's going to locate notes and not
+
+00:06:46,319 --> 00:06:50,000
+has at least two pointers like next and
+
+00:06:48,960 --> 00:06:52,240
+previous
+
+00:06:50,000 --> 00:06:53,440
+and the thing itself maybe maybe maybe
+
+00:06:52,240 --> 00:06:56,319
+something else
+
+00:06:53,440 --> 00:06:58,560
+and uh it's completely implementation
+
+00:06:56,319 --> 00:07:00,080
+defined and hidden inside the library so
+
+00:06:58,560 --> 00:07:02,080
+it can vary between different
+
+00:07:00,080 --> 00:07:03,919
+implementations for example
+
+00:07:02,080 --> 00:07:06,319
+right so what it allocates is actually
+
+00:07:03,919 --> 00:07:10,080
+this internal think not what we asked it
+
+00:07:06,319 --> 00:07:12,080
+uh to allocate right so
+
+00:07:10,080 --> 00:07:13,199
+but we have some good news here and the
+
+00:07:12,080 --> 00:07:16,400
+good news is that
+
+00:07:13,199 --> 00:07:19,599
+even though allocator we
+
+00:07:16,400 --> 00:07:22,639
+we give uh to to the thing
+
+00:07:19,599 --> 00:07:23,360
+is not used a related one is usu usually
+
+00:07:22,639 --> 00:07:26,720
+used
+
+00:07:23,360 --> 00:07:30,880
+and uh when i say related i i mean with
+
+00:07:26,720 --> 00:07:33,280
+a famous or infamous rebind construct
+
+00:07:30,880 --> 00:07:34,960
+which basically instantiates the same
+
+00:07:33,280 --> 00:07:36,960
+template
+
+00:07:34,960 --> 00:07:39,039
+we kind of provide it as a template
+
+00:07:36,960 --> 00:07:41,479
+argument uh
+
+00:07:39,039 --> 00:07:44,240
+to the list or whatever and
+
+00:07:41,479 --> 00:07:47,599
+reinstantiates this with another
+
+00:07:44,240 --> 00:07:48,560
+type so it's still the same allocator
+
+00:07:47,599 --> 00:07:51,280
+type
+
+00:07:48,560 --> 00:07:52,000
+but it's different instantiation of this
+
+00:07:51,280 --> 00:07:55,120
+template
+
+00:07:52,000 --> 00:07:55,919
+so what list is going to do is going to
+
+00:07:55,120 --> 00:07:58,720
+rebind
+
+00:07:55,919 --> 00:07:59,759
+our allocator with something called like
+
+00:07:58,720 --> 00:08:02,800
+list node or
+
+00:07:59,759 --> 00:08:04,720
+something like this internal name but
+
+00:08:02,800 --> 00:08:07,039
+still with allocate functions
+
+00:08:04,720 --> 00:08:08,800
+uh function we defined in our locator if
+
+00:08:07,039 --> 00:08:09,840
+it's our customer locator is going to be
+
+00:08:08,800 --> 00:08:13,360
+called just for
+
+00:08:09,840 --> 00:08:15,039
+another type so so this u becomes t
+
+00:08:13,360 --> 00:08:16,560
+so there is still a place where we
+
+00:08:15,039 --> 00:08:19,039
+should know this size right
+
+00:08:16,560 --> 00:08:20,080
+even though it's hidden and under this
+
+00:08:19,039 --> 00:08:23,120
+rebind thing
+
+00:08:20,080 --> 00:08:25,919
+and so on so
+
+00:08:23,120 --> 00:08:26,319
+what we would like to do we would like
+
+00:08:25,919 --> 00:08:28,479
+to
+
+00:08:26,319 --> 00:08:30,479
+to be able to use any code which adopts
+
+00:08:28,479 --> 00:08:31,919
+standard c plus plus a locator model
+
+00:08:30,479 --> 00:08:34,080
+without modifications
+
+00:08:31,919 --> 00:08:36,399
+but allocate from a memory pool under
+
+00:08:34,080 --> 00:08:38,240
+the hood instead of going to the hip or
+
+00:08:36,399 --> 00:08:40,240
+whatever
+
+00:08:38,240 --> 00:08:41,680
+so in order to implement that we are
+
+00:08:40,240 --> 00:08:43,599
+going to to do three things
+
+00:08:41,680 --> 00:08:45,360
+we are going to create a memory pool
+
+00:08:43,599 --> 00:08:47,120
+itself we are going to
+
+00:08:45,360 --> 00:08:48,800
+create an allocator which allocates from
+
+00:08:47,120 --> 00:08:51,120
+this memory pool
+
+00:08:48,800 --> 00:08:53,519
+and we are going to define a way to
+
+00:08:51,120 --> 00:08:54,160
+generate bucket definitions with block
+
+00:08:53,519 --> 00:08:56,399
+sizes
+
+00:08:54,160 --> 00:08:57,519
+right according to the actual
+
+00:08:56,399 --> 00:09:00,480
+allocations
+
+00:08:57,519 --> 00:09:01,200
+you know allocator does even if it's
+
+00:09:00,480 --> 00:09:05,519
+some hidden
+
+00:09:01,200 --> 00:09:08,720
+uh some sort of some hidden type um
+
+00:09:05,519 --> 00:09:11,760
+like in list example so
+
+00:09:08,720 --> 00:09:13,120
+first of all memory foam
+
+00:09:11,760 --> 00:09:15,519
+now we are going for a minimum
+
+00:09:13,120 --> 00:09:18,320
+implementation so some error checks
+
+00:09:15,519 --> 00:09:20,240
+are skipped for better readability and
+
+00:09:18,320 --> 00:09:22,240
+implementation is not read safe
+
+00:09:20,240 --> 00:09:23,519
+even though it's easy to convert to a
+
+00:09:22,240 --> 00:09:26,880
+trade save
+
+00:09:23,519 --> 00:09:30,000
+and default alignment is assumed
+
+00:09:26,880 --> 00:09:31,440
+uh so again if
+
+00:09:30,000 --> 00:09:33,600
+we want to be more precise with
+
+00:09:31,440 --> 00:09:35,600
+alignment we can we can do that but for
+
+00:09:33,600 --> 00:09:39,839
+this example default alignment is
+
+00:09:35,600 --> 00:09:43,120
+is uh is completely okay it suffices
+
+00:09:39,839 --> 00:09:43,680
+so uh one thing we would still want to
+
+00:09:43,120 --> 00:09:45,839
+do
+
+00:09:43,680 --> 00:09:47,040
+is to be able to define multiple
+
+00:09:45,839 --> 00:09:50,720
+instances of
+
+00:09:47,040 --> 00:09:52,880
+of the memory pool the reason for that
+
+00:09:50,720 --> 00:09:55,040
+is that safety critical applications
+
+00:09:52,880 --> 00:09:55,920
+usually require separation of memory
+
+00:09:55,040 --> 00:09:59,680
+pools
+
+00:09:55,920 --> 00:10:02,480
+just for safety and uh
+
+00:09:59,680 --> 00:10:04,160
+just as example a pulper trail with a
+
+00:10:02,480 --> 00:10:07,760
+lot of wood looking all together
+
+00:10:04,160 --> 00:10:10,880
+even though it's just one way to do it
+
+00:10:07,760 --> 00:10:13,920
+or multiple postpartum per one
+
+00:10:10,880 --> 00:10:16,839
+thing uh whatever it is
+
+00:10:13,920 --> 00:10:18,079
+right you we can compose it in different
+
+00:10:16,839 --> 00:10:20,959
+ways
+
+00:10:18,079 --> 00:10:22,959
+now let's take a look at bucket
+
+00:10:20,959 --> 00:10:24,640
+implementation
+
+00:10:22,959 --> 00:10:26,320
+now our bucket is going to be something
+
+00:10:24,640 --> 00:10:28,240
+like this and
+
+00:10:26,320 --> 00:10:30,560
+an interesting thing here is with two
+
+00:10:28,240 --> 00:10:32,880
+pointers
+
+00:10:30,560 --> 00:10:35,279
+right we have a pointer to data which is
+
+00:10:32,880 --> 00:10:38,640
+like the memory area itself from which
+
+00:10:35,279 --> 00:10:41,120
+we are going to allocate for our blogs
+
+00:10:38,640 --> 00:10:43,360
+and we have this ledger and the ledger
+
+00:10:41,120 --> 00:10:47,440
+is just a bookkeeping mechanism
+
+00:10:43,360 --> 00:10:50,000
+which uh uses one bit per block
+
+00:10:47,440 --> 00:10:51,279
+uh in order to indicate whether it is in
+
+00:10:50,000 --> 00:10:54,399
+use
+
+00:10:51,279 --> 00:10:57,360
+so for example if we allocate block
+
+00:10:54,399 --> 00:10:58,880
+with index five inside with data array
+
+00:10:57,360 --> 00:11:02,079
+we are going to put
+
+00:10:58,880 --> 00:11:04,000
+bit five inside the ledger to one and if
+
+00:11:02,079 --> 00:11:05,360
+it allocates we're going to put it to
+
+00:11:04,000 --> 00:11:08,640
+zero
+
+00:11:05,360 --> 00:11:10,720
+now block size and block count is two
+
+00:11:08,640 --> 00:11:11,279
+properties of the bucket and it gets it
+
+00:11:10,720 --> 00:11:13,040
+into
+
+00:11:11,279 --> 00:11:14,720
+uh in the constructor and assigns to
+
+00:11:13,040 --> 00:11:18,800
+this
+
+00:11:14,720 --> 00:11:22,800
+two variables and belongs function
+
+00:11:18,800 --> 00:11:26,240
+actually just tells us if the
+
+00:11:22,800 --> 00:11:28,160
+pointer belongs to memory area
+
+00:11:26,240 --> 00:11:29,920
+of this bucket and this is trivia i'm
+
+00:11:28,160 --> 00:11:32,320
+not going to show it it just
+
+00:11:29,920 --> 00:11:34,000
+checks that pointer is in range right
+
+00:11:32,320 --> 00:11:35,680
+we're going to take a look at allocate
+
+00:11:34,000 --> 00:11:37,120
+and allocate in more detail in next
+
+00:11:35,680 --> 00:11:39,360
+slides
+
+00:11:37,120 --> 00:11:40,880
+and with free private functions actually
+
+00:11:39,360 --> 00:11:42,000
+helpers are not going to show the
+
+00:11:40,880 --> 00:11:45,600
+implementation they
+
+00:11:42,000 --> 00:11:48,880
+were rather trivial first finds
+
+00:11:45,600 --> 00:11:51,040
+an adjacent contiguous blocks a number
+
+00:11:48,880 --> 00:11:53,600
+of contiguous blocks we asked it
+
+00:11:51,040 --> 00:11:55,200
+uh so if we need like four blocks to
+
+00:11:53,600 --> 00:11:58,480
+allocate and we'll see why we
+
+00:11:55,200 --> 00:11:59,040
+may want it uh it just goes over our
+
+00:11:58,480 --> 00:12:02,639
+ledger
+
+00:11:59,040 --> 00:12:05,839
+and tries to find three zeros uh
+
+00:12:02,639 --> 00:12:09,200
+in in in uh sequence and
+
+00:12:05,839 --> 00:12:11,120
+returns as a index of first of them yeah
+
+00:12:09,200 --> 00:12:12,639
+and now set blocks and use and set
+
+00:12:11,120 --> 00:12:14,800
+blocks free just flip
+
+00:12:12,639 --> 00:12:15,839
+this beat so for example set blocks and
+
+00:12:14,800 --> 00:12:19,120
+use we say
+
+00:12:15,839 --> 00:12:21,519
+okay starting from uh block seven
+
+00:12:19,120 --> 00:12:22,880
+it's going to be in use like five blocks
+
+00:12:21,519 --> 00:12:23,760
+are going to be used so it's going to
+
+00:12:22,880 --> 00:12:26,399
+put like
+
+00:12:23,760 --> 00:12:27,600
+five months starting from this index and
+
+00:12:26,399 --> 00:12:29,120
+set blocks three
+
+00:12:27,600 --> 00:12:30,720
+does exactly the same thing but put
+
+00:12:29,120 --> 00:12:34,480
+zeros
+
+00:12:30,720 --> 00:12:36,240
+right so we're saying block is free now
+
+00:12:34,480 --> 00:12:37,839
+now we're going to take a look at the
+
+00:12:36,240 --> 00:12:40,320
+constructor which is
+
+00:12:37,839 --> 00:12:41,680
+rather trivial just two mallocs and of
+
+00:12:40,320 --> 00:12:45,040
+course we do some
+
+00:12:41,680 --> 00:12:45,839
+rounding up for ledger size in order to
+
+00:12:45,040 --> 00:12:49,120
+have enough
+
+00:12:45,839 --> 00:12:52,240
+bits for every block and we
+
+00:12:49,120 --> 00:12:53,519
+zero everything out and this is
+
+00:12:52,240 --> 00:12:56,480
+basically it and
+
+00:12:53,519 --> 00:12:58,399
+the uh destructor is going to free
+
+00:12:56,480 --> 00:13:00,399
+everything now if we
+
+00:12:58,399 --> 00:13:02,079
+if we need some kind of alignment it's
+
+00:13:00,399 --> 00:13:02,959
+probably going to be here so instead
+
+00:13:02,079 --> 00:13:05,600
+maluk
+
+00:13:02,959 --> 00:13:06,000
+we're going to use something uh which
+
+00:13:05,600 --> 00:13:09,279
+can
+
+00:13:06,000 --> 00:13:12,480
+give us a custom alignment but again no
+
+00:13:09,279 --> 00:13:14,880
+not in this presentation now
+
+00:13:12,480 --> 00:13:15,760
+the allocate function takes amount of
+
+00:13:14,880 --> 00:13:18,079
+bytes
+
+00:13:15,760 --> 00:13:19,040
+calculates the amount of blocks it would
+
+00:13:18,079 --> 00:13:21,760
+take
+
+00:13:19,040 --> 00:13:23,519
+a locate with bytes and of course it
+
+00:13:21,760 --> 00:13:24,800
+rounds it up so our blocks are always
+
+00:13:23,519 --> 00:13:27,600
+fixed size
+
+00:13:24,800 --> 00:13:29,440
+yeah so if our block is like 10 bytes
+
+00:13:27,600 --> 00:13:30,240
+and we ask for 12 bytes it's going to
+
+00:13:29,440 --> 00:13:33,519
+actually locate
+
+00:13:30,240 --> 00:13:36,079
+20 because there's two blocks right and
+
+00:13:33,519 --> 00:13:38,079
+if we don't have enough contiguous
+
+00:13:36,079 --> 00:13:40,399
+adjacent blocks
+
+00:13:38,079 --> 00:13:42,720
+then we're going to return null ptr
+
+00:13:40,399 --> 00:13:46,000
+otherwise we are setting these blocks
+
+00:13:42,720 --> 00:13:47,600
+in use and returning the pointer to the
+
+00:13:46,000 --> 00:13:52,320
+beginning of the
+
+00:13:47,600 --> 00:13:55,120
+memory area for user
+
+00:13:52,320 --> 00:13:55,600
+now the allocate is going to do more or
+
+00:13:55,120 --> 00:13:58,880
+less
+
+00:13:55,600 --> 00:14:01,199
+opposite thing it has a pointer
+
+00:13:58,880 --> 00:14:02,240
+and byte so it can calculate both the
+
+00:14:01,199 --> 00:14:05,279
+index
+
+00:14:02,240 --> 00:14:08,480
+and the amount of blocks so it can just
+
+00:14:05,279 --> 00:14:08,959
+put zeros in the ledger and basically
+
+00:14:08,480 --> 00:14:12,160
+this is
+
+00:14:08,959 --> 00:14:17,360
+the whole thing the allocate should do
+
+00:14:12,160 --> 00:14:20,399
+right so it's rather straightforward
+
+00:14:17,360 --> 00:14:22,880
+now what is memory pool
+
+00:14:20,399 --> 00:14:23,440
+it's just a collection of buckets
+
+00:14:22,880 --> 00:14:26,160
+actually
+
+00:14:23,440 --> 00:14:28,079
+and each bucket has two properties right
+
+00:14:26,160 --> 00:14:29,680
+right block size and block count
+
+00:14:28,079 --> 00:14:31,360
+it can also has alignment and other
+
+00:14:29,680 --> 00:14:34,560
+things but in our example it's
+
+00:14:31,360 --> 00:14:36,240
+only block size and block count so a
+
+00:14:34,560 --> 00:14:36,959
+collection of these properties per
+
+00:14:36,240 --> 00:14:38,959
+bucket
+
+00:14:36,959 --> 00:14:40,240
+will actually define an instance of the
+
+00:14:38,959 --> 00:14:43,440
+pool
+
+00:14:40,240 --> 00:14:46,639
+so how would we define it uh
+
+00:14:43,440 --> 00:14:49,760
+in a way which would be convenient to
+
+00:14:46,639 --> 00:14:52,079
+auto generate or do things like this
+
+00:14:49,760 --> 00:14:53,839
+so what would the collection of uh
+
+00:14:52,079 --> 00:14:55,600
+parameters look like
+
+00:14:53,839 --> 00:14:57,360
+how would we define more than one pool
+
+00:14:55,600 --> 00:15:00,480
+instance well
+
+00:14:57,360 --> 00:15:01,760
+uh we'll do something like this we will
+
+00:15:00,480 --> 00:15:04,240
+define a kind of
+
+00:15:01,760 --> 00:15:05,120
+kind of type trait called bucket
+
+00:15:04,240 --> 00:15:08,160
+descriptors
+
+00:15:05,120 --> 00:15:11,199
+and id here is actually id of
+
+00:15:08,160 --> 00:15:12,560
+the memory pool so we have like five
+
+00:15:11,199 --> 00:15:15,920
+memory pools we we
+
+00:15:12,560 --> 00:15:18,320
+can have uh one two three four five
+
+00:15:15,920 --> 00:15:19,279
+like numbers or we can do something more
+
+00:15:18,320 --> 00:15:22,399
+interesting like
+
+00:15:19,279 --> 00:15:23,760
+uh compile time fashions uh of strings
+
+00:15:22,399 --> 00:15:26,800
+or something like this is more
+
+00:15:23,760 --> 00:15:30,480
+informative or to avoid
+
+00:15:26,800 --> 00:15:31,839
+avoid collisions in in different uh
+
+00:15:30,480 --> 00:15:33,680
+files or something like this but we are
+
+00:15:31,839 --> 00:15:37,199
+going with just integers uh
+
+00:15:33,680 --> 00:15:38,560
+for for this presentation so our default
+
+00:15:37,199 --> 00:15:40,639
+implementation of
+
+00:15:38,560 --> 00:15:42,959
+this descriptors thing it's going to
+
+00:15:40,639 --> 00:15:43,920
+hold exactly zero buckets so you see the
+
+00:15:42,959 --> 00:15:46,320
+type here is
+
+00:15:43,920 --> 00:15:48,000
+empty tuple and empty tuple here
+
+00:15:46,320 --> 00:15:50,720
+basically says
+
+00:15:48,000 --> 00:15:52,240
+okay this memory pool is not defined we
+
+00:15:50,720 --> 00:15:55,440
+don't have any buckets for this
+
+00:15:52,240 --> 00:15:59,360
+so if you instantiate it with any id
+
+00:15:55,440 --> 00:16:02,880
+you you you get like empty memory pool
+
+00:15:59,360 --> 00:16:06,079
+but what we can do we can specialize it
+
+00:16:02,880 --> 00:16:08,399
+for certain for certain ids
+
+00:16:06,079 --> 00:16:09,519
+and actually define memory pools this
+
+00:16:08,399 --> 00:16:12,000
+way
+
+00:16:09,519 --> 00:16:13,759
+now this file is actually a pretty easy
+
+00:16:12,000 --> 00:16:15,120
+to auto generate once we know all the
+
+00:16:13,759 --> 00:16:18,160
+information right
+
+00:16:15,120 --> 00:16:21,279
+so this is what we're going for now
+
+00:16:18,160 --> 00:16:23,360
+here we see the implementation
+
+00:16:21,279 --> 00:16:25,519
+a specialization of bucket descriptors
+
+00:16:23,360 --> 00:16:28,480
+from memory pool one
+
+00:16:25,519 --> 00:16:29,279
+which actually holds three buckets of 16
+
+00:16:28,480 --> 00:16:32,560
+00:16:29,279 --> 00:16:34,320
+and 1k block sizes and
+
+00:16:32,560 --> 00:16:36,240
+as we said blow count here is kind of
+
+00:16:34,320 --> 00:16:37,920
+hard coded we're not going to address it
+
+00:16:36,240 --> 00:16:42,639
+very much it is something
+
+00:16:37,920 --> 00:16:42,639
+which is an application defined mostly
+
+00:16:42,800 --> 00:16:50,320
+so uh adding with specialization
+
+00:16:46,480 --> 00:16:52,399
+and recompiling code basically adds a
+
+00:16:50,320 --> 00:16:56,079
+definition of memory pull
+
+00:16:52,399 --> 00:16:57,360
+now we need to use it somehow right
+
+00:16:56,079 --> 00:17:00,399
+now we're going to define some
+
+00:16:57,360 --> 00:17:02,639
+boilerplate and it looks scary but it's
+
+00:17:00,399 --> 00:17:04,959
+just that it's boilerplate to save some
+
+00:17:02,639 --> 00:17:07,520
+space on next slides
+
+00:17:04,959 --> 00:17:09,439
+first of all we'll define a bucket count
+
+00:17:07,520 --> 00:17:12,450
+trait which just
+
+00:17:09,439 --> 00:17:14,400
+makes uh the tuple circles tuple size
+
+00:17:12,450 --> 00:17:17,039
+[Music]
+
+00:17:14,400 --> 00:17:17,839
+and we'll define pool type which is just
+
+00:17:17,039 --> 00:17:21,919
+to the array
+
+00:17:17,839 --> 00:17:24,799
+of bucket and bucket count
+
+00:17:21,919 --> 00:17:26,079
+and we will define two trades get size
+
+00:17:24,799 --> 00:17:28,640
+and get count
+
+00:17:26,079 --> 00:17:31,039
+which will help us to extract with block
+
+00:17:28,640 --> 00:17:34,160
+size and blow count properties from
+
+00:17:31,039 --> 00:17:34,160
+the previous slide
+
+00:17:38,559 --> 00:17:42,880
+but to do it conveniently when we we
+
+00:17:40,559 --> 00:17:45,600
+give it like an idea of a memorable
+
+00:17:42,880 --> 00:17:46,480
+and the index of a bucket inside tuple
+
+00:17:45,600 --> 00:17:49,840
+and we get
+
+00:17:46,480 --> 00:17:54,320
+block size as a value or blow count as a
+
+00:17:49,840 --> 00:17:57,600
+value now when we have all these
+
+00:17:54,320 --> 00:17:59,840
+we can define our pools
+
+00:17:57,600 --> 00:18:01,280
+very easily we can define with get
+
+00:17:59,840 --> 00:18:07,120
+instance function which is
+
+00:18:01,280 --> 00:18:10,799
+instantiated with a memory pro id
+
+00:18:07,120 --> 00:18:11,679
+and it is going to define a static local
+
+00:18:10,799 --> 00:18:14,640
+studio rape
+
+00:18:11,679 --> 00:18:15,760
+i remind you that pool type is just to
+
+00:18:14,640 --> 00:18:19,520
+the array
+
+00:18:15,760 --> 00:18:21,520
+uh and it's going to call this get size
+
+00:18:19,520 --> 00:18:23,280
+and get count on every bucket from left
+
+00:18:21,520 --> 00:18:27,600
+to right and instantiate with
+
+00:18:23,280 --> 00:18:30,960
+our our array with this
+
+00:18:27,600 --> 00:18:34,160
+actual buckets right
+
+00:18:30,960 --> 00:18:36,799
+so when we call get instance first time
+
+00:18:34,160 --> 00:18:38,640
+everything is allocated and and created
+
+00:18:36,799 --> 00:18:43,840
+and we have our memory pool with
+
+00:18:38,640 --> 00:18:43,840
+this id okay
+
+00:18:44,000 --> 00:18:48,160
+now here's an interesting question how
+
+00:18:46,480 --> 00:18:49,919
+to choose a right bucket we have like
+
+00:18:48,160 --> 00:18:51,440
+this memory pool with many buckets of
+
+00:18:49,919 --> 00:18:54,480
+different sizes
+
+00:18:51,440 --> 00:18:56,640
+so a naive thing to do would be just to
+
+00:18:54,480 --> 00:18:57,520
+go through the buckets until we find one
+
+00:18:56,640 --> 00:19:01,120
+big enough
+
+00:18:57,520 --> 00:19:03,520
+right for one like one block
+
+00:19:01,120 --> 00:19:04,720
+and it may work in some cases it would
+
+00:19:03,520 --> 00:19:08,840
+look something like this
+
+00:19:04,720 --> 00:19:12,240
+very simple we just go through all our
+
+00:19:08,840 --> 00:19:15,200
+buckets and once we find one which works
+
+00:19:12,240 --> 00:19:16,320
+just to locate from it and if it if it
+
+00:19:15,200 --> 00:19:19,280
+succeeds
+
+00:19:16,320 --> 00:19:21,039
+just return with ptr otherwise uh if we
+
+00:19:19,280 --> 00:19:23,600
+we never found the bucket which we
+
+00:19:21,039 --> 00:19:24,960
+were able to allocate from we is fraud
+
+00:19:23,600 --> 00:19:27,600
+stood by dialogue and
+
+00:19:24,960 --> 00:19:29,200
+that's it it would work for things like
+
+00:19:27,600 --> 00:19:31,360
+stood mappers to the list and by the way
+
+00:19:29,200 --> 00:19:32,799
+i use this stl examples because they are
+
+00:19:31,360 --> 00:19:37,039
+very well known for
+
+00:19:32,799 --> 00:19:39,120
+everyone uh and and
+
+00:19:37,039 --> 00:19:41,440
+not because something special about scl
+
+00:19:39,120 --> 00:19:43,440
+right but it's just convenient to talk
+
+00:19:41,440 --> 00:19:46,000
+about
+
+00:19:43,440 --> 00:19:47,039
+now uh from apple at least it would work
+
+00:19:46,000 --> 00:19:49,440
+because maps
+
+00:19:47,039 --> 00:19:50,160
+uh mapping at least they allocate
+
+00:19:49,440 --> 00:19:51,840
+usually
+
+00:19:50,160 --> 00:19:53,679
+at least in most implementations i
+
+00:19:51,840 --> 00:19:55,679
+locate only one type of thing and they
+
+00:19:53,679 --> 00:19:57,280
+always locate things one by one so
+
+00:19:55,679 --> 00:19:59,760
+these nodes are always located one by
+
+00:19:57,280 --> 00:20:02,320
+one map nodes are always located
+
+00:19:59,760 --> 00:20:03,919
+one by one but it's not the case in many
+
+00:20:02,320 --> 00:20:06,240
+in many other cases
+
+00:20:03,919 --> 00:20:07,919
+like for example it would work as we
+
+00:20:06,240 --> 00:20:09,520
+said for map but it wouldn't work for
+
+00:20:07,919 --> 00:20:12,559
+something like an orbit map
+
+00:20:09,520 --> 00:20:13,919
+and the reason for that is that another
+
+00:20:12,559 --> 00:20:15,679
+map show actually allocates
+
+00:20:13,919 --> 00:20:18,159
+two different things in two different
+
+00:20:15,679 --> 00:20:21,200
+manners first of all it allocates a
+
+00:20:18,159 --> 00:20:25,200
+hedge node itself which is uh basically
+
+00:20:21,200 --> 00:20:26,159
+the same pattern of allocation as a map
+
+00:20:25,200 --> 00:20:28,000
+does
+
+00:20:26,159 --> 00:20:30,000
+so is the thing itself which is holds
+
+00:20:28,000 --> 00:20:32,320
+like the key and value
+
+00:20:30,000 --> 00:20:33,679
+but it also locates pointers to these
+
+00:20:32,320 --> 00:20:36,880
+things
+
+00:20:33,679 --> 00:20:38,159
+and it does it because well confusingly
+
+00:20:36,880 --> 00:20:40,480
+it's also called bucket
+
+00:20:38,159 --> 00:20:43,840
+bucket yeah an ordered map it's a hash
+
+00:20:40,480 --> 00:20:47,440
+map and it has this bucket list
+
+00:20:43,840 --> 00:20:48,080
+on every unique key so when you do
+
+00:20:47,440 --> 00:20:52,400
+rehash
+
+00:20:48,080 --> 00:20:54,960
+or resize it's going to reallocate with
+
+00:20:52,400 --> 00:20:56,159
+linked lists uh of things or at least
+
+00:20:54,960 --> 00:20:59,120
+most implementations
+
+00:20:56,159 --> 00:21:01,120
+it's a linked list of things and it's
+
+00:20:59,120 --> 00:21:04,559
+going to need some pointers right
+
+00:21:01,120 --> 00:21:05,520
+so it's always it's almost always going
+
+00:21:04,559 --> 00:21:08,880
+to allocate them
+
+00:21:05,520 --> 00:21:11,600
+in in draws not not like one of them
+
+00:21:08,880 --> 00:21:13,440
+yeah so we have two different things to
+
+00:21:11,600 --> 00:21:16,960
+allocate one of them is allocated
+
+00:21:13,440 --> 00:21:18,880
+in one way one manner and another may
+
+00:21:16,960 --> 00:21:22,000
+be allocated in multiples and if you
+
+00:21:18,880 --> 00:21:25,679
+think about it vector does that and and
+
+00:21:22,000 --> 00:21:28,559
+that does that and and many other things
+
+00:21:25,679 --> 00:21:29,440
+actually allocate not one but but many
+
+00:21:28,559 --> 00:21:32,880
+things
+
+00:21:29,440 --> 00:21:34,720
+and what can happen uh well since our
+
+00:21:32,880 --> 00:21:36,880
+buckets are based on the type
+
+00:21:34,720 --> 00:21:38,400
+we are going to have if we like do an
+
+00:21:36,880 --> 00:21:40,559
+analysis we're going to have like two
+
+00:21:38,400 --> 00:21:44,000
+buckets here one for h not which
+
+00:21:40,559 --> 00:21:44,000
+i don't know let's say
+
+00:21:44,320 --> 00:21:47,679
+64 bytes i i don't know and we're going
+
+00:21:46,880 --> 00:21:50,480
+to have this
+
+00:21:47,679 --> 00:21:51,360
+uh pointer type which is like eight um
+
+00:21:50,480 --> 00:21:53,039
+right
+
+00:21:51,360 --> 00:21:55,360
+and we're going to have two buckets like
+
+00:21:53,039 --> 00:21:56,480
+eight and 64. but it may want to locate
+
+00:21:55,360 --> 00:21:59,600
+like 10 pointers
+
+00:21:56,480 --> 00:22:01,520
+so this is 80 bytes and we don't have
+
+00:21:59,600 --> 00:22:03,440
+a bucket big enough so it's going to
+
+00:22:01,520 --> 00:22:06,960
+fail right
+
+00:22:03,440 --> 00:22:10,000
+so uh well okay
+
+00:22:06,960 --> 00:22:13,440
+maybe even like could happen even worse
+
+00:22:10,000 --> 00:22:14,960
+case if it if it has enough uh
+
+00:22:13,440 --> 00:22:16,799
+like we're going to look at like two
+
+00:22:14,960 --> 00:22:18,080
+pointers and it's at 16 bytes so it's
+
+00:22:16,799 --> 00:22:21,280
+going to steal
+
+00:22:18,080 --> 00:22:22,080
+a slot from our hash node which we never
+
+00:22:21,280 --> 00:22:25,600
+planned for
+
+00:22:22,080 --> 00:22:28,080
+right uh and actually when it steals
+
+00:22:25,600 --> 00:22:30,799
+with a slot of 64 bytes
+
+00:22:28,080 --> 00:22:32,799
+uh it's a waste right because it's not
+
+00:22:30,799 --> 00:22:34,320
+going to use all 64 bytes you only need
+
+00:22:32,799 --> 00:22:37,039
+16.
+
+00:22:34,320 --> 00:22:37,600
+so we have a problem here we cannot use
+
+00:22:37,039 --> 00:22:41,520
+like this
+
+00:22:37,600 --> 00:22:45,200
+first fit strategy
+
+00:22:41,520 --> 00:22:48,480
+now we could do something clever here uh
+
+00:22:45,200 --> 00:22:50,559
+we could we could for example um
+
+00:22:48,480 --> 00:22:52,840
+do compile time analysis and actually
+
+00:22:50,559 --> 00:22:55,919
+bind buckets to
+
+00:22:52,840 --> 00:22:58,400
+uh hashes of
+
+00:22:55,919 --> 00:22:59,120
+type names or something like this yeah
+
+00:22:58,400 --> 00:23:02,320
+but it's
+
+00:22:59,120 --> 00:23:03,840
+it it would take a longer a longer
+
+00:23:02,320 --> 00:23:04,960
+presentation to actually present
+
+00:23:03,840 --> 00:23:07,200
+solution like this
+
+00:23:04,960 --> 00:23:09,520
+so we're going for something simpler
+
+00:23:07,200 --> 00:23:11,919
+what we are going to do and i claim it
+
+00:23:09,520 --> 00:23:13,120
+it's it will it would work for for an
+
+00:23:11,919 --> 00:23:16,799
+ordered map and and
+
+00:23:13,120 --> 00:23:18,720
+for cases like this um
+
+00:23:16,799 --> 00:23:20,480
+and by the way this whole problem sorry
+
+00:23:18,720 --> 00:23:21,120
+i'm going a little bit on the tongue and
+
+00:23:20,480 --> 00:23:23,679
+here
+
+00:23:21,120 --> 00:23:25,039
+uh this whole problem happens because a
+
+00:23:23,679 --> 00:23:28,080
+location
+
+00:23:25,039 --> 00:23:29,760
+actually deep down happens in bytes
+
+00:23:28,080 --> 00:23:31,360
+we kind of lose information about how
+
+00:23:29,760 --> 00:23:32,880
+many things we are going to allocate or
+
+00:23:31,360 --> 00:23:34,799
+what type we are going to allocate and
+
+00:23:32,880 --> 00:23:35,679
+the interface of bucket is defined like
+
+00:23:34,799 --> 00:23:38,480
+this
+
+00:23:35,679 --> 00:23:39,679
+because it kind of mimics how pmr memory
+
+00:23:38,480 --> 00:23:41,600
+resource defined which
+
+00:23:39,679 --> 00:23:44,320
+does exactly the same thing you just get
+
+00:23:41,600 --> 00:23:48,400
+size we don't know if it's size for one
+
+00:23:44,320 --> 00:23:48,400
+think of five things or
+
+00:23:48,640 --> 00:23:53,679
+or what what the original type was so we
+
+00:23:51,679 --> 00:23:55,520
+lose this information so we need to do
+
+00:23:53,679 --> 00:23:57,840
+something with size only
+
+00:23:55,520 --> 00:23:59,600
+well it's not necessarily the case as i
+
+00:23:57,840 --> 00:24:01,039
+said we could do a more sophisticated
+
+00:23:59,600 --> 00:24:02,240
+solution which actually takes into
+
+00:24:01,039 --> 00:24:04,960
+account the type
+
+00:24:02,240 --> 00:24:05,840
+name itself in some way or another but
+
+00:24:04,960 --> 00:24:07,520
+again it's not
+
+00:24:05,840 --> 00:24:09,039
+in the scope of this presentation so
+
+00:24:07,520 --> 00:24:12,320
+what we are going to do
+
+00:24:09,039 --> 00:24:15,279
+is something simpler yeah we're just
+
+00:24:12,320 --> 00:24:16,559
+going to calculate the minimum amount of
+
+00:24:15,279 --> 00:24:18,880
+wasted memory
+
+00:24:16,559 --> 00:24:20,720
+and minimum amount of wasted blocks and
+
+00:24:18,880 --> 00:24:23,520
+the bucket which gives us that
+
+00:24:20,720 --> 00:24:25,279
+is going to be good enough and again my
+
+00:24:23,520 --> 00:24:26,960
+claim is it's going to work for things
+
+00:24:25,279 --> 00:24:30,480
+like an ordered map
+
+00:24:26,960 --> 00:24:33,840
+now in order to do that we will define a
+
+00:24:30,480 --> 00:24:35,360
+helper structure and index here is just
+
+00:24:33,840 --> 00:24:37,760
+an index of the bucket
+
+00:24:35,360 --> 00:24:39,120
+blow count is how many blocks on the
+
+00:24:37,760 --> 00:24:41,200
+location would take
+
+00:24:39,120 --> 00:24:44,080
+and the waste how many bytes would be
+
+00:24:41,200 --> 00:24:45,520
+wasted if i locate from this bucket
+
+00:24:44,080 --> 00:24:47,120
+doesn't matter from one block or
+
+00:24:45,520 --> 00:24:51,039
+multiple blocks so
+
+00:24:47,120 --> 00:24:53,039
+how many how more bytes the bucket would
+
+00:24:51,039 --> 00:24:56,159
+actually provide in
+
+00:24:53,039 --> 00:24:57,679
+integral like blocks than the location
+
+00:24:56,159 --> 00:25:01,520
+actually needs
+
+00:24:57,679 --> 00:25:03,679
+right and we want minimum waste
+
+00:25:01,520 --> 00:25:05,279
+we want minimum wage but if the waste is
+
+00:25:03,679 --> 00:25:09,679
+the same we are going for
+
+00:25:05,279 --> 00:25:12,159
+less blocks so um
+
+00:25:09,679 --> 00:25:12,799
+if we do that and and operate or less
+
+00:25:12,159 --> 00:25:14,240
+here
+
+00:25:12,799 --> 00:25:15,840
+basically it's basically assault
+
+00:25:14,240 --> 00:25:19,279
+predicate here
+
+00:25:15,840 --> 00:25:22,159
+right we can sort with infrastructure
+
+00:25:19,279 --> 00:25:25,200
+and uh find like minimum based on
+
+00:25:22,159 --> 00:25:25,200
+minimum block count
+
+00:25:25,520 --> 00:25:29,600
+so here's a quote i'm not going to go
+
+00:25:27,679 --> 00:25:32,480
+through it line by line but
+
+00:25:29,600 --> 00:25:33,279
+the the idea is pretty clear we just
+
+00:25:32,480 --> 00:25:36,720
+take the
+
+00:25:33,279 --> 00:25:37,360
+allocation size require the location
+
+00:25:36,720 --> 00:25:39,200
+size
+
+00:25:37,360 --> 00:25:41,440
+and we're going for all buckets and we
+
+00:25:39,200 --> 00:25:44,080
+calculate this infrastructure
+
+00:25:41,440 --> 00:25:45,919
+for every one of them there are two
+
+00:25:44,080 --> 00:25:48,000
+cases like when we can allocate from one
+
+00:25:45,919 --> 00:25:50,320
+block or when we need multiple blocks
+
+00:25:48,000 --> 00:25:52,240
+but in the end we have this waste and
+
+00:25:50,320 --> 00:25:54,640
+block count calculated
+
+00:25:52,240 --> 00:25:56,080
+for every bucket and when we are going
+
+00:25:54,640 --> 00:25:58,880
+to sort and by the way
+
+00:25:56,080 --> 00:25:59,600
+stood sort here is not used because
+
+00:25:58,880 --> 00:26:01,440
+tooth sort
+
+00:25:59,600 --> 00:26:03,120
+at least by definition allowed to
+
+00:26:01,440 --> 00:26:05,279
+allocate and
+
+00:26:03,120 --> 00:26:07,360
+we can't allocate here so it's a kind of
+
+00:26:05,279 --> 00:26:09,120
+limitation of sort which for sure
+
+00:26:07,360 --> 00:26:10,880
+does not allocate by the way i don't
+
+00:26:09,120 --> 00:26:12,960
+think stood sword will allocate in this
+
+00:26:10,880 --> 00:26:13,520
+case but in most implementations i know
+
+00:26:12,960 --> 00:26:16,000
+but
+
+00:26:13,520 --> 00:26:17,520
+still it's allowed to in the standard so
+
+00:26:16,000 --> 00:26:19,919
+it's kind of custom sort let's say it's
+
+00:26:17,520 --> 00:26:22,080
+quick sort and log n something
+
+00:26:19,919 --> 00:26:23,600
+okay and when we do that we have this
+
+00:26:22,080 --> 00:26:26,559
+delta's list
+
+00:26:23,600 --> 00:26:27,360
+from list waste and list block count to
+
+00:26:26,559 --> 00:26:29,840
+the worst
+
+00:26:27,360 --> 00:26:31,360
+like to most waste and most block count
+
+00:26:29,840 --> 00:26:32,320
+and we're trying to allocate in this
+
+00:26:31,360 --> 00:26:35,120
+order
+
+00:26:32,320 --> 00:26:36,320
+and i'm saying that if you're creating
+
+00:26:35,120 --> 00:26:38,400
+something like this for
+
+00:26:36,320 --> 00:26:39,919
+another map it's going to work it's
+
+00:26:38,400 --> 00:26:41,520
+going to work properly
+
+00:26:39,919 --> 00:26:43,440
+it doesn't matter from which bucket that
+
+00:26:41,520 --> 00:26:44,559
+allocates in the end we will have enough
+
+00:26:43,440 --> 00:26:47,200
+memory for everything
+
+00:26:44,559 --> 00:26:48,880
+right so again it's not the best
+
+00:26:47,200 --> 00:26:50,640
+solution it's just a
+
+00:26:48,880 --> 00:26:52,000
+simple enough solution to put into this
+
+00:26:50,640 --> 00:26:54,480
+presentation the best one
+
+00:26:52,000 --> 00:26:55,520
+would be to map types directly to the
+
+00:26:54,480 --> 00:26:58,159
+buckets
+
+00:26:55,520 --> 00:26:59,919
+by hashing their type names or something
+
+00:26:58,159 --> 00:27:03,120
+like this
+
+00:26:59,919 --> 00:27:04,000
+but again that would work as one of the
+
+00:27:03,120 --> 00:27:08,320
+solutions
+
+00:27:04,000 --> 00:27:10,559
+okay now we introduced a problem here
+
+00:27:08,320 --> 00:27:11,520
+by the way we we kind of introduced
+
+00:27:10,559 --> 00:27:15,200
+fragmentation
+
+00:27:11,520 --> 00:27:17,039
+uh back because uh we allocate
+
+00:27:15,200 --> 00:27:18,880
+we are able to locate more and more
+
+00:27:17,039 --> 00:27:21,679
+block and as we said
+
+00:27:18,880 --> 00:27:23,039
+many of the containers may allocate more
+
+00:27:21,679 --> 00:27:26,880
+than one thing
+
+00:27:23,039 --> 00:27:28,640
+at a time we may use multiple blocks and
+
+00:27:26,880 --> 00:27:30,320
+that means we are going to create with
+
+00:27:28,640 --> 00:27:33,200
+holes in our ledger
+
+00:27:30,320 --> 00:27:34,399
+which kind of local fermentation inside
+
+00:27:33,200 --> 00:27:36,799
+the bucket
+
+00:27:34,399 --> 00:27:37,760
+now theoretically this is a problem but
+
+00:27:36,799 --> 00:27:41,679
+practically
+
+00:27:37,760 --> 00:27:43,440
+if users keep memory pools separated and
+
+00:27:41,679 --> 00:27:44,799
+understand the location patterns and
+
+00:27:43,440 --> 00:27:48,080
+understand
+
+00:27:44,799 --> 00:27:51,440
+what these what limitations
+
+00:27:48,080 --> 00:27:54,880
+uh um working with
+
+00:27:51,440 --> 00:27:58,159
+like embedded uh solutions uh
+
+00:27:54,880 --> 00:28:00,480
+actually imply it's not that
+
+00:27:58,159 --> 00:28:02,080
+of a problem because if you think about
+
+00:28:00,480 --> 00:28:04,000
+it like an ordered map
+
+00:28:02,080 --> 00:28:05,440
+in embedded application is going to be
+
+00:28:04,000 --> 00:28:07,679
+probably a fixed size because
+
+00:28:05,440 --> 00:28:09,600
+anyways you have a limitation on max
+
+00:28:07,679 --> 00:28:12,720
+amount of things you can put into it
+
+00:28:09,600 --> 00:28:14,799
+so the best thing would be to to do like
+
+00:28:12,720 --> 00:28:17,279
+rehash or resize in the beginning
+
+00:28:14,799 --> 00:28:19,200
+to the constant size and you will never
+
+00:28:17,279 --> 00:28:21,600
+go beyond this size because
+
+00:28:19,200 --> 00:28:24,640
+anyway you have only limited amount of
+
+00:28:21,600 --> 00:28:28,320
+slots for the thing itself
+
+00:28:24,640 --> 00:28:29,840
+and uh well it's not it's not going to
+
+00:28:28,320 --> 00:28:31,679
+manifest so the problem is not going to
+
+00:28:29,840 --> 00:28:32,080
+manifest because you never d allocate
+
+00:28:31,679 --> 00:28:33,760
+this
+
+00:28:32,080 --> 00:28:35,440
+pointers and so on but of course it
+
+00:28:33,760 --> 00:28:38,480
+requires a
+
+00:28:35,440 --> 00:28:40,640
+an understanding of the mechanism behind
+
+00:28:38,480 --> 00:28:42,000
+the constructs you use how they allocate
+
+00:28:40,640 --> 00:28:44,960
+how they allocate
+
+00:28:42,000 --> 00:28:47,520
+and yeah it does not we don't have a
+
+00:28:44,960 --> 00:28:48,960
+like 100 solution for fragmentation but
+
+00:28:47,520 --> 00:28:52,000
+at least it's very local
+
+00:28:48,960 --> 00:28:56,559
+and should be very well understood
+
+00:28:52,000 --> 00:28:59,360
+when and why it can happen in this case
+
+00:28:56,559 --> 00:29:01,840
+and again for some cases you may go with
+
+00:28:59,360 --> 00:29:04,480
+a simpler solution like first feed and
+
+00:29:01,840 --> 00:29:06,000
+on block only as i said it will work in
+
+00:29:04,480 --> 00:29:10,559
+many cases
+
+00:29:06,000 --> 00:29:13,840
+but not only not all of them all right
+
+00:29:10,559 --> 00:29:16,240
+so the allocate well
+
+00:29:13,840 --> 00:29:17,679
+the allocate is very simple it just goes
+
+00:29:16,240 --> 00:29:19,520
+through our buckets
+
+00:29:17,679 --> 00:29:21,520
+until it finds the one the pointer
+
+00:29:19,520 --> 00:29:24,799
+actually belongs to
+
+00:29:21,520 --> 00:29:25,840
+and it allocates that's it it's just
+
+00:29:24,799 --> 00:29:29,919
+that simple
+
+00:29:25,840 --> 00:29:32,080
+so um
+
+00:29:29,919 --> 00:29:33,919
+well two functions we are still need to
+
+00:29:32,080 --> 00:29:37,360
+define
+
+00:29:33,919 --> 00:29:38,799
+for like allocator usage is with each
+
+00:29:37,360 --> 00:29:40,880
+defined function
+
+00:29:38,799 --> 00:29:42,000
+which basically just this bucket count
+
+00:29:40,880 --> 00:29:44,960
+on the pull id
+
+00:29:42,000 --> 00:29:44,960
+we provide and
+
+00:29:45,360 --> 00:29:51,520
+i mean we defined that a um
+
+00:29:49,919 --> 00:29:53,760
+default implementation of our bucket
+
+00:29:51,520 --> 00:29:56,960
+descriptors is actually tuple of zero
+
+00:29:53,760 --> 00:29:59,120
+so if it goes for
+
+00:29:56,960 --> 00:30:00,559
+default implementation that basically
+
+00:29:59,120 --> 00:30:03,919
+means
+
+00:30:00,559 --> 00:30:06,640
+uh that the memory pool is not defined
+
+00:30:03,919 --> 00:30:08,320
+right and this is important actually
+
+00:30:06,640 --> 00:30:09,760
+this function is const expert we will
+
+00:30:08,320 --> 00:30:11,279
+see why it's important
+
+00:30:09,760 --> 00:30:13,200
+optimization opportunity for the
+
+00:30:11,279 --> 00:30:16,240
+allocator actually
+
+00:30:13,200 --> 00:30:18,399
+and now initialize function here is just
+
+00:30:16,240 --> 00:30:20,480
+a helper
+
+00:30:18,399 --> 00:30:22,640
+which calls getting instance which which
+
+00:30:20,480 --> 00:30:25,440
+creates with static local variable and
+
+00:30:22,640 --> 00:30:28,320
+we probably want to call this initialize
+
+00:30:25,440 --> 00:30:29,840
+before we go operational for every pool
+
+00:30:28,320 --> 00:30:32,159
+id
+
+00:30:29,840 --> 00:30:34,640
+and just returns the result of is
+
+00:30:32,159 --> 00:30:34,640
+defined
+
+00:30:35,279 --> 00:30:41,840
+now we are going to create an allocator
+
+00:30:38,559 --> 00:30:43,840
+and our locator
+
+00:30:41,840 --> 00:30:45,279
+should implement standard c plus plus
+
+00:30:43,840 --> 00:30:49,600
+allocator model
+
+00:30:45,279 --> 00:30:53,279
+compatible with student locator traits
+
+00:30:49,600 --> 00:30:53,279
+and it um
+
+00:30:54,080 --> 00:30:57,919
+it should be bound we wanted to be bound
+
+00:30:56,080 --> 00:30:59,200
+to a specific memory pool instance and
+
+00:30:57,919 --> 00:31:01,519
+compile time and
+
+00:30:59,200 --> 00:31:02,880
+the reason we want that is that many
+
+00:31:01,519 --> 00:31:06,799
+constructs
+
+00:31:02,880 --> 00:31:09,919
+can kinda silently migrate things
+
+00:31:06,799 --> 00:31:11,600
+from one allocator to another and if a
+
+00:31:09,919 --> 00:31:13,919
+locator is convertible
+
+00:31:11,600 --> 00:31:16,159
+we can when we move things between
+
+00:31:13,919 --> 00:31:19,039
+containers we can inadvertently
+
+00:31:16,159 --> 00:31:20,880
+move them between memory pools and we
+
+00:31:19,039 --> 00:31:23,760
+don't want that we want our
+
+00:31:20,880 --> 00:31:25,760
+allocators be specific for memory pools
+
+00:31:23,760 --> 00:31:28,720
+and not be convertible to
+
+00:31:25,760 --> 00:31:30,559
+and maybe the same kind of a locator but
+
+00:31:28,720 --> 00:31:34,080
+bound to another memory pool we wanted
+
+00:31:30,559 --> 00:31:36,320
+compile time protected
+
+00:31:34,080 --> 00:31:38,000
+now we also want our locator to
+
+00:31:36,320 --> 00:31:40,159
+transparently allocate from another
+
+00:31:38,000 --> 00:31:41,519
+resource until memory pool is defined so
+
+00:31:40,159 --> 00:31:43,519
+until we run our
+
+00:31:41,519 --> 00:31:45,360
+analysis and we can know the bucket
+
+00:31:43,519 --> 00:31:48,159
+sizes we want everything still
+
+00:31:45,360 --> 00:31:49,200
+kind of working and we want developers
+
+00:31:48,159 --> 00:31:52,000
+uh
+
+00:31:49,200 --> 00:31:53,120
+not thinking too much about where it all
+
+00:31:52,000 --> 00:31:56,799
+okay it's from
+
+00:31:53,120 --> 00:31:58,640
+so by by default we want our locator to
+
+00:31:56,799 --> 00:32:00,559
+be able to allocate from probably heap
+
+00:31:58,640 --> 00:32:04,480
+or something before we go into
+
+00:32:00,559 --> 00:32:07,519
+full certifiable mode
+
+00:32:04,480 --> 00:32:09,360
+and we have buckets defined
+
+00:32:07,519 --> 00:32:11,440
+now and of course we also want our
+
+00:32:09,360 --> 00:32:11,840
+locator to be able to help us to define
+
+00:32:11,440 --> 00:32:14,480
+this
+
+00:32:11,840 --> 00:32:16,480
+uh buckets because we said that it knows
+
+00:32:14,480 --> 00:32:19,519
+all the information we actually need
+
+00:32:16,480 --> 00:32:23,919
+so we can be we should be able
+
+00:32:19,519 --> 00:32:26,080
+to to extract it from from from it
+
+00:32:23,919 --> 00:32:28,880
+now let's take a look at usage scenarios
+
+00:32:26,080 --> 00:32:32,159
+just to to to get some taste
+
+00:32:28,880 --> 00:32:33,600
+of how it may work so we have a static
+
+00:32:32,159 --> 00:32:36,000
+pool allocator which
+
+00:32:33,600 --> 00:32:38,080
+has two template arguments here and the
+
+00:32:36,000 --> 00:32:39,760
+second one is actually the memory pool
+
+00:32:38,080 --> 00:32:42,640
+id
+
+00:32:39,760 --> 00:32:45,120
+right so in this example we have list of
+
+00:32:42,640 --> 00:32:47,360
+integers and vector of such lists
+
+00:32:45,120 --> 00:32:49,760
+and they both are located from the same
+
+00:32:47,360 --> 00:32:52,640
+memory pool which is not recommended but
+
+00:32:49,760 --> 00:32:54,159
+you can do that right you can just say
+
+00:32:52,640 --> 00:32:56,240
+okay i have one memory pool with
+
+00:32:54,159 --> 00:32:59,120
+different bucket sizes one for
+
+00:32:56,240 --> 00:32:59,840
+lists of ins and another for kind of ins
+
+00:32:59,120 --> 00:33:03,760
+or
+
+00:32:59,840 --> 00:33:06,960
+list nothing so whatever and
+
+00:33:03,760 --> 00:33:09,120
+and we will just use the same
+
+00:33:06,960 --> 00:33:10,240
+the same allocator and it's going to be
+
+00:33:09,120 --> 00:33:13,360
+properly propagated
+
+00:33:10,240 --> 00:33:15,120
+and and and so on into into vector yeah
+
+00:33:13,360 --> 00:33:17,039
+when we create like vector member it's
+
+00:33:15,120 --> 00:33:18,559
+going to be propagated into list and
+
+00:33:17,039 --> 00:33:21,440
+everything is going to be allocated from
+
+00:33:18,559 --> 00:33:23,840
+the same memory pool
+
+00:33:21,440 --> 00:33:25,679
+now another way to do that would be to
+
+00:33:23,840 --> 00:33:30,399
+use stood scoped allocator
+
+00:33:25,679 --> 00:33:33,440
+adapter and define separate memory pools
+
+00:33:30,399 --> 00:33:36,240
+and when we do that it's just like
+
+00:33:33,440 --> 00:33:36,720
+stuttgart allocator adapter normal usage
+
+00:33:36,240 --> 00:33:38,399
+right
+
+00:33:36,720 --> 00:33:40,320
+but we create two different static pool
+
+00:33:38,399 --> 00:33:42,159
+allocator types as you see
+
+00:33:40,320 --> 00:33:43,919
+because we take different integers it's
+
+00:33:42,159 --> 00:33:45,600
+different types and we will see they
+
+00:33:43,919 --> 00:33:47,600
+cannot be converted one another so we
+
+00:33:45,600 --> 00:33:48,080
+are kind of protected from migrating
+
+00:33:47,600 --> 00:33:50,880
+right
+
+00:33:48,080 --> 00:33:52,799
+so we need sculpt allocator adapter here
+
+00:33:50,880 --> 00:33:57,519
+in order to actually keep things
+
+00:33:52,799 --> 00:34:00,399
+separate um
+
+00:33:57,519 --> 00:34:01,679
+right now i'm going to skip all the
+
+00:34:00,399 --> 00:34:04,399
+boilerplate code
+
+00:34:01,679 --> 00:34:06,640
+and and the reason is it's completely
+
+00:34:04,399 --> 00:34:08,399
+identical to something like stood pmr
+
+00:34:06,640 --> 00:34:09,040
+polymorphic allocator so you can take a
+
+00:34:08,399 --> 00:34:11,040
+look at
+
+00:34:09,040 --> 00:34:13,440
+how this all construct functions
+
+00:34:11,040 --> 00:34:16,639
+implement and then propagation work and
+
+00:34:13,440 --> 00:34:16,960
+all this support and allocator traits
+
+00:34:16,639 --> 00:34:19,679
+and
+
+00:34:16,960 --> 00:34:20,000
+and different types of constructors is
+
+00:34:19,679 --> 00:34:22,800
+actually
+
+00:34:20,000 --> 00:34:24,159
+implemented in a polymorphic allocator
+
+00:34:22,800 --> 00:34:25,760
+but we're going to take a look at the
+
+00:34:24,159 --> 00:34:29,520
+parts which are relevant for us
+
+00:34:25,760 --> 00:34:33,119
+right and
+
+00:34:29,520 --> 00:34:36,480
+this is like the most relevant parts
+
+00:34:33,119 --> 00:34:37,200
+except the location itself and the
+
+00:34:36,480 --> 00:34:41,280
+interesting thing
+
+00:34:37,200 --> 00:34:44,159
+is that rebind here actually rebinds
+
+00:34:41,280 --> 00:34:45,440
+only for locator which bound to the same
+
+00:34:44,159 --> 00:34:48,639
+memory pull
+
+00:34:45,440 --> 00:34:49,280
+id so you can rebuy into like any memory
+
+00:34:48,639 --> 00:34:52,560
+pool
+
+00:34:49,280 --> 00:34:55,040
+just the same one and same goes for copy
+
+00:34:52,560 --> 00:34:58,800
+constructor and assignment operator so
+
+00:34:55,040 --> 00:35:02,240
+it's always uh it's always protecting
+
+00:34:58,800 --> 00:35:04,320
+itself from skipping memory pools
+
+00:35:02,240 --> 00:35:06,400
+now another interesting thing here is
+
+00:35:04,320 --> 00:35:07,920
+this upstream resource and this is like
+
+00:35:06,400 --> 00:35:12,079
+pmr memory resource
+
+00:35:07,920 --> 00:35:14,079
+which by default uh in initialized with
+
+00:35:12,079 --> 00:35:15,359
+get default resource which is usually
+
+00:35:14,079 --> 00:35:18,320
+new delete resource
+
+00:35:15,359 --> 00:35:20,880
+it basically means that if this id pool
+
+00:35:18,320 --> 00:35:22,640
+is not defined we are able to go
+
+00:35:20,880 --> 00:35:24,960
+to upstream resources and locate from
+
+00:35:22,640 --> 00:35:27,119
+that which gives us an opportunity
+
+00:35:24,960 --> 00:35:28,800
+in the development stage to to work with
+
+00:35:27,119 --> 00:35:32,640
+like normal heap
+
+00:35:28,800 --> 00:35:33,760
+for example right and of course we have
+
+00:35:32,640 --> 00:35:36,480
+a static bull
+
+00:35:33,760 --> 00:35:37,920
+uh initialized memory pool function
+
+00:35:36,480 --> 00:35:41,599
+which is a helper which
+
+00:35:37,920 --> 00:35:45,599
+uh forwards uh to our corresponding
+
+00:35:41,599 --> 00:35:48,800
+memory pull initialize
+
+00:35:45,599 --> 00:35:51,440
+okay now if we take a look at allocate
+
+00:35:48,800 --> 00:35:54,240
+it actually makes use of this constant
+
+00:35:51,440 --> 00:35:56,079
+expert is defined function
+
+00:35:54,240 --> 00:35:59,000
+and it checks if our memory pool is
+
+00:35:56,079 --> 00:36:02,160
+defined oh okay we are in like
+
+00:35:59,000 --> 00:36:04,880
+certification mode so we're going to
+
+00:36:02,160 --> 00:36:08,000
+allocate from our memory pool
+
+00:36:04,880 --> 00:36:08,960
+and if it's not defined we're going to
+
+00:36:08,000 --> 00:36:11,760
+allocate
+
+00:36:08,960 --> 00:36:12,000
+from upstream resource which probably is
+
+00:36:11,760 --> 00:36:15,359
+going
+
+00:36:12,000 --> 00:36:18,880
+to just to do new or something
+
+00:36:15,359 --> 00:36:22,079
+in the end right and otherwise we just
+
+00:36:18,880 --> 00:36:22,320
+don't have uh we have neither all this
+
+00:36:22,079 --> 00:36:25,520
+and
+
+00:36:22,320 --> 00:36:28,640
+we just throw
+
+00:36:25,520 --> 00:36:32,160
+and um of course we can we can
+
+00:36:28,640 --> 00:36:33,920
+put something like uh static assert but
+
+00:36:32,160 --> 00:36:36,480
+if you compile is like
+
+00:36:33,920 --> 00:36:39,040
+certifiable defined or something that
+
+00:36:36,480 --> 00:36:42,160
+only first option is viable and so on
+
+00:36:39,040 --> 00:36:45,280
+we can do things here and and by the way
+
+00:36:42,160 --> 00:36:47,520
+uh uh t here i
+
+00:36:45,280 --> 00:36:48,960
+just remind of t here is the actual type
+
+00:36:47,520 --> 00:36:51,040
+we are going to allocate for so
+
+00:36:48,960 --> 00:36:52,000
+it's like some internal list note or
+
+00:36:51,040 --> 00:36:54,480
+something
+
+00:36:52,000 --> 00:36:55,440
+it's going to be known here at this line
+
+00:36:54,480 --> 00:36:58,640
+right
+
+00:36:55,440 --> 00:37:01,440
+so we're going to use this information
+
+00:36:58,640 --> 00:37:02,560
+now how to collect the type sizes of
+
+00:37:01,440 --> 00:37:06,000
+course we could just
+
+00:37:02,560 --> 00:37:08,000
+put something like stdc out and print
+
+00:37:06,000 --> 00:37:10,400
+here the size and so on
+
+00:37:08,000 --> 00:37:12,240
+but it wouldn't be ideal and the reason
+
+00:37:10,400 --> 00:37:14,480
+it wouldn't be ideal
+
+00:37:12,240 --> 00:37:17,040
+is because first of all we kind of need
+
+00:37:14,480 --> 00:37:20,079
+100 line coverage because some
+
+00:37:17,040 --> 00:37:23,440
+some allocations may happen rarely or
+
+00:37:20,079 --> 00:37:26,320
+under some circumstances and so on but
+
+00:37:23,440 --> 00:37:27,280
+it's doable we can we can get this
+
+00:37:26,320 --> 00:37:28,960
+coverage maybe
+
+00:37:27,280 --> 00:37:31,359
+it's maybe unpractical it may be
+
+00:37:28,960 --> 00:37:33,920
+impossible even in some applications but
+
+00:37:31,359 --> 00:37:34,960
+maybe we can do it so why would wouldn't
+
+00:37:33,920 --> 00:37:38,640
+it just print out
+
+00:37:34,960 --> 00:37:41,119
+these sizes well we won't
+
+00:37:38,640 --> 00:37:42,960
+have information about about call side
+
+00:37:41,119 --> 00:37:44,320
+we won't know okay we'll see here the
+
+00:37:42,960 --> 00:37:46,720
+location of
+
+00:37:44,320 --> 00:37:48,800
+x bytes but we don't know why it's here
+
+00:37:46,720 --> 00:37:49,280
+we don't know the code graph how it came
+
+00:37:48,800 --> 00:37:53,599
+here
+
+00:37:49,280 --> 00:37:57,040
+who actually invoked this location
+
+00:37:53,599 --> 00:37:57,520
+up the call graph right and it would
+
+00:37:57,040 --> 00:38:00,320
+limit
+
+00:37:57,520 --> 00:38:01,440
+us uh we wouldn't see many interesting
+
+00:38:00,320 --> 00:38:03,440
+things about what
+
+00:38:01,440 --> 00:38:04,560
+actually and where allocates in our
+
+00:38:03,440 --> 00:38:08,240
+program
+
+00:38:04,560 --> 00:38:12,079
+uh and it also kind of harder to prove
+
+00:38:08,240 --> 00:38:14,400
+that we cover all allocations
+
+00:38:12,079 --> 00:38:15,119
+again if you have like 100 line coverage
+
+00:38:14,400 --> 00:38:18,720
+it may be
+
+00:38:15,119 --> 00:38:20,640
+maybe the case but but anyway
+
+00:38:18,720 --> 00:38:23,440
+it's hard to proven when you do it in
+
+00:38:20,640 --> 00:38:27,040
+runtime so what we want to do
+
+00:38:23,440 --> 00:38:29,359
+is to register all calls to allocate
+
+00:38:27,040 --> 00:38:31,760
+in the compiled code so we want to to
+
+00:38:29,359 --> 00:38:33,599
+just take our compiled code
+
+00:38:31,760 --> 00:38:35,119
+and regardless of the runtime flow which
+
+00:38:33,599 --> 00:38:39,040
+functions calls which functions
+
+00:38:35,119 --> 00:38:42,720
+may be never called we still want to uh
+
+00:38:39,040 --> 00:38:45,359
+probably be able to know all the
+
+00:38:42,720 --> 00:38:48,400
+location properties sizes
+
+00:38:45,359 --> 00:38:50,400
+and maybe alignments and so on
+
+00:38:48,400 --> 00:38:52,160
+and of course it would be very nice to
+
+00:38:50,400 --> 00:38:54,160
+see the call paths which led to this
+
+00:38:52,160 --> 00:38:57,359
+allocations for like debug and
+
+00:38:54,160 --> 00:38:59,680
+simply anal analysis purposes
+
+00:38:57,359 --> 00:39:00,800
+right so what we are going to do we are
+
+00:38:59,680 --> 00:39:04,079
+going to inject
+
+00:39:00,800 --> 00:39:05,920
+some instrumentation and our
+
+00:39:04,079 --> 00:39:06,880
+instrumentation is going to look like
+
+00:39:05,920 --> 00:39:10,320
+this
+
+00:39:06,880 --> 00:39:12,640
+just a dummy code to a function
+
+00:39:10,320 --> 00:39:14,480
+here it's called type rack and it has
+
+00:39:12,640 --> 00:39:18,000
+this free
+
+00:39:14,480 --> 00:39:21,200
+template template argument which is
+
+00:39:18,000 --> 00:39:21,760
+id of our memory pool the name of the
+
+00:39:21,200 --> 00:39:24,160
+type
+
+00:39:21,760 --> 00:39:27,760
+size of the type and in real code it's
+
+00:39:24,160 --> 00:39:31,839
+going to be probably a line of the type
+
+00:39:27,760 --> 00:39:34,079
+now uh this dummy function is actually
+
+00:39:31,839 --> 00:39:34,880
+a dummy function it doesn't do anything
+
+00:39:34,079 --> 00:39:38,320
+what we
+
+00:39:34,880 --> 00:39:41,680
+wanted to be is just a a call
+
+00:39:38,320 --> 00:39:44,720
+which we can actually extract
+
+00:39:41,680 --> 00:39:45,440
+from our compiled code and see that this
+
+00:39:44,720 --> 00:39:47,200
+is
+
+00:39:45,440 --> 00:39:49,119
+this is a call that happens and these
+
+00:39:47,200 --> 00:39:52,320
+are this template arguments
+
+00:39:49,119 --> 00:39:55,040
+which we can use to generate our bucket
+
+00:39:52,320 --> 00:39:55,040
+definitions
+
+00:39:55,359 --> 00:40:02,400
+so the allocation is trivial again
+
+00:39:59,520 --> 00:40:03,520
+it's uh the same thing if memory pool is
+
+00:40:02,400 --> 00:40:05,920
+defined we're going to
+
+00:40:03,520 --> 00:40:07,040
+delocate from the memory pool otherwise
+
+00:40:05,920 --> 00:40:08,960
+we're going to delocate
+
+00:40:07,040 --> 00:40:10,079
+probably from heap or another memory
+
+00:40:08,960 --> 00:40:13,280
+resource
+
+00:40:10,079 --> 00:40:15,599
+and the third case should not ever
+
+00:40:13,280 --> 00:40:15,599
+happen
+
+00:40:16,640 --> 00:40:21,359
+now we only need a way to generate
+
+00:40:19,440 --> 00:40:21,839
+bucket definitions according to the
+
+00:40:21,359 --> 00:40:25,760
+actual
+
+00:40:21,839 --> 00:40:28,000
+locations right so in order to do that
+
+00:40:25,760 --> 00:40:30,720
+we are going to compile the code with
+
+00:40:28,000 --> 00:40:31,839
+clank into llvm bit code because it's so
+
+00:40:30,720 --> 00:40:35,920
+easy to analyze
+
+00:40:31,839 --> 00:40:38,160
+and uh so easy to work with
+
+00:40:35,920 --> 00:40:40,400
+we will implement the custom lvm
+
+00:40:38,160 --> 00:40:43,760
+password multiple passes which would be
+
+00:40:40,400 --> 00:40:45,200
+able to compose the list of all unique
+
+00:40:43,760 --> 00:40:47,280
+locations
+
+00:40:45,200 --> 00:40:48,480
+purple instance we want this information
+
+00:40:47,280 --> 00:40:53,119
+like for every
+
+00:40:48,480 --> 00:40:55,119
+pool instance and we would want to
+
+00:40:53,119 --> 00:40:56,960
+see the call graph for every location
+
+00:40:55,119 --> 00:41:00,880
+for again debug and
+
+00:40:56,960 --> 00:41:03,599
+kind of general insight purposes and
+
+00:41:00,880 --> 00:41:06,000
+we would uh want to automatically if
+
+00:41:03,599 --> 00:41:09,280
+it's possible generate buckets
+
+00:41:06,000 --> 00:41:12,319
+and memory pool definitions
+
+00:41:09,280 --> 00:41:17,200
+so we will run our path with
+
+00:41:12,319 --> 00:41:20,319
+on on our bit code with llvm opt2
+
+00:41:17,200 --> 00:41:21,760
+and llvm ob2 is just a utility from a
+
+00:41:20,319 --> 00:41:25,920
+llvm suit which
+
+00:41:21,760 --> 00:41:29,359
+uh can run a a custom
+
+00:41:25,920 --> 00:41:31,680
+pass they call it optimization path but
+
+00:41:29,359 --> 00:41:36,800
+in this case it's analysis path
+
+00:41:31,680 --> 00:41:36,800
+on uh on on a bitcode file
+
+00:41:37,040 --> 00:41:44,319
+now a bit of technical details here
+
+00:41:41,200 --> 00:41:46,160
+we would want to compile this uh debug
+
+00:41:44,319 --> 00:41:48,240
+symbols in order to see this
+
+00:41:46,160 --> 00:41:51,920
+informational call graph
+
+00:41:48,240 --> 00:41:53,680
+where things were called from and so on
+
+00:41:51,920 --> 00:41:55,359
+we probably would want to prevent
+
+00:41:53,680 --> 00:41:57,760
+optimizing
+
+00:41:55,359 --> 00:41:59,760
+out optimizing out our instrumentation
+
+00:41:57,760 --> 00:42:01,680
+calls
+
+00:41:59,760 --> 00:42:04,079
+and maybe there are better ways to do
+
+00:42:01,680 --> 00:42:07,440
+that but uh minus all zero
+
+00:42:04,079 --> 00:42:08,400
+will do the trick it's just uh it just
+
+00:42:07,440 --> 00:42:10,880
+prevents
+
+00:42:08,400 --> 00:42:13,440
+optimizer to to throw away our empty
+
+00:42:10,880 --> 00:42:17,359
+calls to type rank
+
+00:42:13,440 --> 00:42:20,000
+and we would want to use emit llvm
+
+00:42:17,359 --> 00:42:21,119
+to compile into the bit code instead of
+
+00:42:20,000 --> 00:42:24,400
+the native
+
+00:42:21,119 --> 00:42:26,960
+uh native instructions
+
+00:42:24,400 --> 00:42:27,680
+and we probably want and debug defined
+
+00:42:26,960 --> 00:42:29,280
+uh
+
+00:42:27,680 --> 00:42:31,119
+to get the release version of data
+
+00:42:29,280 --> 00:42:34,000
+structures if there's any difference but
+
+00:42:31,119 --> 00:42:34,480
+it's okay it's of course up to up to you
+
+00:42:34,000 --> 00:42:37,200
+you may
+
+00:42:34,480 --> 00:42:38,880
+want to do it with debug versions for
+
+00:42:37,200 --> 00:42:41,440
+some reason
+
+00:42:38,880 --> 00:42:41,440
+um
+
+00:42:42,319 --> 00:42:48,960
+okay now uh after that we can
+
+00:42:45,760 --> 00:42:51,520
+now one bit code file is is basically
+
+00:42:48,960 --> 00:42:52,560
+equal to one opt file so when we compile
+
+00:42:51,520 --> 00:42:55,920
+into bit code
+
+00:42:52,560 --> 00:42:58,720
+we have this um one like
+
+00:42:55,920 --> 00:42:59,760
+result of compilation one cpp file in a
+
+00:42:58,720 --> 00:43:02,720
+bc file
+
+00:42:59,760 --> 00:43:03,920
+bitcode file well we may want to link
+
+00:43:02,720 --> 00:43:06,720
+them together
+
+00:43:03,920 --> 00:43:08,240
+into the whole program or big chunk of a
+
+00:43:06,720 --> 00:43:13,040
+program in order to
+
+00:43:08,240 --> 00:43:17,119
+run this optimization optimization pass
+
+00:43:13,040 --> 00:43:19,920
+on um on all of them together
+
+00:43:17,119 --> 00:43:22,000
+so a llv llvm link does exactly that it
+
+00:43:19,920 --> 00:43:24,160
+just takes a bunch of pc files and
+
+00:43:22,000 --> 00:43:27,839
+produces one bc file which
+
+00:43:24,160 --> 00:43:27,839
+always files a link together in
+
+00:43:28,000 --> 00:43:32,560
+now this is actually a minimalistic pass
+
+00:43:30,400 --> 00:43:33,520
+it doesn't generate anything but it does
+
+00:43:32,560 --> 00:43:36,800
+print out
+
+00:43:33,520 --> 00:43:38,480
+the all unique uh allocations with pool
+
+00:43:36,800 --> 00:43:41,440
+id size and type and
+
+00:43:38,480 --> 00:43:42,640
+this is actually the whole code you need
+
+00:43:41,440 --> 00:43:44,400
+for this it's just
+
+00:43:42,640 --> 00:43:46,160
+the whole project you need for this and
+
+00:43:44,400 --> 00:43:50,800
+this is impressive i think
+
+00:43:46,160 --> 00:43:53,119
+uh it it it's it's a
+
+00:43:50,800 --> 00:43:54,160
+function path something which in lvm
+
+00:43:53,119 --> 00:43:56,400
+terms calls
+
+00:43:54,160 --> 00:43:57,680
+called function paths and this is called
+
+00:43:56,400 --> 00:44:00,960
+this because it's called on
+
+00:43:57,680 --> 00:44:04,160
+every function in the mod module you
+
+00:44:00,960 --> 00:44:05,040
+you analyze and what it's going to do is
+
+00:44:04,160 --> 00:44:07,520
+it's going to check
+
+00:44:05,040 --> 00:44:09,359
+the function we call now the mangled
+
+00:44:07,520 --> 00:44:12,560
+name of this function
+
+00:44:09,359 --> 00:44:15,119
+is typewreck it's going to extract
+
+00:44:12,560 --> 00:44:15,839
+all this information we put there like a
+
+00:44:15,119 --> 00:44:18,800
+pool id
+
+00:44:15,839 --> 00:44:19,599
+size type name and print it out and
+
+00:44:18,800 --> 00:44:21,280
+that's it
+
+00:44:19,599 --> 00:44:22,960
+we have all these things of course we
+
+00:44:21,280 --> 00:44:24,960
+don't have call graph here we do not
+
+00:44:22,960 --> 00:44:28,000
+generate
+
+00:44:24,960 --> 00:44:28,000
+we do not generate
+
+00:44:28,319 --> 00:44:32,000
+header files but again i think it's
+
+00:44:30,560 --> 00:44:33,839
+impressive that you can put it on one
+
+00:44:32,000 --> 00:44:37,200
+slide and
+
+00:44:33,839 --> 00:44:39,040
+pretty big font i would say now
+
+00:44:37,200 --> 00:44:40,720
+the real thing i'm not going to show
+
+00:44:39,040 --> 00:44:44,000
+it's just too much of
+
+00:44:40,720 --> 00:44:46,400
+a code but the real thing is going to
+
+00:44:44,000 --> 00:44:48,000
+be not function password model path
+
+00:44:46,400 --> 00:44:50,560
+because we won't call graph so we want
+
+00:44:48,000 --> 00:44:52,560
+information from the whole model
+
+00:44:50,560 --> 00:44:53,680
+and we're going to run a depth first
+
+00:44:52,560 --> 00:44:56,079
+search with dfs
+
+00:44:53,680 --> 00:44:57,040
+starting from entry points which is
+
+00:44:56,079 --> 00:44:59,440
+usually main
+
+00:44:57,040 --> 00:45:01,200
+test main some kind of function you you
+
+00:44:59,440 --> 00:45:04,720
+actually start with
+
+00:45:01,200 --> 00:45:05,680
+start running with and every time we
+
+00:45:04,720 --> 00:45:08,160
+discover a
+
+00:45:05,680 --> 00:45:10,079
+typewreck call we're going to register
+
+00:45:08,160 --> 00:45:11,920
+our location type and we're going to
+
+00:45:10,079 --> 00:45:13,680
+print the call graph to this for this
+
+00:45:11,920 --> 00:45:15,760
+allocation
+
+00:45:13,680 --> 00:45:17,040
+and we're going to check for recaptions
+
+00:45:15,760 --> 00:45:18,400
+along the way and
+
+00:45:17,040 --> 00:45:20,880
+we're going to drop these branches
+
+00:45:18,400 --> 00:45:21,520
+because such range cannot end in a
+
+00:45:20,880 --> 00:45:24,720
+location
+
+00:45:21,520 --> 00:45:28,480
+it's just something else entirely
+
+00:45:24,720 --> 00:45:30,640
+now finally the list of
+
+00:45:28,480 --> 00:45:32,240
+all unique allocations we can translate
+
+00:45:30,640 --> 00:45:35,680
+it into a header file
+
+00:45:32,240 --> 00:45:38,160
+with this specialization with bucket
+
+00:45:35,680 --> 00:45:41,280
+descriptors
+
+00:45:38,160 --> 00:45:42,079
+so let's take a look at an example main
+
+00:45:41,280 --> 00:45:45,359
+calls
+
+00:45:42,079 --> 00:45:48,640
+f f x
+
+00:45:45,359 --> 00:45:53,599
+x defines with list which
+
+00:45:48,640 --> 00:45:55,680
+allocates uh like creates a list with um
+
+00:45:53,599 --> 00:45:57,440
+static polar locator on memory pool with
+
+00:45:55,680 --> 00:46:02,720
+id3
+
+00:45:57,440 --> 00:46:02,720
+yeah so when we run our like real um
+
+00:46:02,800 --> 00:46:07,119
+real path we're going to see something
+
+00:46:04,880 --> 00:46:10,960
+like this we're going to see
+
+00:46:07,119 --> 00:46:12,720
+a call graph for pull idea free size 24
+
+00:46:10,960 --> 00:46:14,720
+and real type we see here
+
+00:46:12,720 --> 00:46:17,280
+the name of the type is internal think
+
+00:46:14,720 --> 00:46:20,640
+of list node
+
+00:46:17,280 --> 00:46:20,960
+and and and we see the call graph so if
+
+00:46:20,640 --> 00:46:23,599
+we
+
+00:46:20,960 --> 00:46:25,920
+go from bottom to top we see that okay
+
+00:46:23,599 --> 00:46:28,079
+main is skipped here but
+
+00:46:25,920 --> 00:46:29,280
+in the real like output it would be made
+
+00:46:28,079 --> 00:46:32,800
+here
+
+00:46:29,280 --> 00:46:35,040
+but main calls f f calls x
+
+00:46:32,800 --> 00:46:39,040
+and then push back calls which calls
+
+00:46:35,040 --> 00:46:39,040
+allocate node and so on and so on
+
+00:46:39,440 --> 00:46:43,280
+and we come to our allocate functions
+
+00:46:41,920 --> 00:46:46,000
+function in the end
+
+00:46:43,280 --> 00:46:48,079
+and of course we have like all uh debug
+
+00:46:46,000 --> 00:46:51,680
+information here
+
+00:46:48,079 --> 00:46:52,400
+file and line so we can get a good
+
+00:46:51,680 --> 00:46:54,960
+insight
+
+00:46:52,400 --> 00:46:57,280
+what happens here and why it allocates
+
+00:46:54,960 --> 00:47:01,200
+the way it allocates
+
+00:46:57,280 --> 00:47:03,520
+right now we have some caveats with the
+
+00:47:01,200 --> 00:47:06,560
+call graph though
+
+00:47:03,520 --> 00:47:07,520
+and we cannot actually build a call
+
+00:47:06,560 --> 00:47:10,720
+graph
+
+00:47:07,520 --> 00:47:13,040
+or it might be incomplete uh because of
+
+00:47:10,720 --> 00:47:13,839
+virtual calls or calls for a function
+
+00:47:13,040 --> 00:47:16,800
+pointer
+
+00:47:13,839 --> 00:47:17,760
+or inline assembler with some well-known
+
+00:47:16,800 --> 00:47:19,520
+limitations
+
+00:47:17,760 --> 00:47:20,800
+right because some of them depend on
+
+00:47:19,520 --> 00:47:23,760
+runtime and
+
+00:47:20,800 --> 00:47:26,319
+inline assembly has a different kind of
+
+00:47:23,760 --> 00:47:26,319
+difficulty
+
+00:47:26,480 --> 00:47:31,119
+uh now what we can do in order to
+
+00:47:29,920 --> 00:47:33,520
+mitigate this
+
+00:47:31,119 --> 00:47:35,680
+we can combine both approaches so we can
+
+00:47:33,520 --> 00:47:37,920
+still build with call graph for
+
+00:47:35,680 --> 00:47:38,880
+for convenient and nice information and
+
+00:47:37,920 --> 00:47:41,200
+when we
+
+00:47:38,880 --> 00:47:42,640
+can complete it with these functions
+
+00:47:41,200 --> 00:47:43,280
+which are kind of our faint in our
+
+00:47:42,640 --> 00:47:46,400
+program
+
+00:47:43,280 --> 00:47:49,920
+which not in the call graph yet
+
+00:47:46,400 --> 00:47:53,440
+but we're still now in our
+
+00:47:49,920 --> 00:47:56,400
+code so we can just just combine
+
+00:47:53,440 --> 00:47:57,920
+like the first approach i showed and and
+
+00:47:56,400 --> 00:48:02,559
+the in the second
+
+00:47:57,920 --> 00:48:06,079
+right and and we we will be probably
+
+00:48:02,559 --> 00:48:09,599
+like sure that we cover
+
+00:48:06,079 --> 00:48:10,079
+everything if you do that right we may
+
+00:48:09,599 --> 00:48:13,599
+cover
+
+00:48:10,079 --> 00:48:15,520
+too much right we can go to some
+
+00:48:13,599 --> 00:48:16,720
+like unreachable function and so on but
+
+00:48:15,520 --> 00:48:18,559
+it doesn't matter the
+
+00:48:16,720 --> 00:48:20,000
+important thing we cover everything
+
+00:48:18,559 --> 00:48:23,520
+right if you have unreachable
+
+00:48:20,000 --> 00:48:27,280
+code it's uh something to deal with uh
+
+00:48:23,520 --> 00:48:29,599
+like anyway it's not not exactly our
+
+00:48:27,280 --> 00:48:29,599
+problem
+
+00:48:30,160 --> 00:48:34,640
+now when we do all that we can run our
+
+00:48:32,839 --> 00:48:36,319
+opt
+
+00:48:34,640 --> 00:48:38,160
+and it's going to look something like
+
+00:48:36,319 --> 00:48:39,520
+this it's a bit scary common line but
+
+00:48:38,160 --> 00:48:42,000
+basically what it says is
+
+00:48:39,520 --> 00:48:43,680
+run opt and load our customer lock
+
+00:48:42,000 --> 00:48:46,319
+analyzer pass
+
+00:48:43,680 --> 00:48:47,280
+and generate our header called my devs
+
+00:48:46,319 --> 00:48:49,760
+hpp
+
+00:48:47,280 --> 00:48:51,359
+starting from entry point main and this
+
+00:48:49,760 --> 00:48:52,720
+is regular expression you can put
+
+00:48:51,359 --> 00:48:56,240
+everything here
+
+00:48:52,720 --> 00:49:00,079
+and program bc is our
+
+00:48:56,240 --> 00:49:03,359
+compiled bitcode file and we ignore
+
+00:49:00,079 --> 00:49:06,400
+output of output of the
+
+00:49:03,359 --> 00:49:08,800
+opt now uh
+
+00:49:06,400 --> 00:49:09,440
+what is going to generate for our
+
+00:49:08,800 --> 00:49:12,480
+example
+
+00:49:09,440 --> 00:49:13,680
+on on uh the previous slides
+
+00:49:12,480 --> 00:49:15,680
+it's going to be something like this
+
+00:49:13,680 --> 00:49:17,200
+it's going to generate bucket
+
+00:49:15,680 --> 00:49:19,440
+and it's going to generate bucket
+
+00:49:17,200 --> 00:49:22,000
+descriptors and
+
+00:49:19,440 --> 00:49:24,000
+in our case we had only one stood list
+
+00:49:22,000 --> 00:49:27,760
+so it's going to be block size 24
+
+00:49:24,000 --> 00:49:29,520
+and it was memory for id free so
+
+00:49:27,760 --> 00:49:31,280
+this is what we're going to have but of
+
+00:49:29,520 --> 00:49:33,920
+course more buckets
+
+00:49:31,280 --> 00:49:35,200
+can be here and more specializations for
+
+00:49:33,920 --> 00:49:38,079
+other memory pools
+
+00:49:35,200 --> 00:49:38,480
+can also be here now when we do that we
+
+00:49:38,079 --> 00:49:41,119
+just
+
+00:49:38,480 --> 00:49:41,920
+include this file recompile and
+
+00:49:41,119 --> 00:49:45,520
+hopefully all
+
+00:49:41,920 --> 00:49:48,720
+our locations now go to our memory pool
+
+00:49:45,520 --> 00:49:50,319
+instead of memory resource meaning
+
+00:49:48,720 --> 00:49:53,280
+instead of the hip
+
+00:49:50,319 --> 00:49:54,559
+so ideally we are done we just need to
+
+00:49:53,280 --> 00:49:57,680
+figure out block counts
+
+00:49:54,559 --> 00:49:58,640
+and things like this but um other than
+
+00:49:57,680 --> 00:50:00,720
+that we just
+
+00:49:58,640 --> 00:50:02,160
+seamlessly switch from allocating from
+
+00:50:00,720 --> 00:50:05,200
+heap to
+
+00:50:02,160 --> 00:50:08,880
+allocating from our memory pool
+
+00:50:05,200 --> 00:50:12,240
+here and just to recap
+
+00:50:08,880 --> 00:50:14,079
+yeah it's uh well know that memory
+
+00:50:12,240 --> 00:50:16,319
+locations is a fundamental part of c
+
+00:50:14,079 --> 00:50:17,680
+plus plus and they have to be
+
+00:50:16,319 --> 00:50:21,119
+deterministic
+
+00:50:17,680 --> 00:50:24,559
+for safety critical applications and
+
+00:50:21,119 --> 00:50:26,720
+memory pools is a good solution but
+
+00:50:24,559 --> 00:50:28,480
+it's kind of hard to use with c plus
+
+00:50:26,720 --> 00:50:30,960
+plus locator model
+
+00:50:28,480 --> 00:50:31,760
+and in instrumental locator combined
+
+00:50:30,960 --> 00:50:34,480
+with an
+
+00:50:31,760 --> 00:50:36,319
+analyzing tool can be a certified
+
+00:50:34,480 --> 00:50:37,040
+certifiable solution for this problem
+
+00:50:36,319 --> 00:50:39,359
+it's just
+
+00:50:37,040 --> 00:50:40,160
+one of the possible solutions and it can
+
+00:50:39,359 --> 00:50:43,200
+be improved
+
+00:50:40,160 --> 00:50:46,880
+immensely in many regards but just
+
+00:50:43,200 --> 00:50:50,000
+an an idea how you can do things
+
+00:50:46,880 --> 00:50:51,359
+and thank you very much uh for your
+
+00:50:50,000 --> 00:50:53,920
+attention
+
+00:50:51,359 --> 00:50:55,200
+thank you that's all i have for today
+
+00:50:53,920 --> 00:50:57,440
+and if you have time for
+
+00:50:55,200 --> 00:50:59,440
+questions i would be happy to answer
+
+00:50:57,440 --> 00:51:03,440
+them thank you
+
+00:50:59,440 --> 00:51:07,359
+hi hello and
+
+00:51:03,440 --> 00:51:10,559
+can you hear me guys carlos
+
+00:51:07,359 --> 00:51:10,559
+can you give me thumbs up
+
+00:51:12,400 --> 00:51:15,359
+cool so
+
+00:51:15,760 --> 00:51:21,599
+i'm going to address questions
+
+00:51:19,040 --> 00:51:23,200
+and the most popular one by far is why
+
+00:51:21,599 --> 00:51:26,720
+do i use malok and bakken
+
+00:51:23,200 --> 00:51:29,359
+in in the bucket instead of new and
+
+00:51:26,720 --> 00:51:30,480
+yeah i knew that the tpp cone you cannot
+
+00:51:29,359 --> 00:51:34,000
+show a bucket with
+
+00:51:30,480 --> 00:51:35,760
+maluk it's a scene but the reason is
+
+00:51:34,000 --> 00:51:37,920
+purely historical it can be of course it
+
+00:51:35,760 --> 00:51:40,160
+can be new and the reason is with
+
+00:51:37,920 --> 00:51:41,359
+original code in c plus plus 14 not in
+
+00:51:40,160 --> 00:51:44,559
+00:51:41,359 --> 00:51:47,440
+and it uses a alignment allocation
+
+00:51:44,559 --> 00:51:50,000
+so we don't have uh a line dialog or
+
+00:51:47,440 --> 00:51:52,240
+news alignment in simplest plus 14
+
+00:51:50,000 --> 00:51:54,559
+and that was posix mammal line which i
+
+00:51:52,240 --> 00:51:57,119
+changed to malloc
+
+00:51:54,559 --> 00:51:58,480
+like on the slide but yeah it can be new
+
+00:51:57,119 --> 00:52:00,880
+so no
+
+00:51:58,480 --> 00:52:03,119
+nothing nothing nothing particularly
+
+00:52:00,880 --> 00:52:07,520
+interesting about it
+
+00:52:03,119 --> 00:52:09,680
+um now are there any changes gotcha's
+
+00:52:07,520 --> 00:52:11,040
+details that change when we need the
+
+00:52:09,680 --> 00:52:13,599
+pool of physically
+
+00:52:11,040 --> 00:52:14,720
+contiguous memory say from kernel space
+
+00:52:13,599 --> 00:52:17,920
+driver location
+
+00:52:14,720 --> 00:52:19,040
+okay i'm not an expert on uh on linux
+
+00:52:17,920 --> 00:52:21,200
+kernel but
+
+00:52:19,040 --> 00:52:23,119
+i think at administration general
+
+00:52:21,200 --> 00:52:26,240
+knowledge as far as i know it
+
+00:52:23,119 --> 00:52:27,839
+would be something like a k malloc or
+
+00:52:26,240 --> 00:52:29,920
+something case that dialogue something
+
+00:52:27,839 --> 00:52:30,640
+like this on camera level and we would
+
+00:52:29,920 --> 00:52:33,920
+need to
+
+00:52:30,640 --> 00:52:35,839
+map it and map it through driver broads
+
+00:52:33,920 --> 00:52:36,160
+file system something like this but i'm
+
+00:52:35,839 --> 00:52:38,800
+not
+
+00:52:36,160 --> 00:52:40,800
+i'm not really an expert we have guys
+
+00:52:38,800 --> 00:52:43,119
+who really work on camera more
+
+00:52:40,800 --> 00:52:45,119
+and i'm not one of them but yeah it
+
+00:52:43,119 --> 00:52:48,079
+would be it would come instead of
+
+00:52:45,119 --> 00:52:49,200
+malloc yeah something like memory map to
+
+00:52:48,079 --> 00:52:52,480
+something allocated
+
+00:52:49,200 --> 00:52:54,960
+in the driver i guess
+
+00:52:52,480 --> 00:52:56,400
+now what is the vm bit code yeah this is
+
+00:52:54,960 --> 00:52:59,839
+a huge problem i i
+
+00:52:56,400 --> 00:53:01,440
+haven't said that right and yeah i mean
+
+00:52:59,839 --> 00:53:02,640
+that's the problem with the presentation
+
+00:53:01,440 --> 00:53:05,040
+i should have said that
+
+00:53:02,640 --> 00:53:06,720
+llvm bit code is an intermediate
+
+00:53:05,040 --> 00:53:10,079
+representation which
+
+00:53:06,720 --> 00:53:14,160
+clank and general eleven uh toolset
+
+00:53:10,079 --> 00:53:18,000
+uses um uses for compilation so
+
+00:53:14,160 --> 00:53:22,000
+it's a little bit like java virtual
+
+00:53:18,000 --> 00:53:24,000
+uh java bytecode or
+
+00:53:22,000 --> 00:53:25,599
+microsoft's intermediate representation
+
+00:53:24,000 --> 00:53:27,599
+like c sharp and
+
+00:53:25,599 --> 00:53:28,640
+all the family of languages are compiled
+
+00:53:27,599 --> 00:53:30,640
+into so
+
+00:53:28,640 --> 00:53:32,720
+bitcoin is like virtual assemblers like
+
+00:53:30,640 --> 00:53:35,040
+high level assembler but the
+
+00:53:32,720 --> 00:53:35,760
+the thing with the bit code is that this
+
+00:53:35,040 --> 00:53:37,760
+it's
+
+00:53:35,760 --> 00:53:39,359
+file compiled into this intermediate
+
+00:53:37,760 --> 00:53:42,559
+format are easy to manipulate
+
+00:53:39,359 --> 00:53:44,559
+easy to analyze easy to just reverse
+
+00:53:42,559 --> 00:53:47,599
+functions and and the whole like
+
+00:53:44,559 --> 00:53:50,960
+uh the whole like
+
+00:53:47,599 --> 00:53:52,720
+model it's basically we don't have
+
+00:53:50,960 --> 00:53:55,760
+reflections right so it's like the
+
+00:53:52,720 --> 00:53:56,240
+closest thing to compile time reflection
+
+00:53:55,760 --> 00:53:58,480
+uh
+
+00:53:56,240 --> 00:53:59,280
+which we can get it's not exactly c plus
+
+00:53:58,480 --> 00:54:01,599
+plus it's like
+
+00:53:59,280 --> 00:54:02,960
+with virtual assembler but you can go
+
+00:54:01,599 --> 00:54:06,000
+and for example
+
+00:54:02,960 --> 00:54:08,480
+check out all function calls or what
+
+00:54:06,000 --> 00:54:10,400
+arguments they take
+
+00:54:08,480 --> 00:54:11,920
+and so on and so on so you can you can
+
+00:54:10,400 --> 00:54:14,480
+just learn a lot about
+
+00:54:11,920 --> 00:54:16,079
+about your program so basically llvm
+
+00:54:14,480 --> 00:54:19,680
+uses this uh
+
+00:54:16,079 --> 00:54:21,280
+for optimization uh passes like
+
+00:54:19,680 --> 00:54:23,200
+whole optimization passes work on this
+
+00:54:21,280 --> 00:54:25,440
+virtual assembly and then
+
+00:54:23,200 --> 00:54:26,240
+comes process which which uh called
+
+00:54:25,440 --> 00:54:28,079
+lowering
+
+00:54:26,240 --> 00:54:30,720
+this is like compilation into native
+
+00:54:28,079 --> 00:54:33,200
+code and additional optimizations of on
+
+00:54:30,720 --> 00:54:36,160
+native code so again bit code is an
+
+00:54:33,200 --> 00:54:40,000
+intermediate representation in the llvm
+
+00:54:36,160 --> 00:54:41,599
+compiler so now can a memory pool be
+
+00:54:40,000 --> 00:54:43,760
+able to grow dynamically
+
+00:54:41,599 --> 00:54:45,760
+add more buckets as needed or it's only
+
+00:54:43,760 --> 00:54:47,920
+allocated to a fixed size of front
+
+00:54:45,760 --> 00:54:48,799
+of case of of course sorry of course you
+
+00:54:47,920 --> 00:54:50,880
+can do
+
+00:54:48,799 --> 00:54:52,880
+you can make it grow dynamically but it
+
+00:54:50,880 --> 00:54:54,240
+kind of defies the purpose right
+
+00:54:52,880 --> 00:54:56,000
+because if it grows dynamically you're
+
+00:54:54,240 --> 00:54:59,040
+probably asking for memory uh
+
+00:54:56,000 --> 00:55:01,599
+from operating system and this is going
+
+00:54:59,040 --> 00:55:03,280
+to give you like this non-deterministic
+
+00:55:01,599 --> 00:55:05,119
+behavior which we're kind of trying to
+
+00:55:03,280 --> 00:55:06,720
+avoid but one thing we
+
+00:55:05,119 --> 00:55:08,319
+could do and this question kind of makes
+
+00:55:06,720 --> 00:55:10,559
+sense in in one another
+
+00:55:08,319 --> 00:55:12,559
+one other regard you you don't have to
+
+00:55:10,559 --> 00:55:14,960
+do everything static you can do things
+
+00:55:12,559 --> 00:55:15,920
+like more dynamically in initialization
+
+00:55:14,960 --> 00:55:18,079
+stage like
+
+00:55:15,920 --> 00:55:19,680
+when all classes are setting up they can
+
+00:55:18,079 --> 00:55:22,240
+add add buckets
+
+00:55:19,680 --> 00:55:23,760
+for for things we're going to use and
+
+00:55:22,240 --> 00:55:24,480
+when you're going into your running
+
+00:55:23,760 --> 00:55:27,440
+station
+
+00:55:24,480 --> 00:55:27,760
+actually operational and you you don't
+
+00:55:27,440 --> 00:55:29,440
+add
+
+00:55:27,760 --> 00:55:31,200
+any more so you can do things more
+
+00:55:29,440 --> 00:55:32,240
+dynamic and we indeed do things more
+
+00:55:31,200 --> 00:55:35,280
+dynamic just
+
+00:55:32,240 --> 00:55:38,160
+the reason i i haven't shown that is
+
+00:55:35,280 --> 00:55:40,000
+that it's a small relatively small talk
+
+00:55:38,160 --> 00:55:40,799
+and i needed to show the whole idea like
+
+00:55:40,000 --> 00:55:44,000
+the whole
+
+00:55:40,799 --> 00:55:49,839
+chain uh of what what you do with
+
+00:55:44,000 --> 00:55:49,839
+with this like compile time analyze
+
+00:55:50,400 --> 00:55:56,640
+now okay i don't understand what the
+
+00:55:54,240 --> 00:55:57,680
+injected instrumentation is doing for us
+
+00:55:56,640 --> 00:56:00,000
+well it
+
+00:55:57,680 --> 00:56:02,160
+actually doesn't do anything it's just
+
+00:56:00,000 --> 00:56:05,599
+there like the whole reason
+
+00:56:02,160 --> 00:56:08,880
+for this dummy function is to be called
+
+00:56:05,599 --> 00:56:10,400
+it's like what we need is the name with
+
+00:56:08,880 --> 00:56:12,240
+template arguments which
+
+00:56:10,400 --> 00:56:14,079
+all we need actually encoded into this
+
+00:56:12,240 --> 00:56:17,680
+name so when we analyze like
+
+00:56:14,079 --> 00:56:19,760
+compiled program three we can just uh
+
+00:56:17,680 --> 00:56:21,280
+go and see where this function is called
+
+00:56:19,760 --> 00:56:23,440
+and for us it's like a
+
+00:56:21,280 --> 00:56:24,480
+just a marker that with this function is
+
+00:56:23,440 --> 00:56:27,200
+going to be called from
+
+00:56:24,480 --> 00:56:29,440
+every allocation so if we kind of went
+
+00:56:27,200 --> 00:56:30,240
+and collected all these instrumentation
+
+00:56:29,440 --> 00:56:33,599
+calls we
+
+00:56:30,240 --> 00:56:36,880
+for sure like 100 percent
+
+00:56:33,599 --> 00:56:41,280
+sure we we covered all the locations
+
+00:56:36,880 --> 00:56:41,280
+in our compiled uh code
+
+00:56:42,839 --> 00:56:46,960
+um
+
+00:56:45,280 --> 00:56:48,559
+in your implementation of memory pool
+
+00:56:46,960 --> 00:56:50,640
+can we throw exception during
+
+00:56:48,559 --> 00:56:52,880
+initialization too
+
+00:56:50,640 --> 00:56:54,319
+yes do you during initialization is
+
+00:56:52,880 --> 00:56:55,760
+probably the best time to throw
+
+00:56:54,319 --> 00:56:59,200
+exception you probably
+
+00:56:55,760 --> 00:57:02,160
+is going to uh terminate
+
+00:56:59,200 --> 00:57:03,359
+or switch to like a parallel pipeline or
+
+00:57:02,160 --> 00:57:06,160
+something
+
+00:57:03,359 --> 00:57:08,319
+so if you want to crash it's probably
+
+00:57:06,160 --> 00:57:09,040
+the best time to crash in the beginning
+
+00:57:08,319 --> 00:57:12,480
+and not in
+
+00:57:09,040 --> 00:57:16,480
+the operational mode
+
+00:57:12,480 --> 00:57:16,480
+and okay
+
+00:57:16,559 --> 00:57:21,200
+uh would the test pmr test allocator
+
+00:57:19,520 --> 00:57:23,040
+together with stack trace proposal will
+
+00:57:21,200 --> 00:57:25,359
+be an option to collect type sizes
+
+00:57:23,040 --> 00:57:28,000
+well it has exactly the same problem as
+
+00:57:25,359 --> 00:57:31,760
+as printing to stdc out
+
+00:57:28,000 --> 00:57:34,960
+uh you kind of need to be sure that
+
+00:57:31,760 --> 00:57:35,680
+every every possible runtime scenario is
+
+00:57:34,960 --> 00:57:37,280
+covered
+
+00:57:35,680 --> 00:57:39,359
+and this is something which is kind of
+
+00:57:37,280 --> 00:57:40,000
+hard to prove i mean with sufficient
+
+00:57:39,359 --> 00:57:42,240
+line coverage
+
+00:57:40,000 --> 00:57:43,839
+you can prove that but it can be
+
+00:57:42,240 --> 00:57:47,200
+impractical in some cases
+
+00:57:43,839 --> 00:57:49,520
+the the advantage of doing it on the
+
+00:57:47,200 --> 00:57:49,920
+compiled code like analyzing compiled
+
+00:57:49,520 --> 00:57:51,839
+code
+
+00:57:49,920 --> 00:57:53,599
+is actually that it's it's profitable
+
+00:57:51,839 --> 00:57:56,240
+even if your code is unreachable
+
+00:57:53,599 --> 00:57:57,599
+even it's called like one million years
+
+00:57:56,240 --> 00:57:59,680
+or something
+
+00:57:57,599 --> 00:58:00,640
+and you don't have tests for that you
+
+00:57:59,680 --> 00:58:03,200
+still
+
+00:58:00,640 --> 00:58:04,880
+can be sure that if you analyze compiled
+
+00:58:03,200 --> 00:58:07,280
+code you're going to cover it but if you
+
+00:58:04,880 --> 00:58:08,880
+do things in runtime
+
+00:58:07,280 --> 00:58:11,680
+it's not it's not sure it's not
+
+00:58:08,880 --> 00:58:15,200
+something you can certifiably prove
+
+00:58:11,680 --> 00:58:17,040
+let's say okay
+
+00:58:15,200 --> 00:58:19,200
+uh is the full source code available
+
+00:58:17,040 --> 00:58:22,079
+anywhere we could take a further look
+
+00:58:19,200 --> 00:58:22,799
+uh well not yet we are talking it's it's
+
+00:58:22,079 --> 00:58:24,960
+kind of in
+
+00:58:22,799 --> 00:58:27,280
+interviewing with with uh our
+
+00:58:24,960 --> 00:58:30,799
+proprietary code and we're still talking
+
+00:58:27,280 --> 00:58:31,839
+what we would like to kind of open
+
+00:58:30,799 --> 00:58:34,000
+source or
+
+00:58:31,839 --> 00:58:35,119
+so i don't have i don't have the code
+
+00:58:34,000 --> 00:58:38,400
+unfortunately but
+
+00:58:35,119 --> 00:58:40,160
+maybe i will uh at some point no no no
+
+00:58:38,400 --> 00:58:43,520
+promises though
+
+00:58:40,160 --> 00:58:45,119
+um how do you handle exceptions for
+
+00:58:43,520 --> 00:58:46,640
+these critical systems that's a great
+
+00:58:45,119 --> 00:58:50,319
+question actually
+
+00:58:46,640 --> 00:58:51,520
+uh well it's a hard problem and we're
+
+00:58:50,319 --> 00:58:54,799
+still working on it we
+
+00:58:51,520 --> 00:58:56,319
+have uh many ideas but generally
+
+00:58:54,799 --> 00:58:59,680
+speaking there is no no
+
+00:58:56,319 --> 00:59:01,760
+no no magic here like a
+
+00:58:59,680 --> 00:59:04,160
+in most cases you probably want to use
+
+00:59:01,760 --> 00:59:06,160
+exceptions only for really critical
+
+00:59:04,160 --> 00:59:09,200
+scenarios and you want to terminate
+
+00:59:06,160 --> 00:59:10,240
+immediately so you kind of you don't you
+
+00:59:09,200 --> 00:59:12,640
+don't use exceptions
+
+00:59:10,240 --> 00:59:14,160
+you use exceptions in order to to cause
+
+00:59:12,640 --> 00:59:17,440
+to terminate
+
+00:59:14,160 --> 00:59:18,000
+and and die yeah and most cases you you
+
+00:59:17,440 --> 00:59:21,280
+probably
+
+00:59:18,000 --> 00:59:23,920
+want something like uh boost
+
+00:59:21,280 --> 00:59:26,000
+outcome or or stood expected something
+
+00:59:23,920 --> 00:59:28,319
+like this i think
+
+00:59:26,000 --> 00:59:30,240
+uh do you have to analyze this graph
+
+00:59:28,319 --> 00:59:33,599
+every time you update your compile
+
+00:59:30,240 --> 00:59:35,839
+unfortunately yes but uh it's
+
+00:59:33,599 --> 00:59:36,720
+against just a general idea how you can
+
+00:59:35,839 --> 00:59:38,960
+do things and
+
+00:59:36,720 --> 00:59:39,920
+one thing we do we don't use it actually
+
+00:59:38,960 --> 00:59:43,119
+as it is
+
+00:59:39,920 --> 00:59:44,079
+that much we use it for example for
+
+00:59:43,119 --> 00:59:46,799
+creating like more
+
+00:59:44,079 --> 00:59:47,760
+generic type traits yeah you can think
+
+00:59:46,799 --> 00:59:49,359
+about writing
+
+00:59:47,760 --> 00:59:50,960
+special kind of tests which being
+
+00:59:49,359 --> 00:59:52,960
+analyzed will
+
+00:59:50,960 --> 00:59:55,119
+will allow you to generate like type
+
+00:59:52,960 --> 00:59:58,000
+traits which which are actually more
+
+00:59:55,119 --> 00:59:58,880
+flexible and you can use them as a part
+
+00:59:58,000 --> 01:00:01,680
+of your
+
+00:59:58,880 --> 01:00:03,200
+code just to to uh to do more like
+
+01:00:01,680 --> 01:00:06,000
+compile time
+
+01:00:03,200 --> 01:00:07,200
+like real compile time not not nothing
+
+01:00:06,000 --> 01:00:10,160
+nothing generated
+
+01:00:07,200 --> 01:00:11,280
+a code but in real compile time to to
+
+01:00:10,160 --> 01:00:14,640
+actually access your
+
+01:00:11,280 --> 01:00:17,200
+your sizes uh
+
+01:00:14,640 --> 01:00:18,480
+yeah i would be i would be available i
+
+01:00:17,200 --> 01:00:20,880
+think i will
+
+01:00:18,480 --> 01:00:21,920
+i yeah no problem i will be in hallway
+
+01:00:20,880 --> 01:00:25,520
+for
+
+01:00:21,920 --> 01:00:26,960
+uh for next like 10 minutes 15 minutes
+
+01:00:25,520 --> 01:00:31,359
+if you want to talk to me
+
+01:00:26,960 --> 01:00:34,880
+and and can be more if there is interest
+
+01:00:31,359 --> 01:00:37,200
+okay so are there any issues with the
+
+01:00:34,880 --> 01:00:38,559
+location of memory in physical address
+
+01:00:37,200 --> 01:00:41,280
+space
+
+01:00:38,559 --> 01:00:42,400
+monochrome allocated virtually space and
+
+01:00:41,280 --> 01:00:44,640
+locate and physical
+
+01:00:42,400 --> 01:00:46,319
+yeah of course it's a kind of example if
+
+01:00:44,640 --> 01:00:48,240
+you if you really want like
+
+01:00:46,319 --> 01:00:49,599
+this is like the first question she
+
+01:00:48,240 --> 01:00:52,160
+actually answered
+
+01:00:49,599 --> 01:00:52,640
+er kinda answered i don't know a good
+
+01:00:52,160 --> 01:00:54,880
+good
+
+01:00:52,640 --> 01:00:56,720
+like really deep answer for this but of
+
+01:00:54,880 --> 01:00:58,799
+course you need something more
+
+01:00:56,720 --> 01:01:00,000
+like not monologue but something more
+
+01:00:58,799 --> 01:01:03,040
+like
+
+01:01:00,000 --> 01:01:05,440
+real-time uh
+
+01:01:03,040 --> 01:01:07,599
+real-time allocation you kind of need to
+
+01:01:05,440 --> 01:01:08,960
+to write a driver or do something with
+
+01:01:07,599 --> 01:01:11,119
+caramel in order to
+
+01:01:08,960 --> 01:01:13,920
+to make sure your memory is contiguous
+
+01:01:11,119 --> 01:01:19,119
+and actually physically contiguous yes
+
+01:01:13,920 --> 01:01:19,119
+so maluk isn't isn't a real example yeah
+
+01:01:19,200 --> 01:01:25,760
+yeah i think this one is also kind of
+
+01:01:23,040 --> 01:01:26,480
+answered so thank you very much i'm
+
+01:01:25,760 --> 01:01:29,520
+going to ben
+
+01:01:26,480 --> 01:01:31,839
+hallway in the next like uh
+
+01:01:29,520 --> 01:01:33,440
+10 minutes if you want to talk to me
+
+01:01:31,839 --> 01:01:36,839
+please come
+
+01:01:33,440 --> 01:01:53,839
+thank you very much for your attention
+
+01:01:36,839 --> 01:01:53,839
+thanks bye
+
+01:01:58,720 --> 01:02:00,799
+
+YouTube URL: https://www.youtube.com/watch?v=l14Zkx5OXr4
+
+
