@@ -1,0 +1,3741 @@
+Title: "OCIv2: Container Images Considered Harmful" - Aleksa Sarai (LCA 2020)
+Publication date: 2020-01-15
+Playlist: linux.conf.au 2020
+Description: 
+	Aleksa Sarai
+
+https://lca2020.linux.org.au/schedule/presentation/125/
+
+Most modern container image formats use tar-based linear archives to represent root filesystems, which results in many issues when using modern container images. In this talk, we will demonstrate a solution to this problem that we plan to propose for standardisation within the Open Container Initiative (code-named "OCIv2 images").
+
+This talk is specific to the Open Container Initiative's image specification, but the same techniques could be applied to other systems (though we'd obviously recommend using OCI). 
+
+In order to avoid the [numerous issues with tar archives](https://www.cyphar.com/blog/post/20190121-ociv2-images-i-tar) it is necessary to come up with a different format. In addition, layer representations result in needless wasted space for storage of files which are no longer relevant to running containers. Massive amounts of duplication are also rampant within OCI images because tar archives are completely opaque to OCI's content-addressable store.
+
+Luckily the problem of representing a container root filesystem for distribution is very similar to existing problems within backup systems, and we can take advantage of prior art such as [restic](https://restic.net/) to show us how we can get significant space-savings and possibly efficiency savings.
+
+However, we also must ensure that the runtime cost of using this new system is equivalent to existing container images. Container images are efficient at runtime because they map directly to how overlay filesystems represent change-sets as layers, but with some tricks it is possible for us to obtain most of the improvements we also gained in distribution with de-duplication.
+
+Our proposed solution to all of these problems will be laid out, with opportunities for feedback and discussion.
+
+linux.conf.au is a conference about the Linux operating system, and all aspects of the thriving ecosystem of Free and Open Source Software that has grown up around it. Run since 1999, in a different Australian or New Zealand city each year, by a team of local volunteers, LCA invites more than 500 people to learn from the people who shape the future of Open Source. For more information on the conference see https://linux.conf.au/
+
+Produced by NDV: https://youtube.com/channel/UCQ7dFBzZGlBvtU2hCecsBBg?sub_confirmation=1
+
+#linux.conf.au #linux #foss #opensource
+
+Tue Jan 14 13:30:00 2020 at Room 7
+Captions: 
+	00:00:02,270 --> 00:00:08,670
+good afternoon class we are starting
+
+00:00:06,180 --> 00:00:10,769
+back from lunch with Alexa from Suzy who
+
+00:00:08,670 --> 00:00:12,960
+will be talking about container images
+
+00:00:10,769 --> 00:00:22,020
+considered harmful let's make him feel
+
+00:00:12,960 --> 00:00:24,150
+welcome so this is gonna be a little bit
+
+00:00:22,020 --> 00:00:27,029
+of a breeze through a little bit of the
+
+00:00:24,150 --> 00:00:28,080
+history of tar as well as why the
+
+00:00:27,029 --> 00:00:30,510
+current formation of container images
+
+00:00:28,080 --> 00:00:31,769
+that we have at the moment are yeah to
+
+00:00:30,510 --> 00:00:33,840
+use a phrase considered harmful I
+
+00:00:31,769 --> 00:00:36,149
+apologize for using the meme title but I
+
+00:00:33,840 --> 00:00:37,590
+think it fits as well as some of the
+
+00:00:36,149 --> 00:00:39,230
+things that we can do to fix fix the
+
+00:00:37,590 --> 00:00:42,870
+problems we have with container images
+
+00:00:39,230 --> 00:00:45,090
+so first of all let's just think about
+
+00:00:42,870 --> 00:00:46,860
+what would be an ideal image format so
+
+00:00:45,090 --> 00:00:48,450
+we clear our minds of what we have at
+
+00:00:46,860 --> 00:00:50,000
+the moment and we think what are the
+
+00:00:48,450 --> 00:00:52,230
+things that we would really love to have
+
+00:00:50,000 --> 00:00:53,520
+ideally this image format this
+
+00:00:52,230 --> 00:00:55,410
+hypothetical image format would be
+
+00:00:53,520 --> 00:00:57,480
+duplicated as much as possible we don't
+
+00:00:55,410 --> 00:00:59,640
+want to have and I've split it out here
+
+00:00:57,480 --> 00:01:01,500
+between transfer and storage so we want
+
+00:00:59,640 --> 00:01:02,969
+to have deduplication on transfer
+
+00:01:01,500 --> 00:01:05,420
+meaning we don't pool data we already
+
+00:01:02,969 --> 00:01:07,470
+have on our laptops as well as
+
+00:01:05,420 --> 00:01:09,150
+deduplication of storage so we don't
+
+00:01:07,470 --> 00:01:10,320
+have if we have multiple images that are
+
+00:01:09,150 --> 00:01:13,619
+the same file we don't have to have
+
+00:01:10,320 --> 00:01:15,420
+copies of this file everywhere it should
+
+00:01:13,619 --> 00:01:17,729
+be parallelizable meaning that we should
+
+00:01:15,420 --> 00:01:19,080
+be able to download as much as we can as
+
+00:01:17,729 --> 00:01:21,720
+quickly as we can and we should be able
+
+00:01:19,080 --> 00:01:24,390
+to extract it as quickly as we can
+
+00:01:21,720 --> 00:01:25,590
+so effectively yeah we want to have a
+
+00:01:24,390 --> 00:01:27,270
+format such that you can actually get
+
+00:01:25,590 --> 00:01:28,470
+more than one thing at once in parallel
+
+00:01:27,270 --> 00:01:34,020
+if you have like a bunch of network
+
+00:01:28,470 --> 00:01:36,240
+nicks and yeah reproducible so we want a
+
+00:01:34,020 --> 00:01:37,650
+format we're given two completely
+
+00:01:36,240 --> 00:01:38,970
+separate machines that have never talked
+
+00:01:37,650 --> 00:01:41,189
+to each other and they have the exact
+
+00:01:38,970 --> 00:01:42,450
+same root filesystem we would want the
+
+00:01:41,189 --> 00:01:44,250
+image that is created from this root
+
+00:01:42,450 --> 00:01:46,740
+filesystem to be identical or at least
+
+00:01:44,250 --> 00:01:49,380
+as close to identical as you can get and
+
+00:01:46,740 --> 00:01:50,820
+this requires you to have a canonical
+
+00:01:49,380 --> 00:01:52,770
+representation need to have an agreement
+
+00:01:50,820 --> 00:01:54,990
+on exactly what the format should look
+
+00:01:52,770 --> 00:01:56,490
+like in such a way that it doesn't
+
+00:01:54,990 --> 00:01:58,619
+matter what operating system you're
+
+00:01:56,490 --> 00:02:00,540
+using what version of what operating
+
+00:01:58,619 --> 00:02:02,009
+system using what archiving tool you're
+
+00:02:00,540 --> 00:02:03,450
+using what version of what archiving
+
+00:02:02,009 --> 00:02:07,079
+tool you're using what language you're
+
+00:02:03,450 --> 00:02:09,000
+using etc and non avalanching this is a
+
+00:02:07,079 --> 00:02:11,280
+misuse of a turning cryptography but
+
+00:02:09,000 --> 00:02:12,690
+what I mean here is that a small change
+
+00:02:11,280 --> 00:02:13,620
+in a container image should not require
+
+00:02:12,690 --> 00:02:15,599
+you to read down
+
+00:02:13,620 --> 00:02:17,459
+the entire thing so in other words if
+
+00:02:15,599 --> 00:02:19,709
+you have some could enter image that
+
+00:02:17,459 --> 00:02:21,180
+like Ubuntu or whatever if pain gets
+
+00:02:19,709 --> 00:02:23,400
+updated you want you don't want to have
+
+00:02:21,180 --> 00:02:26,040
+to redownload the entire 50 Meg archive
+
+00:02:23,400 --> 00:02:29,940
+and finally it should be transparent and
+
+00:02:26,040 --> 00:02:31,530
+transparent here refers to the well it
+
+00:02:29,940 --> 00:02:34,739
+refers to a couple of things it should
+
+00:02:31,530 --> 00:02:35,970
+be transparent in that the OCI image
+
+00:02:34,739 --> 00:02:37,829
+format which is the image photo eyes are
+
+00:02:35,970 --> 00:02:39,450
+we talking about should be able to know
+
+00:02:37,829 --> 00:02:41,790
+exactly what's inside this image rather
+
+00:02:39,450 --> 00:02:43,620
+than it being a baked blob and also
+
+00:02:41,790 --> 00:02:46,349
+ideally it should be possible for us to
+
+00:02:43,620 --> 00:02:48,209
+have some sort of extension or some sort
+
+00:02:46,349 --> 00:02:50,040
+of feature to be able to actually tag
+
+00:02:48,209 --> 00:02:51,180
+what files inside or inside an image so
+
+00:02:50,040 --> 00:02:52,709
+you actually know what's inside the
+
+00:02:51,180 --> 00:02:55,260
+thing as opposed to again being an
+
+00:02:52,709 --> 00:02:56,640
+opaque blob so given given all of these
+
+00:02:55,260 --> 00:02:58,049
+things I guess we should ask you know
+
+00:02:56,640 --> 00:02:59,310
+how are we doing so far how a container
+
+00:02:58,049 --> 00:03:01,230
+image is doing so far so in case you
+
+00:02:59,310 --> 00:03:04,049
+didn't know container images today are
+
+00:03:01,230 --> 00:03:07,109
+based on top row entire archives or in
+
+00:03:04,049 --> 00:03:11,040
+or actually an array of tar archives so
+
+00:03:07,109 --> 00:03:13,470
+here's what whoops oh yes sorry I'll go
+
+00:03:11,040 --> 00:03:16,109
+here first so this is what this is what
+
+00:03:13,470 --> 00:03:18,209
+the OCI image format looks like so there
+
+00:03:16,109 --> 00:03:22,049
+are a couple of things basically all of
+
+00:03:18,209 --> 00:03:23,849
+the greyish things the top three are all
+
+00:03:22,049 --> 00:03:26,880
+JSON blobs that contain information
+
+00:03:23,849 --> 00:03:30,060
+about your image they contain you know
+
+00:03:26,880 --> 00:03:31,560
+the index which is effectively what you
+
+00:03:30,060 --> 00:03:34,980
+would consider to be a tag in dhaka
+
+00:03:31,560 --> 00:03:37,590
+parlance so for instance Ubuntu 1904 is
+
+00:03:34,980 --> 00:03:41,160
+effectively a entry in the index saying
+
+00:03:37,590 --> 00:03:44,459
+this thing this other blob this manifest
+
+00:03:41,160 --> 00:03:46,430
+blob is Ubuntu 1804 or whatever all of
+
+00:03:44,459 --> 00:03:48,959
+these arrows are content addressable
+
+00:03:46,430 --> 00:03:50,549
+pointers or you can think of them as
+
+00:03:48,959 --> 00:03:53,370
+smart pointers effectively they contain
+
+00:03:50,549 --> 00:03:54,720
+both the the type of the thing being
+
+00:03:53,370 --> 00:03:56,220
+pointed to so the index points the
+
+00:03:54,720 --> 00:03:58,319
+Manifesta says this is a manifest as
+
+00:03:56,220 --> 00:04:00,180
+well as the size of the thing and the
+
+00:03:58,319 --> 00:04:02,940
+sha-256 checksum of what it is which
+
+00:04:00,180 --> 00:04:04,440
+means that OCI images are canta Dressel
+
+00:04:02,940 --> 00:04:05,699
+which is why you have this constant or
+
+00:04:04,440 --> 00:04:07,949
+small store where all these things are
+
+00:04:05,699 --> 00:04:09,660
+stored and you have a config which can
+
+00:04:07,949 --> 00:04:11,220
+include stuff like what volumes you have
+
+00:04:09,660 --> 00:04:13,620
+what user you're running ads and so on
+
+00:04:11,220 --> 00:04:15,359
+and then the manifest also includes a
+
+00:04:13,620 --> 00:04:17,880
+list of layers and this is the thing
+
+00:04:15,359 --> 00:04:19,260
+we'll be talking about these layers are
+
+00:04:17,880 --> 00:04:21,719
+all tar archives
+
+00:04:19,260 --> 00:04:23,669
+and they're applied in order from 1 to n
+
+00:04:21,719 --> 00:04:25,080
+when you extract them and these are
+
+00:04:23,669 --> 00:04:27,400
+effectively when you do like a docker
+
+00:04:25,080 --> 00:04:29,770
+build or a padma build
+
+00:04:27,400 --> 00:04:31,720
+build whatever however you're building
+
+00:04:29,770 --> 00:04:33,100
+your images if they have more than one
+
+00:04:31,720 --> 00:04:38,110
+layer this is how they're represented is
+
+00:04:33,100 --> 00:04:39,430
+one Tariq I per layer yep so what's
+
+00:04:38,110 --> 00:04:42,520
+wrong with ah there are a couple of
+
+00:04:39,430 --> 00:04:46,120
+things to go back to to go back to our
+
+00:04:42,520 --> 00:04:48,910
+hypothetical ideal image formats how are
+
+00:04:46,120 --> 00:04:51,340
+we doing how is tar doing well this is
+
+00:04:48,910 --> 00:04:52,900
+given this list of I would say fairly
+
+00:04:51,340 --> 00:04:54,400
+would you say fairly reasonable
+
+00:04:52,900 --> 00:04:56,320
+requirements things that are sort of
+
+00:04:54,400 --> 00:05:02,229
+would make sense to have this is what
+
+00:04:56,320 --> 00:05:05,590
+tar gives us so there are some problems
+
+00:05:02,229 --> 00:05:06,820
+let's put it like that so let's go
+
+00:05:05,590 --> 00:05:08,470
+through what each of them one by one to
+
+00:05:06,820 --> 00:05:11,199
+at least get an idea of exactly why I
+
+00:05:08,470 --> 00:05:14,470
+think that tar is the wrong choice for
+
+00:05:11,199 --> 00:05:15,610
+container images because spoiler alert
+
+00:05:14,470 --> 00:05:16,930
+I'm about to suggest we do something
+
+00:05:15,610 --> 00:05:18,070
+else so I should probably explain why
+
+00:05:16,930 --> 00:05:21,760
+we're going to abandon a format that's
+
+00:05:18,070 --> 00:05:24,250
+40 years old so let's begin with sort of
+
+00:05:21,760 --> 00:05:26,349
+the most one of the simpler problems so
+
+00:05:24,250 --> 00:05:28,090
+imagine you have layer 1 and layer 2 and
+
+00:05:26,349 --> 00:05:30,130
+they have some sort of file so as a
+
+00:05:28,090 --> 00:05:31,840
+quick background tar the way the tar
+
+00:05:30,130 --> 00:05:33,280
+stores files is that it's a it's
+
+00:05:31,840 --> 00:05:33,990
+possibly the simplest format you can
+
+00:05:33,280 --> 00:05:36,970
+imagine
+
+00:05:33,990 --> 00:05:38,830
+well yeah it's about the simplest format
+
+00:05:36,970 --> 00:05:41,110
+you can imagine where every single file
+
+00:05:38,830 --> 00:05:42,699
+is stored as a linear archive obviously
+
+00:05:41,110 --> 00:05:45,699
+because tape drives were all the thing
+
+00:05:42,699 --> 00:05:48,639
+at the time and you have a header which
+
+00:05:45,699 --> 00:05:50,830
+is 512 bytes long which says here is the
+
+00:05:48,639 --> 00:05:51,669
+name of the file as an aside like I'm
+
+00:05:50,830 --> 00:05:53,470
+just gonna tell you this is very
+
+00:05:51,669 --> 00:05:56,070
+interesting the name of the file at
+
+00:05:53,470 --> 00:05:57,909
+least now I'll get that later
+
+00:05:56,070 --> 00:05:59,560
+basically conveys like the name of the
+
+00:05:57,909 --> 00:06:01,570
+file contains what type of file it is
+
+00:05:59,560 --> 00:06:03,760
+whether it's a wider no directory or a
+
+00:06:01,570 --> 00:06:05,860
+regular or an ordinary file yadda yadda
+
+00:06:03,760 --> 00:06:07,210
+and it has the length and then after the
+
+00:06:05,860 --> 00:06:08,530
+length of the data and then after that
+
+00:06:07,210 --> 00:06:11,110
+you have just the data just splatted
+
+00:06:08,530 --> 00:06:13,840
+right into the into the archive so what
+
+00:06:11,110 --> 00:06:16,599
+this means is that if you have to tar
+
+00:06:13,840 --> 00:06:18,699
+archives that have the exact same file
+
+00:06:16,599 --> 00:06:20,680
+but like the modified time has changed
+
+00:06:18,699 --> 00:06:22,870
+or someone at CH monitor or anything
+
+00:06:20,680 --> 00:06:25,000
+like that the then you create another
+
+00:06:22,870 --> 00:06:26,409
+layer afterwards so you have one layer
+
+00:06:25,000 --> 00:06:27,909
+which has one file which is 10 gigs in
+
+00:06:26,409 --> 00:06:29,919
+size and then you touch the file and
+
+00:06:27,909 --> 00:06:32,050
+then you create a new layer from it you
+
+00:06:29,919 --> 00:06:33,070
+have an entire copy of the 10 gigs so
+
+00:06:32,050 --> 00:06:35,349
+your image has doubled in size
+
+00:06:33,070 --> 00:06:36,849
+effectively if you just touch it because
+
+00:06:35,349 --> 00:06:38,200
+the header file is different the header
+
+00:06:36,849 --> 00:06:40,240
+is different and therefore the contents
+
+00:06:38,200 --> 00:06:41,020
+has to be have to be copied because Todd
+
+00:06:40,240 --> 00:06:43,479
+does not have a call
+
+00:06:41,020 --> 00:06:45,370
+Sept of I just modified the metadata
+
+00:06:43,479 --> 00:06:48,610
+don't make an entire copy of the file
+
+00:06:45,370 --> 00:06:50,440
+now it turns out that this is solvable
+
+00:06:48,610 --> 00:06:53,050
+in that if you go into the history of
+
+00:06:50,440 --> 00:06:54,190
+tar there are like dozens of different
+
+00:06:53,050 --> 00:06:56,319
+extensions that different vendors
+
+00:06:54,190 --> 00:06:58,629
+implemented at some point during the 80s
+
+00:06:56,319 --> 00:07:01,300
+and 90s and one of them is that Solaris
+
+00:06:58,629 --> 00:07:03,099
+had a feature which was a meta entry
+
+00:07:01,300 --> 00:07:06,729
+which in theory could be used to solve
+
+00:07:03,099 --> 00:07:07,599
+this problem however we get into why
+
+00:07:06,729 --> 00:07:10,090
+that what doesn't solve the problem at
+
+00:07:07,599 --> 00:07:11,860
+the moment also basically no tar program
+
+00:07:10,090 --> 00:07:14,229
+that I've seen supports it properly at
+
+00:07:11,860 --> 00:07:15,280
+least as far as I'm aware so let's just
+
+00:07:14,229 --> 00:07:16,509
+say that that's out of the picture so
+
+00:07:15,280 --> 00:07:18,310
+effectively you have this doubling
+
+00:07:16,509 --> 00:07:20,289
+problem another problem you have which
+
+00:07:18,310 --> 00:07:22,389
+is really fun is that if you remove a
+
+00:07:20,289 --> 00:07:24,159
+file your image will get bigger and the
+
+00:07:22,389 --> 00:07:26,650
+reason why is because if you have one
+
+00:07:24,159 --> 00:07:28,509
+layer and then you remove a file
+
+00:07:26,650 --> 00:07:30,130
+we can't modify the original layer
+
+00:07:28,509 --> 00:07:31,630
+because that would be very bad I mean
+
+00:07:30,130 --> 00:07:33,099
+it's constant addressable and people
+
+00:07:31,630 --> 00:07:34,539
+have signed these things if you delete a
+
+00:07:33,099 --> 00:07:36,190
+file from a bunty you don't want to have
+
+00:07:34,539 --> 00:07:38,580
+to say oh no this image is no longer
+
+00:07:36,190 --> 00:07:41,020
+sign because we deleted something so
+
+00:07:38,580 --> 00:07:42,460
+instead we do is we put a tombstone call
+
+00:07:41,020 --> 00:07:44,530
+which effectively the way it works is
+
+00:07:42,460 --> 00:07:47,500
+that if you're a file called foo you add
+
+00:07:44,530 --> 00:07:49,900
+whe foo in the same directory which is
+
+00:07:47,500 --> 00:07:51,729
+an empty file but because these are
+
+00:07:49,900 --> 00:07:53,889
+these headers all 512 bytes your image
+
+00:07:51,729 --> 00:07:56,830
+gets bigger by 512 bytes if you delete a
+
+00:07:53,889 --> 00:07:58,240
+file and also as another final side this
+
+00:07:56,830 --> 00:08:01,180
+means that you can't have a file called
+
+00:07:58,240 --> 00:08:02,319
+WH dot anything in a container image so
+
+00:08:01,180 --> 00:08:03,940
+if you want to try it when you get when
+
+00:08:02,319 --> 00:08:06,099
+you get away from this talk create a
+
+00:08:03,940 --> 00:08:10,180
+docker image or whatever type make a
+
+00:08:06,099 --> 00:08:11,650
+file called weh dot foo and then commit
+
+00:08:10,180 --> 00:08:13,389
+the image make a new image from it and
+
+00:08:11,650 --> 00:08:15,069
+then run the image and you'll find that
+
+00:08:13,389 --> 00:08:16,710
+this file is gone and the reason why is
+
+00:08:15,069 --> 00:08:19,330
+because there's no way to support having
+
+00:08:16,710 --> 00:08:21,460
+WG taught as a file name if it's used as
+
+00:08:19,330 --> 00:08:22,360
+like a metaphor map and as an aside if
+
+00:08:21,460 --> 00:08:23,830
+you're wondering why we came up with
+
+00:08:22,360 --> 00:08:25,810
+this brilliant idea for how we do this
+
+00:08:23,830 --> 00:08:27,849
+white out stuff this is actually because
+
+00:08:25,810 --> 00:08:29,259
+a ufs is how this is how a ufs used to
+
+00:08:27,849 --> 00:08:30,880
+store it and because docker only
+
+00:08:29,259 --> 00:08:34,060
+supported AFS for a very long time and
+
+00:08:30,880 --> 00:08:36,579
+because OC I copied Dockers image format
+
+00:08:34,060 --> 00:08:38,890
+sort of verbatim we end up we're
+
+00:08:36,579 --> 00:08:41,079
+actually like encoding a OFS which is a
+
+00:08:38,890 --> 00:08:42,849
+file system was now emerged into our
+
+00:08:41,079 --> 00:08:46,060
+image format which is obviously a very
+
+00:08:42,849 --> 00:08:49,029
+very good place to be so then we have
+
+00:08:46,060 --> 00:08:51,279
+then we have the okay let's imagine we
+
+00:08:49,029 --> 00:08:52,630
+had this brilliant header extension that
+
+00:08:51,279 --> 00:08:54,460
+managed to fix this problem of we've
+
+00:08:52,630 --> 00:08:56,560
+mate we've changed metadata okay
+
+00:08:54,460 --> 00:08:57,610
+we won't have the copy the file but then
+
+00:08:56,560 --> 00:08:59,530
+what someone does is that some
+
+00:08:57,610 --> 00:09:01,990
+knucklehead decides to add a fad a bite
+
+00:08:59,530 --> 00:09:03,310
+to the end of this data chunk and there
+
+00:09:01,990 --> 00:09:06,340
+is no way to solve this with inte R
+
+00:09:03,310 --> 00:09:09,370
+because again tar is a single archive
+
+00:09:06,340 --> 00:09:12,160
+you can't say listen I have the first 10
+
+00:09:09,370 --> 00:09:13,120
+gigs of this file just just add this
+
+00:09:12,160 --> 00:09:15,430
+little bit to the end that's not
+
+00:09:13,120 --> 00:09:17,770
+supported at all with inte R there isn't
+
+00:09:15,430 --> 00:09:19,540
+even really a tar extension that does
+
+00:09:17,770 --> 00:09:23,050
+this there are some Forks of tar that
+
+00:09:19,540 --> 00:09:25,000
+kind of do this but let's just say that
+
+00:09:23,050 --> 00:09:27,400
+there they have other problems but
+
+00:09:25,000 --> 00:09:28,660
+effectively when we come to this problem
+
+00:09:27,400 --> 00:09:30,730
+there's no way to Seoul with inte R
+
+00:09:28,660 --> 00:09:32,350
+because it just doesn't match what Todd
+
+00:09:30,730 --> 00:09:34,210
+does so you end up again with a 20 get
+
+00:09:32,350 --> 00:09:35,410
+with 20 gigs of data even though the
+
+00:09:34,210 --> 00:09:36,940
+first one is completely irrelevant
+
+00:09:35,410 --> 00:09:40,480
+because when you actually run the thing
+
+00:09:36,940 --> 00:09:44,530
+you only care about the later version ok
+
+00:09:40,480 --> 00:09:46,330
+and then we have then we come to how are
+
+00:09:44,530 --> 00:09:48,910
+we going to with sorry there we go to
+
+00:09:46,330 --> 00:09:51,160
+transfer so imagine you have some
+
+00:09:48,910 --> 00:09:53,740
+version of tumbleweed version 1 or
+
+00:09:51,160 --> 00:09:56,890
+whatever and then you pull the same
+
+00:09:53,740 --> 00:09:58,720
+image again the next week and we've
+
+00:09:56,890 --> 00:10:01,180
+added a bunch of random binary to the
+
+00:09:58,720 --> 00:10:03,040
+base image now because because operator
+
+00:10:01,180 --> 00:10:04,990
+well because base images at least four
+
+00:10:03,040 --> 00:10:07,000
+distributions are all one archive that
+
+00:10:04,990 --> 00:10:08,350
+we generate we we make it however we
+
+00:10:07,000 --> 00:10:10,120
+make our distribution and we make at our
+
+00:10:08,350 --> 00:10:12,070
+archive of it and that's your image as a
+
+00:10:10,120 --> 00:10:14,680
+result if you you have basically the
+
+00:10:12,070 --> 00:10:16,450
+exact same files between them except for
+
+00:10:14,680 --> 00:10:18,580
+a couple of extras you're going to
+
+00:10:16,450 --> 00:10:19,780
+redownload the entire thing from scratch
+
+00:10:18,580 --> 00:10:21,130
+so I don't know if you've noticed
+
+00:10:19,780 --> 00:10:22,300
+whenever you have there's an Ubuntu
+
+00:10:21,130 --> 00:10:24,460
+update or whatever and you do dock a
+
+00:10:22,300 --> 00:10:26,560
+pool or however you update you know with
+
+00:10:24,460 --> 00:10:28,330
+kubernetes or whatever how are we update
+
+00:10:26,560 --> 00:10:31,240
+your images you might find that your
+
+00:10:28,330 --> 00:10:32,710
+redownload Ingush an update the entire
+
+00:10:31,240 --> 00:10:34,780
+thing which doesn't make much sense
+
+00:10:32,710 --> 00:10:36,820
+because I mean how often is you know
+
+00:10:34,780 --> 00:10:38,350
+bash or how often is like been true
+
+00:10:36,820 --> 00:10:40,900
+updated on a bun - it doesn't make sense
+
+00:10:38,350 --> 00:10:42,280
+and in addition obviously I mean you
+
+00:10:40,900 --> 00:10:43,750
+know I can rant about Australian
+
+00:10:42,280 --> 00:10:45,490
+internet I mean we have the NBN now but
+
+00:10:43,750 --> 00:10:46,870
+at least for a very long time you know I
+
+00:10:45,490 --> 00:10:48,550
+was sitting in my laptop like can you
+
+00:10:46,870 --> 00:10:50,680
+please just finish the download like we
+
+00:10:48,550 --> 00:10:52,180
+don't have it's only one file has
+
+00:10:50,680 --> 00:10:54,880
+changed why we down in the whole thing
+
+00:10:52,180 --> 00:10:57,730
+that's just completely wasteful and then
+
+00:10:54,880 --> 00:10:59,310
+as a secondary problem to this is that
+
+00:10:57,730 --> 00:11:01,990
+when we actually go to one packet
+
+00:10:59,310 --> 00:11:04,120
+because this is just at our archive and
+
+00:11:01,990 --> 00:11:06,490
+we don't know that these two tarik Ives
+
+00:11:04,120 --> 00:11:07,930
+contain the exact same file when you
+
+00:11:06,490 --> 00:11:10,690
+actually extract them you end
+
+00:11:07,930 --> 00:11:12,670
+with complete full copies of them so in
+
+00:11:10,690 --> 00:11:14,140
+other words ping is copied twice even
+
+00:11:12,670 --> 00:11:16,240
+though it's the exact same binary all
+
+00:11:14,140 --> 00:11:18,070
+these files are copied every single time
+
+00:11:16,240 --> 00:11:20,380
+we run them so every single time you
+
+00:11:18,070 --> 00:11:23,020
+download them and extract them which is
+
+00:11:20,380 --> 00:11:24,460
+again very wasteful because it's the
+
+00:11:23,020 --> 00:11:25,660
+exact same file or if it is the exact
+
+00:11:24,460 --> 00:11:27,400
+same file it makes very little sense to
+
+00:11:25,660 --> 00:11:29,500
+make copies and again if you look at
+
+00:11:27,400 --> 00:11:31,780
+some even inter distribution changes are
+
+00:11:29,500 --> 00:11:33,100
+also sometimes have the same files it
+
+00:11:31,780 --> 00:11:36,700
+makes very little sense to do it that
+
+00:11:33,100 --> 00:11:38,950
+way any again in the distribution so
+
+00:11:36,700 --> 00:11:41,200
+some distributions I will admit I'm a
+
+00:11:38,950 --> 00:11:42,640
+being a little bit optimistic here in
+
+00:11:41,200 --> 00:11:44,320
+that often distributions end up with
+
+00:11:42,640 --> 00:11:46,000
+different binaries because they have
+
+00:11:44,320 --> 00:11:48,220
+different compiler flags but if you look
+
+00:11:46,000 --> 00:11:49,510
+at I mean like man pages or there are
+
+00:11:48,220 --> 00:11:51,460
+certain files that are actually fairly
+
+00:11:49,510 --> 00:11:54,310
+common between distributions it seems
+
+00:11:51,460 --> 00:11:55,840
+strange again to have the exact to have
+
+00:11:54,310 --> 00:11:57,850
+I've downloaded a bunch when I've
+
+00:11:55,840 --> 00:11:59,710
+downloaded tumbleweed and they have very
+
+00:11:57,850 --> 00:12:01,690
+similar files at least in some areas why
+
+00:11:59,710 --> 00:12:05,740
+are we making full copies and redownload
+
+00:12:01,690 --> 00:12:09,550
+in them each time and then we get to so
+
+00:12:05,740 --> 00:12:11,800
+tar is not reproducible so tar archives
+
+00:12:09,550 --> 00:12:12,940
+if you generate a tar archive now this
+
+00:12:11,800 --> 00:12:15,070
+to be fair this does depend on what
+
+00:12:12,940 --> 00:12:17,410
+language you're using but there is an
+
+00:12:15,070 --> 00:12:18,760
+entire like slew of problems that our
+
+00:12:17,410 --> 00:12:20,410
+archives have had in terms of
+
+00:12:18,760 --> 00:12:21,940
+reproducibility if you look into the
+
+00:12:20,410 --> 00:12:25,030
+history of how tar has actually evolved
+
+00:12:21,940 --> 00:12:26,590
+as a format which by the way takes you
+
+00:12:25,030 --> 00:12:28,750
+all the back to back to unix v2 but I'm
+
+00:12:26,590 --> 00:12:30,640
+not gonna go there now effectively the
+
+00:12:28,750 --> 00:12:33,790
+the problem is is that there are many
+
+00:12:30,640 --> 00:12:36,010
+extensions fatah which are sort of semi
+
+00:12:33,790 --> 00:12:38,380
+incompatible in that most tolerant of
+
+00:12:36,010 --> 00:12:40,120
+tar implementations will use these
+
+00:12:38,380 --> 00:12:42,550
+different extensions in different ways I
+
+00:12:40,120 --> 00:12:44,080
+mean for instance there's like five
+
+00:12:42,550 --> 00:12:47,290
+different ways of representing no
+
+00:12:44,080 --> 00:12:48,550
+narsimha links I think it's Xterra
+
+00:12:47,290 --> 00:12:50,890
+actually there's like five different
+
+00:12:48,550 --> 00:12:53,560
+ways to do extended attributes because
+
+00:12:50,890 --> 00:12:55,000
+every single operating system in the 90s
+
+00:12:53,560 --> 00:12:56,380
+implemented their own way of doing
+
+00:12:55,000 --> 00:12:58,270
+standard attributes and all of them are
+
+00:12:56,380 --> 00:12:59,530
+incompatible with each other or rather
+
+00:12:58,270 --> 00:13:02,140
+the no they're not incompatible
+
+00:12:59,530 --> 00:13:03,670
+necessarily they're just different in
+
+00:13:02,140 --> 00:13:04,780
+that if you hash something that uses
+
+00:13:03,670 --> 00:13:06,730
+them you end up with a different hash
+
+00:13:04,780 --> 00:13:09,070
+and so depending on which implementation
+
+00:13:06,730 --> 00:13:11,020
+you use you maybe get different problems
+
+00:13:09,070 --> 00:13:13,090
+another fun thing is that some languages
+
+00:13:11,020 --> 00:13:15,220
+decide that Oh extra base that's like a
+
+00:13:13,090 --> 00:13:16,090
+map it's like a dictionary so therefore
+
+00:13:15,220 --> 00:13:18,990
+what we're gonna do is we're going to
+
+00:13:16,090 --> 00:13:21,230
+represent the list or the set of
+
+00:13:18,990 --> 00:13:22,460
+extended attributes as a dick
+
+00:13:21,230 --> 00:13:23,840
+and obviously in most languages
+
+00:13:22,460 --> 00:13:25,610
+dictionaries do not have deterministic
+
+00:13:23,840 --> 00:13:26,840
+iteration order which means that for
+
+00:13:25,610 --> 00:13:28,070
+some languages depending on which
+
+00:13:26,840 --> 00:13:30,050
+version you're on it would actually
+
+00:13:28,070 --> 00:13:31,610
+generate a different archive depending
+
+00:13:30,050 --> 00:13:33,590
+on what contest we're in it in that like
+
+00:13:31,610 --> 00:13:35,570
+if you ran two versions of the same
+
+00:13:33,590 --> 00:13:38,270
+program compiled again you may end up
+
+00:13:35,570 --> 00:13:40,400
+with different iteration orders of the
+
+00:13:38,270 --> 00:13:41,570
+of extender attributes meaning that the
+
+00:13:40,400 --> 00:13:43,610
+actual file would have a different hash
+
+00:13:41,570 --> 00:13:44,720
+because you would be like first you'd
+
+00:13:43,610 --> 00:13:46,070
+have this extended attribute and then
+
+00:13:44,720 --> 00:13:47,360
+another one and then if you ran it again
+
+00:13:46,070 --> 00:13:49,130
+it'll be the other way around which is
+
+00:13:47,360 --> 00:13:50,690
+brilliant it's great it's definitely
+
+00:13:49,130 --> 00:13:53,870
+things are going well in addition you
+
+00:13:50,690 --> 00:13:54,770
+have yeah that I mean I have a blog post
+
+00:13:53,870 --> 00:13:56,480
+which I'll show you with you later which
+
+00:13:54,770 --> 00:13:58,850
+just like you can see the descent into
+
+00:13:56,480 --> 00:14:00,380
+madness as I found all this out but
+
+00:13:58,850 --> 00:14:02,510
+basically let's just say that it is
+
+00:14:00,380 --> 00:14:04,100
+incredibly unlikely that two different
+
+00:14:02,510 --> 00:14:07,060
+computers will generate the exact same
+
+00:14:04,100 --> 00:14:10,700
+archive for the same root filesystem
+
+00:14:07,060 --> 00:14:11,780
+yeah that's basically just a problem so
+
+00:14:10,700 --> 00:14:13,370
+what is the alternative I mean obviously
+
+00:14:11,780 --> 00:14:17,150
+I'm telling you everything's on fire how
+
+00:14:13,370 --> 00:14:19,520
+do we fix it so well my suggestion is
+
+00:14:17,150 --> 00:14:21,530
+that we take this pre-existing format
+
+00:14:19,520 --> 00:14:24,260
+which we which we sort of know and love
+
+00:14:21,530 --> 00:14:25,660
+and we we strip out the bottom and we
+
+00:14:24,260 --> 00:14:28,250
+replace it with something like this so
+
+00:14:25,660 --> 00:14:31,280
+what we do is we have rather than having
+
+00:14:28,250 --> 00:14:33,200
+this this whole tar archive thing where
+
+00:14:31,280 --> 00:14:34,730
+we have where we generate our archive
+
+00:14:33,200 --> 00:14:36,110
+and then we bet it inside the OCR image
+
+00:14:34,730 --> 00:14:38,120
+format meaning that it's like a
+
+00:14:36,110 --> 00:14:41,230
+completely opaque blob to any tool that
+
+00:14:38,120 --> 00:14:44,360
+uses OCI images instead we do is that we
+
+00:14:41,230 --> 00:14:46,490
+expose this into the OCI container a
+
+00:14:44,360 --> 00:14:48,050
+controversial store which means that you
+
+00:14:46,490 --> 00:14:49,910
+would have some sort of like route
+
+00:14:48,050 --> 00:14:52,880
+object which contains a list of every
+
+00:14:49,910 --> 00:14:54,560
+single inode in the image and then from
+
+00:14:52,880 --> 00:14:57,110
+there it would point again these these
+
+00:14:54,560 --> 00:14:59,180
+arrows are all like contra decibel
+
+00:14:57,110 --> 00:15:01,490
+pointers would point been to each of the
+
+00:14:59,180 --> 00:15:03,200
+chunks and then each of these chunks
+
+00:15:01,490 --> 00:15:04,460
+would then be stored in the contours
+
+00:15:03,200 --> 00:15:06,260
+will store meaning the two files that
+
+00:15:04,460 --> 00:15:08,350
+have the exact same contents would
+
+00:15:06,260 --> 00:15:10,820
+actually be duplicated within the image
+
+00:15:08,350 --> 00:15:13,220
+as well as any files that have identical
+
+00:15:10,820 --> 00:15:15,620
+metadata and at a typical contents will
+
+00:15:13,220 --> 00:15:16,960
+also be diplucate 'add meaning if you
+
+00:15:15,620 --> 00:15:19,220
+have two copies of the exact same image
+
+00:15:16,960 --> 00:15:20,510
+that only have one file different they
+
+00:15:19,220 --> 00:15:22,580
+would only be one extra ayah note added
+
+00:15:20,510 --> 00:15:25,070
+plus a new root node that has the list
+
+00:15:22,580 --> 00:15:27,590
+of them which would remove that problem
+
+00:15:25,070 --> 00:15:28,280
+both on transfers and I'll get to how
+
+00:15:27,590 --> 00:15:31,010
+we're going to deal with it on a
+
+00:15:28,280 --> 00:15:32,630
+straight extraction in a second so yeah
+
+00:15:31,010 --> 00:15:34,460
+and if there's a modification imagine
+
+00:15:32,630 --> 00:15:36,470
+you modify like one chunk
+
+00:15:34,460 --> 00:15:38,000
+in one file so you recompile that it's a
+
+00:15:36,470 --> 00:15:39,860
+chore something or it's a config file
+
+00:15:38,000 --> 00:15:42,290
+and you change something that chunk gets
+
+00:15:39,860 --> 00:15:43,580
+get invalidated then one of the bits of
+
+00:15:42,290 --> 00:15:44,990
+the route get invalidate mean the route
+
+00:15:43,580 --> 00:15:47,240
+gets invalid in the minified manifest
+
+00:15:44,990 --> 00:15:48,290
+gets invalidated but only that aspect
+
+00:15:47,240 --> 00:15:49,640
+gets invalidate this is the non
+
+00:15:48,290 --> 00:15:51,320
+avalanching feature I was talking about
+
+00:15:49,640 --> 00:15:54,110
+so rather than having to worry about
+
+00:15:51,320 --> 00:15:55,880
+oh I modify one file in Ubuntu 1804 the
+
+00:15:54,110 --> 00:15:57,350
+base image now we have in a completely
+
+00:15:55,880 --> 00:15:59,120
+different blob and we have two copies of
+
+00:15:57,350 --> 00:16:01,040
+a forty Meg blob in our you know image
+
+00:15:59,120 --> 00:16:04,700
+store it's just that chunk that's
+
+00:16:01,040 --> 00:16:06,260
+modified and this inode would look
+
+00:16:04,700 --> 00:16:08,089
+something like this it looks for those
+
+00:16:06,260 --> 00:16:10,010
+you who not familiar with how tar works
+
+00:16:08,089 --> 00:16:11,480
+it's very very similar except rather
+
+00:16:10,010 --> 00:16:14,899
+than having all the historical baggage
+
+00:16:11,480 --> 00:16:16,910
+of like a 512 Meg header which sorry 512
+
+00:16:14,899 --> 00:16:19,070
+byte header which you have to extend by
+
+00:16:16,910 --> 00:16:22,250
+adding like metadata extensions which is
+
+00:16:19,070 --> 00:16:23,839
+like don't we start on POSIX the point
+
+00:16:22,250 --> 00:16:25,310
+is that you have some sort of type which
+
+00:16:23,839 --> 00:16:27,440
+is a symlink of whatever you like some
+
+00:16:25,310 --> 00:16:29,480
+metadata which is the owner or whatever
+
+00:16:27,440 --> 00:16:31,940
+else as well as the extender attributes
+
+00:16:29,480 --> 00:16:35,149
+oh sorry then you have inline data which
+
+00:16:31,940 --> 00:16:36,800
+is okay this is like I'm not gonna get
+
+00:16:35,149 --> 00:16:39,620
+into like goes limitations here but
+
+00:16:36,800 --> 00:16:42,170
+because because go does not have sub
+
+00:16:39,620 --> 00:16:44,330
+classing we have to like have inline
+
+00:16:42,170 --> 00:16:46,880
+data which is like metadata that is
+
+00:16:44,330 --> 00:16:48,620
+specific to the type of inode so like
+
+00:16:46,880 --> 00:16:50,450
+for instance for a symlink inline data
+
+00:16:48,620 --> 00:16:52,250
+would be like the target of the sim link
+
+00:16:50,450 --> 00:16:55,130
+for instance which it would make sense
+
+00:16:52,250 --> 00:16:58,310
+to have a symlink entry which is
+
+00:16:55,130 --> 00:16:59,630
+actually what that is kind of what tar
+
+00:16:58,310 --> 00:17:01,640
+did but we're not gonna do that so you
+
+00:16:59,630 --> 00:17:03,080
+have like a symlink entry which which
+
+00:17:01,640 --> 00:17:04,790
+doesn't make sense of anything on the
+
+00:17:03,080 --> 00:17:07,370
+sim links and then in direct daughter is
+
+00:17:04,790 --> 00:17:08,660
+pointers to other chunks which is the
+
+00:17:07,370 --> 00:17:10,160
+actual content which obviously would
+
+00:17:08,660 --> 00:17:12,230
+only exist for ordinary files everything
+
+00:17:10,160 --> 00:17:15,459
+else would just be metadata only without
+
+00:17:12,230 --> 00:17:19,640
+an a in direct order component oopsie
+
+00:17:15,459 --> 00:17:21,319
+spoilers so this is and now the nice
+
+00:17:19,640 --> 00:17:22,970
+thing about having a different format is
+
+00:17:21,319 --> 00:17:25,280
+that we can actually rethink how we do
+
+00:17:22,970 --> 00:17:27,860
+storage on like how you actually use the
+
+00:17:25,280 --> 00:17:29,600
+images once you've got them so we start
+
+00:17:27,860 --> 00:17:31,220
+out with this as the OCR v1 style which
+
+00:17:29,600 --> 00:17:33,140
+I should have mentioned this this entire
+
+00:17:31,220 --> 00:17:35,210
+talk is equally applicable to Dockers
+
+00:17:33,140 --> 00:17:36,470
+image format because again we OC I sort
+
+00:17:35,210 --> 00:17:39,530
+of ap stockers image format so it's the
+
+00:17:36,470 --> 00:17:41,210
+exact same thing the way we would
+
+00:17:39,530 --> 00:17:42,290
+extract them is extract one and one one
+
+00:17:41,210 --> 00:17:44,630
+by one in order
+
+00:17:42,290 --> 00:17:45,830
+serially which in case this is the
+
+00:17:44,630 --> 00:17:47,450
+reason why in case you've ever noticed
+
+00:17:45,830 --> 00:17:48,020
+if you do like a docker pull something
+
+00:17:47,450 --> 00:17:49,520
+or darker
+
+00:17:48,020 --> 00:17:51,080
+something you'll notice that like it
+
+00:17:49,520 --> 00:17:52,610
+extracts them one by one and it takes
+
+00:17:51,080 --> 00:17:54,560
+forever this is the reason why is
+
+00:17:52,610 --> 00:17:55,700
+because you're reacting everything every
+
+00:17:54,560 --> 00:17:57,020
+single time you pull a new version of
+
+00:17:55,700 --> 00:17:59,180
+the image even though it has the exact
+
+00:17:57,020 --> 00:18:00,830
+same data as before so we extract each
+
+00:17:59,180 --> 00:18:02,750
+one into a single root filesystem and
+
+00:18:00,830 --> 00:18:06,260
+I'll use it well instead we can do is we
+
+00:18:02,750 --> 00:18:07,850
+can do something like this where we have
+
+00:18:06,260 --> 00:18:10,850
+our store that has all of our chunks in
+
+00:18:07,850 --> 00:18:12,860
+it and then we reconstruct the file data
+
+00:18:10,850 --> 00:18:15,560
+in what I'm calling here that as the
+
+00:18:12,860 --> 00:18:17,390
+inode cache meaning that you these are
+
+00:18:15,560 --> 00:18:19,160
+full files that have the full contents
+
+00:18:17,390 --> 00:18:22,970
+the reason for this is because there's a
+
+00:18:19,160 --> 00:18:25,640
+limitation on Linux I'll go back so ref
+
+00:18:22,970 --> 00:18:27,440
+ref links are like our a like an
+
+00:18:25,640 --> 00:18:29,150
+intermediary between a symlink and a
+
+00:18:27,440 --> 00:18:32,900
+hard link effectively there are there a
+
+00:18:29,150 --> 00:18:35,510
+copy-on-write hard link where you can
+
+00:18:32,900 --> 00:18:37,550
+have different metadata so it's not like
+
+00:18:35,510 --> 00:18:39,200
+a hard link in that respect but if also
+
+00:18:37,550 --> 00:18:40,910
+if you modify it and actually it's
+
+00:18:39,200 --> 00:18:42,260
+nothing like a hard thing sorry it's
+
+00:18:40,910 --> 00:18:43,790
+like it's like a new type of link where
+
+00:18:42,260 --> 00:18:45,470
+effectively if you have a file you can
+
+00:18:43,790 --> 00:18:47,480
+hreflang it to another file there is
+
+00:18:45,470 --> 00:18:48,440
+basically no data copied originally
+
+00:18:47,480 --> 00:18:52,760
+because it's copy-on-write
+
+00:18:48,440 --> 00:18:54,500
+and then if you modify it it then you
+
+00:18:52,760 --> 00:18:56,060
+then end up with its copy and right so
+
+00:18:54,500 --> 00:18:57,350
+the new file has a new contents but it's
+
+00:18:56,060 --> 00:18:59,270
+still duplicated mostly with the old
+
+00:18:57,350 --> 00:19:01,040
+contents and this is supported on quite
+
+00:18:59,270 --> 00:19:03,080
+a few file systems now on XFS it
+
+00:19:01,040 --> 00:19:05,630
+supported butter affairs and a couple of
+
+00:19:03,080 --> 00:19:07,760
+the file systems not annexed for yet
+
+00:19:05,630 --> 00:19:09,080
+unfortunately but if you have a file
+
+00:19:07,760 --> 00:19:10,400
+since oppose ref links we can do it this
+
+00:19:09,080 --> 00:19:12,470
+way and the nice thing with this is that
+
+00:19:10,400 --> 00:19:13,970
+when you're dealing with user name
+
+00:19:12,470 --> 00:19:16,160
+spaces and having to have different
+
+00:19:13,970 --> 00:19:17,600
+owners for the same files because ref
+
+00:19:16,160 --> 00:19:19,700
+links have a separate metadata section
+
+00:19:17,600 --> 00:19:22,430
+or rather they have like the owner can
+
+00:19:19,700 --> 00:19:24,500
+be different you can actually have no
+
+00:19:22,430 --> 00:19:25,970
+data duplication when you create a new
+
+00:19:24,500 --> 00:19:28,520
+root file system with different owners
+
+00:19:25,970 --> 00:19:30,230
+so this solves the let's make a copy and
+
+00:19:28,520 --> 00:19:32,300
+CH oh and everything problem which is
+
+00:19:30,230 --> 00:19:35,930
+basically how dr. doesn't do it that way
+
+00:19:32,300 --> 00:19:38,960
+but lxd does it that way and pod man I
+
+00:19:35,930 --> 00:19:40,460
+think also does it that way actually I
+
+00:19:38,960 --> 00:19:42,080
+can't think oh no they have the fuse
+
+00:19:40,460 --> 00:19:44,210
+thing without having to use fuse you can
+
+00:19:42,080 --> 00:19:46,160
+do it this way and so the each of these
+
+00:19:44,210 --> 00:19:49,130
+would be activity catenation of all the
+
+00:19:46,160 --> 00:19:52,070
+chunks for this inode and then you have
+
+00:19:49,130 --> 00:19:54,860
+ref links for that o as an aside this
+
+00:19:52,070 --> 00:19:56,120
+also would allow us to have completely
+
+00:19:54,860 --> 00:19:57,200
+because ref links don't require
+
+00:19:56,120 --> 00:19:58,670
+privileges it will allow you to I've
+
+00:19:57,200 --> 00:20:01,850
+completely unprivileged or rootless
+
+00:19:58,670 --> 00:20:04,610
+containers be able to have copy-on-write
+
+00:20:01,850 --> 00:20:06,470
+images yeah you would have to reiax
+
+00:20:04,610 --> 00:20:08,150
+tracked this thing but ref linking
+
+00:20:06,470 --> 00:20:11,870
+everything is very is very easy to do
+
+00:20:08,150 --> 00:20:14,840
+and effectively you can you'd be able to
+
+00:20:11,870 --> 00:20:16,940
+have for each container would you would
+
+00:20:14,840 --> 00:20:18,620
+have content copy-on-write even though
+
+00:20:16,940 --> 00:20:20,750
+you can't create a butterface sub volume
+
+00:20:18,620 --> 00:20:22,460
+so it's quite neat that you can that by
+
+00:20:20,750 --> 00:20:24,410
+rethinking how we do the image for and
+
+00:20:22,460 --> 00:20:26,270
+not only do we get better do duplication
+
+00:20:24,410 --> 00:20:28,130
+because the only copy that we have of
+
+00:20:26,270 --> 00:20:29,900
+the data is in this i know'd cache and
+
+00:20:28,130 --> 00:20:31,520
+all of these are basically taking no
+
+00:20:29,900 --> 00:20:33,380
+extra data each time you create a new
+
+00:20:31,520 --> 00:20:34,460
+copy meaning that if you have two
+
+00:20:33,380 --> 00:20:36,890
+different images that have the same
+
+00:20:34,460 --> 00:20:40,700
+files they are the same on disk as well
+
+00:20:36,890 --> 00:20:42,919
+but also if you have it also as a new
+
+00:20:40,700 --> 00:20:44,270
+feature which is hey if we have rootless
+
+00:20:42,919 --> 00:20:46,039
+containers we can actually run them with
+
+00:20:44,270 --> 00:20:47,330
+copy-on-write which you can't really do
+
+00:20:46,039 --> 00:20:48,799
+at the moment at least not without
+
+00:20:47,330 --> 00:20:50,419
+having it admin setup butter if s for
+
+00:20:48,799 --> 00:20:51,890
+you okay
+
+00:20:50,419 --> 00:20:55,520
+there is one problem though with this
+
+00:20:51,890 --> 00:20:56,809
+model which is which is do i go through
+
+00:20:55,520 --> 00:20:59,330
+it no i'm going to go through it now so
+
+00:20:56,809 --> 00:21:00,710
+there is one problem with this idea this
+
+00:20:59,330 --> 00:21:03,020
+idea are having the chunks in the image
+
+00:21:00,710 --> 00:21:04,250
+store which is sort of a bit of an open
+
+00:21:03,020 --> 00:21:07,850
+problem it's not clear whether we should
+
+00:21:04,250 --> 00:21:08,929
+go this way is that you may notice that
+
+00:21:07,850 --> 00:21:10,580
+i'm sort of cheating a little bit here
+
+00:21:08,929 --> 00:21:13,809
+this is actually there are actually two
+
+00:21:10,580 --> 00:21:17,630
+copies of the data because if you have
+
+00:21:13,809 --> 00:21:20,539
+these chunks in the image store are then
+
+00:21:17,630 --> 00:21:22,340
+copied like actually copied to files in
+
+00:21:20,539 --> 00:21:24,020
+the eyelid cache and the reason why is
+
+00:21:22,340 --> 00:21:26,030
+because there's limitation on linux when
+
+00:21:24,020 --> 00:21:27,890
+it comes to ref links there is that
+
+00:21:26,030 --> 00:21:30,830
+there is a way it's called copy file
+
+00:21:27,890 --> 00:21:32,960
+range where you can create because
+
+00:21:30,830 --> 00:21:36,140
+because file systems on linux are extent
+
+00:21:32,960 --> 00:21:37,760
+based the granularity of deduplication
+
+00:21:36,140 --> 00:21:41,150
+is on the extent level so that means
+
+00:21:37,760 --> 00:21:43,940
+that you have to be able to duplicate 4k
+
+00:21:41,150 --> 00:21:46,190
+usually 4k chunks and you can't
+
+00:21:43,940 --> 00:21:48,320
+duplicate anything smaller than 4k which
+
+00:21:46,190 --> 00:21:49,850
+means that because these chunks and i'll
+
+00:21:48,320 --> 00:21:51,110
+get into the chunking that i'm that i'd
+
+00:21:49,850 --> 00:21:52,700
+like to do in a minute
+
+00:21:51,110 --> 00:21:55,039
+because these chunks are not going to be
+
+00:21:52,700 --> 00:21:56,600
+fixed size because fixed size chunking
+
+00:21:55,039 --> 00:21:58,630
+or has many many problems which i can
+
+00:21:56,600 --> 00:22:01,190
+get into in a bit if you're interested
+
+00:21:58,630 --> 00:22:04,520
+we have to make a copy and then ruffling
+
+00:22:01,190 --> 00:22:07,220
+the entire file but one possibility is
+
+00:22:04,520 --> 00:22:09,440
+that instead what we do is that rather
+
+00:22:07,220 --> 00:22:12,350
+than we have the chunking inside the OCI
+
+00:22:09,440 --> 00:22:14,390
+store instead we just have the data and
+
+00:22:12,350 --> 00:22:15,500
+then we do all of the chunking on
+
+00:22:14,390 --> 00:22:18,100
+transfer
+
+00:22:15,500 --> 00:22:21,590
+this previous model that we had whoops
+
+00:22:18,100 --> 00:22:23,059
+yeah yeah this proves what we had was
+
+00:22:21,590 --> 00:22:25,190
+that we would have the chunking actually
+
+00:22:23,059 --> 00:22:26,750
+be inside the store so when you download
+
+00:22:25,190 --> 00:22:28,580
+it it is actually chunks on disk and
+
+00:22:26,750 --> 00:22:30,769
+then we have to have this interaction
+
+00:22:28,580 --> 00:22:33,289
+layer but instead what we can try to do
+
+00:22:30,769 --> 00:22:36,409
+is we can have the data be just stored
+
+00:22:33,289 --> 00:22:38,330
+inside the console store which yes will
+
+00:22:36,409 --> 00:22:40,970
+lead to duplication if you have the same
+
+00:22:38,330 --> 00:22:43,399
+file but remember with the previous
+
+00:22:40,970 --> 00:22:46,129
+model we had to have an inode cache but
+
+00:22:43,399 --> 00:22:48,320
+if all of the blobs are in full stored
+
+00:22:46,129 --> 00:22:50,000
+inside the OCI store instead we can do
+
+00:22:48,320 --> 00:22:52,250
+is we can do this so you can have all
+
+00:22:50,000 --> 00:22:54,320
+the blobs yeah they're duplicated but we
+
+00:22:52,250 --> 00:22:56,629
+can sort out that on transfer and
+
+00:22:54,320 --> 00:22:58,909
+instead we have ref links directly from
+
+00:22:56,629 --> 00:23:00,769
+the OCA image store into here thus
+
+00:22:58,909 --> 00:23:02,360
+removing the copy the only downside is
+
+00:23:00,769 --> 00:23:03,559
+is that on transfer we have to be a
+
+00:23:02,360 --> 00:23:05,389
+little bit more clever about how we're
+
+00:23:03,559 --> 00:23:07,610
+doing it so those are the two sort of
+
+00:23:05,389 --> 00:23:10,299
+alternative options and I guess it's
+
+00:23:07,610 --> 00:23:14,629
+time for me to give a demo yay all right
+
+00:23:10,299 --> 00:23:16,490
+so I'll give it a link later for help
+
+00:23:14,629 --> 00:23:19,250
+for the wake and get the code for this
+
+00:23:16,490 --> 00:23:20,629
+demo but I I wrote I wrote and I
+
+00:23:19,250 --> 00:23:22,610
+maintain an image tool called hamachi
+
+00:23:20,629 --> 00:23:26,120
+which is like sort of a general Swiss
+
+00:23:22,610 --> 00:23:28,700
+toolkit Swiss Army knife for um for OCI
+
+00:23:26,120 --> 00:23:31,120
+images and I have created a new version
+
+00:23:28,700 --> 00:23:33,889
+of it called emoji 2 which
+
+00:23:31,120 --> 00:23:36,049
+unsurprisingly implements sort of the
+
+00:23:33,889 --> 00:23:39,799
+very very bare minimums of the design I
+
+00:23:36,049 --> 00:23:41,480
+was talking about so I have here because
+
+00:23:39,799 --> 00:23:44,330
+I'm not gonna risk conference Wi-Fi I
+
+00:23:41,480 --> 00:23:45,679
+have here an MCI image and it looks sort
+
+00:23:44,330 --> 00:23:46,940
+of similar you have the index which is
+
+00:23:45,679 --> 00:23:47,779
+what I mentioned you have here which I
+
+00:23:46,940 --> 00:23:52,250
+can actually just show you what looks
+
+00:23:47,779 --> 00:23:58,340
+like just to get an idea okay
+
+00:23:52,250 --> 00:24:00,139
+JQ so yeah so these are this is the list
+
+00:23:58,340 --> 00:24:02,899
+of all of the entries and you can see
+
+00:24:00,139 --> 00:24:04,100
+that it has the type of the other thing
+
+00:24:02,899 --> 00:24:07,039
+it's pointing to it's pointing to a
+
+00:24:04,100 --> 00:24:08,929
+manifest it has the digest it has the
+
+00:24:07,039 --> 00:24:11,480
+size of the thing and then here is the
+
+00:24:08,929 --> 00:24:14,690
+image name quote-unquote so this is a
+
+00:24:11,480 --> 00:24:15,590
+bun to 1710 can everyone read that I
+
+00:24:14,690 --> 00:24:17,179
+should have asked that at the beginning
+
+00:24:15,590 --> 00:24:20,419
+if it so good yep
+
+00:24:17,179 --> 00:24:22,490
+so this is sort of the idea that's what
+
+00:24:20,419 --> 00:24:23,809
+the index looks like and then inside the
+
+00:24:22,490 --> 00:24:25,429
+manifest you have a whole bunch of stuff
+
+00:24:23,809 --> 00:24:27,619
+and then that points to your to your
+
+00:24:25,429 --> 00:24:29,890
+blobs so what I'm gonna do is I'm going
+
+00:24:27,619 --> 00:24:41,060
+to just quickly
+
+00:24:29,890 --> 00:24:45,170
+Archy unpack and then so what this is
+
+00:24:41,060 --> 00:24:47,690
+doing is that it's taking what this is
+
+00:24:45,170 --> 00:24:50,300
+doing is that it's taking the image
+
+00:24:47,690 --> 00:24:52,100
+inside the Ubuntu OCI image with the
+
+00:24:50,300 --> 00:24:54,560
+reference 18:04 and then it's putting it
+
+00:24:52,100 --> 00:24:56,330
+inside and OCI runtime bundle which is
+
+00:24:54,560 --> 00:24:58,250
+the thing that runs see uses so
+
+00:24:56,330 --> 00:25:00,050
+internally you can imagine this is sort
+
+00:24:58,250 --> 00:25:03,650
+of what doctor does when you run a thing
+
+00:25:00,050 --> 00:25:05,600
+or any OCI based runtime does is that
+
+00:25:03,650 --> 00:25:06,560
+you has a bundle and the bundle looks
+
+00:25:05,600 --> 00:25:10,610
+something like this
+
+00:25:06,560 --> 00:25:13,130
+so I mean so inside the bundle you have
+
+00:25:10,610 --> 00:25:15,260
+a config which is sort of is the runtime
+
+00:25:13,130 --> 00:25:16,760
+version of the image configuration it
+
+00:25:15,260 --> 00:25:18,860
+has a root of s which is the root file
+
+00:25:16,760 --> 00:25:21,380
+system completely extracted it has this
+
+00:25:18,860 --> 00:25:21,890
+and then leased to a post both specific
+
+00:25:21,380 --> 00:25:24,080
+to am Watchi
+
+00:25:21,890 --> 00:25:25,310
+not super interesting to get into I mean
+
+00:25:24,080 --> 00:25:25,580
+it's neat but you can find that out
+
+00:25:25,310 --> 00:25:29,210
+later
+
+00:25:25,580 --> 00:25:33,200
+and yeah that's what we have here and
+
+00:25:29,210 --> 00:25:36,350
+yeah and if I look inside bundle bundle
+
+00:25:33,200 --> 00:25:38,600
+one rid of firsts it's like a pool
+
+00:25:36,350 --> 00:25:40,880
+system it's Ubuntu 1804 we all know what
+
+00:25:38,600 --> 00:25:46,100
+it looks like so I'm gonna extract again
+
+00:25:40,880 --> 00:25:49,640
+now I'm gonna go extract 1904 and put it
+
+00:25:46,100 --> 00:25:50,990
+inside bundle - ok so now we have two of
+
+00:25:49,640 --> 00:25:54,050
+our file systems will be generated and
+
+00:25:50,990 --> 00:25:56,020
+now we can use this in Watchi - that I
+
+00:25:54,050 --> 00:25:58,550
+have here and we can create a snapshot
+
+00:25:56,020 --> 00:26:04,930
+whoops I should probably make I'm gonna
+
+00:25:58,550 --> 00:26:10,700
+make a separate and I make a seperate
+
+00:26:04,930 --> 00:26:13,550
+OCIO CI v to store so I so this is what
+
+00:26:10,700 --> 00:26:16,010
+this does is the dumb creating a new OC
+
+00:26:13,550 --> 00:26:17,690
+I store so you can see all of these this
+
+00:26:16,010 --> 00:26:19,610
+Ubuntu directory is actually like a no
+
+00:26:17,690 --> 00:26:21,380
+CI image store and then I'm going to
+
+00:26:19,610 --> 00:26:24,260
+create a new one just for the purpose of
+
+00:26:21,380 --> 00:26:26,690
+this test and so now I'm going to use in
+
+00:26:24,260 --> 00:26:29,030
+watch you two just snapshot and I'm
+
+00:26:26,690 --> 00:26:33,710
+gonna put it inside ERV to store and I'm
+
+00:26:29,030 --> 00:26:38,390
+gonna put it is 1804 and then we're
+
+00:26:33,710 --> 00:26:39,920
+gonna go bundle one root of s and so
+
+00:26:38,390 --> 00:26:41,390
+what this is doing is that it is it has
+
+00:26:39,920 --> 00:26:42,620
+created it has gone through the entire
+
+00:26:41,390 --> 00:26:44,570
+image
+
+00:26:42,620 --> 00:26:48,710
+it generated a new snapshot using the
+
+00:26:44,570 --> 00:26:52,640
+style that I showed whoops so it's
+
+00:26:48,710 --> 00:26:54,559
+created this entire structure inside
+
+00:26:52,640 --> 00:26:55,820
+inside this image store and now and
+
+00:26:54,559 --> 00:26:58,880
+you'll first notice that actually it was
+
+00:26:55,820 --> 00:27:01,790
+it was pretty quick which is nice and if
+
+00:26:58,880 --> 00:27:05,600
+I now go when I take a look at OC IV to
+
+00:27:01,790 --> 00:27:10,040
+store index of JSON no that's the wrong
+
+00:27:05,600 --> 00:27:13,010
+thing so this this thing here is the
+
+00:27:10,040 --> 00:27:18,370
+blob to the very beginning so I'm gonna
+
+00:27:13,010 --> 00:27:18,370
+go let's take a look at that so sudo JQ
+
+00:27:19,870 --> 00:27:29,330
+to stall
+
+00:27:21,410 --> 00:27:33,580
+whoops Bob probably should pipe that too
+
+00:27:29,330 --> 00:27:36,620
+less okay mmm so this is the this is the
+
+00:27:33,580 --> 00:27:39,050
+route that I mentioned here so this is
+
+00:27:36,620 --> 00:27:42,230
+the is this thing that I'm looking at
+
+00:27:39,050 --> 00:27:44,080
+right now and it's the idea it's all
+
+00:27:42,230 --> 00:27:46,880
+JSON I apologize
+
+00:27:44,080 --> 00:27:48,410
+it's possible look at different ways of
+
+00:27:46,880 --> 00:27:49,670
+serializing this though then again I
+
+00:27:48,410 --> 00:27:52,429
+mean if you compress Jason that's not
+
+00:27:49,670 --> 00:27:54,170
+that bad but yeah so like if we look at
+
+00:27:52,429 --> 00:27:56,750
+bin bash here you'll notice it has the
+
+00:27:54,170 --> 00:27:59,000
+meta data is the UID inode mode all the
+
+00:27:56,750 --> 00:28:04,490
+rest of it and then here in line you
+
+00:27:59,000 --> 00:28:07,130
+have yeah you have so in line here is
+
+00:28:04,490 --> 00:28:10,160
+the digest of the entire file this is
+
+00:28:07,130 --> 00:28:11,660
+required in order to allow us to skip
+
+00:28:10,160 --> 00:28:13,460
+extracting it because obviously if you
+
+00:28:11,660 --> 00:28:15,620
+have more than one let's get a pearl
+
+00:28:13,460 --> 00:28:17,870
+pearls a good example so pearl has
+
+00:28:15,620 --> 00:28:22,640
+because oh whoops
+
+00:28:17,870 --> 00:28:24,050
+oh okay doesn't matter basically this
+
+00:28:22,640 --> 00:28:26,420
+this digest here is the duchess of the
+
+00:28:24,050 --> 00:28:28,490
+entire file while here is the list of
+
+00:28:26,420 --> 00:28:30,740
+all of the of pointers to each
+
+00:28:28,490 --> 00:28:34,730
+individual chunk and so as a result if
+
+00:28:30,740 --> 00:28:36,320
+we do you end up with if on extraction
+
+00:28:34,730 --> 00:28:39,200
+which I'll show you in a second if we
+
+00:28:36,320 --> 00:28:41,179
+already have this thing inside the the
+
+00:28:39,200 --> 00:28:42,350
+image the inode cache then we don't even
+
+00:28:41,179 --> 00:28:43,850
+bother with the rest of it which means
+
+00:28:42,350 --> 00:28:46,040
+we can make extraction even faster so
+
+00:28:43,850 --> 00:28:47,450
+not only do we get deduplicated
+
+00:28:46,040 --> 00:28:50,090
+extraction we also get faster extraction
+
+00:28:47,450 --> 00:28:51,020
+which is great so lots of things I'll
+
+00:28:50,090 --> 00:28:52,630
+see if I can show you what a similar
+
+00:28:51,020 --> 00:28:55,010
+looks like so symlink would look like
+
+00:28:52,630 --> 00:28:56,429
+yeah so in line and then here is the
+
+00:28:55,010 --> 00:28:58,950
+target so
+
+00:28:56,429 --> 00:29:01,110
+Peak Hill is actually assembling 2p crap
+
+00:28:58,950 --> 00:29:03,240
+who knew and these this is how
+
+00:29:01,110 --> 00:29:04,740
+effectively all of all this would be
+
+00:29:03,240 --> 00:29:06,630
+stored is you have these individual
+
+00:29:04,740 --> 00:29:08,820
+items inside of China inside a giant
+
+00:29:06,630 --> 00:29:11,429
+list Oh inside a giant JSON map saying
+
+00:29:08,820 --> 00:29:14,400
+this file contains this data and that's
+
+00:29:11,429 --> 00:29:16,110
+the end of that and so now I can go and
+
+00:29:14,400 --> 00:29:24,059
+I can create I can also go and create a
+
+00:29:16,110 --> 00:29:25,140
+snapshot of 1904 ok and it would
+
+00:29:24,059 --> 00:29:27,120
+be--look it would look very very similar
+
+00:29:25,140 --> 00:29:31,640
+and now I'm going to go and I'm going to
+
+00:29:27,120 --> 00:29:34,640
+create I'm going to what do I call it
+
+00:29:31,640 --> 00:29:34,640
+whoops
+
+00:29:37,220 --> 00:29:43,289
+crystal right so I'm gonna now restore
+
+00:29:40,820 --> 00:29:44,669
+the so restore takes a file store which
+
+00:29:43,289 --> 00:29:49,710
+is the inode cache I mentioned so I'm
+
+00:29:44,669 --> 00:29:52,320
+going to say ok file store file store
+
+00:29:49,710 --> 00:29:57,590
+and then I'm gonna say ok given I want
+
+00:29:52,320 --> 00:30:05,490
+to now extract OCI the v2 store 18:04
+
+00:29:57,590 --> 00:30:08,429
+into into 1 2 or 3 or bundle bundle 3 ok
+
+00:30:05,490 --> 00:30:09,870
+so you can take a second because what
+
+00:30:08,429 --> 00:30:12,299
+it's just done is that it has populated
+
+00:30:09,870 --> 00:30:13,500
+this inode cache with all of the bits so
+
+00:30:12,299 --> 00:30:15,390
+it's gone through the entire image store
+
+00:30:13,500 --> 00:30:17,159
+it's pre-populated everything but now if
+
+00:30:15,390 --> 00:30:19,320
+I redo it again it's almost
+
+00:30:17,159 --> 00:30:21,120
+instantaneous and the reason why it's
+
+00:30:19,320 --> 00:30:22,950
+almost instantaneous is because it just
+
+00:30:21,120 --> 00:30:25,350
+has to ref link the entries from inside
+
+00:30:22,950 --> 00:30:27,840
+the I nerd cache so now imagine if every
+
+00:30:25,350 --> 00:30:29,039
+time you had to deal with an image that
+
+00:30:27,840 --> 00:30:31,049
+was quite similar it would be almost
+
+00:30:29,039 --> 00:30:32,279
+instantaneous but you're thinking I know
+
+00:30:31,049 --> 00:30:34,679
+you're thinking or at least I hope I
+
+00:30:32,279 --> 00:30:35,220
+know what you're thinking is oh wait a
+
+00:30:34,679 --> 00:30:37,230
+second
+
+00:30:35,220 --> 00:30:38,370
+Alexa you just use the same image surely
+
+00:30:37,230 --> 00:30:39,809
+that should be take no time at all
+
+00:30:38,370 --> 00:30:41,880
+because with other kit with other
+
+00:30:39,809 --> 00:30:43,200
+runtimes it'll it'll be instantaneous
+
+00:30:41,880 --> 00:30:45,179
+because we just have a copy somewhere on
+
+00:30:43,200 --> 00:30:46,950
+disk alright fair enough you've
+
+00:30:45,179 --> 00:30:53,640
+convinced me so what happens if we use
+
+00:30:46,950 --> 00:30:56,090
+another image thing hmm ah thank you
+
+00:30:53,640 --> 00:30:59,370
+thank you very much
+
+00:30:56,090 --> 00:31:00,720
+so that was well you'd have to like take
+
+00:30:59,370 --> 00:31:04,549
+out a stopwatch and time it but it was
+
+00:31:00,720 --> 00:31:04,549
+quicker I do guarantee you it's quicker
+
+00:31:05,149 --> 00:31:12,409
+but if you but if if you do it with
+
+00:31:10,999 --> 00:31:14,029
+you're gonna take my word on this um if
+
+00:31:12,409 --> 00:31:15,830
+you if you do it with an image that only
+
+00:31:14,029 --> 00:31:18,709
+has one file change it is actually
+
+00:31:15,830 --> 00:31:20,869
+almost instantaneous because it takes
+
+00:31:18,709 --> 00:31:22,639
+only the single files to be fetched in
+
+00:31:20,869 --> 00:31:24,259
+the store I full she decided to take two
+
+00:31:22,639 --> 00:31:26,359
+images that are from a year apart there
+
+00:31:24,259 --> 00:31:28,609
+are actually quite a few differences but
+
+00:31:26,359 --> 00:31:31,070
+yeah it's it's it's pretty quick and it
+
+00:31:28,609 --> 00:31:31,969
+also can be extracted in parallel and
+
+00:31:31,070 --> 00:31:35,269
+the reason why can be created in
+
+00:31:31,969 --> 00:31:37,009
+parallel was because because the problem
+
+00:31:35,269 --> 00:31:38,239
+with having multiple tarik Ives in order
+
+00:31:37,009 --> 00:31:39,849
+is you have to extract them by order
+
+00:31:38,239 --> 00:31:42,200
+because we don't know whether or not
+
+00:31:39,849 --> 00:31:43,789
+which files in the first archive
+
+00:31:42,200 --> 00:31:45,499
+actually important for the last archive
+
+00:31:43,789 --> 00:31:48,409
+in theory we could fix this by having
+
+00:31:45,499 --> 00:31:50,209
+some sort of index that we store but no
+
+00:31:48,409 --> 00:31:52,879
+one does this at the moment but because
+
+00:31:50,209 --> 00:31:55,009
+the entire thing is one giant JSON map
+
+00:31:52,879 --> 00:31:57,320
+you can very very easily spin up a bunch
+
+00:31:55,009 --> 00:31:59,899
+of threads and you just do bits of it
+
+00:31:57,320 --> 00:32:01,909
+for different you just assign files to
+
+00:31:59,899 --> 00:32:03,499
+each thread and then you fix up the
+
+00:32:01,909 --> 00:32:04,999
+metadata of the directories afterwards
+
+00:32:03,499 --> 00:32:06,799
+because directory has a lot of changes
+
+00:32:04,999 --> 00:32:08,719
+based on when you do things and then you
+
+00:32:06,799 --> 00:32:10,700
+have you'll be able to in in parallel
+
+00:32:08,719 --> 00:32:12,529
+extract I have in a minute here but
+
+00:32:10,700 --> 00:32:14,179
+based on some experiments I've done it
+
+00:32:12,529 --> 00:32:15,589
+is much much quicker to do extraction
+
+00:32:14,179 --> 00:32:20,419
+especially on big things like Fedora
+
+00:32:15,589 --> 00:32:22,099
+images no shady fedora yeah so that's
+
+00:32:20,419 --> 00:32:23,389
+the general idea of how this whole thing
+
+00:32:22,099 --> 00:32:31,759
+works and if we look inside the file
+
+00:32:23,389 --> 00:32:34,399
+store loves 256 this can equally mean
+
+00:32:31,759 --> 00:32:35,719
+it's cuz oh sorry I'm not gonna go in
+
+00:32:34,399 --> 00:32:37,759
+there basically it's just it's just a
+
+00:32:35,719 --> 00:32:39,349
+bunch of concept divided chunks and all
+
+00:32:37,759 --> 00:32:40,820
+of these are a single file that has been
+
+00:32:39,349 --> 00:32:42,289
+reproduced that it's been stored in here
+
+00:32:40,820 --> 00:32:46,839
+which then is ref linked in to whatever
+
+00:32:42,289 --> 00:32:51,649
+you're putting it in alright awesome so
+
+00:32:46,839 --> 00:32:52,879
+yep okay so hmm so we have that done
+
+00:32:51,649 --> 00:32:54,259
+let's imagine that's all done we
+
+00:32:52,879 --> 00:32:55,339
+banished inversion into a lot of things
+
+00:32:54,259 --> 00:32:57,950
+it's gonna take a while but let's
+
+00:32:55,339 --> 00:32:59,649
+imagine we do it so what is the next
+
+00:32:57,950 --> 00:33:02,749
+step what is a nice feature we can add
+
+00:32:59,649 --> 00:33:04,999
+one of the problems that it has existed
+
+00:33:02,749 --> 00:33:06,679
+for a very very long time in container
+
+00:33:04,999 --> 00:33:08,989
+images is that you don't actually know
+
+00:33:06,679 --> 00:33:11,029
+what's inside the damn thing it's at our
+
+00:33:08,989 --> 00:33:12,349
+archive and I mean most of the solutions
+
+00:33:11,029 --> 00:33:14,299
+to figuring out what's inside a
+
+00:33:12,349 --> 00:33:15,409
+container image involve scanning it
+
+00:33:14,299 --> 00:33:17,179
+meaning you have like a thing that
+
+00:33:15,409 --> 00:33:17,780
+extracts the tar archive or scans the
+
+00:33:17,179 --> 00:33:19,880
+tar archive
+
+00:33:17,780 --> 00:33:21,470
+and checks what's inside it which is all
+
+00:33:19,880 --> 00:33:23,240
+fraught with lovely problems of
+
+00:33:21,470 --> 00:33:26,210
+distributions not having version numbers
+
+00:33:23,240 --> 00:33:27,470
+that make sense or the scan is not
+
+00:33:26,210 --> 00:33:28,670
+understanding the distributions don't
+
+00:33:27,470 --> 00:33:30,260
+have good version all right
+
+00:33:28,670 --> 00:33:31,520
+distribution that version of us that
+
+00:33:30,260 --> 00:33:34,070
+makes sense but they only make sense to
+
+00:33:31,520 --> 00:33:37,370
+them basically is how we put it and so
+
+00:33:34,070 --> 00:33:38,510
+how do we solve this problem so and I'm
+
+00:33:37,370 --> 00:33:40,370
+afraid this is where I stuck in even
+
+00:33:38,510 --> 00:33:41,840
+hand-wavy this isn't done yet that there
+
+00:33:40,370 --> 00:33:43,460
+is actually work being done within oci
+
+00:33:41,840 --> 00:33:45,080
+to come up with a nice formalized way
+
+00:33:43,460 --> 00:33:47,330
+that we can do this but the idea would
+
+00:33:45,080 --> 00:33:50,030
+be well okay all of these different
+
+00:33:47,330 --> 00:33:51,260
+chunks are exposed inside OCI meaning
+
+00:33:50,030 --> 00:33:52,550
+that there is a hash for each of them
+
+00:33:51,260 --> 00:33:54,920
+and there is a list where all the hashes
+
+00:33:52,550 --> 00:33:56,570
+are and you can very easily check what
+
+00:33:54,920 --> 00:33:58,610
+is the set of things inside this image
+
+00:33:56,570 --> 00:34:01,880
+or we can then do is we can start having
+
+00:33:58,610 --> 00:34:03,170
+signed manifests from the vendor the
+
+00:34:01,880 --> 00:34:06,230
+vendor meaning either the distribution
+
+00:34:03,170 --> 00:34:07,880
+or whoever is packaging it which would
+
+00:34:06,230 --> 00:34:10,639
+look something like this and I apologize
+
+00:34:07,880 --> 00:34:12,950
+for the lovely LibreOffice the bot but
+
+00:34:10,639 --> 00:34:16,460
+you have yeah you would have liked Lib
+
+00:34:12,950 --> 00:34:18,980
+fubar version 1.3 or 37 contains these
+
+00:34:16,460 --> 00:34:21,080
+files these files being those files
+
+00:34:18,980 --> 00:34:23,149
+inside the root and then this would
+
+00:34:21,080 --> 00:34:25,159
+obviously contain the hashes of the
+
+00:34:23,149 --> 00:34:28,129
+entire file as well as this thing would
+
+00:34:25,159 --> 00:34:30,080
+hopefully be signed by the vendor and
+
+00:34:28,129 --> 00:34:31,730
+you would have said of these meaning
+
+00:34:30,080 --> 00:34:34,040
+that you can now go and check once you
+
+00:34:31,730 --> 00:34:35,480
+have once you have one of these images
+
+00:34:34,040 --> 00:34:38,629
+and we have one is manifest you can
+
+00:34:35,480 --> 00:34:40,940
+check okay are all the files in this
+
+00:34:38,629 --> 00:34:42,710
+image actually from a vendor are there
+
+00:34:40,940 --> 00:34:44,750
+any files that are not from a vendor are
+
+00:34:42,710 --> 00:34:46,429
+there any files that are different to
+
+00:34:44,750 --> 00:34:47,510
+what the vendor says this the thing
+
+00:34:46,429 --> 00:34:50,570
+should what the vendor says the hack
+
+00:34:47,510 --> 00:34:52,340
+should be are there any you know that
+
+00:34:50,570 --> 00:34:54,620
+sort of in it I think this is a very
+
+00:34:52,340 --> 00:34:56,210
+very well to me it looks good it looks
+
+00:34:54,620 --> 00:34:57,590
+like it be kind to have but I think it
+
+00:34:56,210 --> 00:34:58,790
+would also be quite useful because it
+
+00:34:57,590 --> 00:35:02,030
+would basically eliminate the need for
+
+00:34:58,790 --> 00:35:04,040
+us to have scanning tools that are
+
+00:35:02,030 --> 00:35:05,390
+completely separate from our image
+
+00:35:04,040 --> 00:35:07,700
+building tools completely separate from
+
+00:35:05,390 --> 00:35:10,220
+our run times you can just have it so
+
+00:35:07,700 --> 00:35:11,750
+the run time will only run code that
+
+00:35:10,220 --> 00:35:13,280
+comes from a certain vendor so if the
+
+00:35:11,750 --> 00:35:14,870
+image does not contain all code coming
+
+00:35:13,280 --> 00:35:18,050
+from one vendor you just refuse to run
+
+00:35:14,870 --> 00:35:19,850
+it or you can have you can do the CVE
+
+00:35:18,050 --> 00:35:21,080
+checking because distributions obviously
+
+00:35:19,850 --> 00:35:22,940
+would be able to have there are metadata
+
+00:35:21,080 --> 00:35:24,500
+in these blobs you could say well the
+
+00:35:22,940 --> 00:35:25,970
+way you check for ass webinar this thing
+
+00:35:24,500 --> 00:35:27,260
+has CVS fixed as you go to this
+
+00:35:25,970 --> 00:35:29,090
+particular distribution specific
+
+00:35:27,260 --> 00:35:31,490
+metadata or however you want to do it
+
+00:35:29,090 --> 00:35:33,410
+and I think this is quite
+
+00:35:31,490 --> 00:35:35,570
+neat and the nice thing about this is
+
+00:35:33,410 --> 00:35:36,650
+that well the the thing at least to me
+
+00:35:35,570 --> 00:35:38,869
+that's most obvious about this is that
+
+00:35:36,650 --> 00:35:41,180
+this is only really possible once you
+
+00:35:38,869 --> 00:35:43,040
+expose this information in a Content
+
+00:35:41,180 --> 00:35:45,320
+Dressel way inside the user image store
+
+00:35:43,040 --> 00:35:47,450
+we target our archives you could on
+
+00:35:45,320 --> 00:35:49,250
+paper do this but it would take so much
+
+00:35:47,450 --> 00:35:50,599
+effort to get it working that I mean the
+
+00:35:49,250 --> 00:35:52,550
+fact that no one has done it yet sort of
+
+00:35:50,599 --> 00:35:54,830
+is all the evidence I need that it's it
+
+00:35:52,550 --> 00:35:56,030
+isn't easy to do with tar archives with
+
+00:35:54,830 --> 00:35:58,730
+this new format it would be much much
+
+00:35:56,030 --> 00:35:59,720
+simpler and obviously at hand way
+
+00:35:58,730 --> 00:36:01,460
+because obviously I haven't implemented
+
+00:35:59,720 --> 00:36:03,050
+any of this I'm just talking you know I
+
+00:36:01,460 --> 00:36:05,180
+flip my head but hey that's um that's
+
+00:36:03,050 --> 00:36:06,520
+that you know it once I get once I talk
+
+00:36:05,180 --> 00:36:10,280
+about it then we can work on it right
+
+00:36:06,520 --> 00:36:13,550
+yeah so what and then we get into more
+
+00:36:10,280 --> 00:36:15,710
+alternatives so there is a project
+
+00:36:13,550 --> 00:36:17,869
+called c8r from from the systemd folks
+
+00:36:15,710 --> 00:36:19,099
+which does a sem to attempt to solve
+
+00:36:17,869 --> 00:36:22,220
+some similar problems that I've outlined
+
+00:36:19,099 --> 00:36:24,020
+here obviously the tar in the name sort
+
+00:36:22,220 --> 00:36:25,880
+of hints you towards it is based on tar
+
+00:36:24,020 --> 00:36:29,000
+at least very loosely but they've
+
+00:36:25,880 --> 00:36:31,010
+they've modified their idea of what tar
+
+00:36:29,000 --> 00:36:32,420
+is into being a completely different
+
+00:36:31,010 --> 00:36:34,910
+forma that is complete different like
+
+00:36:32,420 --> 00:36:37,640
+structure it's loosely based on tar in
+
+00:36:34,910 --> 00:36:39,530
+that it is a linear archive that is sort
+
+00:36:37,640 --> 00:36:40,490
+of looks like tar but they've added a
+
+00:36:39,530 --> 00:36:43,820
+bunch of things to it and it is actually
+
+00:36:40,490 --> 00:36:47,000
+quite neat in that it solves the
+
+00:36:43,820 --> 00:36:49,339
+transfer problem quite well because the
+
+00:36:47,000 --> 00:36:50,690
+problem with the model that I've
+
+00:36:49,339 --> 00:36:53,810
+outlined here where you have a bunch of
+
+00:36:50,690 --> 00:36:55,310
+small blobs is that well let's say that
+
+00:36:53,810 --> 00:36:57,320
+when I mention this to some folks that
+
+00:36:55,310 --> 00:36:58,970
+run big image registries they like they
+
+00:36:57,320 --> 00:37:00,470
+started sweating visibly when I said you
+
+00:36:58,970 --> 00:37:01,880
+know you know you currently have three
+
+00:37:00,470 --> 00:37:03,349
+blobs for every image how about we have
+
+00:37:01,880 --> 00:37:07,520
+like five thousand and they're like oh
+
+00:37:03,349 --> 00:37:09,050
+maybe we should rethink that so having
+
+00:37:07,520 --> 00:37:11,210
+said like see I tar which is basically
+
+00:37:09,050 --> 00:37:13,700
+the way it works is that you have some
+
+00:37:11,210 --> 00:37:14,990
+registry you take a giant your entire
+
+00:37:13,700 --> 00:37:16,670
+root filesystem is represented as one
+
+00:37:14,990 --> 00:37:19,970
+file which hey that looks kind of like
+
+00:37:16,670 --> 00:37:21,830
+tar except you have a way to like sub
+
+00:37:19,970 --> 00:37:23,540
+address bits of it and at the very end
+
+00:37:21,830 --> 00:37:26,030
+it has a jump table which is very
+
+00:37:23,540 --> 00:37:30,770
+similar to like zip basically which
+
+00:37:26,030 --> 00:37:32,660
+allows you to say as a client I already
+
+00:37:30,770 --> 00:37:34,760
+have these bits I just want to do like a
+
+00:37:32,660 --> 00:37:37,700
+HTTP range request saying give me just
+
+00:37:34,760 --> 00:37:40,160
+this section of this giant file and the
+
+00:37:37,700 --> 00:37:42,980
+nice thing is that CD ends at least I've
+
+00:37:40,160 --> 00:37:44,960
+been told like having large files that
+
+00:37:42,980 --> 00:37:46,369
+can be like range requested verse
+
+00:37:44,960 --> 00:37:47,869
+small files that actually fashion
+
+00:37:46,369 --> 00:37:48,320
+individually at least that's what I've
+
+00:37:47,869 --> 00:37:49,520
+been told
+
+00:37:48,320 --> 00:37:53,420
+please let me know if I'm wrong on that
+
+00:37:49,520 --> 00:37:54,800
+and but the point is is that because if
+
+00:37:53,420 --> 00:37:56,180
+we go with the alternative which is
+
+00:37:54,800 --> 00:37:57,890
+where you have one giant blob for every
+
+00:37:56,180 --> 00:38:00,080
+file inside the image store we need to
+
+00:37:57,890 --> 00:38:02,300
+solve deduplication in the transfer
+
+00:38:00,080 --> 00:38:03,890
+somehow and so the idea would be maybe
+
+00:38:02,300 --> 00:38:05,900
+we can do something like c8 ah I've
+
+00:38:03,890 --> 00:38:08,270
+spoken to the not about this and he I
+
+00:38:05,900 --> 00:38:10,220
+mean it's very cool but the main problem
+
+00:38:08,270 --> 00:38:12,680
+is that it doesn't actually match the
+
+00:38:10,220 --> 00:38:14,839
+needs we have because c8r was designed
+
+00:38:12,680 --> 00:38:16,820
+for the problem of while it was
+
+00:38:14,839 --> 00:38:18,800
+ostensibly designed to solve the
+
+00:38:16,820 --> 00:38:20,210
+container image problem in reality it
+
+00:38:18,800 --> 00:38:21,500
+was designed to solve an arts problem of
+
+00:38:20,210 --> 00:38:22,640
+like I want to synchronize my home
+
+00:38:21,500 --> 00:38:25,460
+directory that was the problem he's
+
+00:38:22,640 --> 00:38:26,960
+trying to solve and the problem with
+
+00:38:25,460 --> 00:38:28,099
+that is that you don't you don't run a
+
+00:38:26,960 --> 00:38:30,500
+thousand copies of your home directory
+
+00:38:28,099 --> 00:38:34,520
+on a single machine at least I hope you
+
+00:38:30,500 --> 00:38:35,810
+don't and so the the use case while the
+
+00:38:34,520 --> 00:38:37,640
+transfer stuff is very cool we could
+
+00:38:35,810 --> 00:38:39,230
+definitely steal I mean borrow I mean be
+
+00:38:37,640 --> 00:38:42,560
+inspired by some of the stuff that he's
+
+00:38:39,230 --> 00:38:44,450
+done I think that because we have this
+
+00:38:42,560 --> 00:38:45,500
+neat way we can do with rough links and
+
+00:38:44,450 --> 00:38:47,900
+we have all these nice features we can
+
+00:38:45,500 --> 00:38:49,460
+get if we can have separate individual
+
+00:38:47,900 --> 00:38:51,020
+blobs for each file or at least some
+
+00:38:49,460 --> 00:38:53,390
+other thing like that I think that it'd
+
+00:38:51,020 --> 00:38:55,040
+be better if we collaborate or look at
+
+00:38:53,390 --> 00:38:58,130
+some of the way it works and then um you
+
+00:38:55,040 --> 00:39:00,290
+know steal them yeah so that's that's
+
+00:38:58,130 --> 00:39:01,460
+one thing legging you get the stuff I
+
+00:39:00,290 --> 00:39:03,710
+was talking about so I'm coming near the
+
+00:39:01,460 --> 00:39:06,589
+end now where can you get the stuff I
+
+00:39:03,710 --> 00:39:08,030
+was talking about yes so much he lives
+
+00:39:06,589 --> 00:39:11,000
+there it's a it's a tool that you can
+
+00:39:08,030 --> 00:39:12,410
+use just generally for OCI images it's
+
+00:39:11,000 --> 00:39:13,339
+actually quite interestingly it's been
+
+00:39:12,410 --> 00:39:16,040
+used in quite a few different places
+
+00:39:13,339 --> 00:39:18,349
+like LXE uses it for their like OCI
+
+00:39:16,040 --> 00:39:19,400
+templates and there's like several tools
+
+00:39:18,349 --> 00:39:23,180
+that are built on top of am Watchi
+
+00:39:19,400 --> 00:39:24,440
+I have a blog post here which is where
+
+00:39:23,180 --> 00:39:26,060
+you know if you want to like watch me
+
+00:39:24,440 --> 00:39:28,010
+slowly lose my mind from January of last
+
+00:39:26,060 --> 00:39:29,359
+year about like you know actually no
+
+00:39:28,010 --> 00:39:31,070
+hang on just are actually work that out
+
+00:39:29,359 --> 00:39:31,520
+like that is it really that bad turns
+
+00:39:31,070 --> 00:39:35,150
+out yes
+
+00:39:31,520 --> 00:39:36,770
+so yeah it's much longer and I will I am
+
+00:39:35,150 --> 00:39:39,589
+planning to a part two but like I need
+
+00:39:36,770 --> 00:39:40,700
+to like I need to recover first and then
+
+00:39:39,589 --> 00:39:43,280
+yeah you can get the slice let's talk
+
+00:39:40,700 --> 00:39:44,810
+from here what are the next steps one of
+
+00:39:43,280 --> 00:39:47,270
+the things that we would like to get
+
+00:39:44,810 --> 00:39:48,650
+done so assuming later I mean I've given
+
+00:39:47,270 --> 00:39:50,210
+this talk it's all great I have some
+
+00:39:48,650 --> 00:39:52,550
+sort of demo that kind of mostly works
+
+00:39:50,210 --> 00:39:55,010
+what is the next step so the first one
+
+00:39:52,550 --> 00:39:59,410
+is only mentioned transfers still kill
+
+00:39:55,010 --> 00:40:01,490
+us because even though you have
+
+00:39:59,410 --> 00:40:05,000
+one thing I thought to mention sorry is
+
+00:40:01,490 --> 00:40:06,260
+um is that OCR images are compressed
+
+00:40:05,000 --> 00:40:08,090
+that compressed archives
+
+00:40:06,260 --> 00:40:10,070
+the problem with compressed our archives
+
+00:40:08,090 --> 00:40:11,450
+is that well the problem from my
+
+00:40:10,070 --> 00:40:14,360
+perspective is that they're really good
+
+00:40:11,450 --> 00:40:16,790
+gzip is very clever and as a result all
+
+00:40:14,360 --> 00:40:18,440
+of this because we don't at the moment
+
+00:40:16,790 --> 00:40:20,930
+have production of each of the blobs
+
+00:40:18,440 --> 00:40:22,160
+because it would be a little bit waste
+
+00:40:20,930 --> 00:40:24,230
+to at least on paper or at least
+
+00:40:22,160 --> 00:40:26,090
+compressing one file is nowhere near as
+
+00:40:24,230 --> 00:40:31,700
+good as compressing an entire archive of
+
+00:40:26,090 --> 00:40:33,950
+thousands of files the file size of the
+
+00:40:31,700 --> 00:40:37,160
+actual images is still smaller for
+
+00:40:33,950 --> 00:40:39,440
+original tar original OSI iv1 archives
+
+00:40:37,160 --> 00:40:40,880
+of OSI IV one images which is a bit of a
+
+00:40:39,440 --> 00:40:42,260
+problem because it sort of defeats my
+
+00:40:40,880 --> 00:40:45,020
+entire argument so it's good it's a good
+
+00:40:42,260 --> 00:40:49,520
+thing that I mention that I think that
+
+00:40:45,020 --> 00:40:51,260
+we can fix this by by thinking about how
+
+00:40:49,520 --> 00:40:51,980
+they're going to do by fixing most of
+
+00:40:51,260 --> 00:40:54,590
+the deduplication and compression
+
+00:40:51,980 --> 00:40:56,510
+problems on the transfer side right now
+
+00:40:54,590 --> 00:40:59,030
+my solution is basically oh we have an
+
+00:40:56,510 --> 00:41:00,920
+image let's just we have this thing
+
+00:40:59,030 --> 00:41:03,170
+let's just downloaded directly as is if
+
+00:41:00,920 --> 00:41:04,280
+we have a slight and it is the reason
+
+00:41:03,170 --> 00:41:06,050
+for that is that that's how OCI
+
+00:41:04,280 --> 00:41:08,060
+distribution and how dr distribution has
+
+00:41:06,050 --> 00:41:09,650
+always worked but i think if we start
+
+00:41:08,060 --> 00:41:11,390
+looking at it as two different problems
+
+00:41:09,650 --> 00:41:13,940
+we can solve separately it might be
+
+00:41:11,390 --> 00:41:15,980
+possible for us to have a solution that
+
+00:41:13,940 --> 00:41:18,200
+allows us to reduce transfers be a
+
+00:41:15,980 --> 00:41:19,490
+transfer size without compromising and
+
+00:41:18,200 --> 00:41:22,820
+all the neat features we have by having
+
+00:41:19,490 --> 00:41:24,830
+this expanded view of an image
+
+00:41:22,820 --> 00:41:26,660
+yeah the Bill of Materials format is
+
+00:41:24,830 --> 00:41:27,770
+like complete hand wavy I haven't even
+
+00:41:26,660 --> 00:41:29,750
+like written down what it would look
+
+00:41:27,770 --> 00:41:31,160
+like so we need to like design that and
+
+00:41:29,750 --> 00:41:33,140
+then we want to write a specification
+
+00:41:31,160 --> 00:41:34,280
+and submit it for review in the UCI so
+
+00:41:33,140 --> 00:41:36,950
+people can actually start implementing
+
+00:41:34,280 --> 00:41:37,850
+this thing and one thing that should be
+
+00:41:36,950 --> 00:41:38,990
+noted is that people have already
+
+00:41:37,850 --> 00:41:41,960
+started working around many of these
+
+00:41:38,990 --> 00:41:44,390
+problems you know within the pod mint
+
+00:41:41,960 --> 00:41:45,860
+side of things you have fusible AFS
+
+00:41:44,390 --> 00:41:47,930
+which allows you to have an unprivileged
+
+00:41:45,860 --> 00:41:49,730
+way to run an overlay first based on our
+
+00:41:47,930 --> 00:41:51,650
+new CI image we ideally want to have
+
+00:41:49,730 --> 00:41:52,820
+that be able to be a use case that they
+
+00:41:51,650 --> 00:41:56,000
+would like to be able to say I've solved
+
+00:41:52,820 --> 00:41:58,030
+and cisco has a thing called stacker
+
+00:41:56,000 --> 00:41:59,960
+which lets you which builds images and
+
+00:41:58,030 --> 00:42:01,850
+because they're complete maniacs they
+
+00:41:59,960 --> 00:42:03,500
+use squash FS rather than tar archives
+
+00:42:01,850 --> 00:42:05,930
+because it allows them to have signed
+
+00:42:03,500 --> 00:42:07,430
+squash FS blobs so that at runtime you
+
+00:42:05,930 --> 00:42:08,630
+know that the thing that's running is
+
+00:42:07,430 --> 00:42:10,400
+signed because the problem with
+
+00:42:08,630 --> 00:42:11,660
+extraction is that you can't really be
+
+00:42:10,400 --> 00:42:11,960
+sure cryptographically the thing you're
+
+00:42:11,660 --> 00:42:14,359
+running
+
+00:42:11,960 --> 00:42:17,060
+the same they've mentioned writing like
+
+00:42:14,359 --> 00:42:17,630
+a kernel driver photo CIA images good
+
+00:42:17,060 --> 00:42:20,300
+luck with that
+
+00:42:17,630 --> 00:42:21,560
+and yeah and then finally get them to
+
+00:42:20,300 --> 00:42:23,150
+switch and this will take a while I mean
+
+00:42:21,560 --> 00:42:24,260
+people still haven't switched to OC IV
+
+00:42:23,150 --> 00:42:26,900
+one images even though it's been around
+
+00:42:24,260 --> 00:42:28,400
+for like a while
+
+00:42:26,900 --> 00:42:31,160
+people still use docker images because
+
+00:42:28,400 --> 00:42:32,990
+not everyone no because well no one
+
+00:42:31,160 --> 00:42:34,609
+switched virtually people have switched
+
+00:42:32,990 --> 00:42:35,810
+because everyone is still using docker
+
+00:42:34,609 --> 00:42:37,160
+and then everyone's still using docker
+
+00:42:35,810 --> 00:42:38,450
+because OC everyone is this water
+
+00:42:37,160 --> 00:42:41,119
+everywhere so we need to fix that
+
+00:42:38,450 --> 00:42:42,950
+problem somehow and yeah I think that's
+
+00:42:41,119 --> 00:42:44,030
+basically it oh I already is it another
+
+00:42:42,950 --> 00:42:45,890
+slide of where everything is which
+
+00:42:44,030 --> 00:43:00,200
+definitely was intentional and any
+
+00:42:45,890 --> 00:43:05,270
+questions will the future OCI specs etc
+
+00:43:00,200 --> 00:43:07,400
+be governed by the ncf talk or is the
+
+00:43:05,270 --> 00:43:11,210
+ten close.i committee not going to get
+
+00:43:07,400 --> 00:43:14,750
+involved there i don't know of any plans
+
+00:43:11,210 --> 00:43:16,580
+to migrate OCI to the CN CF right now o
+
+00:43:14,750 --> 00:43:18,619
+CI is is a linux foundation initiative
+
+00:43:16,580 --> 00:43:20,660
+so it's it's separate to the CN CF but
+
+00:43:18,619 --> 00:43:22,010
+they but actually interestingly they're
+
+00:43:20,660 --> 00:43:25,580
+actually the the head of them is the
+
+00:43:22,010 --> 00:43:27,470
+same person Chris Anna's chick but they
+
+00:43:25,580 --> 00:43:29,119
+are I forgot to mention OC I easily
+
+00:43:27,470 --> 00:43:31,130
+Foundation initiative already and it
+
+00:43:29,119 --> 00:43:32,599
+does have its own like rules and all the
+
+00:43:31,130 --> 00:43:34,070
+rest of it I don't know if there's any
+
+00:43:32,599 --> 00:43:35,839
+plans to am I go to CN CF my
+
+00:43:34,070 --> 00:43:36,830
+understanding is that there isn't given
+
+00:43:35,839 --> 00:43:39,830
+it's already a Linux Foundation
+
+00:43:36,830 --> 00:43:50,030
+initiative but yeah that's I'm not sure
+
+00:43:39,830 --> 00:43:53,240
+to be honest thank you um I when you
+
+00:43:50,030 --> 00:43:56,240
+were talking about using one of the
+
+00:43:53,240 --> 00:43:59,510
+symlinks that wants in links with your
+
+00:43:56,240 --> 00:44:02,320
+images do do you have any idea on if
+
+00:43:59,510 --> 00:44:04,940
+that's supported in say windows or if
+
+00:44:02,320 --> 00:44:08,270
+you're even considering whether to you
+
+00:44:04,940 --> 00:44:14,990
+to have windows containers be supported
+
+00:44:08,270 --> 00:44:16,130
+in this hiv-2 thing yeah I mean windows
+
+00:44:14,990 --> 00:44:17,720
+windows is very interesting when it
+
+00:44:16,130 --> 00:44:18,800
+comes to symlinks they have like three
+
+00:44:17,720 --> 00:44:23,030
+different versions but let's not get
+
+00:44:18,800 --> 00:44:24,200
+into that I'm not sure right now the aim
+
+00:44:23,030 --> 00:44:25,339
+is to try to come up with a solution
+
+00:44:24,200 --> 00:44:28,430
+that fixes the problem
+
+00:44:25,339 --> 00:44:30,589
+for for like Linux servers is sort of
+
+00:44:28,430 --> 00:44:32,450
+the main thing which I solve it for I do
+
+00:44:30,589 --> 00:44:34,940
+believe that you could like I mean the
+
+00:44:32,450 --> 00:44:36,319
+format is like tar in that you could
+
+00:44:34,940 --> 00:44:39,499
+extract it in such a way that it works
+
+00:44:36,319 --> 00:44:40,969
+on Windows as is but at the moment it's
+
+00:44:39,499 --> 00:44:41,989
+not like I mean my main concern but I
+
+00:44:40,969 --> 00:44:43,190
+mean if people bring it up on the
+
+00:44:41,989 --> 00:44:45,170
+mailing lists and stuff then we can we
+
+00:44:43,190 --> 00:44:47,989
+can see what we can do to make it less
+
+00:44:45,170 --> 00:44:49,400
+of a pain on Windows sadly we're now out
+
+00:44:47,989 --> 00:44:51,650
+of time
+
+00:44:49,400 --> 00:44:52,519
+are you happy to answer questions I'll
+
+00:44:51,650 --> 00:44:54,380
+be right out
+
+00:44:52,519 --> 00:44:54,640
+lovely let's give a lexer around the
+
+00:44:54,380 --> 00:45:01,760
+course
+
+00:44:54,640 --> 00:45:01,760
+
+YouTube URL: https://www.youtube.com/watch?v=nhO2A6rr5lE
+
+

@@ -1,0 +1,1316 @@
+Title: Snowcannon: Synchronous Data Replication in FDB - Markus Pilman + David Youngworth
+Publication date: 2018-12-14
+Playlist: FoundationDB Summit 2018
+Description: 
+	The current FDB disaster recovery solution uses asynchronous replication, therefore failover might result in data loss.  
+
+For Snowflake, this is an unacceptable business risk.
+
+Snowcannon is a synchronous, distributed queueing system built within FDB.  An FDB cluster can synchronously replicate transactions to Snowcannon, and Snowcannon asychronously pushes these transactions to a secondary cluster.  The queueing system has three benefits: (1) It can replay rollbacks and redos (2) It allows us to bring down the secondary cluster for maintenance while the primary remains online. (3) In the event that both primary and secondary cluster fails, it allows recovery from backups with zero data loss.
+
+This talk will go over the design of Snowcannon, including the replication protocol, failover switch, queueing architecture, and the quorum protocol.
+Captions: 
+	00:00:01,100 --> 00:00:10,559
+hello everyone so I'm Marcus from
+
+00:00:07,710 --> 00:00:14,330
+snowflake computing part of the FTP
+
+00:00:10,559 --> 00:00:17,310
+engineering team and this is David and
+
+00:00:14,330 --> 00:00:23,970
+we are here to talk a bit about high
+
+00:00:17,310 --> 00:00:25,410
+availability within FTB so this is the
+
+00:00:23,970 --> 00:00:27,869
+outline of this talk
+
+00:00:25,410 --> 00:00:30,660
+first time on a motivate our work and
+
+00:00:27,869 --> 00:00:33,270
+why we chose the architecture that the
+
+00:00:30,660 --> 00:00:36,570
+architecture that we implemented then I
+
+00:00:33,270 --> 00:00:39,090
+will do a small detour and talk about
+
+00:00:36,570 --> 00:00:45,000
+building distributed systems in general
+
+00:00:39,090 --> 00:00:47,309
+and after that David will take over and
+
+00:00:45,000 --> 00:00:50,280
+he will talk about the snow cannon
+
+00:00:47,309 --> 00:00:57,480
+architecture and how it is implemented
+
+00:00:50,280 --> 00:01:00,300
+and how it works so snowflake uses
+
+00:00:57,480 --> 00:01:02,129
+foundation DBS and integrals is a part
+
+00:01:00,300 --> 00:01:04,799
+of the system it's it's the whole file
+
+00:01:02,129 --> 00:01:09,450
+system if foundation DB goes down in
+
+00:01:04,799 --> 00:01:11,549
+reach and our service goes down so we
+
+00:01:09,450 --> 00:01:14,640
+came up with a list of requirements that
+
+00:01:11,549 --> 00:01:18,360
+we have for a high availability slash
+
+00:01:14,640 --> 00:01:21,060
+disaster recovery solution the first one
+
+00:01:18,360 --> 00:01:24,840
+and the most important one by far is we
+
+00:01:21,060 --> 00:01:27,810
+never want to lose data data loss means
+
+00:01:24,840 --> 00:01:30,509
+we lose customer data in if we lose
+
+00:01:27,810 --> 00:01:33,509
+foundation DB data we want to have the
+
+00:01:30,509 --> 00:01:38,340
+possibility to have something like a
+
+00:01:33,509 --> 00:01:40,740
+standby and be able sorry to to failover
+
+00:01:38,340 --> 00:01:43,409
+to the standby and then also have the
+
+00:01:40,740 --> 00:01:47,130
+possibility to fail back the reason for
+
+00:01:43,409 --> 00:01:49,530
+that is usually your data doesn't when
+
+00:01:47,130 --> 00:01:51,780
+you lose an F DB loss usually we usually
+
+00:01:49,530 --> 00:01:54,509
+don't lose it completely it's more like
+
+00:01:51,780 --> 00:01:56,820
+it's performance degrades for networking
+
+00:01:54,509 --> 00:01:59,369
+issues losing machines these kind of
+
+00:01:56,820 --> 00:02:01,409
+things and if we can fail over to a
+
+00:01:59,369 --> 00:02:04,409
+secondary but don't have to throw away
+
+00:02:01,409 --> 00:02:07,500
+the old primary if we can fix that old
+
+00:02:04,409 --> 00:02:11,250
+primary and have a vulnerable secondary
+
+00:02:07,500 --> 00:02:13,620
+again for free basically we also want to
+
+00:02:11,250 --> 00:02:16,769
+have multiple secondaries
+
+00:02:13,620 --> 00:02:19,319
+we're dead paranoid
+
+00:02:16,769 --> 00:02:21,650
+we won't have the possibility to shut
+
+00:02:19,319 --> 00:02:24,720
+down secondaries to do something like
+
+00:02:21,650 --> 00:02:29,239
+software upgrades go to other machines
+
+00:02:24,720 --> 00:02:32,970
+these kind of things and we want to have
+
+00:02:29,239 --> 00:02:36,000
+terabytes potentially of mutations of
+
+00:02:32,970 --> 00:02:39,030
+changes to our FDB storage in on disk
+
+00:02:36,000 --> 00:02:41,819
+safely stored we will see a bit later
+
+00:02:39,030 --> 00:02:44,549
+how that is useful and it should be as
+
+00:02:41,819 --> 00:02:47,549
+highly available as possible correctness
+
+00:02:44,549 --> 00:02:49,680
+is more important than availability but
+
+00:02:47,549 --> 00:02:53,370
+it still we want to optimize for that as
+
+00:02:49,680 --> 00:02:56,700
+much as we can get away with so the
+
+00:02:53,370 --> 00:02:58,859
+first solution that FTB implemented in
+
+00:02:56,700 --> 00:03:02,190
+that space was backups and that is what
+
+00:02:58,859 --> 00:03:06,090
+we started running with however backups
+
+00:03:02,190 --> 00:03:08,519
+are not free so what you see here is one
+
+00:03:06,090 --> 00:03:10,530
+of our production cluster and this is
+
+00:03:08,519 --> 00:03:13,829
+the sum of all these corporations
+
+00:03:10,530 --> 00:03:18,169
+executed over time and the red areas is
+
+00:03:13,829 --> 00:03:20,639
+where we are running a backup process so
+
+00:03:18,169 --> 00:03:22,859
+sadly this scale doesn't start at zero
+
+00:03:20,639 --> 00:03:24,780
+but what you can see is that roughly the
+
+00:03:22,859 --> 00:03:26,819
+number of write operations - like the
+
+00:03:24,780 --> 00:03:30,269
+number of disk operations doubles as
+
+00:03:26,819 --> 00:03:32,400
+soon as you are running a backup this
+
+00:03:30,269 --> 00:03:36,180
+got better with have to be 6 but it's
+
+00:03:32,400 --> 00:03:38,930
+still the cost is still there and this
+
+00:03:36,180 --> 00:03:42,329
+costs finally is also part of the
+
+00:03:38,930 --> 00:03:44,639
+disaster recovery solution within within
+
+00:03:42,329 --> 00:03:48,139
+FDB because that one depends on like
+
+00:03:44,639 --> 00:03:50,879
+builds on top of the backup mechanism so
+
+00:03:48,139 --> 00:03:53,549
+this is the comparison of all the
+
+00:03:50,879 --> 00:03:56,010
+solutions that are available snow snow
+
+00:03:53,549 --> 00:03:57,870
+cannon the thing that we built isn't yet
+
+00:03:56,010 --> 00:04:00,660
+a open source but we're in the process
+
+00:03:57,870 --> 00:04:03,150
+of doing that so you will hopefully
+
+00:04:00,660 --> 00:04:04,919
+rather sooner than later be able to
+
+00:04:03,150 --> 00:04:08,639
+deploy that as well if you choose to
+
+00:04:04,919 --> 00:04:11,459
+keep in mind that this comparison here
+
+00:04:08,639 --> 00:04:13,290
+is highly skewed to our requirements so
+
+00:04:11,459 --> 00:04:15,090
+you could come up with all the points
+
+00:04:13,290 --> 00:04:16,650
+where you would see more crosses that
+
+00:04:15,090 --> 00:04:19,789
+there's no kind of thingy and more takes
+
+00:04:16,650 --> 00:04:19,789
+at auto solutions
+
+00:04:19,799 --> 00:04:27,090
+but basically what snow cannon gives us
+
+00:04:23,009 --> 00:04:29,190
+is the the main drawback that it has is
+
+00:04:27,090 --> 00:04:31,470
+that commit latency will go up slightly
+
+00:04:29,190 --> 00:04:34,139
+by like depending on how you deploy the
+
+00:04:31,470 --> 00:04:36,150
+whole thing but at the same time it it
+
+00:04:34,139 --> 00:04:40,169
+doesn't increase load on primary we can
+
+00:04:36,150 --> 00:04:42,780
+we can recover a backup and replay snow
+
+00:04:40,169 --> 00:04:45,110
+cannon logs and get back in your cluster
+
+00:04:42,780 --> 00:04:47,819
+without having any data loss we can
+
+00:04:45,110 --> 00:04:52,050
+switch over and back these kind of
+
+00:04:47,819 --> 00:04:53,970
+things the way we implemented this and
+
+00:04:52,050 --> 00:04:55,830
+this is very high-level David will go a
+
+00:04:53,970 --> 00:04:58,949
+bit more into detail is we built
+
+00:04:55,830 --> 00:05:01,830
+basically I felt a second system called
+
+00:04:58,949 --> 00:05:04,710
+snow cannon which is a full cluster and
+
+00:05:01,830 --> 00:05:07,470
+it basically implements a distributed
+
+00:05:04,710 --> 00:05:12,690
+queuing system think of it as something
+
+00:05:07,470 --> 00:05:17,219
+like Kafka the main FDB cluster will
+
+00:05:12,690 --> 00:05:20,039
+then stream synchronously all these all
+
+00:05:17,219 --> 00:05:22,169
+its transaction that it executes all the
+
+00:05:20,039 --> 00:05:24,930
+mutations of detron days transactions -
+
+00:05:22,169 --> 00:05:26,669
+snow cannon snow cannon will persist
+
+00:05:24,930 --> 00:05:29,400
+this - this and it will then a
+
+00:05:26,669 --> 00:05:31,590
+synchronously push it to a secondary
+
+00:05:29,400 --> 00:05:33,479
+cluster or even a third or fourth one
+
+00:05:31,590 --> 00:05:36,330
+however many of those you want to have
+
+00:05:33,479 --> 00:05:38,639
+and because of the asynchronous nature
+
+00:05:36,330 --> 00:05:40,319
+on the second power of it you can like
+
+00:05:38,639 --> 00:05:42,509
+bring down the other cluster for
+
+00:05:40,319 --> 00:05:48,180
+maintenance - upgrades these kind of
+
+00:05:42,509 --> 00:05:50,310
+things so now this d2 when we saw it
+
+00:05:48,180 --> 00:05:51,810
+with this project the very first part of
+
+00:05:50,310 --> 00:05:54,630
+the code was actually the idea was to
+
+00:05:51,810 --> 00:05:59,400
+build a new distributed system we built
+
+00:05:54,630 --> 00:06:01,650
+this unit system this before but if you
+
+00:05:59,400 --> 00:06:04,110
+if you build a distributed system you
+
+00:06:01,650 --> 00:06:07,740
+have to think about failure scenarios
+
+00:06:04,110 --> 00:06:09,630
+and how you are going to fix those in in
+
+00:06:07,740 --> 00:06:11,909
+during run time right you can have
+
+00:06:09,630 --> 00:06:14,460
+machines or failing processes or failing
+
+00:06:11,909 --> 00:06:15,990
+disks all failing you can have network
+
+00:06:14,460 --> 00:06:18,479
+partitions you cannot differentiate
+
+00:06:15,990 --> 00:06:20,909
+between network petitionary partitions
+
+00:06:18,479 --> 00:06:23,639
+and machine failures you can have
+
+00:06:20,909 --> 00:06:26,370
+message reordering on the wire and to
+
+00:06:23,639 --> 00:06:29,479
+make your life even more miserable these
+
+00:06:26,370 --> 00:06:32,159
+things will happen at the same time
+
+00:06:29,479 --> 00:06:33,420
+because of that you need to have a good
+
+00:06:32,159 --> 00:06:35,400
+testing story
+
+00:06:33,420 --> 00:06:36,960
+and this is a difficult thing and if I
+
+00:06:35,400 --> 00:06:38,850
+would have to say what is the best thing
+
+00:06:36,960 --> 00:06:43,710
+about Foundation TV I would say it's the
+
+00:06:38,850 --> 00:06:45,690
+testing story so if you think about
+
+00:06:43,710 --> 00:06:47,370
+foundation TV you can either say this is
+
+00:06:45,690 --> 00:06:49,500
+a database or a distributed key-value
+
+00:06:47,370 --> 00:06:52,230
+store or you can say it is a distributed
+
+00:06:49,500 --> 00:06:55,320
+system that implements several kind of
+
+00:06:52,230 --> 00:06:58,200
+services within that system it starts
+
+00:06:55,320 --> 00:07:00,210
+like tea logs and masters and resolvers
+
+00:06:58,200 --> 00:07:02,970
+and these things and clues everything
+
+00:07:00,210 --> 00:07:04,530
+together so instead of building a lay on
+
+00:07:02,970 --> 00:07:06,150
+top of that what you can also do is you
+
+00:07:04,530 --> 00:07:07,680
+can take this thing as a framework and
+
+00:07:06,150 --> 00:07:09,900
+just implement your own service on it
+
+00:07:07,680 --> 00:07:11,940
+and the amount of code you need to
+
+00:07:09,900 --> 00:07:14,550
+change is surprisingly small if you want
+
+00:07:11,940 --> 00:07:17,300
+to do that it is actually so small that
+
+00:07:14,550 --> 00:07:22,740
+I managed to put it on four slides and
+
+00:07:17,300 --> 00:07:24,990
+that is exactly what I did so the first
+
+00:07:22,740 --> 00:07:27,510
+step was to add a new machine clause we
+
+00:07:24,990 --> 00:07:29,400
+basically need to teach foundation DB we
+
+00:07:27,510 --> 00:07:31,620
+now have this new service in this
+
+00:07:29,400 --> 00:07:34,350
+example called snow cannon which is have
+
+00:07:31,620 --> 00:07:36,960
+a puing system in the next step we need
+
+00:07:34,350 --> 00:07:41,160
+to tell the cluster controller the guy
+
+00:07:36,960 --> 00:07:44,070
+who's responsible to to recruit new
+
+00:07:41,160 --> 00:07:46,350
+rules that this thing exists
+
+00:07:44,070 --> 00:07:50,370
+so we basically add a new API call to
+
+00:07:46,350 --> 00:07:53,510
+that the way of then actually serving
+
+00:07:50,370 --> 00:07:57,590
+the API call is pretty much some
+
+00:07:53,510 --> 00:07:57,590
+copy-paste it's like three lines of code
+
+00:07:57,980 --> 00:08:03,330
+then workers which is basically the main
+
+00:08:01,200 --> 00:08:05,190
+role that every process executes needs
+
+00:08:03,330 --> 00:08:07,710
+to be able to start that rule and now
+
+00:08:05,190 --> 00:08:10,560
+that you can can can see here is
+
+00:08:07,710 --> 00:08:13,590
+basically this is the code that actually
+
+00:08:10,560 --> 00:08:18,660
+executes then a snow cannons of one of
+
+00:08:13,590 --> 00:08:20,490
+these special processes and then we need
+
+00:08:18,660 --> 00:08:23,880
+something that orchestrates everything
+
+00:08:20,490 --> 00:08:27,000
+and here we healthy FDB cloth always has
+
+00:08:23,880 --> 00:08:28,710
+one master server orchestrating as no
+
+00:08:27,000 --> 00:08:30,480
+can is pretty cheap so why not do it
+
+00:08:28,710 --> 00:08:35,700
+there you could make an auto decision
+
+00:08:30,480 --> 00:08:39,450
+this was ours so whenever the master
+
+00:08:35,700 --> 00:08:42,330
+finishes a recovery it will simply it
+
+00:08:39,450 --> 00:08:43,420
+will simply stall up this track and we
+
+00:08:42,330 --> 00:08:47,890
+are done
+
+00:08:43,420 --> 00:08:50,050
+so this means that using FDB as a base
+
+00:08:47,890 --> 00:08:52,210
+for this simulit system makes your life
+
+00:08:50,050 --> 00:08:52,900
+much much easier and I want to educate a
+
+00:08:52,210 --> 00:08:56,200
+lot for that
+
+00:08:52,900 --> 00:08:58,390
+and I wanna again say like the simulator
+
+00:08:56,200 --> 00:09:00,610
+and the testing stuff is awesome and
+
+00:08:58,390 --> 00:09:02,650
+will make your life so much easier being
+
+00:09:00,610 --> 00:09:04,510
+able to run civil is a serializable
+
+00:09:02,650 --> 00:09:09,310
+transaction within your services
+
+00:09:04,510 --> 00:09:13,150
+stenches the icing on the cake thanks
+
+00:09:09,310 --> 00:09:14,980
+Marcus so now that we've talked a little
+
+00:09:13,150 --> 00:09:16,780
+bit about snowflakes requirements for
+
+00:09:14,980 --> 00:09:18,490
+its metadata and sort of our motivation
+
+00:09:16,780 --> 00:09:19,990
+behind making this thing I want to go in
+
+00:09:18,490 --> 00:09:23,170
+a little bit into the architecture
+
+00:09:19,990 --> 00:09:25,750
+behind snow cannon what is snow cannon
+
+00:09:23,170 --> 00:09:28,660
+it is a multi cluster replication
+
+00:09:25,750 --> 00:09:30,700
+solution built on top of FDB the
+
+00:09:28,660 --> 00:09:33,180
+producer cluster pushes data
+
+00:09:30,700 --> 00:09:35,980
+synchronously to the snow cannon cluster
+
+00:09:33,180 --> 00:09:38,200
+which then buffers it together and
+
+00:09:35,980 --> 00:09:41,050
+batches it and pushes it asynchronously
+
+00:09:38,200 --> 00:09:44,440
+to the consumer cluster your consumer
+
+00:09:41,050 --> 00:09:47,050
+can act as a standby the snow cannon
+
+00:09:44,440 --> 00:09:50,920
+cluster is responsible for maintaining
+
+00:09:47,050 --> 00:09:53,080
+your replication factor for making sure
+
+00:09:50,920 --> 00:09:55,300
+that your failover is managed correctly
+
+00:09:53,080 --> 00:09:58,500
+and for making sure that the clients
+
+00:09:55,300 --> 00:10:00,810
+know which cluster to currently talk to
+
+00:09:58,500 --> 00:10:03,070
+let's go into a little bit more detail
+
+00:10:00,810 --> 00:10:05,050
+the first thing that has to happen is
+
+00:10:03,070 --> 00:10:07,390
+that the client needs to query the snow
+
+00:10:05,050 --> 00:10:09,880
+cannon for the for the current producer
+
+00:10:07,390 --> 00:10:11,710
+the snow cannon acts as a client proxy
+
+00:10:09,880 --> 00:10:15,520
+and gives the interface for the current
+
+00:10:11,710 --> 00:10:19,120
+producer to the clients the clients can
+
+00:10:15,520 --> 00:10:21,970
+now begin pushing data to FDB the proxy
+
+00:10:19,120 --> 00:10:23,830
+on the producer will simultaneously push
+
+00:10:21,970 --> 00:10:26,440
+transactions to both its own T log
+
+00:10:23,830 --> 00:10:29,500
+system and to the snow cannon log system
+
+00:10:26,440 --> 00:10:31,840
+a transaction is not acknowledged as
+
+00:10:29,500 --> 00:10:34,780
+complete or committed unless it is on
+
+00:10:31,840 --> 00:10:38,140
+all of the T log replicas and a majority
+
+00:10:34,780 --> 00:10:39,790
+of our snow cannon logs the snow cannons
+
+00:10:38,140 --> 00:10:41,530
+will buffer up this data and a
+
+00:10:39,790 --> 00:10:44,380
+replicator actor will read from one of
+
+00:10:41,530 --> 00:10:47,080
+the snow cannons batch the transactions
+
+00:10:44,380 --> 00:10:51,430
+together and push them asynchronously to
+
+00:10:47,080 --> 00:10:53,140
+the consumer the consumer cluster is in
+
+00:10:51,430 --> 00:10:55,360
+a read-only state which was some state
+
+00:10:53,140 --> 00:10:56,800
+we added to the metadata store to ensure
+
+00:10:55,360 --> 00:10:58,870
+that the consumer doesn't accept
+
+00:10:56,800 --> 00:11:03,670
+any transactions except from the snow
+
+00:10:58,870 --> 00:11:04,450
+cannon we wanted a dr solution full
+
+00:11:03,670 --> 00:11:06,940
+backup/restore
+
+00:11:04,450 --> 00:11:09,130
+that could work across availability
+
+00:11:06,940 --> 00:11:11,110
+zones or data centers with minimal
+
+00:11:09,130 --> 00:11:14,380
+impact to the customer and with zero
+
+00:11:11,110 --> 00:11:15,820
+data loss this is a tall order and in
+
+00:11:14,380 --> 00:11:17,170
+order to do this we implemented snow
+
+00:11:15,820 --> 00:11:20,290
+cannon to give us the best of both
+
+00:11:17,170 --> 00:11:22,300
+worlds the synchronous push to the snow
+
+00:11:20,290 --> 00:11:24,899
+cannons ensures that we have zero data
+
+00:11:22,300 --> 00:11:27,459
+loss even when we're restoring a backup
+
+00:11:24,899 --> 00:11:28,420
+the snow cannons were also implemented
+
+00:11:27,459 --> 00:11:30,610
+to be very simple
+
+00:11:28,420 --> 00:11:32,950
+there are append-only logs that write
+
+00:11:30,610 --> 00:11:35,380
+directly to disk this means that our
+
+00:11:32,950 --> 00:11:38,320
+rights are very cheap and it means that
+
+00:11:35,380 --> 00:11:39,670
+usually they outperform the t logs which
+
+00:11:38,320 --> 00:11:41,380
+in turn means that we can get our
+
+00:11:39,670 --> 00:11:44,529
+replication factor without any
+
+00:11:41,380 --> 00:11:47,980
+additional impact or latency to the
+
+00:11:44,529 --> 00:11:50,730
+commit time the snow cannons can also
+
+00:11:47,980 --> 00:11:54,730
+give you data center fault tolerance
+
+00:11:50,730 --> 00:11:56,170
+without having to deploy the t logs or
+
+00:11:54,730 --> 00:11:58,180
+the nodes in your cluster across
+
+00:11:56,170 --> 00:11:59,649
+different data centers which can cause a
+
+00:11:58,180 --> 00:12:02,079
+lot of extra latencies and some
+
+00:11:59,649 --> 00:12:04,000
+performance degradation you only have to
+
+00:12:02,079 --> 00:12:07,260
+deploy the snow cannons across different
+
+00:12:04,000 --> 00:12:09,190
+data centers now for just a single
+
+00:12:07,260 --> 00:12:11,500
+this-this-this essentially gives you the
+
+00:12:09,190 --> 00:12:13,770
+same guarantees with only a single hop
+
+00:12:11,500 --> 00:12:16,510
+across data centers to your commit time
+
+00:12:13,770 --> 00:12:19,930
+now your producer cluster could go down
+
+00:12:16,510 --> 00:12:21,100
+due to some terrible disaster and you
+
+00:12:19,930 --> 00:12:23,709
+can bring up your consumer in a
+
+00:12:21,100 --> 00:12:25,810
+different data center replay the snow
+
+00:12:23,709 --> 00:12:28,510
+cannon log in that same data center and
+
+00:12:25,810 --> 00:12:32,880
+begin again with zero data loss right
+
+00:12:28,510 --> 00:12:35,529
+where you were before the snow cannons
+
+00:12:32,880 --> 00:12:37,450
+pushing asynchronously to the consumer
+
+00:12:35,529 --> 00:12:40,959
+also grants us a couple of interesting
+
+00:12:37,450 --> 00:12:43,020
+benefits we designed the snow cannon to
+
+00:12:40,959 --> 00:12:45,550
+be able to buffer the data indefinitely
+
+00:12:43,020 --> 00:12:48,100
+which means that the consumer could go
+
+00:12:45,550 --> 00:12:50,170
+down or become unresponsive for hours at
+
+00:12:48,100 --> 00:12:53,019
+a time without any impact to our
+
+00:12:50,170 --> 00:12:55,269
+customer workload this means that if we
+
+00:12:53,019 --> 00:12:56,920
+want to take backups as Marcus was
+
+00:12:55,269 --> 00:13:00,220
+showing it could take and it has a huge
+
+00:12:56,920 --> 00:13:01,720
+impact to customer workload it won't
+
+00:13:00,220 --> 00:13:03,220
+impact customer workload at all because
+
+00:13:01,720 --> 00:13:05,920
+we can do it on our backup on our
+
+00:13:03,220 --> 00:13:08,020
+standby cluster it also means we can
+
+00:13:05,920 --> 00:13:09,630
+have multiple consumers so we could have
+
+00:13:08,020 --> 00:13:11,040
+one running as a standby
+
+00:13:09,630 --> 00:13:12,960
+we can have multiple consumers running
+
+00:13:11,040 --> 00:13:14,790
+backups at the same time and you can
+
+00:13:12,960 --> 00:13:19,260
+even have a consumer running test code
+
+00:13:14,790 --> 00:13:23,820
+with actual production level traffic so
+
+00:13:19,260 --> 00:13:25,680
+in order to test your code we also
+
+00:13:23,820 --> 00:13:28,650
+implemented snow cannon to work on a
+
+00:13:25,680 --> 00:13:31,770
+quorum based logic usually the proxy has
+
+00:13:28,650 --> 00:13:33,960
+to commit to all of the T log replicas
+
+00:13:31,770 --> 00:13:36,060
+before committing its transaction but it
+
+00:13:33,960 --> 00:13:39,600
+need only commit to a majority of snow
+
+00:13:36,060 --> 00:13:40,890
+cannons before we commit this means that
+
+00:13:39,600 --> 00:13:43,080
+we're more fault that we're fault
+
+00:13:40,890 --> 00:13:45,360
+tolerant in the face of node failure we
+
+00:13:43,080 --> 00:13:48,780
+can lose a snow cannon we can recruit a
+
+00:13:45,360 --> 00:13:51,180
+new stupid cannon and we can repair
+
+00:13:48,780 --> 00:13:53,700
+holes all while the data continues
+
+00:13:51,180 --> 00:13:59,100
+unhindered to be replicated to the to
+
+00:13:53,700 --> 00:14:02,250
+the consumer one of the biggest benefits
+
+00:13:59,100 --> 00:14:04,460
+of our architecture is the ability to to
+
+00:14:02,250 --> 00:14:06,930
+switch over to a hot standby cluster
+
+00:14:04,460 --> 00:14:10,230
+let's say that your clusters performance
+
+00:14:06,930 --> 00:14:12,870
+has become degraded due to the B trees
+
+00:14:10,230 --> 00:14:16,050
+being fragmented something it snowflakes
+
+00:14:12,870 --> 00:14:17,640
+see a lot because of our turn or perhaps
+
+00:14:16,050 --> 00:14:19,590
+there's just a network partitioning or
+
+00:14:17,640 --> 00:14:21,120
+some sort of network degradation or
+
+00:14:19,590 --> 00:14:23,040
+maybe you just want to do a major
+
+00:14:21,120 --> 00:14:25,470
+version code upgrade without bringing
+
+00:14:23,040 --> 00:14:29,510
+your whole cluster down the snow cannon
+
+00:14:25,470 --> 00:14:32,670
+switch can handle all this for you
+
+00:14:29,510 --> 00:14:34,200
+here's the overview again for the
+
+00:14:32,670 --> 00:14:36,330
+standby to come up as your primary
+
+00:14:34,200 --> 00:14:38,510
+cluster it must first have all of the
+
+00:14:36,330 --> 00:14:41,130
+data that's currently on your producer
+
+00:14:38,510 --> 00:14:44,580
+for this to happen we must block new
+
+00:14:41,130 --> 00:14:46,500
+transactions to the current producer we
+
+00:14:44,580 --> 00:14:48,930
+do this by setting it to read-only and
+
+00:14:46,500 --> 00:14:51,000
+this means that new transactions from
+
+00:14:48,930 --> 00:14:55,050
+the clients will simply air out and
+
+00:14:51,000 --> 00:14:56,940
+retry now the snow cannons are free to
+
+00:14:55,050 --> 00:15:00,210
+finish pushing its data to the consumer
+
+00:14:56,940 --> 00:15:02,940
+a standby consumer is only five seconds
+
+00:15:00,210 --> 00:15:05,190
+behind the producer and because of
+
+00:15:02,940 --> 00:15:07,050
+batching the the push of the remaining
+
+00:15:05,190 --> 00:15:11,070
+data to the standby is an extremely fast
+
+00:15:07,050 --> 00:15:13,990
+operation not more than a few seconds we
+
+00:15:11,070 --> 00:15:16,300
+call this the flush
+
+00:15:13,990 --> 00:15:17,620
+once we've completed the flush and all
+
+00:15:16,300 --> 00:15:19,690
+of the data on the snow Canada's is now
+
+00:15:17,620 --> 00:15:22,630
+in the consumer we can bring this
+
+00:15:19,690 --> 00:15:24,250
+cluster up as our primary we can set it
+
+00:15:22,630 --> 00:15:27,300
+to read right and it can now handle new
+
+00:15:24,250 --> 00:15:29,440
+transactions but before this can happen
+
+00:15:27,300 --> 00:15:31,570
+the clients must be aware that the
+
+00:15:29,440 --> 00:15:33,220
+switch happened as well so the snow can
+
+00:15:31,570 --> 00:15:35,890
+is need to inform all of the clients
+
+00:15:33,220 --> 00:15:38,230
+about the switch about the new cluster
+
+00:15:35,890 --> 00:15:40,180
+interface and tell all the clients to
+
+00:15:38,230 --> 00:15:43,600
+invalidate their key location caches and
+
+00:15:40,180 --> 00:15:47,080
+watches etc so that now they can begin
+
+00:15:43,600 --> 00:15:48,580
+again with the new cluster and voila the
+
+00:15:47,080 --> 00:15:51,220
+switch is complete we're now serving
+
+00:15:48,580 --> 00:15:53,890
+data on our primary and we're free to do
+
+00:15:51,220 --> 00:15:56,590
+whatever maintenance required on the on
+
+00:15:53,890 --> 00:15:59,140
+the on the original cluster and this
+
+00:15:56,590 --> 00:16:00,970
+which only took on the order of seconds
+
+00:15:59,140 --> 00:16:03,070
+or faster because the the right
+
+00:16:00,970 --> 00:16:05,350
+transactions need only wait for the last
+
+00:16:03,070 --> 00:16:12,370
+five seconds of data to be batched and
+
+00:16:05,350 --> 00:16:14,170
+pushed to the standby cluster I also
+
+00:16:12,370 --> 00:16:15,610
+wanted to talk briefly about the
+
+00:16:14,170 --> 00:16:18,790
+challenges we faced in getting the
+
+00:16:15,610 --> 00:16:21,880
+producer cluster recovery to work when a
+
+00:16:18,790 --> 00:16:24,010
+node goes down and the cluster on your
+
+00:16:21,880 --> 00:16:26,110
+producer cluster needs to recover we
+
+00:16:24,010 --> 00:16:28,480
+face some interesting challenges because
+
+00:16:26,110 --> 00:16:30,580
+now the proxy is pushing simultaneously
+
+00:16:28,480 --> 00:16:32,680
+to two completely separate log systems
+
+00:16:30,580 --> 00:16:35,380
+so it could be that your tea logs are
+
+00:16:32,680 --> 00:16:36,790
+ahead of your snow cannons or the snow
+
+00:16:35,380 --> 00:16:41,830
+cannons are ahead of the tea logs or
+
+00:16:36,790 --> 00:16:44,320
+some combination of both it is up to the
+
+00:16:41,830 --> 00:16:45,970
+producer to coordinate the recovery and
+
+00:16:44,320 --> 00:16:50,410
+make sure that both log systems will
+
+00:16:45,970 --> 00:16:52,030
+begin again at the same point of data so
+
+00:16:50,410 --> 00:16:54,820
+the first thing that happens is the
+
+00:16:52,030 --> 00:16:56,890
+master the master that the new master in
+
+00:16:54,820 --> 00:16:59,740
+the cluster must choose a point in data
+
+00:16:56,890 --> 00:17:01,600
+to begin the recovery on this is the
+
+00:16:59,740 --> 00:17:05,290
+maximum version that's found on all of
+
+00:17:01,600 --> 00:17:09,310
+the old log T log replicas it takes the
+
+00:17:05,290 --> 00:17:10,690
+max as Evan said because the transaction
+
+00:17:09,310 --> 00:17:12,760
+is only committed if it's on all of the
+
+00:17:10,690 --> 00:17:17,860
+replicas in this case this is version
+
+00:17:12,760 --> 00:17:21,730
+400 it now recruits the new T logs tells
+
+00:17:17,860 --> 00:17:24,910
+them to recover from version 400 it must
+
+00:17:21,730 --> 00:17:26,470
+also tell any behind snow cannons to
+
+00:17:24,910 --> 00:17:27,550
+recover at this version so this means
+
+00:17:26,470 --> 00:17:29,470
+that if there's a
+
+00:17:27,550 --> 00:17:32,350
+snow cannon in this case we have one at
+
+00:17:29,470 --> 00:17:34,420
+version 300 it must also stream from the
+
+00:17:32,350 --> 00:17:37,060
+old log system until it contains the
+
+00:17:34,420 --> 00:17:41,860
+last epoch end and we call this the last
+
+00:17:37,060 --> 00:17:44,290
+epoch end version once the all the snow
+
+00:17:41,860 --> 00:17:47,680
+cannons and the the new T log system
+
+00:17:44,290 --> 00:17:51,130
+contained the last epoch end version the
+
+00:17:47,680 --> 00:17:52,630
+producer can continue its recovery it
+
+00:17:51,130 --> 00:17:55,270
+does this by sending a recovery
+
+00:17:52,630 --> 00:17:57,520
+transaction to its log system and to the
+
+00:17:55,270 --> 00:18:00,640
+snow cannon logs this works as any other
+
+00:17:57,520 --> 00:18:02,860
+transaction does except it also pushes
+
+00:18:00,640 --> 00:18:05,470
+the version up by a hundred million it
+
+00:18:02,860 --> 00:18:07,710
+does this in order to make sure that the
+
+00:18:05,470 --> 00:18:11,080
+old log system and the snow cannons
+
+00:18:07,710 --> 00:18:12,490
+don't serve any data from old proxies it
+
+00:18:11,080 --> 00:18:14,110
+could be that there's a proxy from the
+
+00:18:12,490 --> 00:18:16,780
+old cluster that due to network
+
+00:18:14,110 --> 00:18:19,240
+partitioning or some other reason is not
+
+00:18:16,780 --> 00:18:25,990
+aware that it's from a old generation of
+
+00:18:19,240 --> 00:18:27,460
+cluster but before that this recovery
+
+00:18:25,990 --> 00:18:29,590
+transaction has to be a blocking call
+
+00:18:27,460 --> 00:18:31,120
+for the snow cannon because it could
+
+00:18:29,590 --> 00:18:33,430
+also be that the snow cannon is ahead of
+
+00:18:31,120 --> 00:18:37,150
+this version so when the snow cannon
+
+00:18:33,430 --> 00:18:39,040
+receives a recovery transaction it must
+
+00:18:37,150 --> 00:18:42,910
+first roll back to the last epoch end
+
+00:18:39,040 --> 00:18:46,480
+version and then it can apply the
+
+00:18:42,910 --> 00:18:48,580
+recovery transaction now both the log
+
+00:18:46,480 --> 00:18:52,800
+systems are synchronized and can begin
+
+00:18:48,580 --> 00:18:52,800
+in the new epoch at the same version
+
+00:18:55,860 --> 00:19:00,910
+there are plenty of other challenges
+
+00:18:58,300 --> 00:19:02,770
+that we had to face in order to in order
+
+00:19:00,910 --> 00:19:05,260
+to meet all the requirements that
+
+00:19:02,770 --> 00:19:07,350
+snowflake had for backing up and having
+
+00:19:05,260 --> 00:19:09,970
+disaster recovery for its metadata store
+
+00:19:07,350 --> 00:19:12,010
+and a lot of interesting problems that
+
+00:19:09,970 --> 00:19:14,380
+we had to solve but this is all we had
+
+00:19:12,010 --> 00:19:18,430
+time for and we'd like to take any
+
+00:19:14,380 --> 00:19:22,150
+questions either offline or now if there
+
+00:19:18,430 --> 00:19:24,310
+are any I don't think there's time for
+
+00:19:22,150 --> 00:19:25,650
+questions now but feel free to ask us
+
+00:19:24,310 --> 00:19:30,559
+afterwards
+
+00:19:25,650 --> 00:19:30,559
+
+YouTube URL: https://www.youtube.com/watch?v=G3buaA7yw8o
+
+

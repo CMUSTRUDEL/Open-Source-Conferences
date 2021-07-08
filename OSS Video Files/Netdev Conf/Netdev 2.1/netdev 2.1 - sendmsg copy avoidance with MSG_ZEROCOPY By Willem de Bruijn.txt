@@ -1,0 +1,2395 @@
+Title: netdev 2.1 - sendmsg copy avoidance with MSG_ZEROCOPY By Willem de Bruijn
+Publication date: 2017-05-10
+Playlist: Netdev 2.1
+Description: 
+	In this talk given at Netdev 2.1 in Montreal on April 6, 2017, Willem de Bruijn introduces a new MSG_ZEROCOPY extension to the socket API. Processes converted to the interface see a cycle reduction ranging from 90% of process cycles (62% systemwide) for a netperf micro-benchmark to 5-8% for lightly modified production machine learning and CDN workloads.
+
+Content at: https://www.netdevconf.org/2.1/session.html?debruijn
+Captions: 
+	00:00:00,030 --> 00:00:05,730
+uh so on the topic of problems have been
+
+00:00:02,939 --> 00:00:10,790
+around for at least 25 years copy
+
+00:00:05,730 --> 00:00:15,240
+avoidance it's not exactly a new problem
+
+00:00:10,790 --> 00:00:16,320
+we just show a simple example of the
+
+00:00:15,240 --> 00:00:19,350
+network
+
+00:00:16,320 --> 00:00:21,359
+TCP stream being recorded by Perth and
+
+00:00:19,350 --> 00:00:24,869
+if you only look at the process cycles
+
+00:00:21,359 --> 00:00:27,090
+four out of five cycles are spent
+
+00:00:24,869 --> 00:00:29,990
+copying data from user space to the
+
+00:00:27,090 --> 00:00:32,340
+kernel now obviously this is just a
+
+00:00:29,990 --> 00:00:36,660
+micro benchmark network is not really
+
+00:00:32,340 --> 00:00:38,250
+doing anything and it's only process
+
+00:00:36,660 --> 00:00:40,920
+cycles whereas if you look at the entire
+
+00:00:38,250 --> 00:00:45,030
+system more cycles will be spent
+
+00:00:40,920 --> 00:00:47,969
+elsewhere but I had customers coming to
+
+00:00:45,030 --> 00:00:52,379
+me with basically their own pursuing the
+
+00:00:47,969 --> 00:00:54,870
+same or results slum with lower source
+
+00:00:52,379 --> 00:00:56,610
+of overhead but quite substantial and
+
+00:00:54,870 --> 00:01:00,750
+with legacy applications that they would
+
+00:00:56,610 --> 00:01:02,579
+like to convert to avoiding copying so
+
+00:01:00,750 --> 00:01:04,500
+at the end of the talk we'll look at a
+
+00:01:02,579 --> 00:01:07,140
+couple of like real applications and the
+
+00:01:04,500 --> 00:01:11,970
+savings we've out there the spoiler
+
+00:01:07,140 --> 00:01:14,570
+they're not going to be 80% so copy
+
+00:01:11,970 --> 00:01:17,220
+avoidance in Linux is not at all new
+
+00:01:14,570 --> 00:01:19,560
+before I introduce this message zero
+
+00:01:17,220 --> 00:01:21,979
+copy that I sent this patch set about a
+
+00:01:19,560 --> 00:01:24,479
+month ago look at three existing
+
+00:01:21,979 --> 00:01:26,189
+implementations in Linux
+
+00:01:24,479 --> 00:01:27,750
+not just for historical overview but
+
+00:01:26,189 --> 00:01:29,610
+because I'm going to reuse a lot of the
+
+00:01:27,750 --> 00:01:32,450
+existing infrastructure so the first one
+
+00:01:29,610 --> 00:01:34,619
+is the well-known send file system call
+
+00:01:32,450 --> 00:01:37,290
+originally just to send data from the
+
+00:01:34,619 --> 00:01:38,970
+page gasp directly to a network socket
+
+00:01:37,290 --> 00:01:41,460
+without first having to copy it with
+
+00:01:38,970 --> 00:01:44,280
+received or three-d-- up to user spacing
+
+00:01:41,460 --> 00:01:46,619
+and send it back into the kernel the
+
+00:01:44,280 --> 00:01:49,770
+implementation if you look at I think
+
+00:01:46,619 --> 00:01:51,960
+this is from TCP send page is what you
+
+00:01:49,770 --> 00:01:53,549
+would expect basically if you look up
+
+00:01:51,960 --> 00:01:55,710
+the page in the page guys take an extra
+
+00:01:53,549 --> 00:02:01,170
+reference put it in the S could be frags
+
+00:01:55,710 --> 00:02:02,729
+array and Mark the s KB or the shed
+
+00:02:01,170 --> 00:02:05,880
+infrastructure of the sk d where the
+
+00:02:02,729 --> 00:02:10,000
+fracture are kept with this shared frag
+
+00:02:05,880 --> 00:02:11,940
+bit now
+
+00:02:10,000 --> 00:02:14,200
+we have to be careful that we don't
+
+00:02:11,940 --> 00:02:17,080
+change this data while it's being used
+
+00:02:14,200 --> 00:02:19,569
+by this buddy stack it is obviously we
+
+00:02:17,080 --> 00:02:22,660
+have a reference on the page but it's
+
+00:02:19,569 --> 00:02:24,670
+not a it doesn't block any anyone from
+
+00:02:22,660 --> 00:02:26,470
+changing the contents on the page so
+
+00:02:24,670 --> 00:02:29,440
+normally the network stack only cares
+
+00:02:26,470 --> 00:02:30,850
+about headers protocol headers and those
+
+00:02:29,440 --> 00:02:33,270
+are not kept in the frags array those
+
+00:02:30,850 --> 00:02:36,580
+are kept in s could be linear struct and
+
+00:02:33,270 --> 00:02:39,100
+a couple of cases where the network
+
+00:02:36,580 --> 00:02:41,650
+stack would actually touch data from the
+
+00:02:39,100 --> 00:02:43,780
+payload there are these guards as you
+
+00:02:41,650 --> 00:02:45,730
+see at the bottom this SP has shared
+
+00:02:43,780 --> 00:02:47,620
+frag and then we just make a local copy
+
+00:02:45,730 --> 00:02:51,220
+it has to be linearized has the effect
+
+00:02:47,620 --> 00:02:56,380
+of making the S key B have a local copy
+
+00:02:51,220 --> 00:02:59,380
+of all the data and as a matter of fact
+
+00:02:56,380 --> 00:03:00,880
+because this is expensive the mechanism
+
+00:02:59,380 --> 00:03:01,630
+is actually disabled and replaced with
+
+00:03:00,880 --> 00:03:04,840
+the regular copy
+
+00:03:01,630 --> 00:03:06,220
+if these simple checks fail initially so
+
+00:03:04,840 --> 00:03:09,910
+these these two checks are basically
+
+00:03:06,220 --> 00:03:11,709
+does the route out of the device support
+
+00:03:09,910 --> 00:03:14,110
+scatter gathered which is ugliness
+
+00:03:11,709 --> 00:03:17,470
+obviously necessary if you're going to
+
+00:03:14,110 --> 00:03:21,370
+use the frags array and do we support
+
+00:03:17,470 --> 00:03:22,900
+hardware offload now assuming like the
+
+00:03:21,370 --> 00:03:24,910
+normal network path this is both true
+
+00:03:22,900 --> 00:03:26,620
+and the data will get copied to the
+
+00:03:24,910 --> 00:03:31,209
+device before the device checksums the
+
+00:03:26,620 --> 00:03:32,769
+data so even a change in the page will
+
+00:03:31,209 --> 00:03:36,299
+not actually have an effect on for
+
+00:03:32,769 --> 00:03:36,299
+instance having open incorrect checksum
+
+00:03:37,079 --> 00:03:43,120
+sends file can be generalized by
+
+00:03:39,820 --> 00:03:48,670
+splicing so the idea of splicing is that
+
+00:03:43,120 --> 00:03:50,620
+we treat kernel buffers they can be
+
+00:03:48,670 --> 00:03:52,000
+accessed and moved around by file
+
+00:03:50,620 --> 00:03:53,530
+descriptors without having to copy data
+
+00:03:52,000 --> 00:03:55,840
+into using spacing back into the kernel
+
+00:03:53,530 --> 00:03:57,790
+again but unlike send file it is not as
+
+00:03:55,840 --> 00:04:00,160
+restricted in what type of a file
+
+00:03:57,790 --> 00:04:01,840
+descriptor but what type of object hangs
+
+00:04:00,160 --> 00:04:04,540
+off this file descriptor so one of these
+
+00:04:01,840 --> 00:04:06,310
+two file descriptors has to be a pipe
+
+00:04:04,540 --> 00:04:08,980
+this is actually no longer true in the
+
+00:04:06,310 --> 00:04:10,900
+interface but conceptually it is and
+
+00:04:08,980 --> 00:04:12,519
+they just always splice from say a file
+
+00:04:10,900 --> 00:04:15,760
+to apply for pipe through socket and
+
+00:04:12,519 --> 00:04:18,640
+vice versa the semantics whether it's
+
+00:04:15,760 --> 00:04:21,130
+actually a copy or remove are determined
+
+00:04:18,640 --> 00:04:25,420
+by this flag
+
+00:04:21,130 --> 00:04:27,820
+and for copy avoidance purposes it's
+
+00:04:25,420 --> 00:04:29,830
+actually possible to get user data into
+
+00:04:27,820 --> 00:04:32,230
+one of these kernel buffers using VM
+
+00:04:29,830 --> 00:04:36,130
+splice team splice looks pretty similar
+
+00:04:32,230 --> 00:04:39,340
+to a send message type call it passes an
+
+00:04:36,130 --> 00:04:42,130
+eye effect into the kernel and that I in
+
+00:04:39,340 --> 00:04:45,310
+fact is built into a UNIX bike that can
+
+00:04:42,130 --> 00:04:48,940
+then be moved to a network socket say if
+
+00:04:45,310 --> 00:04:50,620
+the flag gift is is passed this actually
+
+00:04:48,940 --> 00:04:52,540
+happens without copying so this is
+
+00:04:50,620 --> 00:04:57,610
+shared data between user space and this
+
+00:04:52,540 --> 00:05:00,190
+kernel object and the same issue exists
+
+00:04:57,610 --> 00:05:02,020
+that if the data is modified the
+
+00:05:00,190 --> 00:05:05,860
+modified bits might actually arrive on
+
+00:05:02,020 --> 00:05:08,230
+the wire so the main page for VM splice
+
+00:05:05,860 --> 00:05:09,880
+is pretty explicit about this it's just
+
+00:05:08,230 --> 00:05:10,560
+not allowed to modify this page ever
+
+00:05:09,880 --> 00:05:14,080
+again
+
+00:05:10,560 --> 00:05:16,150
+these are splatted constraint for to
+
+00:05:14,080 --> 00:05:19,270
+program this way there are some ways
+
+00:05:16,150 --> 00:05:20,740
+around if you look online there are some
+
+00:05:19,270 --> 00:05:22,600
+bad ways around this that are quite
+
+00:05:20,740 --> 00:05:25,330
+common or at least suggested which is
+
+00:05:22,600 --> 00:05:29,260
+for instance look when the PCP queue is
+
+00:05:25,330 --> 00:05:32,530
+empty with s IOC out queue and if so
+
+00:05:29,260 --> 00:05:34,330
+it's probably safe to reuse the data it
+
+00:05:32,530 --> 00:05:35,560
+is it is not because just because the
+
+00:05:34,330 --> 00:05:38,920
+queue is empty does not mean at the
+
+00:05:35,560 --> 00:05:42,640
+packet is left of machine it is also
+
+00:05:38,920 --> 00:05:46,060
+possible to just unwrap the page which
+
+00:05:42,640 --> 00:05:48,550
+indeed it is okay but it's not something
+
+00:05:46,060 --> 00:05:50,470
+you can do if he is malloc say for your
+
+00:05:48,550 --> 00:05:52,990
+very data so you could you know m remap
+
+00:05:50,470 --> 00:05:56,680
+the page make a local copy we went that
+
+00:05:52,990 --> 00:05:58,090
+back into the same address but it's
+
+00:05:56,680 --> 00:06:00,660
+definitely it requires a lot of changes
+
+00:05:58,090 --> 00:06:04,300
+to your legacy application to use this
+
+00:06:00,660 --> 00:06:08,140
+the third copy avoidance mechanism
+
+00:06:04,300 --> 00:06:10,630
+actually shows a way to send completion
+
+00:06:08,140 --> 00:06:13,660
+notifications back to the sender when
+
+00:06:10,630 --> 00:06:15,720
+it's safe to reuse data this is a
+
+00:06:13,660 --> 00:06:18,790
+specific to virtual machine networking
+
+00:06:15,720 --> 00:06:19,630
+it's implemented in also in Zen but I'm
+
+00:06:18,790 --> 00:06:21,570
+going to look at the thread I own
+
+00:06:19,630 --> 00:06:24,820
+aircraft because I know that better
+
+00:06:21,570 --> 00:06:27,190
+so say normal sent path the fact that
+
+00:06:24,820 --> 00:06:29,530
+goes out the guest it goes to the
+
+00:06:27,190 --> 00:06:32,040
+virtual device driver which usually
+
+00:06:29,530 --> 00:06:34,600
+talks to a virtual device emulated by
+
+00:06:32,040 --> 00:06:36,880
+the hypervisor by qmu here
+
+00:06:34,600 --> 00:06:40,570
+and um you converts from virtual
+
+00:06:36,880 --> 00:06:42,430
+descriptors into just I effect that it
+
+00:06:40,570 --> 00:06:44,260
+sent messages and it's not sent it's
+
+00:06:42,430 --> 00:06:47,800
+probably sent message into the kernel
+
+00:06:44,260 --> 00:06:49,810
+and this stab device is bridged with the
+
+00:06:47,800 --> 00:06:52,870
+physical Nick the first optimization
+
+00:06:49,810 --> 00:06:54,550
+it's not related to copy avoidance is to
+
+00:06:52,870 --> 00:06:57,730
+take the hypervisor out of this data
+
+00:06:54,550 --> 00:06:59,620
+path otherwise it's the data Panthers
+
+00:06:57,730 --> 00:07:01,030
+are saying the file descriptor is
+
+00:06:59,620 --> 00:07:03,580
+basically shared with the host kernel
+
+00:07:01,030 --> 00:07:05,860
+the guest descriptors are mapped into
+
+00:07:03,580 --> 00:07:07,840
+the host kernel and the host kernel
+
+00:07:05,860 --> 00:07:10,420
+still calls the send message it's just
+
+00:07:07,840 --> 00:07:12,610
+no longer a system call it's now a
+
+00:07:10,420 --> 00:07:14,260
+function call within the kernel so it's
+
+00:07:12,610 --> 00:07:16,510
+the same address space obviously on the
+
+00:07:14,260 --> 00:07:23,670
+side of the V host F and on the side of
+
+00:07:16,510 --> 00:07:26,620
+the tap device this micro Serkan
+
+00:07:23,670 --> 00:07:29,740
+introduced the zero copy support and
+
+00:07:26,620 --> 00:07:32,470
+what he did was when the V host device
+
+00:07:29,740 --> 00:07:34,690
+in the host kernel creates the i/o fact
+
+00:07:32,470 --> 00:07:38,920
+that it passes through send message it
+
+00:07:34,690 --> 00:07:40,420
+also attaches this control data which is
+
+00:07:38,920 --> 00:07:42,580
+a pretty straightforward structure with
+
+00:07:40,420 --> 00:07:43,900
+a callback function and some data to
+
+00:07:42,580 --> 00:07:46,120
+pass the development function when it's
+
+00:07:43,900 --> 00:07:50,500
+called if you see the feed host version
+
+00:07:46,120 --> 00:07:54,580
+below so this is passed the send message
+
+00:07:50,500 --> 00:07:58,390
+and it's unless it sees that the caller
+
+00:07:54,580 --> 00:08:00,970
+wants to use zero copy it will avoid skb
+
+00:07:58,390 --> 00:08:03,790
+copy data from either from iterator and
+
+00:08:00,970 --> 00:08:06,310
+instead of uses message issues as the
+
+00:08:03,790 --> 00:08:11,050
+zero copy function and similar to send
+
+00:08:06,310 --> 00:08:13,120
+file it tax the skb with a different
+
+00:08:11,050 --> 00:08:15,330
+flag this time and it also Hanks the
+
+00:08:13,120 --> 00:08:18,370
+structure off of the destructor arc
+
+00:08:15,330 --> 00:08:21,250
+which is not a per se B destructor art
+
+00:08:18,370 --> 00:08:24,700
+but for the shared info with the result
+
+00:08:21,250 --> 00:08:27,340
+that when the last user of this Eska be
+
+00:08:24,700 --> 00:08:30,280
+shared info is destroyed and skb release
+
+00:08:27,340 --> 00:08:32,919
+data the bit is checked and if it's set
+
+00:08:30,280 --> 00:08:34,630
+this callback is called and and V host
+
+00:08:32,919 --> 00:08:38,080
+can do what it needs to do to notify the
+
+00:08:34,630 --> 00:08:39,520
+guest that it's safe to the did state
+
+00:08:38,080 --> 00:08:41,849
+has been sent and also that it's safe to
+
+00:08:39,520 --> 00:08:41,849
+reuse the data
+
+00:08:42,000 --> 00:08:47,010
+so we're going to use this
+
+00:08:43,020 --> 00:08:49,500
+infrastructure I'm sorry I got ahead of
+
+00:08:47,010 --> 00:08:53,640
+myself one thing that is a detail that
+
+00:08:49,500 --> 00:08:56,340
+that's important is we actually also
+
+00:08:53,640 --> 00:08:59,220
+have to call this call back if data is
+
+00:08:56,340 --> 00:09:03,420
+being copied when the caller asks for
+
+00:08:59,220 --> 00:09:04,740
+zero copy because the caller will always
+
+00:09:03,420 --> 00:09:08,910
+the descender will always have to be
+
+00:09:04,740 --> 00:09:11,070
+notified that it's data is safe to be
+
+00:09:08,910 --> 00:09:13,020
+reused and actually the RFC patch that I
+
+00:09:11,070 --> 00:09:15,660
+send a few weeks ago there are a couple
+
+00:09:13,020 --> 00:09:17,670
+of paths in the UDP case or just doesn't
+
+00:09:15,660 --> 00:09:19,440
+happen so that's why I'm sort of sitting
+
+00:09:17,670 --> 00:09:25,110
+on sending it again need to fix those
+
+00:09:19,440 --> 00:09:26,850
+things so this is where the new
+
+00:09:25,110 --> 00:09:30,180
+interface comes in message 0 copy
+
+00:09:26,850 --> 00:09:33,420
+it is basically just a flag it's
+
+00:09:30,180 --> 00:09:36,480
+implemented for common sockets TCP UDP
+
+00:09:33,420 --> 00:09:40,650
+raw packet sockets the upstream patch
+
+00:09:36,480 --> 00:09:43,800
+was only for I net I find at 6 now - and
+
+00:09:40,650 --> 00:09:45,780
+if implemented as a flag not as a socket
+
+00:09:43,800 --> 00:09:48,270
+option because it's quite customary to
+
+00:09:45,780 --> 00:09:51,540
+want to combine copying and the server
+
+00:09:48,270 --> 00:09:54,750
+copy operation because you have to do
+
+00:09:51,540 --> 00:09:57,330
+notification processing on this 0 copy
+
+00:09:54,750 --> 00:09:58,980
+request and also because this copy
+
+00:09:57,330 --> 00:10:01,350
+avoidance involves page pinning as we
+
+00:09:58,980 --> 00:10:02,730
+saw before it is not free and for very
+
+00:10:01,350 --> 00:10:05,910
+small writes it's actually more
+
+00:10:02,730 --> 00:10:07,410
+expensive than just copying so it's
+
+00:10:05,910 --> 00:10:09,480
+quite common to for instance want to
+
+00:10:07,410 --> 00:10:11,820
+copy protocol headers and then zero copy
+
+00:10:09,480 --> 00:10:15,510
+from a user space page cache or
+
+00:10:11,820 --> 00:10:17,550
+something data out another constraint is
+
+00:10:15,510 --> 00:10:18,900
+in the top line it is that it's
+
+00:10:17,550 --> 00:10:20,700
+implemented for communication with
+
+00:10:18,900 --> 00:10:23,520
+remote peers and what it really means is
+
+00:10:20,700 --> 00:10:25,710
+only packets that leave the host get to
+
+00:10:23,520 --> 00:10:28,560
+use this feature and in fact that loop
+
+00:10:25,710 --> 00:10:31,620
+that's looped back onto a local socket
+
+00:10:28,560 --> 00:10:34,200
+will get copied so that there are no
+
+00:10:31,620 --> 00:10:36,300
+pages pinned into memory that depend on
+
+00:10:34,200 --> 00:10:41,880
+a local process eventually reading it
+
+00:10:36,300 --> 00:10:46,590
+which is unbound latency so that's the
+
+00:10:41,880 --> 00:10:48,630
+main interface then what we didn't see
+
+00:10:46,590 --> 00:10:51,839
+before is a way to notify a user process
+
+00:10:48,630 --> 00:10:54,529
+that it is safe to reuse data and for
+
+00:10:51,839 --> 00:10:56,850
+this we can actually use
+
+00:10:54,529 --> 00:10:58,740
+completions there's a really very good
+
+00:10:56,850 --> 00:11:03,000
+completion interface transmitted
+
+00:10:58,740 --> 00:11:05,339
+completions exist if for Hardware time
+
+00:11:03,000 --> 00:11:08,009
+steps so or in general for time stems
+
+00:11:05,339 --> 00:11:10,110
+when a process sends our data and
+
+00:11:08,009 --> 00:11:12,449
+requests the timestamp to come back when
+
+00:11:10,110 --> 00:11:14,279
+the packet has been sent out of course
+
+00:11:12,449 --> 00:11:15,750
+it gets the timestamp but at the same
+
+00:11:14,279 --> 00:11:17,459
+time we basically just gets a
+
+00:11:15,750 --> 00:11:22,740
+notification that data has been sent out
+
+00:11:17,459 --> 00:11:24,720
+and when tcp times something was
+
+00:11:22,740 --> 00:11:27,209
+introduced it was pretty clear that the
+
+00:11:24,720 --> 00:11:28,949
+normal the the previous method of
+
+00:11:27,209 --> 00:11:30,959
+sending the packet back to user space
+
+00:11:28,949 --> 00:11:35,189
+with the timestamp was not very helpful
+
+00:11:30,959 --> 00:11:39,389
+because for say a raw packet the the
+
+00:11:35,189 --> 00:11:41,430
+packet is the same as the buffer sent in
+
+00:11:39,389 --> 00:11:43,410
+the original sender call with the tcp
+
+00:11:41,430 --> 00:11:45,750
+packet it's not the the mapping from TCP
+
+00:11:43,410 --> 00:11:48,750
+send buffer to packet on the wires is
+
+00:11:45,750 --> 00:11:50,670
+very much non-trivial so these two
+
+00:11:48,750 --> 00:11:53,610
+options were added to the time stamping
+
+00:11:50,670 --> 00:11:55,829
+interface one is that T is only
+
+00:11:53,610 --> 00:11:58,040
+basically does not bother to send the
+
+00:11:55,829 --> 00:12:01,500
+data back up the user space it just
+
+00:11:58,040 --> 00:12:04,050
+sends an empty skb choose an MVS KB onto
+
+00:12:01,500 --> 00:12:06,379
+the error queue and then ID and that's
+
+00:12:04,050 --> 00:12:09,389
+the thing we're going to reuse here
+
+00:12:06,379 --> 00:12:11,759
+Associates a counter with every socket
+
+00:12:09,389 --> 00:12:14,009
+and every packet that sent out of that
+
+00:12:11,759 --> 00:12:17,100
+socket that results in a transmit
+
+00:12:14,009 --> 00:12:18,990
+timestamp will increment the counter and
+
+00:12:17,100 --> 00:12:21,779
+will associate the current value of the
+
+00:12:18,990 --> 00:12:25,529
+counter at some time with the SUV that
+
+00:12:21,779 --> 00:12:28,800
+will later be queued back so that to put
+
+00:12:25,529 --> 00:12:30,779
+it more simply every send call will
+
+00:12:28,800 --> 00:12:32,850
+result in a timestamp with an increment
+
+00:12:30,779 --> 00:12:37,290
+encounter so it's pretty easy to order
+
+00:12:32,850 --> 00:12:39,750
+your your sense now a transmit timestamp
+
+00:12:37,290 --> 00:12:43,230
+is not a zero copy timestamp for the
+
+00:12:39,750 --> 00:12:46,709
+same reason that the the out cue trick
+
+00:12:43,230 --> 00:12:48,449
+of reading when TCP is done sending it's
+
+00:12:46,709 --> 00:12:51,269
+not safe just because the fact that has
+
+00:12:48,449 --> 00:12:52,920
+left the machine does not mean that no
+
+00:12:51,269 --> 00:12:54,629
+other clone of that packet might be
+
+00:12:52,920 --> 00:12:56,879
+somewhere this is particularly true for
+
+00:12:54,629 --> 00:12:58,350
+TCP which always keeps a clone on the
+
+00:12:56,879 --> 00:13:02,370
+retransmit queue when it sends out
+
+00:12:58,350 --> 00:13:04,550
+another clone onto the wire so we'll get
+
+00:13:02,370 --> 00:13:04,550
+to that
+
+00:13:06,690 --> 00:13:10,330
+the interface itself is pretty
+
+00:13:08,710 --> 00:13:11,500
+straightforward I took a bit of a
+
+00:13:10,330 --> 00:13:14,380
+shortcut in the in error
+
+00:13:11,500 --> 00:13:17,529
+processing here my apologies had to fit
+
+00:13:14,380 --> 00:13:20,430
+in the slide so you just add this flag
+
+00:13:17,529 --> 00:13:23,650
+and as soon as this flag is added the
+
+00:13:20,430 --> 00:13:25,330
+kernel has to send a notification when
+
+00:13:23,650 --> 00:13:27,040
+it's safe to reuse this data whether it
+
+00:13:25,330 --> 00:13:30,220
+copied or not is at this point in
+
+00:13:27,040 --> 00:13:33,610
+material its processed the same way time
+
+00:13:30,220 --> 00:13:36,460
+stamps are processed so read from the
+
+00:13:33,610 --> 00:13:37,720
+error cue with with message error cue in
+
+00:13:36,460 --> 00:13:39,580
+this simple example we'll do everything
+
+00:13:37,720 --> 00:13:41,770
+synchronously I don't suggest anyone
+
+00:13:39,580 --> 00:13:43,630
+does this in real life but in this case
+
+00:13:41,770 --> 00:13:45,730
+receive message is a non-blocking
+
+00:13:43,630 --> 00:13:47,890
+function so we would have to basically
+
+00:13:45,730 --> 00:13:52,360
+pull and wait for pull error to be set
+
+00:13:47,890 --> 00:13:56,740
+or some other blocking function and then
+
+00:13:52,360 --> 00:14:00,160
+reading the notification again it's very
+
+00:13:56,740 --> 00:14:03,190
+similar to other error processing check
+
+00:14:00,160 --> 00:14:04,480
+the control data for the right level in
+
+00:14:03,190 --> 00:14:07,510
+the right type and particularly for this
+
+00:14:04,480 --> 00:14:10,690
+new origin origin zero copy if that is
+
+00:14:07,510 --> 00:14:12,970
+set then in this structure sock extended
+
+00:14:10,690 --> 00:14:14,680
+error which is not new which has a
+
+00:14:12,970 --> 00:14:17,800
+number of fields that we can abuse that
+
+00:14:14,680 --> 00:14:20,589
+we have a new origin the EE data field
+
+00:14:17,800 --> 00:14:22,750
+will be this counter value that's
+
+00:14:20,589 --> 00:14:26,920
+associated with when with the descent
+
+00:14:22,750 --> 00:14:30,029
+call so if a socket is created and two
+
+00:14:26,920 --> 00:14:33,279
+sends calls with message 0 copy are made
+
+00:14:30,029 --> 00:14:39,040
+eventually an error 0 and an error 1
+
+00:14:33,279 --> 00:14:41,920
+will be queued on this Eric you that at
+
+00:14:39,040 --> 00:14:44,700
+least is a simple view if we want to
+
+00:14:41,920 --> 00:14:46,720
+support sockets like TCP in particular
+
+00:14:44,700 --> 00:14:50,140
+we have to make it a little bit more
+
+00:14:46,720 --> 00:14:52,150
+complicated first of all we need to use
+
+00:14:50,140 --> 00:14:56,410
+notification rangers so instead of just
+
+00:14:52,150 --> 00:14:58,300
+having a II data be one value what's
+
+00:14:56,410 --> 00:15:00,940
+actually returned is an inclusive range
+
+00:14:58,300 --> 00:15:02,920
+where II info is the lower end of the
+
+00:15:00,940 --> 00:15:05,380
+range and II data is the upper end of
+
+00:15:02,920 --> 00:15:08,170
+the range and the reason for this is if
+
+00:15:05,380 --> 00:15:10,510
+you look go back to a raw packet where
+
+00:15:08,170 --> 00:15:11,650
+the packet is basically exactly the same
+
+00:15:10,510 --> 00:15:15,459
+as the data on the wire there's a
+
+00:15:11,650 --> 00:15:17,939
+one-to-one relationship we every send
+
+00:15:15,459 --> 00:15:20,369
+message call will create one skb that
+
+00:15:17,939 --> 00:15:22,349
+the entire packet we create one of these
+
+00:15:20,369 --> 00:15:25,229
+days you buffe infrastructures to get a
+
+00:15:22,349 --> 00:15:28,499
+callback we increment the first socket
+
+00:15:25,229 --> 00:15:30,419
+key and we're done but for instance when
+
+00:15:28,499 --> 00:15:32,939
+you with UDP cork we already have
+
+00:15:30,419 --> 00:15:35,789
+multiple send calls that map onto a
+
+00:15:32,939 --> 00:15:39,929
+single packet so that's why we need to
+
+00:15:35,789 --> 00:15:41,659
+return a range and with TCP it's it's
+
+00:15:39,929 --> 00:15:44,299
+more complicated than the UDP case even
+
+00:15:41,659 --> 00:15:47,339
+because TCP is a byte stream it has no
+
+00:15:44,299 --> 00:15:49,409
+direct relationship to its packetization
+
+00:15:47,339 --> 00:15:53,309
+or a lot of things come into play MTU
+
+00:15:49,409 --> 00:15:58,259
+size you know gso TSO support out of
+
+00:15:53,309 --> 00:15:59,759
+working tsq so what basically TCP does
+
+00:15:58,259 --> 00:16:01,559
+is it sees if it looks if there is a
+
+00:15:59,759 --> 00:16:03,569
+packet already being queued for
+
+00:16:01,559 --> 00:16:05,159
+transmission if the fact that is smaller
+
+00:16:03,569 --> 00:16:08,639
+than the maximum size that it's allowed
+
+00:16:05,159 --> 00:16:10,439
+to be and if so it adds some data to
+
+00:16:08,639 --> 00:16:13,199
+that outstanding packet and it creates a
+
+00:16:10,439 --> 00:16:15,809
+new packet for the subsequent data so we
+
+00:16:13,199 --> 00:16:17,819
+cannot just allocate a you buff info for
+
+00:16:15,809 --> 00:16:21,119
+this system for this particular center
+
+00:16:17,819 --> 00:16:23,549
+call because we might be appending data
+
+00:16:21,119 --> 00:16:25,229
+to an SGD that's already associated with
+
+00:16:23,549 --> 00:16:27,419
+the previous center call and if the
+
+00:16:25,229 --> 00:16:29,399
+central as a zero copy center call we
+
+00:16:27,419 --> 00:16:33,899
+have to reuse that you are so that's
+
+00:16:29,399 --> 00:16:36,599
+what this reality knows and as a result
+
+00:16:33,899 --> 00:16:38,129
+the single you buff info a single
+
+00:16:36,599 --> 00:16:40,079
+notification that's queued up the user
+
+00:16:38,129 --> 00:16:45,059
+space may notify for a number of
+
+00:16:40,079 --> 00:16:46,889
+consecutive sentinels the other way
+
+00:16:45,059 --> 00:16:49,499
+around is also true particularly on the
+
+00:16:46,889 --> 00:16:53,039
+TCP that a single Center can make
+
+00:16:49,499 --> 00:16:54,599
+multiple packets because it can be many
+
+00:16:53,039 --> 00:16:58,349
+megabytes of data much larger than the
+
+00:16:54,599 --> 00:17:00,089
+largest network packet so we also added
+
+00:16:58,349 --> 00:17:02,999
+have to add reference counting on these
+
+00:17:00,089 --> 00:17:06,809
+structures if you see like this this TCP
+
+00:17:02,999 --> 00:17:08,579
+sent path sort of simplified here TCP
+
+00:17:06,809 --> 00:17:10,980
+send message will create a number of SK
+
+00:17:08,579 --> 00:17:12,600
+B's each of which will take a reference
+
+00:17:10,980 --> 00:17:14,279
+on this notification structure so that
+
+00:17:12,600 --> 00:17:17,449
+the notification is queued only when all
+
+00:17:14,279 --> 00:17:20,389
+of them have been have been released
+
+00:17:17,449 --> 00:17:23,159
+then when it sent out TCP will basically
+
+00:17:20,389 --> 00:17:24,990
+keep one clone of the back of the
+
+00:17:23,159 --> 00:17:27,000
+original packet on the retransmit queue
+
+00:17:24,990 --> 00:17:28,950
+and create a separate clone and send it
+
+00:17:27,000 --> 00:17:30,720
+out and then the original flown is
+
+00:17:28,950 --> 00:17:32,869
+released when the acknowledgment comes
+
+00:17:30,720 --> 00:17:32,869
+in
+
+00:17:33,380 --> 00:17:39,030
+the current implementation for sun-tap
+
+00:17:36,720 --> 00:17:41,610
+did not have to this problem so
+
+00:17:39,030 --> 00:17:45,300
+currently any clone will cause a copy of
+
+00:17:41,610 --> 00:17:47,220
+the data so we had to change that
+
+00:17:45,300 --> 00:17:48,540
+so now clone basically does not take a
+
+00:17:47,220 --> 00:17:49,830
+copy make a copy
+
+00:17:48,540 --> 00:17:51,360
+it also doesn't have to take an extra
+
+00:17:49,830 --> 00:17:53,630
+reference card since all the clones
+
+00:17:51,360 --> 00:17:58,440
+share the same skb shared infrastructure
+
+00:17:53,630 --> 00:17:59,940
+that's actually already handled then tcp
+
+00:17:58,440 --> 00:18:02,280
+when it actually sends out one of the
+
+00:17:59,940 --> 00:18:07,020
+two clones can mangle the packet in many
+
+00:18:02,280 --> 00:18:08,850
+different ways one example is if it
+
+00:18:07,020 --> 00:18:11,130
+passes a G so path and it has to split a
+
+00:18:08,850 --> 00:18:14,310
+big packet into multiple MTU size
+
+00:18:11,130 --> 00:18:16,320
+packets each of those have to point back
+
+00:18:14,310 --> 00:18:18,030
+again to the original notification
+
+00:18:16,320 --> 00:18:20,940
+structure so we increase the reference
+
+00:18:18,030 --> 00:18:23,280
+count and then finally when these empty
+
+00:18:20,940 --> 00:18:25,560
+useless packets are sent out a packet
+
+00:18:23,280 --> 00:18:28,050
+socket might be interested in it say TCP
+
+00:18:25,560 --> 00:18:30,810
+dump is reading all the packets that
+
+00:18:28,050 --> 00:18:32,970
+again causes a clone now because the
+
+00:18:30,810 --> 00:18:34,770
+clone doesn't take a reference it
+
+00:18:32,970 --> 00:18:37,980
+doesn't increase the ref count which is
+
+00:18:34,770 --> 00:18:39,560
+why I put it in red but actually it
+
+00:18:37,980 --> 00:18:41,880
+doesn't even take a reference because
+
+00:18:39,560 --> 00:18:43,650
+this is one of the examples where a
+
+00:18:41,880 --> 00:18:45,660
+packet is being queued back onto the
+
+00:18:43,650 --> 00:18:47,430
+loopback socket and I said we're not
+
+00:18:45,660 --> 00:18:50,370
+allowed to queue these packets onto the
+
+00:18:47,430 --> 00:18:52,860
+local socket so a copy is made of the
+
+00:18:50,370 --> 00:18:54,510
+data at which point obviously the
+
+00:18:52,860 --> 00:18:57,360
+benefit of zero copy goes out the window
+
+00:18:54,510 --> 00:18:58,620
+it's it's cheaper to make a copy in the
+
+00:18:57,360 --> 00:19:01,850
+same system called and doing it
+
+00:18:58,620 --> 00:19:01,850
+somewhere very really deep in the stack
+
+00:19:03,530 --> 00:19:13,980
+so a few details about this notification
+
+00:19:10,230 --> 00:19:16,710
+processing itself so we at some point
+
+00:19:13,980 --> 00:19:18,300
+all the packets that represent a buffer
+
+00:19:16,710 --> 00:19:20,190
+in a sense system call it left the
+
+00:19:18,300 --> 00:19:23,610
+machine it's time to cue the
+
+00:19:20,190 --> 00:19:25,290
+notification on to the error path the
+
+00:19:23,610 --> 00:19:27,030
+process is not allowed to use data until
+
+00:19:25,290 --> 00:19:28,980
+this notification comes in so we cannot
+
+00:19:27,030 --> 00:19:32,040
+fail sending the notification and for
+
+00:19:28,980 --> 00:19:34,560
+this reason the notification skb is
+
+00:19:32,040 --> 00:19:36,150
+allocated originally at the send call
+
+00:19:34,560 --> 00:19:37,800
+not at the time we actually want to
+
+00:19:36,150 --> 00:19:40,440
+queue it so that it for some reason
+
+00:19:37,800 --> 00:19:44,140
+memory pressure notification sort of
+
+00:19:40,440 --> 00:19:46,990
+allocation fills the entire
+
+00:19:44,140 --> 00:19:48,970
+original system Caulfield's and so we
+
+00:19:46,990 --> 00:19:50,799
+allocated at the same time as the you
+
+00:19:48,970 --> 00:19:54,280
+buff infrastructure that's used during
+
+00:19:50,799 --> 00:19:55,690
+the lifetime of this request and a small
+
+00:19:54,280 --> 00:19:57,100
+optimization is that instead of
+
+00:19:55,690 --> 00:19:58,929
+allocating to structures we actually
+
+00:19:57,100 --> 00:20:02,559
+allocate one because the smaller one
+
+00:19:58,929 --> 00:20:05,260
+fits into the skb control block more
+
+00:20:02,559 --> 00:20:09,010
+important in sort of a subtle change is
+
+00:20:05,260 --> 00:20:14,770
+that we allocate this data not from the
+
+00:20:09,010 --> 00:20:16,929
+tcp send tcp wmm or TCP rmm so you W
+
+00:20:14,770 --> 00:20:19,540
+memory lock arm M which could have
+
+00:20:16,929 --> 00:20:22,179
+unintended effects on the legacy
+
+00:20:19,540 --> 00:20:26,500
+applications who expect a certain send
+
+00:20:22,179 --> 00:20:28,780
+buffer size in particular for TCP T to
+
+00:20:26,500 --> 00:20:29,860
+be small q s-- uses this to paste TCP so
+
+00:20:28,780 --> 00:20:34,330
+if you're going to allocate a lot of
+
+00:20:29,860 --> 00:20:36,250
+data from this area it could affect PS q
+
+00:20:34,330 --> 00:20:40,419
+so for that reason it's actually
+
+00:20:36,250 --> 00:20:43,720
+allocated from optimum instead and one
+
+00:20:40,419 --> 00:20:46,090
+nice result of having a notification
+
+00:20:43,720 --> 00:20:51,910
+that's arranged as opposed to a scalar
+
+00:20:46,090 --> 00:20:53,980
+value is most data is sent out in order
+
+00:20:51,910 --> 00:20:56,919
+the stack doesn't best to not reorder
+
+00:20:53,980 --> 00:20:59,260
+and with TCP in particular data is
+
+00:20:56,919 --> 00:21:01,450
+acknowledged in order we don't release
+
+00:20:59,260 --> 00:21:03,760
+data on selective acknowledgments only
+
+00:21:01,450 --> 00:21:05,740
+when it's fully acknowledged so
+
+00:21:03,760 --> 00:21:08,080
+notifications will be queued in order
+
+00:21:05,740 --> 00:21:10,720
+and instead of queuing say a
+
+00:21:08,080 --> 00:21:13,590
+notification one comma one followed by a
+
+00:21:10,720 --> 00:21:15,910
+notification two comma three we just
+
+00:21:13,590 --> 00:21:18,370
+change the first one to read 1 comma 3
+
+00:21:15,910 --> 00:21:21,100
+and throw away the other notification so
+
+00:21:18,370 --> 00:21:22,900
+in the common case there will be no more
+
+00:21:21,100 --> 00:21:26,080
+than one notification outstanding at any
+
+00:21:22,900 --> 00:21:28,840
+time and the application can postpone
+
+00:21:26,080 --> 00:21:31,419
+reading notifications for as long as
+
+00:21:28,840 --> 00:21:35,590
+it's willing to essentially hold it hold
+
+00:21:31,419 --> 00:21:37,510
+it it's data as read-only that greatly
+
+00:21:35,590 --> 00:21:39,220
+reduces notification processing versus
+
+00:21:37,510 --> 00:21:43,419
+having a one-to-one mapping of
+
+00:21:39,220 --> 00:21:47,080
+notification to senticles but at the
+
+00:21:43,419 --> 00:21:50,340
+cost of not being allowed to modify your
+
+00:21:47,080 --> 00:21:54,550
+memory while it hasn't been notified yet
+
+00:21:50,340 --> 00:21:57,760
+so pinning shared memory in general will
+
+00:21:54,550 --> 00:21:59,440
+use less memory of course than
+
+00:21:57,760 --> 00:22:02,440
+having multiple copies of the same data
+
+00:21:59,440 --> 00:22:05,200
+around but we have to avoid some common
+
+00:22:02,440 --> 00:22:07,360
+problems for one the kernel for
+
+00:22:05,200 --> 00:22:09,760
+integrity purposes has to be able to the
+
+00:22:07,360 --> 00:22:12,490
+limit on how much data process can pin
+
+00:22:09,760 --> 00:22:14,890
+so processes are subject to the you
+
+00:22:12,490 --> 00:22:18,370
+limit unlocked pages per user and not
+
+00:22:14,890 --> 00:22:20,920
+per process as I said before we don't
+
+00:22:18,370 --> 00:22:24,010
+allow data to be pinned possibly
+
+00:22:20,920 --> 00:22:29,080
+indefinitely so no looping back on to a
+
+00:22:24,010 --> 00:22:30,730
+local socket and a process itself in the
+
+00:22:29,080 --> 00:22:32,440
+independent of these these kernel
+
+00:22:30,730 --> 00:22:35,320
+integrity protections the president self
+
+00:22:32,440 --> 00:22:37,150
+can basically stop using zero copy if it
+
+00:22:35,320 --> 00:22:40,090
+has too much data that it's not allowed
+
+00:22:37,150 --> 00:22:41,800
+to touch that's problematic because it
+
+00:22:40,090 --> 00:22:43,240
+changes its performance profile right
+
+00:22:41,800 --> 00:22:45,370
+it's using this because it's more
+
+00:22:43,240 --> 00:22:48,400
+efficient and now we have this bimodal
+
+00:22:45,370 --> 00:22:51,580
+behavior we can use the EM remap trick
+
+00:22:48,400 --> 00:22:56,020
+that worked in Scent file which is also
+
+00:22:51,580 --> 00:23:01,630
+kind of complex but it is for in the
+
+00:22:56,020 --> 00:23:03,510
+long tail of situations that go bad
+
+00:23:01,630 --> 00:23:06,190
+sockets that for some reason don't close
+
+00:23:03,510 --> 00:23:08,380
+then the last two points are actually
+
+00:23:06,190 --> 00:23:11,260
+something that I noticed while testing
+
+00:23:08,380 --> 00:23:13,660
+this in production first some clients
+
+00:23:11,260 --> 00:23:15,310
+are pretty poorly behaved they keep
+
+00:23:13,660 --> 00:23:17,500
+these they don't properly acknowledge
+
+00:23:15,310 --> 00:23:18,520
+the last data they don't close their end
+
+00:23:17,500 --> 00:23:21,960
+of the socket they just kind of
+
+00:23:18,520 --> 00:23:24,700
+disappear so we have on a surface that
+
+00:23:21,960 --> 00:23:26,860
+talks to tens of thousands of clients we
+
+00:23:24,700 --> 00:23:29,650
+had a few clients that that basically
+
+00:23:26,860 --> 00:23:31,120
+were dangling now normally you would
+
+00:23:29,650 --> 00:23:33,310
+just close the socket and give up on
+
+00:23:31,120 --> 00:23:34,780
+this but when you close the socket you
+
+00:23:33,310 --> 00:23:38,290
+also close your Eric you so you can
+
+00:23:34,780 --> 00:23:40,930
+never get notifications for this user
+
+00:23:38,290 --> 00:23:43,870
+data that it's a lot that you're allowed
+
+00:23:40,930 --> 00:23:45,970
+to reuse it so instead it's possible to
+
+00:23:43,870 --> 00:23:48,220
+for four connected sockets to disconnect
+
+00:23:45,970 --> 00:23:51,880
+a socket by call and connect them al
+
+00:23:48,220 --> 00:23:54,270
+spec that will purge the retransmit q.q
+
+00:23:51,880 --> 00:23:57,370
+notifications on to the error queue and
+
+00:23:54,270 --> 00:23:59,890
+once all the user memory has basically
+
+00:23:57,370 --> 00:24:04,840
+been notified we can safely close the
+
+00:23:59,890 --> 00:24:06,310
+socket the second one the the last entry
+
+00:24:04,840 --> 00:24:08,800
+the second problem we observed in
+
+00:24:06,310 --> 00:24:11,320
+production was that the application was
+
+00:24:08,800 --> 00:24:13,450
+queuing tens of gigabytes of day
+
+00:24:11,320 --> 00:24:15,250
+that was not allowed to use for any
+
+00:24:13,450 --> 00:24:16,690
+other purpose anymore
+
+00:24:15,250 --> 00:24:18,940
+and what turned out what was really
+
+00:24:16,690 --> 00:24:23,370
+happening is not that kinds of gigabytes
+
+00:24:18,940 --> 00:24:28,150
+of data was pinned in the kernel this
+
+00:24:23,370 --> 00:24:30,190
+append mechanism in notifications that I
+
+00:24:28,150 --> 00:24:32,230
+showed in the tcp case was working a
+
+00:24:30,190 --> 00:24:35,140
+little bit too well so every system call
+
+00:24:32,230 --> 00:24:37,660
+would notice that there was a packet
+
+00:24:35,140 --> 00:24:39,430
+waiting to be sent so it would reuse
+
+00:24:37,660 --> 00:24:41,500
+that notification structure it would
+
+00:24:39,430 --> 00:24:44,070
+then add more data than would fit in a
+
+00:24:41,500 --> 00:24:48,400
+single packet so we would get a train of
+
+00:24:44,070 --> 00:24:51,940
+many tens of send calls associated with
+
+00:24:48,400 --> 00:24:54,580
+a single notification structure and as a
+
+00:24:51,940 --> 00:24:56,950
+result every socket would have you know
+
+00:24:54,580 --> 00:24:59,230
+like many megabytes of data basically
+
+00:24:56,950 --> 00:25:01,060
+waiting for a notification even though
+
+00:24:59,230 --> 00:25:04,000
+they actually had been released by the
+
+00:25:01,060 --> 00:25:06,790
+kernel was just like one packet was had
+
+00:25:04,000 --> 00:25:10,240
+not been acknowledged yet out of the 75
+
+00:25:06,790 --> 00:25:12,430
+or so but as a result in a system with
+
+00:25:10,240 --> 00:25:13,630
+tens of thousands of connections tens of
+
+00:25:12,430 --> 00:25:16,120
+thousands of personally tens of
+
+00:25:13,630 --> 00:25:18,810
+gigabytes of data was basically being
+
+00:25:16,120 --> 00:25:22,450
+held so I added a bite limit into the
+
+00:25:18,810 --> 00:25:27,370
+notification structure the result of
+
+00:25:22,450 --> 00:25:29,440
+that is when TCP tries to when the TCP
+
+00:25:27,370 --> 00:25:32,080
+sends happens and it tries to append to
+
+00:25:29,440 --> 00:25:34,300
+an existing packet if we would run file
+
+00:25:32,080 --> 00:25:35,710
+of this notification byte limit we
+
+00:25:34,300 --> 00:25:39,370
+actually don't depend to create a new
+
+00:25:35,710 --> 00:25:41,590
+packet so we've slightly change what
+
+00:25:39,370 --> 00:25:43,690
+packets on the wire will look like I try
+
+00:25:41,590 --> 00:25:46,240
+to avoid this in general but that's
+
+00:25:43,690 --> 00:25:47,620
+that's one case where I know whether we
+
+00:25:46,240 --> 00:25:49,390
+might end up with sort of more packets
+
+00:25:47,620 --> 00:25:53,490
+on the wire and not perfectly sized
+
+00:25:49,390 --> 00:25:57,910
+packets on the wire because of zero copy
+
+00:25:53,490 --> 00:26:00,250
+the other problem is of course the
+
+00:25:57,910 --> 00:26:02,500
+shared memory again now this is actually
+
+00:26:00,250 --> 00:26:05,980
+no different from the case in which sent
+
+00:26:02,500 --> 00:26:09,310
+page as I said copies headers are never
+
+00:26:05,980 --> 00:26:10,720
+copied are never sorry shared they're
+
+00:26:09,310 --> 00:26:15,430
+always in the linear section and they're
+
+00:26:10,720 --> 00:26:17,740
+always copied most networks stack access
+
+00:26:15,430 --> 00:26:19,860
+is only two adders and in the cases
+
+00:26:17,740 --> 00:26:22,300
+where it isn't we have the same check
+
+00:26:19,860 --> 00:26:24,430
+for scatter gather and hardware offload
+
+00:26:22,300 --> 00:26:25,090
+support and there are a couple of points
+
+00:26:24,430 --> 00:26:27,190
+in the kernel
+
+00:26:25,090 --> 00:26:29,200
+particularly now that programmable
+
+00:26:27,190 --> 00:26:30,999
+access would be be s becomes more common
+
+00:26:29,200 --> 00:26:33,909
+more points in the kernel where we have
+
+00:26:30,999 --> 00:26:35,379
+to add protections and check whether
+
+00:26:33,909 --> 00:26:40,320
+there's shared data and if so make a
+
+00:26:35,379 --> 00:26:43,980
+copy there now what the sold is by us
+
+00:26:40,320 --> 00:26:46,720
+this is again an app for TCP stream
+
+00:26:43,980 --> 00:26:49,529
+measuring both the cycles attribute to
+
+00:26:46,720 --> 00:26:52,360
+the process which we saw before and the
+
+00:26:49,529 --> 00:26:55,960
+cycles of the two CPUs that do all the
+
+00:26:52,360 --> 00:26:58,659
+network processing in total comparing
+
+00:26:55,960 --> 00:27:00,850
+with copying and without copying four
+
+00:26:58,659 --> 00:27:06,820
+different sent sizes and if you look at
+
+00:27:00,850 --> 00:27:09,249
+the process cycles the on the Left zero
+
+00:27:06,820 --> 00:27:12,279
+copy uses 41 percent of the process
+
+00:27:09,249 --> 00:27:14,980
+cycles versus copy based sdd for
+
+00:27:12,279 --> 00:27:16,690
+standard at four kilobyte writes but
+
+00:27:14,980 --> 00:27:19,509
+only eight percent of the cycles had one
+
+00:27:16,690 --> 00:27:22,409
+mill one megabyte writes so clearly it's
+
+00:27:19,509 --> 00:27:26,259
+more effective for large and writes
+
+00:27:22,409 --> 00:27:28,600
+eight percent is not as really nice but
+
+00:27:26,259 --> 00:27:30,129
+it's not what you can expect to save in
+
+00:27:28,600 --> 00:27:32,639
+reality if you take into account the
+
+00:27:30,129 --> 00:27:36,639
+cost of TX completion processing and so
+
+00:27:32,639 --> 00:27:40,509
+61% is what we what we saw so end-to-end
+
+00:27:36,639 --> 00:27:42,429
+for the same test so what this is mean
+
+00:27:40,509 --> 00:27:44,950
+for real applications oh sorry
+
+00:27:42,429 --> 00:27:46,720
+where does this come from sorry so first
+
+00:27:44,950 --> 00:27:48,340
+we go back to that copy user generic
+
+00:27:46,720 --> 00:27:51,519
+string that's taking four out of five
+
+00:27:48,340 --> 00:27:54,309
+cycles and now we look at the case with
+
+00:27:51,519 --> 00:27:57,700
+zero copy not only is a total event
+
+00:27:54,309 --> 00:28:00,580
+count much lower what's left is our
+
+00:27:57,700 --> 00:28:03,460
+different functions get user pages
+
+00:28:00,580 --> 00:28:05,259
+that's got Pte range is the function
+
+00:28:03,460 --> 00:28:08,379
+that actually pins the user pages at the
+
+00:28:05,259 --> 00:28:12,360
+end call and the other two are functions
+
+00:28:08,379 --> 00:28:15,519
+that link these user pages into the skb
+
+00:28:12,360 --> 00:28:17,409
+so clearly it's not a it's not free
+
+00:28:15,519 --> 00:28:21,029
+right you replace some costs with some
+
+00:28:17,409 --> 00:28:21,029
+other cost so you have to use it wisely
+
+00:28:21,119 --> 00:28:26,200
+so what what is the effect we see at a
+
+00:28:23,529 --> 00:28:28,409
+larger scale we valuated this with the
+
+00:28:26,200 --> 00:28:32,379
+open source tensorflow machine learning
+
+00:28:28,409 --> 00:28:33,789
+framework and with the version the first
+
+00:28:32,379 --> 00:28:35,919
+version was not open source I think with
+
+00:28:33,789 --> 00:28:38,560
+the distributed support we usually with
+
+00:28:35,919 --> 00:28:41,750
+an internal RPC system
+
+00:28:38,560 --> 00:28:44,090
+but we're planning to also support G RPC
+
+00:28:41,750 --> 00:28:47,120
+and currently the open-source tensorflow
+
+00:28:44,090 --> 00:28:49,220
+supports the RPC anyway the RPC
+
+00:28:47,120 --> 00:28:52,310
+benchmark at two black writes was
+
+00:28:49,220 --> 00:28:54,080
+actually worse but at ninety eight
+
+00:28:52,310 --> 00:28:56,570
+kilobyte writes it's better and ninety
+
+00:28:54,080 --> 00:28:58,340
+eight kilobyte is hardly an upper limit
+
+00:28:56,570 --> 00:29:00,680
+on the type of sense that tensorflow
+
+00:28:58,340 --> 00:29:02,630
+does it sends many megabytes of data at
+
+00:29:00,680 --> 00:29:04,300
+once into the socket so we should we
+
+00:29:02,630 --> 00:29:07,670
+should be able to see better results
+
+00:29:04,300 --> 00:29:11,030
+still a bit of a micro benchmark a mixed
+
+00:29:07,670 --> 00:29:13,130
+workload saw a more realistic seven
+
+00:29:11,030 --> 00:29:14,630
+percent end-to-end costs and at the
+
+00:29:13,130 --> 00:29:17,060
+scale of which we do machine learning at
+
+00:29:14,630 --> 00:29:19,670
+Google that is a considerable savings
+
+00:29:17,060 --> 00:29:21,440
+the same for the the Google global cache
+
+00:29:19,670 --> 00:29:24,440
+I think it's called the basically
+
+00:29:21,440 --> 00:29:28,970
+serving things like YouTube traffic peak
+
+00:29:24,440 --> 00:29:31,070
+UPS goes up by about seven percent the
+
+00:29:28,970 --> 00:29:32,120
+exception here is a storage application
+
+00:29:31,070 --> 00:29:36,130
+it was actually the one that originally
+
+00:29:32,120 --> 00:29:38,720
+came to me and asked for this they do
+
+00:29:36,130 --> 00:29:40,730
+integrity checks in user space so they
+
+00:29:38,720 --> 00:29:43,040
+touch all the bytes in user space before
+
+00:29:40,730 --> 00:29:44,600
+they call sense and somewhat
+
+00:29:43,040 --> 00:29:46,310
+unsurprisingly that means that all this
+
+00:29:44,600 --> 00:29:48,770
+data is in the cache at the time they do
+
+00:29:46,310 --> 00:29:52,820
+send so they don't actually incur a lot
+
+00:29:48,770 --> 00:29:55,400
+of cost in the copy and descent call so
+
+00:29:52,820 --> 00:29:59,500
+this is sort of hardly outside vvd
+
+00:29:55,400 --> 00:30:02,960
+variants of the application so that's it
+
+00:29:59,500 --> 00:30:07,670
+with a simple copy avoidance mechanism
+
+00:30:02,960 --> 00:30:10,580
+for legacy sockets that we can change
+
+00:30:07,670 --> 00:30:12,410
+existing applications so far these two
+
+00:30:10,580 --> 00:30:15,200
+examples well I changed all three of
+
+00:30:12,410 --> 00:30:17,120
+only two or effective we're not very
+
+00:30:15,200 --> 00:30:21,750
+hard to to change students use this
+
+00:30:17,120 --> 00:30:26,869
+interface okay thank you questions
+
+00:30:21,750 --> 00:30:26,869
+[Applause]
+
+00:30:27,540 --> 00:30:32,340
+it's great for things like your
+
+00:30:30,270 --> 00:30:35,190
+workloads where it's possible to change
+
+00:30:32,340 --> 00:30:39,150
+the application is there some possible
+
+00:30:35,190 --> 00:30:42,360
+way to support this generically for
+
+00:30:39,150 --> 00:30:45,510
+applications that may you may not have
+
+00:30:42,360 --> 00:30:47,520
+the ability to set socket options on so
+
+00:30:45,510 --> 00:30:50,760
+sorry what kind of applications
+
+00:30:47,520 --> 00:30:55,410
+suppose you had I'll use one database
+
+00:30:50,760 --> 00:30:57,600
+company with some application that you
+
+00:30:55,410 --> 00:30:59,850
+may not even have the source for so you
+
+00:30:57,600 --> 00:31:03,420
+can't go change the socket options okay
+
+00:30:59,850 --> 00:31:05,040
+so the we all this sort of page spinning
+
+00:31:03,420 --> 00:31:07,740
+and page flipping tricks or so it hardly
+
+00:31:05,040 --> 00:31:09,720
+knew if you want to do transparently you
+
+00:31:07,740 --> 00:31:13,310
+would do something I guess like like a
+
+00:31:09,720 --> 00:31:15,750
+page flipping turning off right axis and
+
+00:31:13,310 --> 00:31:17,340
+it was an itch to scratch I did it with
+
+00:31:15,750 --> 00:31:18,930
+this code is at that point all the
+
+00:31:17,340 --> 00:31:20,670
+benefits for me went out the window
+
+00:31:18,930 --> 00:31:21,840
+okay I think a lot of people have done
+
+00:31:20,670 --> 00:31:26,100
+this and a lot of people have come to
+
+00:31:21,840 --> 00:31:27,810
+the same conclusion gap question about I
+
+00:31:26,100 --> 00:31:29,850
+don't remember exactly why you ready to
+
+00:31:27,810 --> 00:31:32,310
+bite limit on the notification because
+
+00:31:29,850 --> 00:31:34,920
+entities like we only acknowledge from
+
+00:31:32,310 --> 00:31:39,120
+the beginning of the queue retransmit so
+
+00:31:34,920 --> 00:31:41,040
+the you shouldn't be if we have one
+
+00:31:39,120 --> 00:31:47,610
+education and all of you why should we
+
+00:31:41,040 --> 00:31:49,920
+limit it the range of the education well
+
+00:31:47,610 --> 00:31:52,200
+so it's it's up to the process to decide
+
+00:31:49,920 --> 00:31:55,890
+how awfully well so we've read the error
+
+00:31:52,200 --> 00:31:57,510
+queue but if we don't have to bite limit
+
+00:31:55,890 --> 00:31:59,420
+it's not up to the process like all
+
+00:31:57,510 --> 00:32:02,610
+these send calls will basically be
+
+00:31:59,420 --> 00:32:04,890
+coalesced into a single notification
+
+00:32:02,610 --> 00:32:06,570
+struct all that's at a send time not
+
+00:32:04,890 --> 00:32:09,120
+only si okay
+
+00:32:06,570 --> 00:32:11,040
+it's basically at sends we decide to not
+
+00:32:09,120 --> 00:32:12,840
+append to the previous skb book but
+
+00:32:11,040 --> 00:32:14,370
+create a new world thank you by the way
+
+00:32:12,840 --> 00:32:15,960
+I did not have the thanks it's slight
+
+00:32:14,370 --> 00:32:17,670
+but I'd like to thank Eric for giving a
+
+00:32:15,960 --> 00:32:20,490
+lot of feedback and fighting a lot of
+
+00:32:17,670 --> 00:32:23,580
+these pointing out a lot of the security
+
+00:32:20,490 --> 00:32:26,570
+issues that I had not addressed in the
+
+00:32:23,580 --> 00:32:26,570
+first version of the code
+
+00:32:28,000 --> 00:32:37,660
+hi Michael sergeant so when I worked on
+
+00:32:33,330 --> 00:32:41,200
+Jericho pantyhose so one of the issues
+
+00:32:37,660 --> 00:32:44,230
+we saw and tilden result properly was
+
+00:32:41,200 --> 00:32:47,740
+that especially if you configure non
+
+00:32:44,230 --> 00:32:49,860
+work conserving cue disks the tacit get
+
+00:32:47,740 --> 00:32:52,600
+can get stuck there for very long time
+
+00:32:49,860 --> 00:32:55,000
+and so if you're trying to do the zero
+
+00:32:52,600 --> 00:32:58,210
+copy then that again that's kind of
+
+00:32:55,000 --> 00:33:04,750
+unlimited amount of time that package
+
+00:32:58,210 --> 00:33:08,860
+can be kept can spam there so we did try
+
+00:33:04,750 --> 00:33:11,470
+to somehow poke at these cuties detect
+
+00:33:08,860 --> 00:33:13,150
+that pack system their copy packets a
+
+00:33:11,470 --> 00:33:17,590
+stack they're on a time here something
+
+00:33:13,150 --> 00:33:18,070
+like this okay but never really do that
+
+00:33:17,590 --> 00:33:21,040
+problem
+
+00:33:18,070 --> 00:33:22,720
+I wonder so I think there's a difference
+
+00:33:21,040 --> 00:33:25,150
+between being stuck on a queue to a
+
+00:33:22,720 --> 00:33:27,010
+process I'm being stuck on a queue that
+
+00:33:25,150 --> 00:33:31,030
+admin control and as part of the kernel
+
+00:33:27,010 --> 00:33:33,490
+in this regard so yeah but yeah the
+
+00:33:31,030 --> 00:33:38,290
+queue disk is obviously they're trying
+
+00:33:33,490 --> 00:33:40,600
+to find all the potential clones that
+
+00:33:38,290 --> 00:33:43,030
+point to the same notification structure
+
+00:33:40,600 --> 00:33:44,920
+and then do a copy is I don't think
+
+00:33:43,030 --> 00:33:48,820
+feasible if I'm honest partially because
+
+00:33:44,920 --> 00:33:50,560
+it's just no way to do it atomically but
+
+00:33:48,820 --> 00:33:52,420
+it is it is an interesting problem if
+
+00:33:50,560 --> 00:33:54,580
+the administrator comes up with a queue
+
+00:33:52,420 --> 00:33:56,500
+disk that for some reason is as you say
+
+00:33:54,580 --> 00:33:57,910
+it's not we're conserving and it can
+
+00:33:56,500 --> 00:34:02,020
+queue data indefinitely
+
+00:33:57,910 --> 00:34:03,460
+then probably zero copy is not a it's
+
+00:34:02,020 --> 00:34:08,890
+not good to expose your copy their
+
+00:34:03,460 --> 00:34:12,520
+processes in that case right so if how
+
+00:34:08,890 --> 00:34:18,270
+about like China again to do copy break
+
+00:34:12,520 --> 00:34:22,090
+somehow copy break yeah I mean you know
+
+00:34:18,270 --> 00:34:24,790
+trying to catch these cases and enter
+
+00:34:22,090 --> 00:34:28,600
+the copy before get into the situation
+
+00:34:24,790 --> 00:34:30,640
+so that means understanding which q and
+
+00:34:28,600 --> 00:34:32,530
+a potentially complex cutest hierarchy
+
+00:34:30,640 --> 00:34:37,120
+might not be service soon and then doing
+
+00:34:32,530 --> 00:34:39,340
+the copy there I think that is very
+
+00:34:37,120 --> 00:34:41,010
+dependent on your key disk layout right
+
+00:34:39,340 --> 00:34:44,940
+there's really no way to
+
+00:34:41,010 --> 00:34:48,810
+have that state available to kernel code
+
+00:34:44,940 --> 00:34:52,740
+that's easy to parse I think so it's
+
+00:34:48,810 --> 00:34:55,109
+going to be admin dependent how how does
+
+00:34:52,740 --> 00:34:58,470
+how does the app know that this is a
+
+00:34:55,109 --> 00:35:00,150
+work non work conserving scheduler and I
+
+00:34:58,470 --> 00:35:02,910
+mean it might even be the devices passed
+
+00:35:00,150 --> 00:35:04,410
+listen if the device is passed that
+
+00:35:02,910 --> 00:35:08,070
+there's no way to know when it will be
+
+00:35:04,410 --> 00:35:10,680
+unpassed okay I know we don't have much
+
+00:35:08,070 --> 00:35:15,630
+- yeah you know we can look into whether
+
+00:35:10,680 --> 00:35:17,820
+it's possible in detect long a high
+
+00:35:15,630 --> 00:35:20,550
+latency in notifications and then try to
+
+00:35:17,820 --> 00:35:22,380
+find the cause and do a copy on the mend
+
+00:35:20,550 --> 00:35:24,000
+well I've been very skeptical that
+
+00:35:22,380 --> 00:35:24,930
+that's that's something we'll be able to
+
+00:35:24,000 --> 00:35:26,700
+solve
+
+00:35:24,930 --> 00:35:29,670
+well we going to cut it short here
+
+00:35:26,700 --> 00:35:32,320
+Thanks whether there's a gift oh yeah
+
+00:35:29,670 --> 00:35:37,089
+thank you sorry for the other speakers
+
+00:35:32,320 --> 00:35:37,089
+
+YouTube URL: https://www.youtube.com/watch?v=9F8I9vYQydU
+
+

@@ -1,0 +1,3019 @@
+Title: More Bang for Your Buck: How Yelp Autoscales Mesos + Marathon on AWS Spot Fleet - Rob Johnson, Yelp
+Publication date: 2017-10-31
+Playlist: MesosCon Europe 2017
+Description: 
+	More Bang for Your Buck: How Yelp Autoscales Mesos + Marathon on AWS Spot Fleet - Rob Johnson, Yelp
+
+Yelp was an early adopter of Mesos and Marathon, building PaaSTA, a PaaS that provides an easy way for developers to deploy their services and batches. As we migrated more parts of the infrastructure to run on PaaSTA, we had to figure out how to maximize cluster utilization and minimize costs. In this talk, I'll discuss how Yelp autoscales both services and servers, shuffling tasks around our Mesos cluster to improve utilization, whilst dealing with the extra volatility caused by running on AWS Spot Fleet. I’ll tell stories of outages, strategies for improving resilience against AWS pulling the plug on instances with 2 minutes warning and gracefully migrating services actively serving traffic, and discuss how we decide when to increase and decrease cluster capacity.
+
+About Rob Johnson
+Rob works as a Site Reliability Engineer on the Operations team at Yelp in London. Most of Rob's time is spent developing PaaSTA, Yelp’s internal platform-as-a-service, which runs nearly all of Yelp's production services. Rob has spoken at MesosCon previously about PaaSTA, and is keen to return to talk about how the platform has grown and developed.
+Captions: 
+	00:00:00,000 --> 00:00:05,069
+okay I guess I'll get started I'm not
+
+00:00:02,610 --> 00:00:08,670
+sure how to let me remove the toolbar
+
+00:00:05,069 --> 00:00:10,679
+and stuff off of chrome but okay so yeah
+
+00:00:08,670 --> 00:00:13,110
+thanks everyone for coming I really
+
+00:00:10,679 --> 00:00:14,940
+appreciate it thanks for the
+
+00:00:13,110 --> 00:00:17,699
+introduction that I'm here from Yelp as
+
+00:00:14,940 --> 00:00:20,130
+I just said my name is Rob and I'm sorry
+
+00:00:17,699 --> 00:00:22,140
+Yelp I've been there two and a half
+
+00:00:20,130 --> 00:00:24,300
+years now and then many work on the past
+
+00:00:22,140 --> 00:00:26,490
+13 so we look after the platform as a
+
+00:00:24,300 --> 00:00:28,800
+service that runs all of the HTTP
+
+00:00:26,490 --> 00:00:31,830
+services and things that actually run
+
+00:00:28,800 --> 00:00:34,980
+the website if you're not familiar with
+
+00:00:31,830 --> 00:00:37,170
+Yelp yelps mission is to connect people
+
+00:00:34,980 --> 00:00:38,550
+with great local businesses so whether
+
+00:00:37,170 --> 00:00:40,890
+you're looking for like a pizza or a
+
+00:00:38,550 --> 00:00:43,739
+plumber the hope is that either using
+
+00:00:40,890 --> 00:00:46,140
+the mobile app or the the website that
+
+00:00:43,739 --> 00:00:50,309
+you you should be able to find someone
+
+00:00:46,140 --> 00:00:51,629
+that can fulfill that need with Yelp to
+
+00:00:50,309 --> 00:00:52,680
+give you an idea of what we're gonna go
+
+00:00:51,629 --> 00:00:54,390
+through today I'll give you some
+
+00:00:52,680 --> 00:00:56,520
+background into how we use muscles at
+
+00:00:54,390 --> 00:00:58,920
+Yelp we have a couple of different
+
+00:00:56,520 --> 00:01:00,539
+things that we do but so I'll give you
+
+00:00:58,920 --> 00:01:02,070
+some idea of like the scale that we run
+
+00:01:00,539 --> 00:01:03,420
+out and things like that
+
+00:01:02,070 --> 00:01:05,640
+then I'm going to talk about also
+
+00:01:03,420 --> 00:01:09,299
+scaling so we also scale at two separate
+
+00:01:05,640 --> 00:01:11,010
+levels at the service level and at the
+
+00:01:09,299 --> 00:01:16,110
+cluster level and of course the impact
+
+00:01:11,010 --> 00:01:18,509
+of the service level changing creates or
+
+00:01:16,110 --> 00:01:19,890
+reduces demand on the cluster and so
+
+00:01:18,509 --> 00:01:21,390
+that's how the cluster alter scale of
+
+00:01:19,890 --> 00:01:22,670
+reacts those things and then finally I'm
+
+00:01:21,390 --> 00:01:24,750
+gonna talk about eight of us spot-free
+
+00:01:22,670 --> 00:01:26,220
+so I'll give you an idea of what spot
+
+00:01:24,750 --> 00:01:28,140
+Lee is if you're not familiar with it
+
+00:01:26,220 --> 00:01:30,990
+some of the pitfalls that can come from
+
+00:01:28,140 --> 00:01:34,110
+using it what value you can get from it
+
+00:01:30,990 --> 00:01:35,369
+over regular ec2 instances and then
+
+00:01:34,110 --> 00:01:37,200
+finally I'll talk about some kind of
+
+00:01:35,369 --> 00:01:39,900
+strategies that you've got for dealing
+
+00:01:37,200 --> 00:01:41,460
+with the pitfalls so the first thing
+
+00:01:39,900 --> 00:01:44,220
+muscle to Yelp
+
+00:01:41,460 --> 00:01:46,740
+so one thing we used nozzles for is
+
+00:01:44,220 --> 00:01:47,490
+pasta pasta is yelps platforms are
+
+00:01:46,740 --> 00:01:48,840
+service
+
+00:01:47,490 --> 00:01:52,380
+it's been running in production for a
+
+00:01:48,840 --> 00:01:55,170
+couple of years now and it runs all of
+
+00:01:52,380 --> 00:01:58,049
+our HTTP services and a lot of batches
+
+00:01:55,170 --> 00:02:00,810
+as well the second thing is seagull
+
+00:01:58,049 --> 00:02:04,460
+seagull is a distributed task runner
+
+00:02:00,810 --> 00:02:07,560
+that we built a Yelp to run unit tests
+
+00:02:04,460 --> 00:02:09,869
+our monolith which still exists now and
+
+00:02:07,560 --> 00:02:12,390
+is deployed with pasta is about three
+
+00:02:09,869 --> 00:02:14,550
+million lines of Python code runs like a
+
+00:02:12,390 --> 00:02:17,070
+hundred thousand units has
+
+00:02:14,550 --> 00:02:18,690
+anyway it like long ago it became
+
+00:02:17,070 --> 00:02:21,660
+impractical for developers to run these
+
+00:02:18,690 --> 00:02:24,420
+unit tests on their machine and so we
+
+00:02:21,660 --> 00:02:27,260
+built seagull as a distributed task
+
+00:02:24,420 --> 00:02:29,430
+runner to paralyze those unit tests for
+
+00:02:27,260 --> 00:02:32,130
+all of the developers at Yelp of which
+
+00:02:29,430 --> 00:02:34,110
+there are hundreds anyway I'm not really
+
+00:02:32,130 --> 00:02:35,460
+here to talk about seagull if you are
+
+00:02:34,110 --> 00:02:37,770
+interested in such things
+
+00:02:35,460 --> 00:02:38,970
+Sekhar who's a fellow engineer he's
+
+00:02:37,770 --> 00:02:41,700
+talking about that later so I'd
+
+00:02:38,970 --> 00:02:43,590
+recommend you go along to his talk and
+
+00:02:41,700 --> 00:02:46,020
+learn about seagull as I said I'm his
+
+00:02:43,590 --> 00:02:47,330
+talk about pasta which is yelps
+
+00:02:46,020 --> 00:02:50,820
+platform-as-a-service
+
+00:02:47,330 --> 00:02:54,060
+these are like the main nervous mother's
+
+00:02:50,820 --> 00:02:55,740
+theory components of it so we have as
+
+00:02:54,060 --> 00:02:58,230
+Austin then marathon and Chronister the
+
+00:02:55,740 --> 00:03:00,209
+two frameworks that run most of the
+
+00:02:58,230 --> 00:03:03,540
+tasks we have a couple of other things
+
+00:03:00,209 --> 00:03:05,220
+that launch tasks but we've like
+
+00:03:03,540 --> 00:03:07,920
+transitioned to services over the last
+
+00:03:05,220 --> 00:03:09,900
+three years or so historically we had
+
+00:03:07,920 --> 00:03:13,740
+the same monolith that everyone else
+
+00:03:09,900 --> 00:03:16,830
+does it was deployed with some Bosch
+
+00:03:13,740 --> 00:03:20,310
+grips and ran on a special class of
+
+00:03:16,830 --> 00:03:21,570
+machines that existed he helped one real
+
+00:03:20,310 --> 00:03:24,060
+big step forward that we've made this
+
+00:03:21,570 --> 00:03:25,709
+year is that we've managed to have the
+
+00:03:24,060 --> 00:03:28,350
+monolith treated like any other service
+
+00:03:25,709 --> 00:03:32,430
+so you know it's not so micro as I
+
+00:03:28,350 --> 00:03:35,489
+hinted out earlier but it's monitored
+
+00:03:32,430 --> 00:03:37,140
+deployed like any other service at Yelp
+
+00:03:35,489 --> 00:03:38,670
+which is a huge win for us it like
+
+00:03:37,140 --> 00:03:40,110
+reduces that cognitive overhead of
+
+00:03:38,670 --> 00:03:44,360
+having separate classes and machines
+
+00:03:40,110 --> 00:03:44,360
+separate deployment strategies and so on
+
+00:03:44,810 --> 00:03:50,040
+so what what is the size that like well
+
+00:03:47,790 --> 00:03:51,840
+we run three main production clusters so
+
+00:03:50,040 --> 00:03:55,019
+there's two on the west coast one on the
+
+00:03:51,840 --> 00:03:58,920
+East Coast so on the west coast as you
+
+00:03:55,019 --> 00:04:02,550
+know us was - which is pn w pw and then
+
+00:03:58,920 --> 00:04:05,580
+in San Francisco and California we run
+
+00:04:02,550 --> 00:04:07,739
+in the u.s. first one AV us region as
+
+00:04:05,580 --> 00:04:09,239
+well as our own data center those two
+
+00:04:07,739 --> 00:04:11,190
+things that are joined by a direct
+
+00:04:09,239 --> 00:04:13,410
+connect so the latency between them is
+
+00:04:11,190 --> 00:04:16,080
+pretty good and then on the East Coast
+
+00:04:13,410 --> 00:04:18,450
+we do the same we use us East one but
+
+00:04:16,080 --> 00:04:20,970
+that was preceded by our own data center
+
+00:04:18,450 --> 00:04:22,350
+in Virginia and in the same way there's
+
+00:04:20,970 --> 00:04:24,840
+a Direct Connect that runs between those
+
+00:04:22,350 --> 00:04:26,860
+two reduce the latency we are moving
+
+00:04:24,840 --> 00:04:29,229
+Holly to AWS
+
+00:04:26,860 --> 00:04:32,349
+but there's that physical instruction
+
+00:04:29,229 --> 00:04:35,650
+orientation it's just it exists we run
+
+00:04:32,349 --> 00:04:38,770
+about like 900 marathon apps now we
+
+00:04:35,650 --> 00:04:41,110
+don't have 900 microservices each
+
+00:04:38,770 --> 00:04:43,210
+service can like opt to be deployed in a
+
+00:04:41,110 --> 00:04:45,699
+number of ways so if a given service has
+
+00:04:43,210 --> 00:04:47,289
+like an HTTP server to it as well as
+
+00:04:45,699 --> 00:04:49,629
+like a long-running worker that consumes
+
+00:04:47,289 --> 00:04:52,150
+off a queue then that will end up in
+
+00:04:49,629 --> 00:04:54,400
+marathons like two separate apps but
+
+00:04:52,150 --> 00:04:56,409
+yeah so we end up like 900 marathons in
+
+00:04:54,400 --> 00:04:58,120
+the biggest cluster the other two are
+
+00:04:56,409 --> 00:05:00,400
+about 2/3 decided that but of course
+
+00:04:58,120 --> 00:05:01,900
+there are duplicates between them we
+
+00:05:00,400 --> 00:05:05,650
+have five and a half thousand others
+
+00:05:01,900 --> 00:05:07,779
+tasks in that big cluster and about 600
+
+00:05:05,650 --> 00:05:11,379
+Mentos agents and as I said they span
+
+00:05:07,779 --> 00:05:12,849
+across matlin and they AWS so the first
+
+00:05:11,379 --> 00:05:15,879
+thing I'm gonna talk about is is also
+
+00:05:12,849 --> 00:05:19,060
+scaling this is yelps traffic at its
+
+00:05:15,879 --> 00:05:24,310
+edge on the y-axis there's requests per
+
+00:05:19,060 --> 00:05:25,719
+second and their x-axis it's time so you
+
+00:05:24,310 --> 00:05:28,360
+can see it's pretty diurnal right like
+
+00:05:25,719 --> 00:05:30,340
+every day as America wakes up and New
+
+00:05:28,360 --> 00:05:32,949
+York goes and finds breakfast and then
+
+00:05:30,340 --> 00:05:35,409
+San Francisco wakes up and has breakfast
+
+00:05:32,949 --> 00:05:36,940
+lunch and dinner that's that's the the
+
+00:05:35,409 --> 00:05:39,460
+spike see you see and the troughs are
+
+00:05:36,940 --> 00:05:42,039
+just like EU daytime well we have like a
+
+00:05:39,460 --> 00:05:44,949
+low amount of residual traffic but it's
+
+00:05:42,039 --> 00:05:47,830
+certainly not the size of when America
+
+00:05:44,949 --> 00:05:49,690
+hits and traditionally that line across
+
+00:05:47,830 --> 00:05:52,770
+the top we've had to provision enough
+
+00:05:49,690 --> 00:05:55,719
+infrastructure to deal with those spikes
+
+00:05:52,770 --> 00:05:58,029
+which as a result means that all of this
+
+00:05:55,719 --> 00:05:59,650
+stuff in pink is just like goes to waste
+
+00:05:58,029 --> 00:06:01,930
+right because it's just they're kind of
+
+00:05:59,650 --> 00:06:03,879
+hanging out not really doing much and
+
+00:06:01,930 --> 00:06:05,500
+costing us money especially now that
+
+00:06:03,879 --> 00:06:07,449
+we're on the reverse and we're paying by
+
+00:06:05,500 --> 00:06:11,979
+the hour like everyone else does
+
+00:06:07,449 --> 00:06:13,240
+not ideal so we oughta scale in two
+
+00:06:11,979 --> 00:06:15,389
+different ways we oughta scale at the
+
+00:06:13,240 --> 00:06:17,560
+service level and at the cluster level
+
+00:06:15,389 --> 00:06:19,509
+and it's the changes that we make at the
+
+00:06:17,560 --> 00:06:22,240
+service level that of course like create
+
+00:06:19,509 --> 00:06:24,240
+and remove demand as I said earlier for
+
+00:06:22,240 --> 00:06:26,319
+the cluster and so we we adjust for that
+
+00:06:24,240 --> 00:06:28,389
+so the service autoscaler
+
+00:06:26,319 --> 00:06:29,889
+in the same way we always had to
+
+00:06:28,389 --> 00:06:32,800
+provision enough infrastructure to deal
+
+00:06:29,889 --> 00:06:35,409
+with the peaks in load we when service
+
+00:06:32,800 --> 00:06:37,270
+owners like describe the deployment of
+
+00:06:35,409 --> 00:06:39,849
+their service which they doing this like
+
+00:06:37,270 --> 00:06:42,490
+Yama file that lives in a git repository
+
+00:06:39,849 --> 00:06:45,399
+they had to describe enough instances to
+
+00:06:42,490 --> 00:06:48,580
+deal with peak load and so that meant
+
+00:06:45,399 --> 00:06:50,649
+they hard-coded a number like 10 in this
+
+00:06:48,580 --> 00:06:52,240
+new world of auto scaling that changes
+
+00:06:50,649 --> 00:06:53,919
+somewhat they describe like an offer and
+
+00:06:52,240 --> 00:06:56,229
+lower bound for how they want their
+
+00:06:53,919 --> 00:06:58,449
+service to be to be deployed they also
+
+00:06:56,229 --> 00:07:00,759
+described like a metric that gives the
+
+00:06:58,449 --> 00:07:02,860
+best representation for their for their
+
+00:07:00,759 --> 00:07:04,599
+load at any given time and then they
+
+00:07:02,860 --> 00:07:07,899
+also describe a decision policy and the
+
+00:07:04,599 --> 00:07:09,939
+decision policy is a model that is used
+
+00:07:07,899 --> 00:07:13,689
+to correct the error between the target
+
+00:07:09,939 --> 00:07:15,849
+utilisation and the real utilization so
+
+00:07:13,689 --> 00:07:17,860
+this is pretty simple we have a program
+
+00:07:15,849 --> 00:07:20,580
+that runs on a cron on every master
+
+00:07:17,860 --> 00:07:23,619
+every 10 minutes
+
+00:07:20,580 --> 00:07:25,149
+this is massively simplified but this is
+
+00:07:23,619 --> 00:07:26,800
+roughly how it works right it takes the
+
+00:07:25,149 --> 00:07:30,490
+target utilization and the real
+
+00:07:26,800 --> 00:07:33,369
+utilization and then uses that model the
+
+00:07:30,490 --> 00:07:35,199
+decision policy to figure out how many
+
+00:07:33,369 --> 00:07:37,330
+instances are required to correct that
+
+00:07:35,199 --> 00:07:38,199
+error between those two values and then
+
+00:07:37,330 --> 00:07:40,059
+it just writes that number into
+
+00:07:38,199 --> 00:07:41,319
+zookeeper and that's kind of it for the
+
+00:07:40,059 --> 00:07:44,319
+service also scalar we do that for every
+
+00:07:41,319 --> 00:07:46,059
+service that option obviously we then
+
+00:07:44,319 --> 00:07:49,990
+have a long-running deployment daemon
+
+00:07:46,059 --> 00:07:52,360
+that runs and this is an event-driven
+
+00:07:49,990 --> 00:07:56,079
+program that just describes like decides
+
+00:07:52,360 --> 00:07:57,279
+when a service needs to be redeployed so
+
+00:07:56,079 --> 00:07:59,979
+there are a number of triggers for this
+
+00:07:57,279 --> 00:08:01,809
+obviously the main one is when a service
+
+00:07:59,979 --> 00:08:03,309
+developer pushes new commits to a
+
+00:08:01,809 --> 00:08:05,709
+service and they want to make a new
+
+00:08:03,309 --> 00:08:08,800
+release and get it into production this
+
+00:08:05,709 --> 00:08:10,689
+notices that other changes that it might
+
+00:08:08,800 --> 00:08:12,789
+watch for are things like changes to
+
+00:08:10,689 --> 00:08:14,499
+configuration so if a service owner
+
+00:08:12,789 --> 00:08:17,499
+asked for more memory or to be deployed
+
+00:08:14,499 --> 00:08:19,839
+in a specific availability zone or
+
+00:08:17,499 --> 00:08:22,389
+anything else then again we have another
+
+00:08:19,839 --> 00:08:25,300
+watcher in the deployment daemon for
+
+00:08:22,389 --> 00:08:27,069
+that another washer that we have here is
+
+00:08:25,300 --> 00:08:28,829
+it watches those zookeeper nodes that
+
+00:08:27,069 --> 00:08:31,779
+the service auto scale of writes to and
+
+00:08:28,829 --> 00:08:33,519
+when it notices a change it changes the
+
+00:08:31,779 --> 00:08:36,279
+number of instances that deployed in
+
+00:08:33,519 --> 00:08:38,319
+marathon now it has a pretty easy job if
+
+00:08:36,279 --> 00:08:39,490
+we're scaling up because it's getting up
+
+00:08:38,319 --> 00:08:40,930
+is easy right we're just like AWS
+
+00:08:39,490 --> 00:08:42,909
+marathon for more instances and that's
+
+00:08:40,930 --> 00:08:44,380
+that if we're scaling down it's slightly
+
+00:08:42,909 --> 00:08:46,720
+harder because we've got to go about
+
+00:08:44,380 --> 00:08:48,670
+making sure that the tasks that we're
+
+00:08:46,720 --> 00:08:51,730
+about to kill are killed in a graceful
+
+00:08:48,670 --> 00:08:53,560
+way right we don't interrupt current
+
+00:08:51,730 --> 00:08:54,700
+HTTP connections
+
+00:08:53,560 --> 00:08:57,070
+and so we have to take them out with a
+
+00:08:54,700 --> 00:08:59,200
+load balancer until we're confident that
+
+00:08:57,070 --> 00:09:01,300
+not only have new traffic stopped
+
+00:08:59,200 --> 00:09:03,880
+arriving bird that any existing traffic
+
+00:09:01,300 --> 00:09:08,140
+has stopped and then we can kill the
+
+00:09:03,880 --> 00:09:10,990
+tasks and and scale down a calling me so
+
+00:09:08,140 --> 00:09:12,610
+I said service owners have the
+
+00:09:10,990 --> 00:09:15,130
+opportunity to describe like the best
+
+00:09:12,610 --> 00:09:18,490
+metric that represents their utilization
+
+00:09:15,130 --> 00:09:20,440
+at any given time we offer three of
+
+00:09:18,490 --> 00:09:25,480
+those right now the first being the the
+
+00:09:20,440 --> 00:09:26,800
+CPU so if I I think given service is CPU
+
+00:09:25,480 --> 00:09:28,660
+bound this is the one they'll use we
+
+00:09:26,800 --> 00:09:32,290
+look at meadows after the CPU
+
+00:09:28,660 --> 00:09:34,240
+utilization and if you go above like a
+
+00:09:32,290 --> 00:09:36,790
+given threshold whether that be like 80%
+
+00:09:34,240 --> 00:09:39,610
+utilization or whatever then we'll scale
+
+00:09:36,790 --> 00:09:42,670
+up or down accordingly the second is
+
+00:09:39,610 --> 00:09:45,270
+your whiskey we are a Python shop at
+
+00:09:42,670 --> 00:09:48,400
+Yelp many of our services are Python
+
+00:09:45,270 --> 00:09:51,730
+fronted by pre forking servers like key
+
+00:09:48,400 --> 00:09:55,150
+whiskey so when us key Forks into a
+
+00:09:51,730 --> 00:09:57,970
+number of workers then we can take its
+
+00:09:55,150 --> 00:10:00,160
+load as roughly we can take that as a
+
+00:09:57,970 --> 00:10:02,410
+guess of like how many instances are
+
+00:10:00,160 --> 00:10:04,240
+sorry how many workers are busy at a
+
+00:10:02,410 --> 00:10:05,830
+given time so if there are a number of
+
+00:10:04,240 --> 00:10:06,790
+idle workers then obviously it's it's
+
+00:10:05,830 --> 00:10:09,760
+not really doing much we can probably
+
+00:10:06,790 --> 00:10:11,560
+scale it down likewise if the requests
+
+00:10:09,760 --> 00:10:13,360
+that are coming in at taking time to be
+
+00:10:11,560 --> 00:10:15,400
+processed because all of the workers are
+
+00:10:13,360 --> 00:10:19,540
+busy then we take that as an indication
+
+00:10:15,400 --> 00:10:21,490
+that in scale up and HTTP if a service
+
+00:10:19,540 --> 00:10:23,620
+has a really like bespoke way of
+
+00:10:21,490 --> 00:10:25,210
+representing their load whether they're
+
+00:10:23,620 --> 00:10:26,910
+like reading off a queue or something
+
+00:10:25,210 --> 00:10:28,990
+like that and they want to use the the
+
+00:10:26,910 --> 00:10:30,460
+rate up which messages are being
+
+00:10:28,990 --> 00:10:33,700
+processed off that queue as an
+
+00:10:30,460 --> 00:10:38,380
+indication of their load then they can
+
+00:10:33,700 --> 00:10:42,940
+do that as well so decision policies so
+
+00:10:38,380 --> 00:10:44,380
+we now have the utilization we have like
+
+00:10:42,940 --> 00:10:46,870
+a target and the real value how do we
+
+00:10:44,380 --> 00:10:47,320
+correct those the error between those
+
+00:10:46,870 --> 00:10:49,839
+two things
+
+00:10:47,320 --> 00:10:51,760
+so the first is we we offer like a pit
+
+00:10:49,839 --> 00:10:53,860
+controller so pit controllers have like
+
+00:10:51,760 --> 00:10:57,520
+a long history in industrial control
+
+00:10:53,860 --> 00:10:59,890
+systems and simply put they do exactly
+
+00:10:57,520 --> 00:11:02,080
+what we asked for they take a like a
+
+00:10:59,890 --> 00:11:03,550
+target value and observe value and they
+
+00:11:02,080 --> 00:11:07,680
+make changes to try and correct that
+
+00:11:03,550 --> 00:11:10,949
+error the three constants in bid like
+
+00:11:07,680 --> 00:11:13,649
+of the other way that the the person
+
+00:11:10,949 --> 00:11:16,980
+operating the controller can change like
+
+00:11:13,649 --> 00:11:18,540
+how how big the changes that the pig
+
+00:11:16,980 --> 00:11:20,579
+controller makes to try and correct that
+
+00:11:18,540 --> 00:11:22,499
+error right so the proportional part
+
+00:11:20,579 --> 00:11:25,319
+appeared just says that if you're like
+
+00:11:22,499 --> 00:11:28,110
+over utilized by 10% then we'll scale up
+
+00:11:25,319 --> 00:11:30,899
+by 10% the integral part of the pit
+
+00:11:28,110 --> 00:11:33,179
+controller kind of adjusts for time as
+
+00:11:30,899 --> 00:11:35,249
+well so if you're like continually
+
+00:11:33,179 --> 00:11:36,899
+making adjustments over time and they're
+
+00:11:35,249 --> 00:11:38,999
+not having the impact that you need then
+
+00:11:36,899 --> 00:11:40,679
+the the constant that you apply to the
+
+00:11:38,999 --> 00:11:42,899
+integral part of the pig controller will
+
+00:11:40,679 --> 00:11:44,550
+like slowly increase the weight of that
+
+00:11:42,899 --> 00:11:47,100
+change to try and make that adjustment
+
+00:11:44,550 --> 00:11:49,499
+as time goes on and then the derivative
+
+00:11:47,100 --> 00:11:51,569
+part of this predicts into the future
+
+00:11:49,499 --> 00:11:53,189
+and tries to dampen any changes that you
+
+00:11:51,569 --> 00:11:54,959
+make such that you don't keep
+
+00:11:53,189 --> 00:11:57,839
+oscillating around like a given valley
+
+00:11:54,959 --> 00:12:00,949
+by over an under estimating like how
+
+00:11:57,839 --> 00:12:00,949
+much change you need to make
+
+00:12:01,819 --> 00:12:08,189
+next up threshold this is far far
+
+00:12:04,290 --> 00:12:10,439
+simpler threshold decision policy just
+
+00:12:08,189 --> 00:12:12,300
+says that if you like hit or if you go
+
+00:12:10,439 --> 00:12:14,100
+over your target utilization and will
+
+00:12:12,300 --> 00:12:16,079
+scale up a 10% write the numbers
+
+00:12:14,100 --> 00:12:19,319
+hard-coded and will scale back down as
+
+00:12:16,079 --> 00:12:20,579
+well by 10% when your underutilized we
+
+00:12:19,319 --> 00:12:23,160
+don't really use this this was kind of a
+
+00:12:20,579 --> 00:12:26,069
+proof of concept that we've got bespoke
+
+00:12:23,160 --> 00:12:28,439
+again we have people where like a
+
+00:12:26,069 --> 00:12:31,170
+generic model for like describing how we
+
+00:12:28,439 --> 00:12:33,689
+should scale up and down just just won't
+
+00:12:31,170 --> 00:12:35,309
+do it and so we give service owners the
+
+00:12:33,689 --> 00:12:38,850
+opportunity if they want to write their
+
+00:12:35,309 --> 00:12:40,139
+own autoscaler so in the same way if we
+
+00:12:38,850 --> 00:12:41,490
+went back to that program actually
+
+00:12:40,139 --> 00:12:43,050
+previously were like writes into
+
+00:12:41,490 --> 00:12:44,850
+zookeeper all we do with the bespoke
+
+00:12:43,050 --> 00:12:47,730
+autoscaler is give service opportunity
+
+00:12:44,850 --> 00:12:49,410
+service authors like the responsibility
+
+00:12:47,730 --> 00:12:50,429
+of writing that value in to interview
+
+00:12:49,410 --> 00:12:54,509
+keeper instead
+
+00:12:50,429 --> 00:12:56,279
+and finally proportional this is this
+
+00:12:54,509 --> 00:12:58,079
+was kind of an evolution of the pic
+
+00:12:56,279 --> 00:12:59,999
+controller if you were to take the pic
+
+00:12:58,079 --> 00:13:01,949
+controller remove that that I and the D
+
+00:12:59,999 --> 00:13:03,179
+out of it and just take the proportional
+
+00:13:01,949 --> 00:13:06,350
+part then that's pretty much what this
+
+00:13:03,179 --> 00:13:08,639
+looks like now so it just directly
+
+00:13:06,350 --> 00:13:11,399
+changes like the amount of instances
+
+00:13:08,639 --> 00:13:13,410
+that we have deployed proportional to
+
+00:13:11,399 --> 00:13:15,689
+the error that's between the target and
+
+00:13:13,410 --> 00:13:17,730
+the real utilization but on top of that
+
+00:13:15,689 --> 00:13:19,829
+it has a couple of like additions that
+
+00:13:17,730 --> 00:13:21,570
+try and keep the changes in a make
+
+00:13:19,829 --> 00:13:23,520
+sensible things like like
+
+00:13:21,570 --> 00:13:25,770
+good enough window we call it which is
+
+00:13:23,520 --> 00:13:27,780
+where like if you're within I know 5% of
+
+00:13:25,770 --> 00:13:29,580
+your target utilization then rather than
+
+00:13:27,780 --> 00:13:31,410
+trying to correct for that and then like
+
+00:13:29,580 --> 00:13:33,960
+scaling up and then scanning back down
+
+00:13:31,410 --> 00:13:35,310
+when we go over by five again we just
+
+00:13:33,960 --> 00:13:36,690
+kind of accepted it it's good enough
+
+00:13:35,310 --> 00:13:39,030
+we're close enough right to the target
+
+00:13:36,690 --> 00:13:41,970
+it's violation and we we don't make any
+
+00:13:39,030 --> 00:13:43,410
+changes accordingly so they're the the
+
+00:13:41,970 --> 00:13:47,870
+models that we use to describe those
+
+00:13:43,410 --> 00:13:50,640
+things that's how effective is a bit I
+
+00:13:47,870 --> 00:13:51,930
+wasn't looking for this graph and I saw
+
+00:13:50,640 --> 00:13:53,940
+this and I was like yeah that's pretty
+
+00:13:51,930 --> 00:13:56,880
+cool right like dramatic spikes and then
+
+00:13:53,940 --> 00:13:58,410
+you see that it's not zero scaled and so
+
+00:13:56,880 --> 00:14:01,350
+we're kind of oscillating here between
+
+00:13:58,410 --> 00:14:03,840
+like five and five thousand two hundred
+
+00:14:01,350 --> 00:14:06,180
+and five and a half thousand tasks so a
+
+00:14:03,840 --> 00:14:09,450
+small indent maybe like a lot less than
+
+00:14:06,180 --> 00:14:11,220
+10% and then when you do zero scale you
+
+00:14:09,450 --> 00:14:14,490
+kind of see that like the we're making
+
+00:14:11,220 --> 00:14:17,460
+fairly small in then umber of tasks but
+
+00:14:14,490 --> 00:14:19,800
+we targeted this first at the monolith
+
+00:14:17,460 --> 00:14:21,030
+right the monolith was the main thing
+
+00:14:19,800 --> 00:14:22,950
+that we had to alter scale because it
+
+00:14:21,030 --> 00:14:24,960
+was just it it's probably like the
+
+00:14:22,950 --> 00:14:27,750
+biggest consumer of resources in our
+
+00:14:24,960 --> 00:14:30,180
+cluster so if we take a different view
+
+00:14:27,750 --> 00:14:32,850
+and look at the number of CPUs that have
+
+00:14:30,180 --> 00:14:34,830
+been also scaled overnight rather than
+
+00:14:32,850 --> 00:14:36,660
+just the number of tasks and you see
+
+00:14:34,830 --> 00:14:39,090
+like the impact of just auto scaling
+
+00:14:36,660 --> 00:14:41,820
+that monolith as well as a few like
+
+00:14:39,090 --> 00:14:43,410
+satellite services around we see we're
+
+00:14:41,820 --> 00:14:45,660
+making a change of like 20 percent here
+
+00:14:43,410 --> 00:14:49,020
+on the number of CPUs that were were
+
+00:14:45,660 --> 00:14:50,610
+also scaling it by and so just by going
+
+00:14:49,020 --> 00:14:52,340
+after that one service we've we've made
+
+00:14:50,610 --> 00:14:55,230
+a pretty big dent in the cluster here
+
+00:14:52,340 --> 00:14:56,550
+especially given like we lose about 50
+
+00:14:55,230 --> 00:14:58,140
+percent of our traffic overnight so
+
+00:14:56,550 --> 00:15:01,230
+that's like the most we're ever gonna
+
+00:14:58,140 --> 00:15:03,090
+scale we aim for like eighty percent
+
+00:15:01,230 --> 00:15:04,230
+utilization as well so we're making like
+
+00:15:03,090 --> 00:15:06,450
+quite a bit of headroom but there's
+
+00:15:04,230 --> 00:15:07,830
+definitely more work to do so the next
+
+00:15:06,450 --> 00:15:09,890
+part of this is the the cluster
+
+00:15:07,830 --> 00:15:12,870
+autoscaler
+
+00:15:09,890 --> 00:15:15,660
+this is a bit simpler right there's only
+
+00:15:12,870 --> 00:15:16,320
+one consumer of the custo of the cluster
+
+00:15:15,660 --> 00:15:18,780
+autoscaler
+
+00:15:16,320 --> 00:15:21,480
+and it and it's us the operations team
+
+00:15:18,780 --> 00:15:22,800
+so we only have a single decision policy
+
+00:15:21,480 --> 00:15:24,600
+we don't need to like have more
+
+00:15:22,800 --> 00:15:27,600
+flexibility than that it's very similar
+
+00:15:24,600 --> 00:15:29,100
+to the proportional one it runs every 20
+
+00:15:27,600 --> 00:15:31,530
+minutes rather than every 10 maybe
+
+00:15:29,100 --> 00:15:33,120
+because it can take a long time because
+
+00:15:31,530 --> 00:15:34,410
+we do things kind of serially and we
+
+00:15:33,120 --> 00:15:35,070
+have to make sure that we drain all of
+
+00:15:34,410 --> 00:15:36,660
+the tasks
+
+00:15:35,070 --> 00:15:41,339
+the load balancer on every host that was
+
+00:15:36,660 --> 00:15:43,800
+shutting down and so on we aim for 80%
+
+00:15:41,339 --> 00:15:46,199
+utilization the cluster this is a really
+
+00:15:43,800 --> 00:15:49,050
+big deal and like we constantly try and
+
+00:15:46,199 --> 00:15:51,449
+tune this because if we were to go at a
+
+00:15:49,050 --> 00:15:54,000
+hundred percent utilization and only
+
+00:15:51,449 --> 00:15:55,470
+afford like the cluster exactly the
+
+00:15:54,000 --> 00:15:58,829
+amount of resources that were required
+
+00:15:55,470 --> 00:16:00,209
+then we'd end up without any like of the
+
+00:15:58,829 --> 00:16:02,279
+operational freedom that the spare
+
+00:16:00,209 --> 00:16:05,220
+capacity gives us to scale up and down
+
+00:16:02,279 --> 00:16:06,899
+in periods of unexpected traffic so by
+
+00:16:05,220 --> 00:16:08,910
+running at 80 percent it means that in
+
+00:16:06,899 --> 00:16:10,709
+an emergency we can really quickly scale
+
+00:16:08,910 --> 00:16:12,600
+up the number of tasks of a given thing
+
+00:16:10,709 --> 00:16:16,170
+without having to wait for the hosts to
+
+00:16:12,600 --> 00:16:18,449
+come up first and it also improves the
+
+00:16:16,170 --> 00:16:20,459
+speed of our deployments the way that
+
+00:16:18,449 --> 00:16:22,079
+most services are deployed is that we'll
+
+00:16:20,459 --> 00:16:24,120
+run the old and the new version of a
+
+00:16:22,079 --> 00:16:26,279
+given service in parallel by bringing
+
+00:16:24,120 --> 00:16:28,319
+the new one up first and then as the old
+
+00:16:26,279 --> 00:16:30,389
+one kind of drains out the load balancer
+
+00:16:28,319 --> 00:16:33,000
+will kill off the tasks if we were to
+
+00:16:30,389 --> 00:16:35,009
+run a hundred percent utilization then
+
+00:16:33,000 --> 00:16:36,810
+the the side effect of that would mean
+
+00:16:35,009 --> 00:16:37,560
+that we would have to do this like in
+
+00:16:36,810 --> 00:16:39,750
+lockstep
+
+00:16:37,560 --> 00:16:41,040
+whereas we killed an old one we'd launch
+
+00:16:39,750 --> 00:16:43,019
+a new one and kill an old one and launch
+
+00:16:41,040 --> 00:16:46,470
+a new one which makes for a much slower
+
+00:16:43,019 --> 00:16:48,180
+like deployment especially when a given
+
+00:16:46,470 --> 00:16:51,149
+service can have like hundreds of tasks
+
+00:16:48,180 --> 00:16:52,949
+so we that eighty percent utilization we
+
+00:16:51,149 --> 00:16:56,730
+keep tuning it and seeing like where the
+
+00:16:52,949 --> 00:16:58,350
+right trade-off is between spending a
+
+00:16:56,730 --> 00:17:00,600
+bit of extra cash but also giving us
+
+00:16:58,350 --> 00:17:03,089
+some freedom but we've set along this
+
+00:17:00,600 --> 00:17:04,860
+for now and then finally we have to run
+
+00:17:03,089 --> 00:17:07,829
+the cyber defense right ultimately we're
+
+00:17:04,860 --> 00:17:09,630
+put in this program in control of the
+
+00:17:07,829 --> 00:17:11,939
+amount of infrastructure that we have to
+
+00:17:09,630 --> 00:17:13,650
+serve the website so there is a whole
+
+00:17:11,939 --> 00:17:16,230
+bunch of checks in there that we have to
+
+00:17:13,650 --> 00:17:16,919
+keep a tab on to make sure that the cost
+
+00:17:16,230 --> 00:17:18,990
+of autoscaler
+
+00:17:16,919 --> 00:17:20,880
+isn't about to shut all of our cluster
+
+00:17:18,990 --> 00:17:23,669
+down because there's a bug in it that
+
+00:17:20,880 --> 00:17:27,540
+thinks hey we have zero percent
+
+00:17:23,669 --> 00:17:28,830
+utilization like let's let's kill it so
+
+00:17:27,540 --> 00:17:29,880
+there's an awful lot of safety checks in
+
+00:17:28,830 --> 00:17:32,070
+here to make sure that we're not doing
+
+00:17:29,880 --> 00:17:33,990
+anything that we shouldn't be other
+
+00:17:32,070 --> 00:17:35,669
+things that we check for are things like
+
+00:17:33,990 --> 00:17:37,290
+if we're like rolling the spot fleet
+
+00:17:35,669 --> 00:17:39,030
+that we're running because we've had to
+
+00:17:37,290 --> 00:17:39,720
+attach new launch configurations or
+
+00:17:39,030 --> 00:17:41,730
+something to it
+
+00:17:39,720 --> 00:17:44,250
+then it can do things like making sure
+
+00:17:41,730 --> 00:17:46,650
+that we don't scale the existing the old
+
+00:17:44,250 --> 00:17:48,299
+spot fly down until the new one has come
+
+00:17:46,650 --> 00:17:49,050
+up and we've won enough bids and things
+
+00:17:48,299 --> 00:17:52,110
+like that
+
+00:17:49,050 --> 00:17:53,430
+so there's just an awful lot of yeah
+
+00:17:52,110 --> 00:17:56,300
+complexity that we've had to put in
+
+00:17:53,430 --> 00:17:59,160
+there to make sure that it's it's safe
+
+00:17:56,300 --> 00:18:01,290
+now the final thing I guess I wanted to
+
+00:17:59,160 --> 00:18:04,440
+share was like how we deal with scaling
+
+00:18:01,290 --> 00:18:07,290
+down scaling down is a pretty disruptive
+
+00:18:04,440 --> 00:18:08,670
+thing because there's of course like
+
+00:18:07,290 --> 00:18:10,020
+we're killing tasks taking them out of
+
+00:18:08,670 --> 00:18:13,410
+the load balancer launching them
+
+00:18:10,020 --> 00:18:15,330
+elsewhere and so on so when we when we
+
+00:18:13,410 --> 00:18:18,390
+do scale down we have to figure out like
+
+00:18:15,330 --> 00:18:20,330
+which host we can scale down whilst
+
+00:18:18,390 --> 00:18:23,220
+causing the least churn in the cluster
+
+00:18:20,330 --> 00:18:26,250
+so the way that we do this is we rank
+
+00:18:23,220 --> 00:18:28,140
+hosts giving them like a fitness score
+
+00:18:26,250 --> 00:18:29,900
+that describes like how easy or
+
+00:18:28,140 --> 00:18:32,670
+difficult it will be to shut them down
+
+00:18:29,900 --> 00:18:34,560
+and like the number one metric for us
+
+00:18:32,670 --> 00:18:36,600
+for that is the number of tasks they're
+
+00:18:34,560 --> 00:18:38,670
+running on it if we have to it's
+
+00:18:36,600 --> 00:18:40,470
+definitely preferable to shut a host
+
+00:18:38,670 --> 00:18:42,960
+down that's like not doing anything or
+
+00:18:40,470 --> 00:18:44,550
+is maybe like running one or two tasks
+
+00:18:42,960 --> 00:18:46,230
+and it is to shut one down that's
+
+00:18:44,550 --> 00:18:47,750
+running 20 tasks because it's been
+
+00:18:46,230 --> 00:18:50,310
+around a bit longer
+
+00:18:47,750 --> 00:18:53,220
+other things that we take into account
+
+00:18:50,310 --> 00:18:56,010
+here are the number of like batches that
+
+00:18:53,220 --> 00:18:58,680
+we run so we do have a fair number of
+
+00:18:56,010 --> 00:19:00,360
+batches that are run by Chronos but
+
+00:18:58,680 --> 00:19:02,720
+unfortunately some of those batches have
+
+00:19:00,360 --> 00:19:05,630
+been around like almost as long as Yelp
+
+00:19:02,720 --> 00:19:08,070
+and so they were built for a time when
+
+00:19:05,630 --> 00:19:10,530
+like you didn't have this notion of
+
+00:19:08,070 --> 00:19:11,760
+ephemeral hosts that and when you were a
+
+00:19:10,530 --> 00:19:13,340
+service owner and you were right in a
+
+00:19:11,760 --> 00:19:15,690
+batch you could kind of assume that
+
+00:19:13,340 --> 00:19:17,070
+you're the host that you were running on
+
+00:19:15,690 --> 00:19:20,220
+would exist for the lifetime of the
+
+00:19:17,070 --> 00:19:22,050
+batch in reality like you kind of
+
+00:19:20,220 --> 00:19:23,700
+assumed that the box was just gonna be
+
+00:19:22,050 --> 00:19:25,620
+there for the next year or so and so if
+
+00:19:23,700 --> 00:19:26,340
+you took like a day to run your batch it
+
+00:19:25,620 --> 00:19:28,260
+was no big deal
+
+00:19:26,340 --> 00:19:29,280
+but that the side effect of that is they
+
+00:19:28,260 --> 00:19:31,980
+were never designed with things like
+
+00:19:29,280 --> 00:19:33,930
+checkpointing and in mind so it's it's
+
+00:19:31,980 --> 00:19:36,140
+it can be difficult to interrupt a batch
+
+00:19:33,930 --> 00:19:38,250
+because they kind of have to start again
+
+00:19:36,140 --> 00:19:40,770
+that's made even worse when batches like
+
+00:19:38,250 --> 00:19:42,300
+aren't built to be out impotent and so
+
+00:19:40,770 --> 00:19:43,470
+we have to take that into account as
+
+00:19:42,300 --> 00:19:45,270
+well and then finally is that eight of
+
+00:19:43,470 --> 00:19:48,090
+us events right we launch a whole bunch
+
+00:19:45,270 --> 00:19:50,130
+of AWS hosts inevitably we get these
+
+00:19:48,090 --> 00:19:52,320
+notifications that say you need to be
+
+00:19:50,130 --> 00:19:55,050
+your on old hardware you need to be like
+
+00:19:52,320 --> 00:19:56,520
+restarted and go elsewhere so in the
+
+00:19:55,050 --> 00:19:58,260
+case where it's inevitable that a host
+
+00:19:56,520 --> 00:20:00,240
+is going to be shut down anyway then we
+
+00:19:58,260 --> 00:20:01,410
+keep an eye on that and if we find a
+
+00:20:00,240 --> 00:20:02,520
+host that is going to be shut down then
+
+00:20:01,410 --> 00:20:04,170
+we like
+
+00:20:02,520 --> 00:20:07,080
+prefer to shut down that first since
+
+00:20:04,170 --> 00:20:09,600
+it's gonna happen so how effective is
+
+00:20:07,080 --> 00:20:12,600
+this pin well you can see like again
+
+00:20:09,600 --> 00:20:15,150
+going back when I said that we targeted
+
+00:20:12,600 --> 00:20:16,410
+like the big monolith just by doing that
+
+00:20:15,150 --> 00:20:20,010
+we're making waves it where we go
+
+00:20:16,410 --> 00:20:22,670
+between like five hundred at the low
+
+00:20:20,010 --> 00:20:25,170
+periods up to about six hundred hosts
+
+00:20:22,670 --> 00:20:26,580
+even kind of higher than that in some
+
+00:20:25,170 --> 00:20:28,830
+cases and so we're doing a pretty good
+
+00:20:26,580 --> 00:20:31,140
+job of like this is a lot of capacity
+
+00:20:28,830 --> 00:20:34,950
+that's going overnight which is really
+
+00:20:31,140 --> 00:20:37,080
+good to see so the final thing that I'm
+
+00:20:34,950 --> 00:20:40,230
+going to talk about is is AWS spottily
+
+00:20:37,080 --> 00:20:43,559
+so is anyone familiar with spottily is
+
+00:20:40,230 --> 00:20:45,510
+anyone running in production great I'd
+
+00:20:43,559 --> 00:20:46,590
+really like to talk that's really good
+
+00:20:45,510 --> 00:20:49,280
+so if you're not familiar with
+
+00:20:46,590 --> 00:20:53,820
+thoughtfully this is Amazon's way of
+
+00:20:49,280 --> 00:20:55,920
+selling their spare capacity to the to
+
+00:20:53,820 --> 00:20:57,750
+the highest bidder effectively so if you
+
+00:20:55,920 --> 00:21:00,270
+imagine that what you see on the left
+
+00:20:57,750 --> 00:21:01,679
+there to be like Amazon's capacity or in
+
+00:21:00,270 --> 00:21:04,140
+a world where Amazon has like seven
+
+00:21:01,679 --> 00:21:05,640
+instances and on the right are people
+
+00:21:04,140 --> 00:21:07,620
+bidding for those instances you can see
+
+00:21:05,640 --> 00:21:09,150
+on the left hand side that Amazon have
+
+00:21:07,620 --> 00:21:11,250
+got like three of their seven instances
+
+00:21:09,150 --> 00:21:14,400
+being used at the moment there's four of
+
+00:21:11,250 --> 00:21:16,230
+them free available for bids and on the
+
+00:21:14,400 --> 00:21:17,880
+right you see that there are a number of
+
+00:21:16,230 --> 00:21:19,830
+users here user a wants two of those
+
+00:21:17,880 --> 00:21:22,290
+instances and it's prepared to pay four
+
+00:21:19,830 --> 00:21:24,150
+dollars for them user B once won they're
+
+00:21:22,290 --> 00:21:26,160
+prepared to pay three dollars you just
+
+00:21:24,150 --> 00:21:29,940
+see once two of them they want to pay
+
+00:21:26,160 --> 00:21:31,350
+two dollars user D wants three instances
+
+00:21:29,940 --> 00:21:34,590
+but they're ne peut prepared to pay like
+
+00:21:31,350 --> 00:21:36,929
+about for them so who wins of course
+
+00:21:34,590 --> 00:21:39,240
+user a wins they get their instances
+
+00:21:36,929 --> 00:21:41,340
+user B gets their instance as well they
+
+00:21:39,240 --> 00:21:42,600
+were prepared to make $3 user C gets one
+
+00:21:41,340 --> 00:21:44,790
+of the instances that they asked for but
+
+00:21:42,600 --> 00:21:46,380
+not the other but the key thing here of
+
+00:21:44,790 --> 00:21:49,290
+you know is that all paying user sees
+
+00:21:46,380 --> 00:21:51,900
+bid so that's the lowest winning bid and
+
+00:21:49,290 --> 00:21:55,170
+even user a who's willing to pay $4 only
+
+00:21:51,900 --> 00:21:57,300
+has to pay 2 and then of course if user
+
+00:21:55,170 --> 00:21:58,440
+B comes along and says like hey I won
+
+00:21:57,300 --> 00:22:01,130
+another one now I'm still prepared to
+
+00:21:58,440 --> 00:22:04,290
+pay $3 for this user C gets kicked off
+
+00:22:01,130 --> 00:22:09,300
+and now everyone pays $3 for those
+
+00:22:04,290 --> 00:22:13,200
+winning winning instances so what are
+
+00:22:09,300 --> 00:22:14,910
+the conditions well you saw like user C
+
+00:22:13,200 --> 00:22:16,020
+kind of got brutally kicked off of that
+
+00:22:14,910 --> 00:22:18,690
+instance there
+
+00:22:16,020 --> 00:22:21,510
+you get two minutes notice so if you
+
+00:22:18,690 --> 00:22:23,070
+lose a bid for your capacity you get two
+
+00:22:21,510 --> 00:22:24,660
+minutes and then that's it the instances
+
+00:22:23,070 --> 00:22:26,430
+are terminated so you've got to figure
+
+00:22:24,660 --> 00:22:27,930
+out a way of bringing up that capacity
+
+00:22:26,430 --> 00:22:30,620
+that you're about to lose within two
+
+00:22:27,930 --> 00:22:32,970
+minutes or that that's it
+
+00:22:30,620 --> 00:22:36,210
+so why why would you live with such
+
+00:22:32,970 --> 00:22:40,200
+volatile capacity well the number one
+
+00:22:36,210 --> 00:22:42,060
+thing is it's absolutely money if you
+
+00:22:40,200 --> 00:22:45,690
+look here this is a comparison between
+
+00:22:42,060 --> 00:22:47,550
+like the on-demand price for an r3 8xl
+
+00:22:45,690 --> 00:22:50,430
+compared to the price that's been paid
+
+00:22:47,550 --> 00:22:53,040
+over the last month on spot flees so you
+
+00:22:50,430 --> 00:22:54,900
+can see it's like two dollars 96 that
+
+00:22:53,040 --> 00:22:57,330
+you normally pay on demand and people
+
+00:22:54,900 --> 00:22:58,830
+who have paid 73 cents for those
+
+00:22:57,330 --> 00:23:01,110
+instances over the last month
+
+00:22:58,830 --> 00:23:04,770
+it's like 23% of the price that's an
+
+00:23:01,110 --> 00:23:06,090
+enormous saving so how do we go about
+
+00:23:04,770 --> 00:23:09,360
+sounds great how do you go about
+
+00:23:06,090 --> 00:23:12,470
+reducing that risk the number one thing
+
+00:23:09,360 --> 00:23:15,870
+I counterintuitive it may seem bit high
+
+00:23:12,470 --> 00:23:19,050
+the hope is that the savings in the low
+
+00:23:15,870 --> 00:23:22,040
+periods will outweigh the expenditure
+
+00:23:19,050 --> 00:23:24,930
+that you see in really expensive periods
+
+00:23:22,040 --> 00:23:26,700
+of course don't get too high because if
+
+00:23:24,930 --> 00:23:28,260
+you if you've been really high and
+
+00:23:26,700 --> 00:23:30,390
+you're still winning during those spikes
+
+00:23:28,260 --> 00:23:32,040
+of really expensive times where it can
+
+00:23:30,390 --> 00:23:34,110
+go up to like three or four times the
+
+00:23:32,040 --> 00:23:36,750
+on-demand price then you're very quickly
+
+00:23:34,110 --> 00:23:38,940
+you know account via gains just a data
+
+00:23:36,750 --> 00:23:42,990
+point we bid two times the instance
+
+00:23:38,940 --> 00:23:45,360
+price don't come along and bid two point
+
+00:23:42,990 --> 00:23:48,120
+one but yeah we bid two times the
+
+00:23:45,360 --> 00:23:50,910
+instance price so the second strategy I
+
+00:23:48,120 --> 00:23:53,730
+guess is diversifying so when you ask
+
+00:23:50,910 --> 00:23:56,220
+Amazon to fulfill the spotlit request
+
+00:23:53,730 --> 00:23:57,840
+you give them the desired capacity which
+
+00:23:56,220 --> 00:23:59,730
+can be either expressed in like a number
+
+00:23:57,840 --> 00:24:01,470
+of instances or it can be expressed in
+
+00:23:59,730 --> 00:24:04,320
+like some other arbitrary weighting that
+
+00:24:01,470 --> 00:24:05,700
+you give to instances and then you give
+
+00:24:04,320 --> 00:24:07,530
+a description of all of the instance
+
+00:24:05,700 --> 00:24:08,610
+types that you want to bid for how much
+
+00:24:07,530 --> 00:24:11,490
+you want to pay for them and how much
+
+00:24:08,610 --> 00:24:14,970
+they contribute towards the that that
+
+00:24:11,490 --> 00:24:16,740
+capacity that you're after now when you
+
+00:24:14,970 --> 00:24:18,510
+do that you can say that Amazon like
+
+00:24:16,740 --> 00:24:20,690
+here's the spec of all the things that
+
+00:24:18,510 --> 00:24:23,670
+I'm willing to pay for you can either
+
+00:24:20,690 --> 00:24:25,950
+please either fulfill it in the cheapest
+
+00:24:23,670 --> 00:24:28,470
+way possible in which case Amazon like
+
+00:24:25,950 --> 00:24:29,810
+might find an instance type that's going
+
+00:24:28,470 --> 00:24:31,280
+crazy cheap right now I know
+
+00:24:29,810 --> 00:24:33,350
+bump you in on that and fulfill all of
+
+00:24:31,280 --> 00:24:35,450
+your capacity using that the alternative
+
+00:24:33,350 --> 00:24:37,730
+is that you can ask them to diversify
+
+00:24:35,450 --> 00:24:41,540
+across as many instance types and
+
+00:24:37,730 --> 00:24:42,950
+availability zones as possible of course
+
+00:24:41,540 --> 00:24:45,800
+you're going to spend a bit more when
+
+00:24:42,950 --> 00:24:48,370
+you diversify but your father
+
+00:24:45,800 --> 00:24:50,540
+susceptible to a single instance type
+
+00:24:48,370 --> 00:24:54,170
+spiking in its price and you're losing
+
+00:24:50,540 --> 00:24:56,480
+all of your capacity so this is a view
+
+00:24:54,170 --> 00:24:58,280
+of like how Yelp asked for spot FLE
+
+00:24:56,480 --> 00:25:00,410
+instances this is the terraform
+
+00:24:58,280 --> 00:25:03,980
+configuration language we wrote like a
+
+00:25:00,410 --> 00:25:05,210
+module that wraps the spot fleet one the
+
+00:25:03,980 --> 00:25:08,930
+key thing that you see here is the
+
+00:25:05,210 --> 00:25:10,580
+minimum and maximum capacity so we then
+
+00:25:08,930 --> 00:25:13,220
+turn that into a file that lives in s3
+
+00:25:10,580 --> 00:25:14,900
+and then the cluster autoscaler turns
+
+00:25:13,220 --> 00:25:19,130
+that into a real number that we give to
+
+00:25:14,900 --> 00:25:20,900
+Amazon but the thing here is that we're
+
+00:25:19,130 --> 00:25:24,080
+asking for between seven and seventy
+
+00:25:20,900 --> 00:25:28,250
+instances now that's not instances
+
+00:25:24,080 --> 00:25:31,490
+that's actually a the number of CPUs
+
+00:25:28,250 --> 00:25:34,420
+that we want divided by 100 so we use
+
+00:25:31,490 --> 00:25:36,740
+cpus like the primary metric that we use
+
+00:25:34,420 --> 00:25:39,640
+to define how many instances that we
+
+00:25:36,740 --> 00:25:42,110
+actually need so when we ask for seven
+
+00:25:39,640 --> 00:25:44,870
+seven units of capacity from Amazon were
+
+00:25:42,110 --> 00:25:48,110
+actually asking first for 700 CPUs
+
+00:25:44,870 --> 00:25:49,880
+across different instance types and then
+
+00:25:48,110 --> 00:25:51,770
+we provide them with their specification
+
+00:25:49,880 --> 00:25:54,230
+of like how each instance type
+
+00:25:51,770 --> 00:25:57,350
+contributes to the capacity that we're
+
+00:25:54,230 --> 00:26:01,160
+after so you can see here that the c4
+
+00:25:57,350 --> 00:26:03,290
+for Excel has 16 virtual CPUs we give
+
+00:26:01,160 --> 00:26:04,820
+that a way of not point one five the
+
+00:26:03,290 --> 00:26:06,890
+reason for that discrepancy is that we
+
+00:26:04,820 --> 00:26:08,690
+keep one CPU behind for like system
+
+00:26:06,890 --> 00:26:12,140
+resources like running puppet and we
+
+00:26:08,690 --> 00:26:13,820
+don't advertise down mount athos but you
+
+00:26:12,140 --> 00:26:16,400
+can see here this like just a spread of
+
+00:26:13,820 --> 00:26:19,340
+the instances see for a excel that's got
+
+00:26:16,400 --> 00:26:21,560
+36 virtual CPUs we give that a weighting
+
+00:26:19,340 --> 00:26:26,060
+of null point 3 5 and so on and so when
+
+00:26:21,560 --> 00:26:28,340
+we then ask for 7 7 units of capacity
+
+00:26:26,060 --> 00:26:29,870
+you can see how they'll add up according
+
+00:26:28,340 --> 00:26:31,820
+to their weights and that's how I'm as
+
+00:26:29,870 --> 00:26:33,590
+in defines decides how many of in each
+
+00:26:31,820 --> 00:26:37,790
+instance I'd it needs to fulfill that
+
+00:26:33,590 --> 00:26:40,940
+capacity request so the final thing that
+
+00:26:37,790 --> 00:26:43,700
+I'll share and talk about now is how we
+
+00:26:40,940 --> 00:26:46,700
+go about why once we get
+
+00:26:43,700 --> 00:26:47,930
+- fired of that two-minute timer that
+
+00:26:46,700 --> 00:26:51,050
+we're about to be shut down how do we
+
+00:26:47,930 --> 00:26:52,250
+actually do this I really want to hear
+
+00:26:51,050 --> 00:26:55,040
+other stories if anyone's got them of
+
+00:26:52,250 --> 00:26:58,130
+how they go about doing this we do this
+
+00:26:55,040 --> 00:26:59,300
+women notice like we you can access the
+
+00:26:58,130 --> 00:27:02,720
+the fact that you're about to be shut
+
+00:26:59,300 --> 00:27:04,460
+down via the ec2 metadata API so we
+
+00:27:02,720 --> 00:27:05,990
+constantly poll that right and when we
+
+00:27:04,460 --> 00:27:08,150
+notice a given instance is about to be
+
+00:27:05,990 --> 00:27:09,680
+shut down we instantly use the muscles
+
+00:27:08,150 --> 00:27:12,350
+maintenance primitives to mark the
+
+00:27:09,680 --> 00:27:15,380
+hostess draining the reason we do that
+
+00:27:12,350 --> 00:27:17,300
+is it's kind of a natural point at which
+
+00:27:15,380 --> 00:27:19,040
+we can say like this box is about to be
+
+00:27:17,300 --> 00:27:20,330
+shut down and the hope is that one day
+
+00:27:19,040 --> 00:27:24,290
+all of the frameworks that we use will
+
+00:27:20,330 --> 00:27:26,330
+actually take that into account so we we
+
+00:27:24,290 --> 00:27:28,370
+mark the hostess training and then in
+
+00:27:26,330 --> 00:27:30,470
+the deployment daemon in the same way
+
+00:27:28,370 --> 00:27:33,140
+that we have watches for zookeeper hoes
+
+00:27:30,470 --> 00:27:35,300
+so changes in zookeeper for the number
+
+00:27:33,140 --> 00:27:36,770
+of hosts that we need watches for new
+
+00:27:35,300 --> 00:27:39,260
+get commits and things we have another
+
+00:27:36,770 --> 00:27:41,360
+watcher for hosts that go into draining
+
+00:27:39,260 --> 00:27:42,760
+mode so we pull the master API that
+
+00:27:41,360 --> 00:27:46,070
+exposes all of the hosts that are
+
+00:27:42,760 --> 00:27:47,420
+draining at a given time and then once
+
+00:27:46,070 --> 00:27:49,700
+we notice that the new host is draining
+
+00:27:47,420 --> 00:27:52,070
+then will instantly scale that
+
+00:27:49,700 --> 00:27:54,380
+application up by the number of
+
+00:27:52,070 --> 00:27:56,360
+instances of that application that are
+
+00:27:54,380 --> 00:27:57,860
+running on the host so if a run a host
+
+00:27:56,360 --> 00:27:59,900
+is running like two instances of our
+
+00:27:57,860 --> 00:28:02,360
+monolith then we'll go along and just
+
+00:27:59,900 --> 00:28:05,390
+make the API call to marason to say
+
+00:28:02,360 --> 00:28:06,530
+whatever you're the capacity that you
+
+00:28:05,390 --> 00:28:09,920
+have at the moment increase it by two
+
+00:28:06,530 --> 00:28:11,630
+and hopefully the host that it launches
+
+00:28:09,920 --> 00:28:14,420
+those new tasks on won't be the one
+
+00:28:11,630 --> 00:28:15,890
+that's be about to be shut down we then
+
+00:28:14,420 --> 00:28:18,710
+take the host out of the load balancer
+
+00:28:15,890 --> 00:28:20,110
+to try and plug all of the new HTTP
+
+00:28:18,710 --> 00:28:23,060
+connections that are being made to it
+
+00:28:20,110 --> 00:28:24,620
+and also like you know finish off the
+
+00:28:23,060 --> 00:28:26,570
+ones that are and then once we're
+
+00:28:24,620 --> 00:28:29,360
+confident that it's done then we we kill
+
+00:28:26,570 --> 00:28:31,430
+the task at that point we enter into
+
+00:28:29,360 --> 00:28:34,520
+this like race between ourselves and
+
+00:28:31,430 --> 00:28:36,560
+marathon where if we kill the task and
+
+00:28:34,520 --> 00:28:39,350
+we've then got a try and get hold of
+
+00:28:36,560 --> 00:28:40,880
+that resource before marathan takes the
+
+00:28:39,350 --> 00:28:43,940
+offer back from Azeroth and launches a
+
+00:28:40,880 --> 00:28:46,490
+new task using it so the way that we do
+
+00:28:43,940 --> 00:28:48,950
+that is by making a dynamic reservation
+
+00:28:46,490 --> 00:28:51,320
+in mezzos for the resources that have
+
+00:28:48,950 --> 00:28:53,600
+just been freed up of course if we lose
+
+00:28:51,320 --> 00:28:55,790
+that race a marathon launches a task
+
+00:28:53,600 --> 00:28:57,500
+before we get the dynamic reservation
+
+00:28:55,790 --> 00:29:02,030
+done then we have to go through this
+
+00:28:57,500 --> 00:29:03,320
+all over again so that's that's that and
+
+00:29:02,030 --> 00:29:04,910
+then so we kind of just looked through
+
+00:29:03,320 --> 00:29:06,650
+this until all of the tasks are done and
+
+00:29:04,910 --> 00:29:08,570
+basically until the end of the two
+
+00:29:06,650 --> 00:29:10,130
+minutes this is this is all we do and
+
+00:29:08,570 --> 00:29:14,720
+then eventually of course Amazon
+
+00:29:10,130 --> 00:29:16,610
+Anderson terminates us I do want to kind
+
+00:29:14,720 --> 00:29:18,020
+of cool this out this was a great
+
+00:29:16,610 --> 00:29:21,410
+contribution that was made to marathon
+
+00:29:18,020 --> 00:29:23,930
+where it'll now ignore hosts sorry ill
+
+00:29:21,410 --> 00:29:26,240
+ignore offers from hosts that have got
+
+00:29:23,930 --> 00:29:29,210
+maintenance schedule attached to them
+
+00:29:26,240 --> 00:29:30,740
+if the contributor Adam Dover is here
+
+00:29:29,210 --> 00:29:33,290
+then it's an enormous thank you from all
+
+00:29:30,740 --> 00:29:34,460
+of us at Yelp because this is going to
+
+00:29:33,290 --> 00:29:37,340
+make our lives a heck of a lot easier
+
+00:29:34,460 --> 00:29:38,690
+and and definitely like reduce the
+
+00:29:37,340 --> 00:29:43,850
+amount of disruption that comes from
+
+00:29:38,690 --> 00:29:46,820
+shutting down a host so is it is it
+
+00:29:43,850 --> 00:29:49,520
+worth it specifically I'm talking about
+
+00:29:46,820 --> 00:29:51,530
+like the spotlights here but this shows
+
+00:29:49,520 --> 00:29:54,860
+how much we've paid for a given instance
+
+00:29:51,530 --> 00:29:59,030
+type in a given region compared to the
+
+00:29:54,860 --> 00:30:01,880
+cost of a three-year upfront reserved
+
+00:29:59,030 --> 00:30:03,440
+instance so that's probably like the
+
+00:30:01,880 --> 00:30:04,940
+cheapest way that you can buy Amazon
+
+00:30:03,440 --> 00:30:06,740
+instances right is you say like I'm
+
+00:30:04,940 --> 00:30:08,140
+prepared to like I'm to say that I'm
+
+00:30:06,740 --> 00:30:10,970
+gonna have this for the next three years
+
+00:30:08,140 --> 00:30:12,440
+have all the money up front and that's
+
+00:30:10,970 --> 00:30:16,190
+how you get like the biggest discounts
+
+00:30:12,440 --> 00:30:17,660
+from Anderson then this is the price
+
+00:30:16,190 --> 00:30:20,150
+that we paid in spot-free compared to
+
+00:30:17,660 --> 00:30:23,150
+that so you can see in the worst case in
+
+00:30:20,150 --> 00:30:26,720
+like us west to for instance we've paid
+
+00:30:23,150 --> 00:30:28,910
+for like the c48 XL we paid 81 percent
+
+00:30:26,720 --> 00:30:31,880
+of that price and that's the worst case
+
+00:30:28,910 --> 00:30:34,160
+in the best case in us worst one we've
+
+00:30:31,880 --> 00:30:36,560
+been paying 27 percent of the price
+
+00:30:34,160 --> 00:30:40,280
+first c3a excels and this is over the
+
+00:30:36,560 --> 00:30:41,690
+like the last three months I think so
+
+00:30:40,280 --> 00:30:43,610
+yeah in some places were making really
+
+00:30:41,690 --> 00:30:46,190
+big savings in the worst case we're
+
+00:30:43,610 --> 00:30:48,170
+still making some savings just not quite
+
+00:30:46,190 --> 00:30:50,300
+as much and then at the bottom you can
+
+00:30:48,170 --> 00:30:52,310
+see like there's a weighted total in
+
+00:30:50,300 --> 00:30:55,190
+u.s. was warm we're talking like 47
+
+00:30:52,310 --> 00:30:56,630
+percent of what we were in u.s. East one
+
+00:30:55,190 --> 00:30:59,420
+we're paying 51 percent of what we were
+
+00:30:56,630 --> 00:31:01,850
+paying and in u.s. West - were paying 60
+
+00:30:59,420 --> 00:31:04,400
+percent it's in the worst case sixty
+
+00:31:01,850 --> 00:31:06,380
+percent of our previous bill which is an
+
+00:31:04,400 --> 00:31:07,940
+enormous Savin combined with the auto
+
+00:31:06,380 --> 00:31:10,640
+scaling of course this is really
+
+00:31:07,940 --> 00:31:15,730
+bringing our cost down which is good
+
+00:31:10,640 --> 00:31:17,809
+so future plans like what what's next
+
+00:31:15,730 --> 00:31:19,730
+well the first thing is this like
+
+00:31:17,809 --> 00:31:22,670
+predictive versus reactive auto-scaling
+
+00:31:19,730 --> 00:31:25,190
+as you saw like Yelp has a really
+
+00:31:22,670 --> 00:31:27,230
+predictable traffic pattern and yet the
+
+00:31:25,190 --> 00:31:30,650
+way that we alter scale is in reaction
+
+00:31:27,230 --> 00:31:32,929
+to changes in the in the utilization and
+
+00:31:30,650 --> 00:31:36,590
+so really we could get ahead of that by
+
+00:31:32,929 --> 00:31:38,750
+preemptively scaling up when we can on a
+
+00:31:36,590 --> 00:31:40,820
+reasonable grounds say like yeah this
+
+00:31:38,750 --> 00:31:41,630
+this traffic the load on this thing is
+
+00:31:40,820 --> 00:31:43,190
+about to go up
+
+00:31:41,630 --> 00:31:45,169
+let's just get ahead of it and scale up
+
+00:31:43,190 --> 00:31:46,940
+because it means that in that period
+
+00:31:45,169 --> 00:31:49,220
+between like when we notice that it's
+
+00:31:46,940 --> 00:31:51,380
+the utilization has gotten gotten higher
+
+00:31:49,220 --> 00:31:53,270
+and the time where we correct that error
+
+00:31:51,380 --> 00:31:55,070
+it means that potentially we've got like
+
+00:31:53,270 --> 00:31:58,010
+higher timings or anything it was
+
+00:31:55,070 --> 00:31:59,540
+something like that in that period so we
+
+00:31:58,010 --> 00:32:03,049
+can get ahead of that as I said by doing
+
+00:31:59,540 --> 00:32:05,600
+some predictive auto scaling parallel
+
+00:32:03,049 --> 00:32:07,309
+scaling as well so I kind of hinted at
+
+00:32:05,600 --> 00:32:11,179
+it taking a long time for the cluster
+
+00:32:07,309 --> 00:32:13,040
+also skeleton run and part of the reason
+
+00:32:11,179 --> 00:32:15,200
+for that is that it runs in serial and
+
+00:32:13,040 --> 00:32:17,450
+then like after every shutdown it
+
+00:32:15,200 --> 00:32:20,030
+reassesses whether we like how much
+
+00:32:17,450 --> 00:32:23,540
+capacity we need to change again and
+
+00:32:20,030 --> 00:32:25,190
+then kind of keeps going so in theory we
+
+00:32:23,540 --> 00:32:27,410
+can just like do this in parallel and
+
+00:32:25,190 --> 00:32:29,840
+make it significantly faster so that's
+
+00:32:27,410 --> 00:32:32,360
+definitely another goal for us and then
+
+00:32:29,840 --> 00:32:35,360
+finally deployment to more services I
+
+00:32:32,360 --> 00:32:37,700
+kind of as I have said like we targeted
+
+00:32:35,360 --> 00:32:39,350
+this at the monolith and a few like
+
+00:32:37,700 --> 00:32:40,580
+satellite services have started to take
+
+00:32:39,350 --> 00:32:42,140
+advantage but we definitely want to
+
+00:32:40,580 --> 00:32:43,580
+encourage more and more service
+
+00:32:42,140 --> 00:32:45,740
+developers to take this on and make it
+
+00:32:43,580 --> 00:32:48,169
+like the default because it's only going
+
+00:32:45,740 --> 00:32:51,700
+to be better for us if we can increase
+
+00:32:48,169 --> 00:32:55,669
+the utilization on the cluster even more
+
+00:32:51,700 --> 00:32:57,470
+so the conclusion well we get a lot of
+
+00:32:55,669 --> 00:33:00,770
+business value by also scaling we save
+
+00:32:57,470 --> 00:33:02,840
+an awful lot of money from it I think
+
+00:33:00,770 --> 00:33:04,490
+that 80% efficiency thing is a really
+
+00:33:02,840 --> 00:33:07,309
+good lesson that we've learned where
+
+00:33:04,490 --> 00:33:10,429
+previously if we try to over optimize
+
+00:33:07,309 --> 00:33:12,080
+and run without a signal amount of
+
+00:33:10,429 --> 00:33:13,460
+headroom then we've then suffered in
+
+00:33:12,080 --> 00:33:14,840
+like developer productivity where
+
+00:33:13,460 --> 00:33:18,620
+they've had to wait for ages to get a
+
+00:33:14,840 --> 00:33:21,380
+deployment out or in times of increased
+
+00:33:18,620 --> 00:33:24,110
+load that's been unexpected then we've
+
+00:33:21,380 --> 00:33:26,870
+not had the room to scale up accordingly
+
+00:33:24,110 --> 00:33:28,370
+spot flea has further reduced our AWS
+
+00:33:26,870 --> 00:33:30,890
+bill I think that kind of under sells it
+
+00:33:28,370 --> 00:33:32,900
+but we've we saved an awful lot of money
+
+00:33:30,890 --> 00:33:35,000
+by using this potli but of course we've
+
+00:33:32,900 --> 00:33:37,820
+also had to spend a lot of engineering
+
+00:33:35,000 --> 00:33:40,370
+time building tooling that's like being
+
+00:33:37,820 --> 00:33:43,130
+able to weather the extra volatility D
+
+00:33:40,370 --> 00:33:44,990
+you get from running and then finally
+
+00:33:43,130 --> 00:33:47,540
+the thing that we've built all of this
+
+00:33:44,990 --> 00:33:50,030
+on and we really hope that frameworks
+
+00:33:47,540 --> 00:33:52,430
+continue adopt continue to adopt is the
+
+00:33:50,030 --> 00:33:54,140
+meadows maintenance primitives they
+
+00:33:52,430 --> 00:33:57,440
+definitely provide us like a good place
+
+00:33:54,140 --> 00:34:01,040
+to express like the fact that our hosts
+
+00:33:57,440 --> 00:34:05,270
+are going to be in and out of use quite
+
+00:34:01,040 --> 00:34:07,640
+frequently so this I've got time for
+
+00:34:05,270 --> 00:34:08,960
+questions when I shout out we are hiring
+
+00:34:07,640 --> 00:34:10,760
+if you're interested in coming to
+
+00:34:08,960 --> 00:34:13,070
+working on this kind of thing we have
+
+00:34:10,760 --> 00:34:16,100
+offices in Hamburg or San Francisco or
+
+00:34:13,070 --> 00:34:17,240
+London which is where I am so if you
+
+00:34:16,100 --> 00:34:19,040
+want to if you're interested come and
+
+00:34:17,240 --> 00:34:21,230
+talk to me and I can put you in contact
+
+00:34:19,040 --> 00:34:31,370
+with the right people but questions
+
+00:34:21,230 --> 00:34:34,130
+has anyone got anything oh I got a
+
+00:34:31,370 --> 00:34:36,560
+question about mitigating risks when out
+
+00:34:34,130 --> 00:34:39,650
+of scaling have you consider it an
+
+00:34:36,560 --> 00:34:43,640
+option when you would have liked to know
+
+00:34:39,650 --> 00:34:46,280
+to pools for your servers one smaller
+
+00:34:43,640 --> 00:34:49,280
+well with moderate auto scaling or
+
+00:34:46,280 --> 00:34:52,540
+almost static for long running batches
+
+00:34:49,280 --> 00:34:56,420
+which you should better not touch and
+
+00:34:52,540 --> 00:34:58,280
+other big dynamic spots Fleet Based with
+
+00:34:56,420 --> 00:35:02,660
+extremely aggressive the scaling for
+
+00:34:58,280 --> 00:35:04,700
+everything else we have I didn't tell
+
+00:35:02,660 --> 00:35:07,490
+the whole story we do have some I like
+
+00:35:04,700 --> 00:35:09,860
+regular auto scaling on-demand hosts
+
+00:35:07,490 --> 00:35:12,020
+that are less volatile that we run those
+
+00:35:09,860 --> 00:35:14,570
+things that really can't deal with being
+
+00:35:12,020 --> 00:35:18,140
+shut down that frequently with as for
+
+00:35:14,570 --> 00:35:20,120
+the batches it's kind of a trade-off
+
+00:35:18,140 --> 00:35:22,160
+between like us increasing our
+
+00:35:20,120 --> 00:35:24,290
+utilization across the default pool
+
+00:35:22,160 --> 00:35:26,750
+because of course batches they run on a
+
+00:35:24,290 --> 00:35:29,900
+schedule and so if we were to just like
+
+00:35:26,750 --> 00:35:32,300
+have static infrastructure available to
+
+00:35:29,900 --> 00:35:33,890
+them then there will be periods where
+
+00:35:32,300 --> 00:35:35,120
+they're just like it's not being used
+
+00:35:33,890 --> 00:35:37,850
+and so we've got to find the right
+
+00:35:35,120 --> 00:35:41,030
+balance between those things that
+
+00:35:37,850 --> 00:35:42,800
+yeah sure it's risky to encase the
+
+00:35:41,030 --> 00:35:45,050
+instance does get shut down but we're
+
+00:35:42,800 --> 00:35:47,900
+not it's not worth as paying for like an
+
+00:35:45,050 --> 00:35:50,000
+instance all of the time just for that
+
+00:35:47,900 --> 00:35:52,790
+batch to run like once a week or
+
+00:35:50,000 --> 00:35:57,170
+something like that so at the moment
+
+00:35:52,790 --> 00:35:59,600
+like our kind of strategy is asking for
+
+00:35:57,170 --> 00:36:01,550
+forgiveness and so we kind of like run
+
+00:35:59,600 --> 00:36:03,020
+as much as we can on spot flees and then
+
+00:36:01,550 --> 00:36:05,150
+it developed her comes along and says
+
+00:36:03,020 --> 00:36:08,030
+like hey what's up like I just lost my
+
+00:36:05,150 --> 00:36:11,510
+own sense then we kind of gently move
+
+00:36:08,030 --> 00:36:13,180
+them over to something more stable yeah
+
+00:36:11,510 --> 00:36:16,220
+that's kind of a strategy we've taken
+
+00:36:13,180 --> 00:36:19,490
+okay actually we do the same that we
+
+00:36:16,220 --> 00:36:23,770
+have liked by everyone minute so our
+
+00:36:19,490 --> 00:36:23,770
+excuses are not working anymore
+
+00:36:40,230 --> 00:36:47,320
+do you have some statistics how how long
+
+00:36:44,950 --> 00:36:49,440
+on average the despot infants runs or
+
+00:36:47,320 --> 00:36:53,950
+how often do you have to reschedule and
+
+00:36:49,440 --> 00:36:55,750
+terminate and do all the yeah I was
+
+00:36:53,950 --> 00:36:57,640
+trying to come up with this and didn't
+
+00:36:55,750 --> 00:37:01,360
+quite get there like I think I found
+
+00:36:57,640 --> 00:37:04,000
+that the 95th percentile for our
+
+00:37:01,360 --> 00:37:08,020
+instances like the uptime for instance
+
+00:37:04,000 --> 00:37:12,130
+is over the last two weeks has been like
+
+00:37:08,020 --> 00:37:14,050
+a little over a day so we do churn
+
+00:37:12,130 --> 00:37:17,130
+through them quite quickly between the
+
+00:37:14,050 --> 00:37:19,720
+autoscaler shutting things down and then
+
+00:37:17,130 --> 00:37:22,210
+obviously spot Li as being outbid
+
+00:37:19,720 --> 00:37:32,770
+everything and things like that thank
+
+00:37:22,210 --> 00:37:35,560
+you sorry question are using sport fleet
+
+00:37:32,770 --> 00:37:37,870
+you needed a lot of engineering capacity
+
+00:37:35,560 --> 00:37:39,580
+probably to get all of that running have
+
+00:37:37,870 --> 00:37:41,020
+you made a total cost of ownership in
+
+00:37:39,580 --> 00:37:42,850
+terms of what you're really saving for
+
+00:37:41,020 --> 00:37:45,460
+me if a structural point of view and
+
+00:37:42,850 --> 00:37:50,080
+investing in engineering it's still a
+
+00:37:45,460 --> 00:37:52,200
+green case I haven't I'm certain someone
+
+00:37:50,080 --> 00:37:57,910
+above me out
+
+00:37:52,200 --> 00:37:57,910
+[Laughter]
+
+00:38:06,940 --> 00:38:11,530
+so sorry maybe I missed something so you
+
+00:38:09,760 --> 00:38:13,569
+you scale the services and you scale the
+
+00:38:11,530 --> 00:38:16,450
+cluster the number of services in the
+
+00:38:13,569 --> 00:38:19,150
+cluster and do you scale the resources
+
+00:38:16,450 --> 00:38:20,619
+of the service itself like if the
+
+00:38:19,150 --> 00:38:22,990
+utilization of you other cared like to
+
+00:38:20,619 --> 00:38:25,569
+gig of memory for service in reality
+
+00:38:22,990 --> 00:38:26,799
+it's using maybe 10 percent or 50
+
+00:38:25,569 --> 00:38:34,240
+percent
+
+00:38:26,799 --> 00:38:36,579
+no we don't do that we do have look we
+
+00:38:34,240 --> 00:38:38,470
+monitor these things and we expose
+
+00:38:36,579 --> 00:38:41,589
+graphs to service developers and things
+
+00:38:38,470 --> 00:38:43,420
+so that hopefully they'll take take it
+
+00:38:41,589 --> 00:38:46,510
+onto themselves to see like if they've
+
+00:38:43,420 --> 00:38:49,329
+asked for I don't know like 10 gigabytes
+
+00:38:46,510 --> 00:38:51,069
+of RAM and they're using 0.5 no they'll
+
+00:38:49,329 --> 00:38:55,710
+adjust accordingly
+
+00:38:51,069 --> 00:39:01,089
+we don't dynamically change that Valley
+
+00:38:55,710 --> 00:39:02,920
+it's definitely an option in our case we
+
+00:39:01,089 --> 00:39:04,650
+use the same we spot instances and these
+
+00:39:02,920 --> 00:39:07,780
+kind of things but we notice that
+
+00:39:04,650 --> 00:39:08,890
+developers are they just put operatory
+
+00:39:07,780 --> 00:39:11,230
+numbers in the beginning when they
+
+00:39:08,890 --> 00:39:13,869
+develop new service because they don't
+
+00:39:11,230 --> 00:39:17,380
+know like how in reality to use and this
+
+00:39:13,869 --> 00:39:19,150
+is a lot of waste like more than 40% or
+
+00:39:17,380 --> 00:39:22,329
+I don't remember the number exactly but
+
+00:39:19,150 --> 00:39:23,799
+around 40% was just waste even we are
+
+00:39:22,329 --> 00:39:25,539
+utilizing the cluster in terms of
+
+00:39:23,799 --> 00:39:30,910
+allocation but the allocation was not
+
+00:39:25,539 --> 00:39:33,369
+used so so we wrote also little job that
+
+00:39:30,910 --> 00:39:37,119
+calculates all the utility get the
+
+00:39:33,369 --> 00:39:39,579
+historical utilization of every task for
+
+00:39:37,119 --> 00:39:41,680
+the last three days and then at 20% like
+
+00:39:39,579 --> 00:39:45,579
+so it you'd make sure that uses 80% and
+
+00:39:41,680 --> 00:39:49,809
+then notify on slack that this service
+
+00:39:45,579 --> 00:39:51,250
+needs like recommended values didn't do
+
+00:39:49,809 --> 00:39:54,039
+it automatic because it was a bit scary
+
+00:39:51,250 --> 00:39:58,660
+but yeah it's it's deafening we've
+
+00:39:54,039 --> 00:40:01,510
+considered like we don't we don't do it
+
+00:39:58,660 --> 00:40:03,640
+but like the we do is like I think
+
+00:40:01,510 --> 00:40:08,440
+that's on a monthly basis we produce a
+
+00:40:03,640 --> 00:40:11,529
+report of like those services that are
+
+00:40:08,440 --> 00:40:13,599
+wasting the most resources and then send
+
+00:40:11,529 --> 00:40:17,579
+them a an email and say you should do
+
+00:40:13,599 --> 00:40:17,579
+something about this yeah
+
+00:40:21,520 --> 00:40:28,710
+any more questions okay
+
+00:40:25,940 --> 00:40:31,960
+thanks Rob right thank you
+
+00:40:28,710 --> 00:40:31,960
+
+YouTube URL: https://www.youtube.com/watch?v=S3c2PbyAg5Y
+
+

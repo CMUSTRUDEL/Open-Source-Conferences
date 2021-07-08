@@ -1,0 +1,1136 @@
+Title: Netdev 0x14 - Replacing HTB with EDT and BPF
+Publication date: 2020-10-09
+Playlist: Netdev 0x14
+Description: 
+	Speakers: Stanislav Fomichev, Eric Dumazet, Willem de Bruijn, Vlad Dumitrescu, Bill Sommerfeld, Peter Oskolkov
+
+More info: https://netdevconf.info/0x14/session.html?talk-replacing-HTB-with-EDT-and-BPF
+
+Date: Thursday, August 20, 2020
+
+In this talk from the Google folks Stanislav Fomichev describes how
+Google has for many years utilized HTB and consequently faced scaling
+challenges.
+With the recent introduction of Early Departure Time model (See
+Van Jacobson's keynote on EDT in netdev 0x12), an opportunity has opened up
+to achieve the same packet service in a more efficient way. In this talk,
+Stan describes how they moved away from HTB altogether.
+The packet service is created using composition of BPF, FQ and
+EDT. The authors will provide performance numbers, discuss some of the
+outstanding challenges and solicit feedback from the community.
+Captions: 
+	00:00:01,199 --> 00:00:06,560
+hello my name is stanislav omichev
+
+00:00:04,720 --> 00:00:08,320
+i'm part of the linux kernel networking
+
+00:00:06,560 --> 00:00:10,400
+team at google
+
+00:00:08,320 --> 00:00:11,679
+i work on the bpf subsystem of the
+
+00:00:10,400 --> 00:00:13,840
+kernel
+
+00:00:11,679 --> 00:00:15,040
+at google i mostly write debug and
+
+00:00:13,840 --> 00:00:18,160
+deploy ppf
+
+00:00:15,040 --> 00:00:20,480
+programs and support our kernel
+
+00:00:18,160 --> 00:00:21,199
+today i'm going to talk about how and
+
+00:00:20,480 --> 00:00:24,160
+why we've
+
+00:00:21,199 --> 00:00:26,880
+removed the http queueing discipline and
+
+00:00:24,160 --> 00:00:30,000
+replaced it with a solution based on bpf
+
+00:00:26,880 --> 00:00:32,000
+and ett one important note i want
+
+00:00:30,000 --> 00:00:34,399
+to mention is that we didn't really set
+
+00:00:32,000 --> 00:00:35,680
+a goal to fully reproduce all hdb
+
+00:00:34,399 --> 00:00:38,160
+features
+
+00:00:35,680 --> 00:00:40,239
+even though it's probably possible we
+
+00:00:38,160 --> 00:00:42,640
+didn't do it because we didn't use all
+
+00:00:40,239 --> 00:00:45,760
+the features internally
+
+00:00:42,640 --> 00:00:47,440
+so we focused only on rate limiting uh
+
+00:00:45,760 --> 00:00:50,719
+the only feature from the
+
+00:00:47,440 --> 00:00:52,719
+hdb that we were using another note is
+
+00:00:50,719 --> 00:00:54,559
+that it's a joint work that involved
+
+00:00:52,719 --> 00:00:56,879
+multiple people and teams
+
+00:00:54,559 --> 00:00:59,520
+and i will list them all at the end of
+
+00:00:56,879 --> 00:01:03,199
+the talk
+
+00:00:59,520 --> 00:01:05,280
+let's start with uh some context
+
+00:01:03,199 --> 00:01:06,479
+because we've previously shared some
+
+00:01:05,280 --> 00:01:09,840
+parts of this work at
+
+00:01:06,479 --> 00:01:10,560
+linux plumbers conference our service
+
+00:01:09,840 --> 00:01:13,119
+classified
+
+00:01:10,560 --> 00:01:14,400
+measure rate limit and remark outgoing
+
+00:01:13,119 --> 00:01:17,040
+packets
+
+00:01:14,400 --> 00:01:19,360
+meaning for every outgoing packet we do
+
+00:01:17,040 --> 00:01:22,400
+the following steps
+
+00:01:19,360 --> 00:01:25,200
+first one is classification we find out
+
+00:01:22,400 --> 00:01:28,080
+which container this packet belongs to
+
+00:01:25,200 --> 00:01:30,640
+i'll call this container and aggregate
+
+00:01:28,080 --> 00:01:34,479
+many tcp flows can belong to the same
+
+00:01:30,640 --> 00:01:38,000
+aggregate next one is measurement
+
+00:01:34,479 --> 00:01:39,600
+we count the packet and byte rate for
+
+00:01:38,000 --> 00:01:41,840
+each aggregate
+
+00:01:39,600 --> 00:01:43,600
+another one is weight limiting if the
+
+00:01:41,840 --> 00:01:45,680
+aggregate weight limit is
+
+00:01:43,600 --> 00:01:48,320
+higher than some pre-configured number
+
+00:01:45,680 --> 00:01:51,759
+we throttle the packets
+
+00:01:48,320 --> 00:01:53,600
+and lastly sometimes we also rewrite
+
+00:01:51,759 --> 00:01:55,520
+some parts of the packet to change the
+
+00:01:53,600 --> 00:01:57,920
+quality of service
+
+00:01:55,520 --> 00:01:59,840
+about two years ago at linux plumbers
+
+00:01:57,920 --> 00:02:02,960
+conference we've shared how we moved
+
+00:01:59,840 --> 00:02:07,040
+classification measurement and remarking
+
+00:02:02,960 --> 00:02:08,160
+from htb to bpf so this talk is a
+
+00:02:07,040 --> 00:02:10,720
+follow-up presentation
+
+00:02:08,160 --> 00:02:11,760
+on how we've moved that last bit rate
+
+00:02:10,720 --> 00:02:14,720
+limiting
+
+00:02:11,760 --> 00:02:14,720
+into bpf
+
+00:02:15,280 --> 00:02:19,599
+um all right let's define some terms
+
+00:02:17,920 --> 00:02:22,480
+that are essential
+
+00:02:19,599 --> 00:02:24,160
+the first one is edt for earliest
+
+00:02:22,480 --> 00:02:26,239
+departure time
+
+00:02:24,160 --> 00:02:27,760
+this is the idea proposed by van
+
+00:02:26,239 --> 00:02:30,560
+jacobson at netdev
+
+00:02:27,760 --> 00:02:31,920
+about 8 years ago and the gist of it
+
+00:02:30,560 --> 00:02:33,760
+goes like this
+
+00:02:31,920 --> 00:02:34,959
+let's replace all the internal
+
+00:02:33,760 --> 00:02:38,319
+networking cues
+
+00:02:34,959 --> 00:02:41,280
+with a timing wheel scheduler every pack
+
+00:02:38,319 --> 00:02:41,920
+is amended with a earliest departure
+
+00:02:41,280 --> 00:02:43,840
+time
+
+00:02:41,920 --> 00:02:47,040
+and the system will not send it out
+
+00:02:43,840 --> 00:02:49,440
+until the departure time is met
+
+00:02:47,040 --> 00:02:52,239
+this departure time can be adjusted at
+
+00:02:49,440 --> 00:02:55,920
+various places in the kernel
+
+00:02:52,239 --> 00:02:57,360
+next one is fq for fair q it's securing
+
+00:02:55,920 --> 00:03:00,400
+discipline that was added
+
+00:02:57,360 --> 00:03:02,959
+to the linux kernel but by eric dumas a
+
+00:03:00,400 --> 00:03:05,599
+independent fq instance is usually
+
+00:03:02,959 --> 00:03:08,239
+created for each hardware and eq
+
+00:03:05,599 --> 00:03:10,480
+and fq tries to fairly distribute the
+
+00:03:08,239 --> 00:03:12,800
+available networking bandwidth between
+
+00:03:10,480 --> 00:03:15,120
+multiple tcp flows
+
+00:03:12,800 --> 00:03:16,720
+an important note here is that compared
+
+00:03:15,120 --> 00:03:19,760
+to global hdb
+
+00:03:16,720 --> 00:03:23,200
+there is no global fq and hence no
+
+00:03:19,760 --> 00:03:26,560
+global q disk log for our purposes
+
+00:03:23,200 --> 00:03:28,560
+fq behaves like a timing wheel scheduler
+
+00:03:26,560 --> 00:03:31,760
+it doesn't send out the packet until
+
+00:03:28,560 --> 00:03:34,400
+their earliest departure time is met
+
+00:03:31,760 --> 00:03:35,519
+and the linux kernel has been converted
+
+00:03:34,400 --> 00:03:39,519
+to the edt
+
+00:03:35,519 --> 00:03:39,519
+model around 2018.
+
+00:03:40,640 --> 00:03:44,640
+moving on here is more details about how
+
+00:03:44,000 --> 00:03:48,239
+our
+
+00:03:44,640 --> 00:03:51,519
+host pre-edt architecture looked like
+
+00:03:48,239 --> 00:03:54,080
+we have an external system called bwe
+
+00:03:51,519 --> 00:03:56,239
+stored for bandwidth enforcer that
+
+00:03:54,080 --> 00:03:57,599
+dynamically pushes aggregate limits to
+
+00:03:56,239 --> 00:04:00,080
+the hosts
+
+00:03:57,599 --> 00:04:00,799
+this means that most traffic is actually
+
+00:04:00,080 --> 00:04:03,280
+not
+
+00:04:00,799 --> 00:04:05,439
+limited if you want to know more about
+
+00:04:03,280 --> 00:04:08,560
+bwe there is an open paper
+
+00:04:05,439 --> 00:04:11,040
+i've added the link to the slides
+
+00:04:08,560 --> 00:04:12,080
+then on every machine there is a daemon
+
+00:04:11,040 --> 00:04:15,680
+that creates
+
+00:04:12,080 --> 00:04:16,720
+flat hdb hierarchy based on those pwe
+
+00:04:15,680 --> 00:04:19,680
+rules
+
+00:04:16,720 --> 00:04:21,359
+for every aggregate that's rate limited
+
+00:04:19,680 --> 00:04:24,560
+we essentially create a
+
+00:04:21,359 --> 00:04:28,000
+hdb leaf with appropriate limit
+
+00:04:24,560 --> 00:04:30,960
+next at tc egress hook the ppf program
+
+00:04:28,000 --> 00:04:32,320
+runs it classifies the packet into
+
+00:04:30,960 --> 00:04:35,520
+appropriate aggregate
+
+00:04:32,320 --> 00:04:37,759
+by setting its tc class id member
+
+00:04:35,520 --> 00:04:40,160
+if there is an http leave for that class
+
+00:04:37,759 --> 00:04:42,560
+id this traffic can be potentially rate
+
+00:04:40,160 --> 00:04:44,960
+limited and we rely on hdb
+
+00:04:42,560 --> 00:04:46,320
+talking bucket mechanism to enforce this
+
+00:04:44,960 --> 00:04:48,800
+limit
+
+00:04:46,320 --> 00:04:50,960
+and the problem with that scheme was
+
+00:04:48,800 --> 00:04:53,120
+that when many aggregates
+
+00:04:50,960 --> 00:04:54,840
+needed to be rate limited on the host we
+
+00:04:53,120 --> 00:04:57,840
+were getting contention in
+
+00:04:54,840 --> 00:04:57,840
+hdb
+
+00:04:57,919 --> 00:05:02,560
+to understand why it happens let's look
+
+00:05:00,320 --> 00:05:05,280
+at the hdb architecture
+
+00:05:02,560 --> 00:05:07,919
+modern nics have multiple hardware cues
+
+00:05:05,280 --> 00:05:11,039
+to support high transmission rates
+
+00:05:07,919 --> 00:05:13,120
+linux can put the packets on each
+
+00:05:11,039 --> 00:05:15,199
+separate queue without any need of
+
+00:05:13,120 --> 00:05:18,240
+global synchronization
+
+00:05:15,199 --> 00:05:18,720
+unfortunately with hdb each hardware
+
+00:05:18,240 --> 00:05:21,919
+queue
+
+00:05:18,720 --> 00:05:25,039
+still shares the same underlying hdb
+
+00:05:21,919 --> 00:05:26,160
+instance acting like a global log here
+
+00:05:25,039 --> 00:05:29,759
+is a small
+
+00:05:26,160 --> 00:05:29,759
+code snippet on how it works
+
+00:05:30,639 --> 00:05:38,560
+we first call netdev corepeaktx function
+
+00:05:35,840 --> 00:05:41,759
+which should pick a per pernic qq disk
+
+00:05:38,560 --> 00:05:45,759
+based on the flow hash or xps
+
+00:05:41,759 --> 00:05:49,120
+then we call def xmid skb
+
+00:05:45,759 --> 00:05:50,000
+this function a lock skew disk enqueues
+
+00:05:49,120 --> 00:05:53,680
+the packet
+
+00:05:50,000 --> 00:05:55,280
+and unlocks it no matter how many
+
+00:05:53,680 --> 00:05:57,919
+hardware cues we have
+
+00:05:55,280 --> 00:05:59,680
+each time we send the packet we grab the
+
+00:05:57,919 --> 00:06:03,039
+same global log
+
+00:05:59,680 --> 00:06:06,160
+i've tried to summarize what's happening
+
+00:06:03,039 --> 00:06:08,720
+in that picture on the right so we have
+
+00:06:06,160 --> 00:06:11,840
+two new cues but they share the same
+
+00:06:08,720 --> 00:06:11,840
+underlying hdb
+
+00:06:12,720 --> 00:06:20,240
+so how can we fix this situation
+
+00:06:16,560 --> 00:06:22,880
+we decided to completely drop hdb
+
+00:06:20,240 --> 00:06:25,199
+we've had some attempts at sharding hdb
+
+00:06:22,880 --> 00:06:27,600
+internally with various successes
+
+00:06:25,199 --> 00:06:29,600
+but ultimately with the edt model
+
+00:06:27,600 --> 00:06:31,120
+decided that we don't really need to use
+
+00:06:29,600 --> 00:06:34,000
+it anymore
+
+00:06:31,120 --> 00:06:35,120
+instead we've switched to the mq short
+
+00:06:34,000 --> 00:06:38,240
+for multi queue
+
+00:06:35,120 --> 00:06:41,199
+which is a lockless q disk that creates
+
+00:06:38,240 --> 00:06:43,600
+a sub q disk for each nic cue
+
+00:06:41,199 --> 00:06:45,120
+as they sub q disk with picked fq
+
+00:06:43,600 --> 00:06:48,560
+because it enforces the
+
+00:06:45,120 --> 00:06:50,800
+edt model and acts like a timing wheel
+
+00:06:48,560 --> 00:06:52,960
+on top of that we've implemented a small
+
+00:06:50,800 --> 00:06:56,080
+rate limiter in bpf
+
+00:06:52,960 --> 00:06:57,919
+that adjusts the departure timestamp
+
+00:06:56,080 --> 00:07:01,440
+and again i tried to summarize what's
+
+00:06:57,919 --> 00:07:04,080
+happening with the picture on the right
+
+00:07:01,440 --> 00:07:05,039
+ppf program just adjust the departure
+
+00:07:04,080 --> 00:07:07,680
+time
+
+00:07:05,039 --> 00:07:09,199
+then net depth or peak tx picks
+
+00:07:07,680 --> 00:07:12,479
+independent
+
+00:07:09,199 --> 00:07:15,039
+per q fq instance without grabbing any
+
+00:07:12,479 --> 00:07:18,800
+global log and then we rely on fq to
+
+00:07:15,039 --> 00:07:18,800
+enforce the departure times down
+
+00:07:19,199 --> 00:07:24,720
+and here is the simplified bpf program
+
+00:07:22,000 --> 00:07:26,880
+that we run for each packet
+
+00:07:24,720 --> 00:07:28,080
+as you can see it's significantly
+
+00:07:26,880 --> 00:07:31,440
+smaller than the
+
+00:07:28,080 --> 00:07:34,000
+1500 lines of hdb but to be
+
+00:07:31,440 --> 00:07:35,840
+fair we still rely on fq for the edt
+
+00:07:34,000 --> 00:07:38,720
+enforcement so it's not really
+
+00:07:35,840 --> 00:07:39,360
+apples to apple's comparison the real
+
+00:07:38,720 --> 00:07:41,280
+bbf
+
+00:07:39,360 --> 00:07:44,240
+program that we run is pretty short as
+
+00:07:41,280 --> 00:07:45,280
+well it's less than 100 lines so the
+
+00:07:44,240 --> 00:07:49,039
+steps that we do
+
+00:07:45,280 --> 00:07:52,400
+are relatively simple we first classify
+
+00:07:49,039 --> 00:07:53,120
+the packet into an aggregate then we
+
+00:07:52,400 --> 00:07:55,520
+calculate
+
+00:07:53,120 --> 00:07:56,400
+possible delay which depends on the
+
+00:07:55,520 --> 00:07:59,199
+programmed
+
+00:07:56,400 --> 00:08:02,000
+rate limit and the length of the packet
+
+00:07:59,199 --> 00:08:04,080
+and then we expect the next time stamp
+
+00:08:02,000 --> 00:08:06,240
+value of the aggregate to see if we are
+
+00:08:04,080 --> 00:08:08,560
+allowed to send the packet right now or
+
+00:08:06,240 --> 00:08:11,120
+we should delay it
+
+00:08:08,560 --> 00:08:12,319
+if next time stamp is less than the
+
+00:08:11,120 --> 00:08:14,960
+current time
+
+00:08:12,319 --> 00:08:15,599
+we update update the aggregate value and
+
+00:08:14,960 --> 00:08:18,879
+exit
+
+00:08:15,599 --> 00:08:20,080
+no rate limiting happens if the packet
+
+00:08:18,879 --> 00:08:23,360
+is delayed
+
+00:08:20,080 --> 00:08:26,240
+by more than group horizon we drop it
+
+00:08:23,360 --> 00:08:28,160
+in this example the drop horizon is 2
+
+00:08:26,240 --> 00:08:31,360
+seconds
+
+00:08:28,160 --> 00:08:34,959
+otherwise if the packet is delayed
+
+00:08:31,360 --> 00:08:38,000
+but not too much we update skb timestamp
+
+00:08:34,959 --> 00:08:42,640
+and atomically increase the aggregate
+
+00:08:38,000 --> 00:08:46,720
+next timestamp that weird sync and fetch
+
+00:08:42,640 --> 00:08:49,120
+at the end is an atomic increment in ppf
+
+00:08:46,720 --> 00:08:51,200
+note that when the aggregate is not rate
+
+00:08:49,120 --> 00:08:53,440
+limited
+
+00:08:51,200 --> 00:08:54,959
+we update next timestamp value in the
+
+00:08:53,440 --> 00:08:57,680
+racing manner
+
+00:08:54,959 --> 00:08:59,600
+right here but we haven't found any
+
+00:08:57,680 --> 00:09:00,160
+problems with that approach the reason
+
+00:08:59,600 --> 00:09:02,800
+is
+
+00:09:00,160 --> 00:09:03,279
+we can't really do better because there
+
+00:09:02,800 --> 00:09:05,680
+is no
+
+00:09:03,279 --> 00:09:07,600
+yet compare and exchange operation on
+
+00:09:05,680 --> 00:09:10,800
+ppf
+
+00:09:07,600 --> 00:09:13,200
+also note that most of the traffic exits
+
+00:09:10,800 --> 00:09:15,120
+way early because there is no rate limit
+
+00:09:13,200 --> 00:09:17,200
+for the aggregate
+
+00:09:15,120 --> 00:09:19,680
+so i haven't shown that part in this
+
+00:09:17,200 --> 00:09:19,680
+example
+
+00:09:20,000 --> 00:09:25,920
+as you can see it's not really a
+
+00:09:23,040 --> 00:09:26,480
+hdb reimplementation of ppf as i
+
+00:09:25,920 --> 00:09:29,519
+mentioned
+
+00:09:26,480 --> 00:09:30,560
+earlier we haven't really had that goal
+
+00:09:29,519 --> 00:09:32,720
+in mind
+
+00:09:30,560 --> 00:09:35,279
+we mostly care about performance and
+
+00:09:32,720 --> 00:09:38,000
+having no global egress lock and
+
+00:09:35,279 --> 00:09:39,680
+the combination of vpf and fq lets us
+
+00:09:38,000 --> 00:09:42,240
+achieve that
+
+00:09:39,680 --> 00:09:43,120
+we also don't need any fancy hdp
+
+00:09:42,240 --> 00:09:45,120
+features like
+
+00:09:43,120 --> 00:09:48,240
+token borrowing or any form of
+
+00:09:45,120 --> 00:09:50,640
+hierarchical limits
+
+00:09:48,240 --> 00:09:51,680
+the natural question usually at this
+
+00:09:50,640 --> 00:09:54,560
+point it goes
+
+00:09:51,680 --> 00:09:56,720
+like this can those features be
+
+00:09:54,560 --> 00:10:00,080
+implemented with bpf
+
+00:09:56,720 --> 00:10:02,079
+and the answer is probably yes bpf right
+
+00:10:00,080 --> 00:10:04,800
+now has very limited support
+
+00:10:02,079 --> 00:10:06,720
+for atomic operation i know that
+
+00:10:04,800 --> 00:10:08,320
+community is working on it on it right
+
+00:10:06,720 --> 00:10:10,399
+now
+
+00:10:08,320 --> 00:10:12,160
+so we would have to use something like
+
+00:10:10,399 --> 00:10:15,440
+ppf spin locks
+
+00:10:12,160 --> 00:10:17,920
+to keep this global shared state
+
+00:10:15,440 --> 00:10:19,120
+unless canon theory negatively impact
+
+00:10:17,920 --> 00:10:21,600
+the performance
+
+00:10:19,120 --> 00:10:22,800
+so any feature creep can impact the
+
+00:10:21,600 --> 00:10:24,880
+performance
+
+00:10:22,800 --> 00:10:28,640
+so for us it is important to keep that
+
+00:10:24,880 --> 00:10:28,640
+part small and simple
+
+00:10:29,040 --> 00:10:37,200
+and here are some performance numbers
+
+00:10:32,959 --> 00:10:40,000
+y-axis is latency it's normalized to the
+
+00:10:37,200 --> 00:10:43,600
+range from 0 to 800 and
+
+00:10:40,000 --> 00:10:45,839
+x exits is time
+
+00:10:43,600 --> 00:10:48,160
+i hope here you can spot the time when
+
+00:10:45,839 --> 00:10:51,600
+we switched to the ppf
+
+00:10:48,160 --> 00:10:55,279
+limiter the red line is
+
+00:10:51,600 --> 00:10:57,839
+99th percentile the blue line is 95th
+
+00:10:55,279 --> 00:10:59,200
+percentile and the green line is 50th
+
+00:10:57,839 --> 00:11:01,920
+percentile
+
+00:10:59,200 --> 00:11:03,360
+there is about 20x improvement in
+
+00:11:01,920 --> 00:11:07,680
+latency for 99
+
+00:11:03,360 --> 00:11:11,440
+percentile and 10x improvement for 99th
+
+00:11:07,680 --> 00:11:13,519
+50th percentile also improved about 2x
+
+00:11:11,440 --> 00:11:15,839
+but it's it's really hard to see on that
+
+00:11:13,519 --> 00:11:15,839
+graph
+
+00:11:16,320 --> 00:11:20,240
+uh if you're interested in building
+
+00:11:18,480 --> 00:11:23,200
+something like this
+
+00:11:20,240 --> 00:11:24,640
+here's a bunch of pointers from the
+
+00:11:23,200 --> 00:11:27,519
+kernel sources
+
+00:11:24,640 --> 00:11:29,040
+the first one is a self test that we've
+
+00:11:27,519 --> 00:11:31,600
+added to show
+
+00:11:29,040 --> 00:11:32,880
+how you can build a small edt based rate
+
+00:11:31,600 --> 00:11:35,600
+limiter
+
+00:11:32,880 --> 00:11:37,680
+it's very simple and it weight limits
+
+00:11:35,600 --> 00:11:40,880
+just a single flow
+
+00:11:37,680 --> 00:11:41,680
+it's a nice working example if you want
+
+00:11:40,880 --> 00:11:43,040
+to start
+
+00:11:41,680 --> 00:11:46,079
+building something like that from
+
+00:11:43,040 --> 00:11:48,720
+scratch the second one is more involved
+
+00:11:46,079 --> 00:11:50,320
+than was contributed by facebook
+
+00:11:48,720 --> 00:11:52,560
+if you need to have something that's
+
+00:11:50,320 --> 00:11:54,839
+workable and feature reach
+
+00:11:52,560 --> 00:11:56,399
+out of the box you might take a look at
+
+00:11:54,839 --> 00:11:58,560
+that
+
+00:11:56,399 --> 00:12:00,160
+it has multiple modes for rate limiting
+
+00:11:58,560 --> 00:12:03,040
+and edt mode
+
+00:12:00,160 --> 00:12:03,040
+is one of them
+
+00:12:03,279 --> 00:12:08,959
+and before we finish i'd like to also
+
+00:12:06,800 --> 00:12:10,560
+say a couple of words why we choose to
+
+00:12:08,959 --> 00:12:13,600
+do this work in bpf
+
+00:12:10,560 --> 00:12:16,079
+instead of writing native code
+
+00:12:13,600 --> 00:12:17,920
+the biggest reason as all the parts were
+
+00:12:16,079 --> 00:12:21,040
+already there
+
+00:12:17,920 --> 00:12:22,639
+so the fq has been around for a while
+
+00:12:21,040 --> 00:12:25,120
+and we were using bpf
+
+00:12:22,639 --> 00:12:27,120
+tc hook for classification management
+
+00:12:25,120 --> 00:12:29,920
+and remarking already
+
+00:12:27,120 --> 00:12:30,880
+i think the only extension to the kernel
+
+00:12:29,920 --> 00:12:34,880
+that we did
+
+00:12:30,880 --> 00:12:35,680
+was to expose skb departure timestamp to
+
+00:12:34,880 --> 00:12:39,360
+the ppf
+
+00:12:35,680 --> 00:12:40,880
+and that's it another big reason that is
+
+00:12:39,360 --> 00:12:43,920
+release velocity
+
+00:12:40,880 --> 00:12:44,399
+we were able to prototype implement and
+
+00:12:43,920 --> 00:12:46,800
+test
+
+00:12:44,399 --> 00:12:47,760
+everything with an easy rollback
+
+00:12:46,800 --> 00:12:50,800
+sequence
+
+00:12:47,760 --> 00:12:52,399
+fixing the bugs was as easy as
+
+00:12:50,800 --> 00:12:55,440
+reinstalling the ppf
+
+00:12:52,399 --> 00:12:59,200
+program without any
+
+00:12:55,440 --> 00:13:02,320
+any reboot of the hosts and that's it
+
+00:12:59,200 --> 00:13:03,120
+thank you as i mentioned various parts
+
+00:13:02,320 --> 00:13:06,000
+of this work
+
+00:13:03,120 --> 00:13:06,959
+were done by many people i've listed
+
+00:13:06,000 --> 00:13:11,040
+them here in no
+
+00:13:06,959 --> 00:13:11,040
+particular order thank you
+
+00:13:13,519 --> 00:13:18,839
+okay uh thank you so again if you have
+
+00:13:16,480 --> 00:13:20,399
+any questions uh please put them in the
+
+00:13:18,839 --> 00:13:24,160
+chat uh
+
+00:13:20,399 --> 00:13:27,120
+thus far there's one so i was wondering
+
+00:13:24,160 --> 00:13:28,320
+i i believe in the bpf code there was a
+
+00:13:27,120 --> 00:13:30,720
+call to classify
+
+00:13:28,320 --> 00:13:32,839
+i was wondering how that works yeah for
+
+00:13:30,720 --> 00:13:35,040
+the
+
+00:13:32,839 --> 00:13:35,680
+classification you can think of it like
+
+00:13:35,040 --> 00:13:38,079
+a
+
+00:13:35,680 --> 00:13:40,320
+there's a helper in vpf it's called ppf
+
+00:13:38,079 --> 00:13:42,639
+skb c group id
+
+00:13:40,320 --> 00:13:44,720
+get something like that which basically
+
+00:13:42,639 --> 00:13:45,279
+looks up a socket associated with the
+
+00:13:44,720 --> 00:13:47,040
+skb
+
+00:13:45,279 --> 00:13:49,519
+and then looks up a c group id
+
+00:13:47,040 --> 00:13:52,800
+associated with this skb
+
+00:13:49,519 --> 00:13:53,279
+because for us it's what we care about
+
+00:13:52,800 --> 00:13:57,600
+is like
+
+00:13:53,279 --> 00:14:00,160
+container or aggregate so we basically
+
+00:13:57,600 --> 00:14:02,800
+look up associated c group id it's more
+
+00:14:00,160 --> 00:14:05,199
+complicated in google's case because
+
+00:14:02,800 --> 00:14:09,279
+there's some also custom logic but in
+
+00:14:05,199 --> 00:14:09,279
+general it's it's basically ac group id
+
+00:14:09,519 --> 00:14:13,040
+okay next question the setting of the
+
+00:14:12,480 --> 00:14:16,800
+edt
+
+00:14:13,040 --> 00:14:17,519
+timestamp uh can can possibly be in the
+
+00:14:16,800 --> 00:14:21,519
+c group
+
+00:14:17,519 --> 00:14:21,839
+skb eagles hook yeah i think it it can
+
+00:14:21,519 --> 00:14:25,360
+be
+
+00:14:21,839 --> 00:14:27,680
+it's it's mostly historical um we run it
+
+00:14:25,360 --> 00:14:29,120
+at tc egress but i think it's definitely
+
+00:14:27,680 --> 00:14:31,839
+possible to do the same at c
+
+00:14:29,120 --> 00:14:31,839
+group hebrews
+
+00:14:32,320 --> 00:14:36,160
+next question this is only for flows
+
+00:14:34,480 --> 00:14:38,800
+originating on the host right
+
+00:14:36,160 --> 00:14:40,720
+or is it also used in packet forwarding
+
+00:14:38,800 --> 00:14:45,839
+uh yeah it's mostly about
+
+00:14:40,720 --> 00:14:45,839
+uh on host flows
+
+00:14:48,560 --> 00:14:53,199
+okay so let's see i don't see any more
+
+00:14:52,000 --> 00:14:55,360
+questions
+
+00:14:53,199 --> 00:14:57,760
+and i don't see any hands raised so
+
+00:14:55,360 --> 00:14:57,760
+
+YouTube URL: https://www.youtube.com/watch?v=MHkF8Uyctxw
+
+

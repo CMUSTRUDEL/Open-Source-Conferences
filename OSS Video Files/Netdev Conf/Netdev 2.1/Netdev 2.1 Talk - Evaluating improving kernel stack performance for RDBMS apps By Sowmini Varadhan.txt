@@ -1,0 +1,2620 @@
+Title: Netdev 2.1 Talk - Evaluating improving kernel stack performance for RDBMS apps By Sowmini Varadhan
+Publication date: 2017-04-30
+Playlist: Netdev 2.1
+Description: 
+	RDBMS applications heavily use stateless datagram sockets such as RDS and UDP. In this talk given on the 6th of Apr/2017 at Netdve 2.1 in Montreal, Sowmini  Varadhan goes into details of have
+investigating a few kernel alternatives to UDP/IP, such as PF_PACKET.  Sowmini  and her co-author Tushar Dave have used micro-benchmarks such as netperf in evaluating PF_PACKET usage in IPC libraries for actual transaction-oriented RDBMS workloads. Content at:
+https://www.netdevconf.org/2.1/session.html?varadhan_dave
+Captions: 
+	00:00:00,000 --> 00:00:04,980
+so up on Salman iam from Oracle I want
+
+00:00:03,240 --> 00:00:07,020
+to be I'll be talking today about some
+
+00:00:04,980 --> 00:00:10,559
+of her findings of see try to benchmark
+
+00:00:07,020 --> 00:00:13,110
+our DBMS applications with the Linux
+
+00:00:10,559 --> 00:00:14,610
+stack the joint work I did with the
+
+00:00:13,110 --> 00:00:17,369
+shell dolly but he couldn't be here
+
+00:00:14,610 --> 00:00:20,220
+because I can see the problem so I'll be
+
+00:00:17,369 --> 00:00:21,449
+presenting on its behalf so here's the
+
+00:00:20,220 --> 00:00:24,480
+agenda I'm going to start off by first
+
+00:00:21,449 --> 00:00:26,400
+describing the problem space this is the
+
+00:00:24,480 --> 00:00:28,619
+backdrop in which we are trying to
+
+00:00:26,400 --> 00:00:31,859
+improve network performance and that
+
+00:00:28,619 --> 00:00:34,320
+backdrop has a lot of non networking
+
+00:00:31,859 --> 00:00:36,690
+stuff things around database transforms
+
+00:00:34,320 --> 00:00:39,450
+things other services that are not
+
+00:00:36,690 --> 00:00:42,059
+directly related to the specific flows
+
+00:00:39,450 --> 00:00:44,730
+that we are trying to focus our farmers
+
+00:00:42,059 --> 00:00:47,610
+on and whatever a solution we consider
+
+00:00:44,730 --> 00:00:49,200
+has to not cause any damage to those
+
+00:00:47,610 --> 00:00:51,719
+other things especially the database
+
+00:00:49,200 --> 00:00:55,620
+applications they are extremely CPU
+
+00:00:51,719 --> 00:00:58,620
+bound so see do you see the utilization
+
+00:00:55,620 --> 00:01:00,989
+will keep coming up as I go to my top so
+
+00:00:58,620 --> 00:01:02,879
+because of these constraints we had to
+
+00:01:00,989 --> 00:01:04,439
+discard certain solutions so I'll talk
+
+00:01:02,879 --> 00:01:06,270
+about some of the possible solutions we
+
+00:01:04,439 --> 00:01:08,880
+consider and why we had to discard them
+
+00:01:06,270 --> 00:01:11,430
+mostly so that we can have those lessons
+
+00:01:08,880 --> 00:01:15,090
+learned how to take away at the moment
+
+00:01:11,430 --> 00:01:17,490
+we are using UDP and RDS TCP as our IP
+
+00:01:15,090 --> 00:01:20,189
+sea transport we are also looking at
+
+00:01:17,490 --> 00:01:21,650
+using PF packets so I will talk about
+
+00:01:20,189 --> 00:01:24,180
+the sort of benchmark and we're doing
+
+00:01:21,650 --> 00:01:26,340
+the micro benchmarks we use include
+
+00:01:24,180 --> 00:01:29,130
+networks and other things that we are
+
+00:01:26,340 --> 00:01:31,290
+all familiar with we also in Oracle have
+
+00:01:29,130 --> 00:01:33,570
+our own IPC library this is a shim
+
+00:01:31,290 --> 00:01:35,430
+between the database applications and
+
+00:01:33,570 --> 00:01:37,890
+the native operating system I'll pause
+
+00:01:35,430 --> 00:01:39,869
+so I'll talk about what that libraries
+
+00:01:37,890 --> 00:01:42,600
+and how trying to converge to use be a
+
+00:01:39,869 --> 00:01:44,430
+packet and that library has its own
+
+00:01:42,600 --> 00:01:46,259
+micro benchmark and a full-blown test
+
+00:01:44,430 --> 00:01:48,840
+suite that actually simulates a real
+
+00:01:46,259 --> 00:01:50,909
+database and I'll show some interesting
+
+00:01:48,840 --> 00:01:53,579
+numbers from that so this is all work in
+
+00:01:50,909 --> 00:01:55,590
+progress and we have some findings that
+
+00:01:53,579 --> 00:01:56,700
+have generated some ideas that I would
+
+00:01:55,590 --> 00:01:59,640
+like to talk and discuss with this
+
+00:01:56,700 --> 00:02:01,640
+community and also next steps things
+
+00:01:59,640 --> 00:02:04,619
+other things that we could possibly try
+
+00:02:01,640 --> 00:02:07,200
+so let's start off by looking at the
+
+00:02:04,619 --> 00:02:09,989
+problem space so there are two types of
+
+00:02:07,200 --> 00:02:12,780
+use cases which where we really care
+
+00:02:09,989 --> 00:02:13,410
+about reducing that work latency one is
+
+00:02:12,780 --> 00:02:15,750
+for
+
+00:02:13,410 --> 00:02:18,120
+applications these this is basically a
+
+00:02:15,750 --> 00:02:20,340
+distributed computing problem we have a
+
+00:02:18,120 --> 00:02:22,830
+service that is provided in the cluster
+
+00:02:20,340 --> 00:02:25,980
+as a distributed application and that
+
+00:02:22,830 --> 00:02:28,500
+service is usually CPU bound so any
+
+00:02:25,980 --> 00:02:31,500
+reduction in network latency any
+
+00:02:28,500 --> 00:02:34,500
+reduction in network utilization is
+
+00:02:31,500 --> 00:02:38,070
+extremely precious to these applications
+
+00:02:34,500 --> 00:02:40,020
+these are usually stateless unconnected
+
+00:02:38,070 --> 00:02:42,600
+UDP flows and you can identify them with
+
+00:02:40,020 --> 00:02:44,730
+a photo tool that somewhat simplifies
+
+00:02:42,600 --> 00:02:46,410
+the problem a bit in the sense that if
+
+00:02:44,730 --> 00:02:48,690
+it's a UDP flow you can do a lot of
+
+00:02:46,410 --> 00:02:51,060
+stuff in user space if it's a photo pool
+
+00:02:48,690 --> 00:02:53,280
+you can tweak things for that photo tool
+
+00:02:51,060 --> 00:02:55,140
+but there's also a risk that you get
+
+00:02:53,280 --> 00:02:57,540
+carried away and tweak things for your
+
+00:02:55,140 --> 00:02:59,400
+photo pool and jeopardize something else
+
+00:02:57,540 --> 00:03:01,530
+I'll talk about that as well
+
+00:02:59,400 --> 00:03:02,700
+these are transaction based so that's
+
+00:03:01,530 --> 00:03:04,620
+request response but the most
+
+00:03:02,700 --> 00:03:06,750
+interesting thing is actually the
+
+00:03:04,620 --> 00:03:08,840
+package sizes so for the flows that we
+
+00:03:06,750 --> 00:03:11,820
+care about improving performance about
+
+00:03:08,840 --> 00:03:14,460
+the request size is usually 512 bytes
+
+00:03:11,820 --> 00:03:16,440
+the response size is usually 8k bytes so
+
+00:03:14,460 --> 00:03:19,050
+this is interesting because when we try
+
+00:03:16,440 --> 00:03:21,630
+to improve network performance we tend
+
+00:03:19,050 --> 00:03:24,390
+to be heavily focused on small packet
+
+00:03:21,630 --> 00:03:25,680
+sizes which is a hard problem but at the
+
+00:03:24,390 --> 00:03:27,240
+other end of the spectrum there is a
+
+00:03:25,680 --> 00:03:30,000
+different set of challenges and that's
+
+00:03:27,240 --> 00:03:32,010
+what I'd like to talk about today so
+
+00:03:30,000 --> 00:03:34,440
+this is actually low-hanging food for us
+
+00:03:32,010 --> 00:03:36,780
+because it's UDP and it's status the
+
+00:03:34,440 --> 00:03:38,970
+when we have somewhat conquered this
+
+00:03:36,780 --> 00:03:41,400
+problem we would like to extend these
+
+00:03:38,970 --> 00:03:44,550
+same ideas for a harder problem set
+
+00:03:41,400 --> 00:03:47,250
+which is the extract transform load so
+
+00:03:44,550 --> 00:03:49,140
+in this case what happens is input comes
+
+00:03:47,250 --> 00:03:51,000
+in in the form of raw data this could be
+
+00:03:49,140 --> 00:03:52,920
+like Jason or comma separated values
+
+00:03:51,000 --> 00:03:54,480
+this is things like your employee
+
+00:03:52,920 --> 00:03:58,340
+federal database of a very large company
+
+00:03:54,480 --> 00:04:00,540
+and this needs to be converted to a
+
+00:03:58,340 --> 00:04:02,280
+relational database format so this is
+
+00:04:00,540 --> 00:04:04,470
+like what they all studied in oncology
+
+00:04:02,280 --> 00:04:06,450
+low class you have one large set of rows
+
+00:04:04,470 --> 00:04:08,040
+and columns you do some transform you
+
+00:04:06,450 --> 00:04:09,720
+convert it to different views which has
+
+00:04:08,040 --> 00:04:12,570
+the same information but it's less data
+
+00:04:09,720 --> 00:04:15,600
+to be stored on disk so doing that
+
+00:04:12,570 --> 00:04:17,220
+transforms is extremely CPU intensive so
+
+00:04:15,600 --> 00:04:19,350
+you need as much CP as you can get to do
+
+00:04:17,220 --> 00:04:20,760
+that work but at the same time your
+
+00:04:19,350 --> 00:04:22,470
+network input is coming in at a very
+
+00:04:20,760 --> 00:04:25,560
+high rate from our trading application
+
+00:04:22,470 --> 00:04:27,480
+or something similar so you have to
+
+00:04:25,560 --> 00:04:29,460
+balance between CPU
+
+00:04:27,480 --> 00:04:33,540
+for doing the backend processing and the
+
+00:04:29,460 --> 00:04:35,280
+backend for the network input and what
+
+00:04:33,540 --> 00:04:38,640
+makes this problem even more complicated
+
+00:04:35,280 --> 00:04:41,280
+is that this is usually TCP so TCP is
+
+00:04:38,640 --> 00:04:44,490
+extremely stateful if you try to bypass
+
+00:04:41,280 --> 00:04:46,530
+the kernel TCP stack you better know
+
+00:04:44,490 --> 00:04:49,710
+what you're doing because the kernel TCP
+
+00:04:46,530 --> 00:04:52,110
+has 30 years of smarts into it it's hard
+
+00:04:49,710 --> 00:04:55,020
+to get that right in userspace again so
+
+00:04:52,110 --> 00:04:57,330
+this is the more challenging problem we
+
+00:04:55,020 --> 00:04:59,370
+want to conquer the UDP flows for class
+
+00:04:57,330 --> 00:05:01,620
+stratification Spurs but if you want
+
+00:04:59,370 --> 00:05:04,800
+more information about the EDL problem
+
+00:05:01,620 --> 00:05:07,830
+there's a pointer there to give you that
+
+00:05:04,800 --> 00:05:09,270
+information so let's look at what we are
+
+00:05:07,830 --> 00:05:12,360
+using for our benchmarking right now
+
+00:05:09,270 --> 00:05:14,520
+which is distributed last manager
+
+00:05:12,360 --> 00:05:16,830
+provided by the cluster so here
+
+00:05:14,520 --> 00:05:18,240
+essentially the served service is
+
+00:05:16,830 --> 00:05:19,740
+actually a set of processes in the
+
+00:05:18,240 --> 00:05:22,530
+cluster which is the distributed lock
+
+00:05:19,740 --> 00:05:24,960
+manager what happens if a client comes
+
+00:05:22,530 --> 00:05:27,630
+in and asked for a read-only lock over
+
+00:05:24,960 --> 00:05:30,150
+set or block of data that client gets
+
+00:05:27,630 --> 00:05:33,570
+assigned by the load balancer to some
+
+00:05:30,150 --> 00:05:35,580
+server the client to server assignment
+
+00:05:33,570 --> 00:05:37,320
+is based on the actual UDP payload
+
+00:05:35,580 --> 00:05:39,780
+itself and currently we have a pretty
+
+00:05:37,320 --> 00:05:41,730
+well balanced hash yes / pointed out
+
+00:05:39,780 --> 00:05:43,560
+that we could use reuse port that's
+
+00:05:41,730 --> 00:05:46,050
+probably the next level of optimizations
+
+00:05:43,560 --> 00:05:47,910
+this was all done in in a world where we
+
+00:05:46,050 --> 00:05:49,800
+useful was not uniformly available on a
+
+00:05:47,910 --> 00:05:52,040
+platform supported through real sports
+
+00:05:49,800 --> 00:05:54,570
+the possibility but we have other
+
+00:05:52,040 --> 00:05:57,210
+bottlenecks and issues that you have to
+
+00:05:54,570 --> 00:05:59,670
+move first through we'd like to get that
+
+00:05:57,210 --> 00:06:01,410
+out of the way first so in this model
+
+00:05:59,670 --> 00:06:03,720
+what happens if the client is blocked
+
+00:06:01,410 --> 00:06:05,910
+until the response comes back and when
+
+00:06:03,720 --> 00:06:07,410
+the response comes back the client is
+
+00:06:05,910 --> 00:06:09,270
+not going to send that next request
+
+00:06:07,410 --> 00:06:11,340
+immediately it has to process the
+
+00:06:09,270 --> 00:06:14,340
+response itself that also is CP in
+
+00:06:11,340 --> 00:06:16,140
+transit so this is different from the
+
+00:06:14,340 --> 00:06:18,090
+way we tend to do micro benchmark Rita
+
+00:06:16,140 --> 00:06:21,240
+it's hard to model this with the typical
+
+00:06:18,090 --> 00:06:24,600
+micro benchmarks so the client input is
+
+00:06:21,240 --> 00:06:26,250
+worse team however we know that the
+
+00:06:24,600 --> 00:06:28,590
+actual bottleneck in the system is the
+
+00:06:26,250 --> 00:06:31,770
+server actual graph which actually shows
+
+00:06:28,590 --> 00:06:35,550
+us so the latency of the server becomes
+
+00:06:31,770 --> 00:06:38,460
+eventually the bounding limit on what
+
+00:06:35,550 --> 00:06:39,810
+the client sees or latency so we know
+
+00:06:38,460 --> 00:06:40,840
+that there are a few things that you can
+
+00:06:39,810 --> 00:06:42,910
+do to
+
+00:06:40,840 --> 00:06:44,680
+improve the performance of the system on
+
+00:06:42,910 --> 00:06:46,240
+the whole so one of these badges right
+
+00:06:44,680 --> 00:06:48,340
+on the server side by think it's
+
+00:06:46,240 --> 00:06:49,630
+actually quite easy to achieve right it
+
+00:06:48,340 --> 00:06:52,030
+falls out naturally the server just
+
+00:06:49,630 --> 00:06:53,980
+keeps reading input until it either runs
+
+00:06:52,030 --> 00:06:55,480
+out of buffer or runs out of input and
+
+00:06:53,980 --> 00:06:58,750
+then we can go off and start processing
+
+00:06:55,480 --> 00:07:00,760
+the DXi batching is a bit trickier if
+
+00:06:58,750 --> 00:07:03,190
+you don't get the batching right
+
+00:07:00,760 --> 00:07:05,200
+if the server sends out a batch of
+
+00:07:03,190 --> 00:07:07,150
+responses it's going to wake up a batch
+
+00:07:05,200 --> 00:07:09,160
+of clients and your input just got burst
+
+00:07:07,150 --> 00:07:11,230
+here so again the low-hanging fruit over
+
+00:07:09,160 --> 00:07:14,350
+here is the server side are exciting and
+
+00:07:11,230 --> 00:07:15,310
+that's what we are using at the moment
+
+00:07:14,350 --> 00:07:18,400
+though we're working on at the
+
+00:07:15,310 --> 00:07:20,530
+expression as well so what are the known
+
+00:07:18,400 --> 00:07:22,960
+bottlenecks in this environment so today
+
+00:07:20,530 --> 00:07:25,330
+we are using UDP and we're using RDS CCP
+
+00:07:22,960 --> 00:07:26,979
+so each i/o file is a send message you
+
+00:07:25,330 --> 00:07:29,470
+receive message so there's some system
+
+00:07:26,979 --> 00:07:31,479
+called overhead there the other thing we
+
+00:07:29,470 --> 00:07:34,180
+know is the control over the bath right
+
+00:07:31,479 --> 00:07:35,770
+so if I pointed out for the EDL case you
+
+00:07:34,180 --> 00:07:37,450
+have some back-end stuff to do and you
+
+00:07:35,770 --> 00:07:39,520
+have network input the process so you
+
+00:07:37,450 --> 00:07:42,100
+want to have a good balance of CPU usage
+
+00:07:39,520 --> 00:07:43,750
+between these two so what happens is
+
+00:07:42,100 --> 00:07:45,850
+when the server runs off in part of
+
+00:07:43,750 --> 00:07:47,260
+input it falls back to pull it gives up
+
+00:07:45,850 --> 00:07:49,270
+the CPU so you can start there your
+
+00:07:47,260 --> 00:07:52,210
+back-end stuff so you want to have a
+
+00:07:49,270 --> 00:07:53,919
+good balance between these two things so
+
+00:07:52,210 --> 00:07:56,710
+the expectation was that the tea packets
+
+00:07:53,919 --> 00:07:58,660
+v20 packet b3 especially the b3 would
+
+00:07:56,710 --> 00:08:00,280
+help in these two areas and the
+
+00:07:58,660 --> 00:08:03,490
+preliminary results indicate that that
+
+00:08:00,280 --> 00:08:05,020
+is in either case so I said that there
+
+00:08:03,490 --> 00:08:09,160
+are some constraints that come to us
+
+00:08:05,020 --> 00:08:11,200
+which made us discard some solution so
+
+00:08:09,160 --> 00:08:13,510
+some of these constraints will be not
+
+00:08:11,200 --> 00:08:15,490
+exactly the same view as the things
+
+00:08:13,510 --> 00:08:18,639
+expressed this morning but this is as it
+
+00:08:15,490 --> 00:08:20,380
+is so one of the things is this is all
+
+00:08:18,639 --> 00:08:21,910
+sitting with a framework of a larger
+
+00:08:20,380 --> 00:08:24,250
+framework of all of this relational
+
+00:08:21,910 --> 00:08:26,320
+database stuff so the input is coming
+
+00:08:24,250 --> 00:08:29,740
+from disk and file system and NFS and so
+
+00:08:26,320 --> 00:08:31,690
+on so whatever network handles you give
+
+00:08:29,740 --> 00:08:35,260
+us it has to be something that we can
+
+00:08:31,690 --> 00:08:36,760
+put in a select fold or equal set it has
+
+00:08:35,260 --> 00:08:38,770
+to be something which supports some type
+
+00:08:36,760 --> 00:08:40,570
+of open read and write retains it's okay
+
+00:08:38,770 --> 00:08:42,130
+if it's like be a packet and have some
+
+00:08:40,570 --> 00:08:43,839
+additional stuff that needs to be done
+
+00:08:42,130 --> 00:08:46,510
+with each send message and receive
+
+00:08:43,839 --> 00:08:48,240
+message but the api's has to be
+
+00:08:46,510 --> 00:08:52,000
+approximately looking like products and
+
+00:08:48,240 --> 00:08:54,790
+also in the process of accelerating the
+
+00:08:52,000 --> 00:08:56,920
+latency of specific UDP flows
+
+00:08:54,790 --> 00:08:58,660
+you cannot regress the latency of NFS
+
+00:08:56,920 --> 00:09:00,100
+and SMTP and ARP and all the other
+
+00:08:58,660 --> 00:09:02,860
+things going on in the system it must
+
+00:09:00,100 --> 00:09:05,440
+coexist harmoniously with the Linux
+
+00:09:02,860 --> 00:09:06,910
+stack so with those constraints in mind
+
+00:09:05,440 --> 00:09:09,850
+here are some of the solutions that
+
+00:09:06,910 --> 00:09:12,280
+would not work off the DP DK for example
+
+00:09:09,850 --> 00:09:13,990
+it was a non-starter because it's not
+
+00:09:12,280 --> 00:09:16,060
+topics it has a radically different
+
+00:09:13,990 --> 00:09:18,760
+threading model there is no selectable
+
+00:09:16,060 --> 00:09:21,040
+socket + DP DK and that's not both of
+
+00:09:18,760 --> 00:09:23,860
+them hijacks the entire network
+
+00:09:21,040 --> 00:09:26,020
+interface by default right so if you
+
+00:09:23,860 --> 00:09:27,820
+want to also support an SS and all of
+
+00:09:26,020 --> 00:09:29,560
+these other things you have to do weird
+
+00:09:27,820 --> 00:09:31,510
+things like K&I or you have to do some
+
+00:09:29,560 --> 00:09:34,420
+SRA away or host drinks all of these are
+
+00:09:31,510 --> 00:09:36,880
+clumsy in comparison 3s packet is a very
+
+00:09:34,420 --> 00:09:38,440
+clean model it it gives you a short it
+
+00:09:36,880 --> 00:09:40,570
+gives you a fast path but at the same
+
+00:09:38,440 --> 00:09:44,350
+time it doesn't let other sockets also
+
+00:09:40,570 --> 00:09:47,200
+get a copy of the package so with that
+
+00:09:44,350 --> 00:09:49,150
+in mind what we are evaluating a
+
+00:09:47,200 --> 00:09:51,610
+comparative evaluation that we're doing
+
+00:09:49,150 --> 00:09:52,930
+right now is UDP with send message and
+
+00:09:51,610 --> 00:09:55,300
+receive message which we already have
+
+00:09:52,930 --> 00:09:57,490
+then John I'll point out to me that if
+
+00:09:55,300 --> 00:09:59,200
+you do receive a message you can have
+
+00:09:57,490 --> 00:10:00,870
+batching on the RX ID at a cost of one
+
+00:09:59,200 --> 00:10:03,970
+system call so that's also there for
+
+00:10:00,870 --> 00:10:06,790
+comparison and then the packet v2 and T
+
+00:10:03,970 --> 00:10:09,280
+packet b3 so who said the faulty packet
+
+00:10:06,790 --> 00:10:11,740
+v2 and v3 helps to reduce the system
+
+00:10:09,280 --> 00:10:13,390
+calls and helps improve batching I am
+
+00:10:11,740 --> 00:10:14,860
+deliberately not talking about the
+
+00:10:13,390 --> 00:10:17,770
+shared memory benefits because I'll come
+
+00:10:14,860 --> 00:10:19,170
+to that in one of the slides so some of
+
+00:10:17,770 --> 00:10:22,660
+this points have already been made today
+
+00:10:19,170 --> 00:10:24,370
+so the benchmarks I'm using are right
+
+00:10:22,660 --> 00:10:25,870
+now I have results for the micro
+
+00:10:24,370 --> 00:10:27,340
+benchmarks we're using networks with all
+
+00:10:25,870 --> 00:10:30,250
+of these strings three things and we
+
+00:10:27,340 --> 00:10:32,350
+have a comparison I am in the middle of
+
+00:10:30,250 --> 00:10:34,810
+converting our IPC libraries we call
+
+00:10:32,350 --> 00:10:36,850
+them IPCL WIP cluster where I'm
+
+00:10:34,810 --> 00:10:40,000
+converting them to also support
+
+00:10:36,850 --> 00:10:42,460
+PF packet this is working progress then
+
+00:10:40,000 --> 00:10:45,670
+when that is done and I have cleared the
+
+00:10:42,460 --> 00:10:47,320
+IP CLW benchmark then we have an
+
+00:10:45,670 --> 00:10:49,270
+internal database to a street called the
+
+00:10:47,320 --> 00:10:52,750
+C our test suite which actually runs the
+
+00:10:49,270 --> 00:10:57,250
+IP CLW library and gives us performance
+
+00:10:52,750 --> 00:10:59,320
+or file so let's look at the networking
+
+00:10:57,250 --> 00:11:03,040
+micro benchmarks I'm using a standard
+
+00:10:59,320 --> 00:11:05,530
+next subscribed request sizes 5 cells
+
+00:11:03,040 --> 00:11:07,750
+the response size I am cheating a bit
+
+00:11:05,530 --> 00:11:08,780
+and I'm using a 1024 response size I've
+
+00:11:07,750 --> 00:11:11,540
+also used 8
+
+00:11:08,780 --> 00:11:13,190
+with jumbo frames but it's all cheating
+
+00:11:11,540 --> 00:11:15,020
+because I'm kind of fronting on the
+
+00:11:13,190 --> 00:11:17,540
+fragmentation in great assembly
+
+00:11:15,020 --> 00:11:18,980
+I'll come back to that in a bit but on
+
+00:11:17,540 --> 00:11:21,350
+the server side are not using next
+
+00:11:18,980 --> 00:11:23,240
+server I'm using my own implementation
+
+00:11:21,350 --> 00:11:25,700
+which can switch between the three
+
+00:11:23,240 --> 00:11:28,340
+different types of transport so that's
+
+00:11:25,700 --> 00:11:31,250
+why I use network for the - and argh I
+
+00:11:28,340 --> 00:11:32,840
+use 64 net worth clients for a single
+
+00:11:31,250 --> 00:11:35,660
+net server because that's usually what
+
+00:11:32,840 --> 00:11:37,520
+we see in production and I'm also
+
+00:11:35,660 --> 00:11:40,430
+cheating in the sense that I am using
+
+00:11:37,520 --> 00:11:42,530
+RSS with GSN so I'm using hashing based
+
+00:11:40,430 --> 00:11:43,670
+on address and port this is cheating
+
+00:11:42,530 --> 00:11:46,100
+because it gives me good numbers for
+
+00:11:43,670 --> 00:11:48,380
+micro benchmarks but in production I
+
+00:11:46,100 --> 00:11:50,210
+will get UDP packets that are fragmented
+
+00:11:48,380 --> 00:11:53,960
+and don't have the port number and then
+
+00:11:50,210 --> 00:11:58,490
+so this is not really something I can do
+
+00:11:53,960 --> 00:12:01,940
+in production so what happens in the
+
+00:11:58,490 --> 00:12:04,100
+server application for the UDP I have a
+
+00:12:01,940 --> 00:12:05,660
+simple application I check with Rick
+
+00:12:04,100 --> 00:12:09,920
+Jones to make sure this is also what mid
+
+00:12:05,660 --> 00:12:11,540
+server does so it's leap simple and gets
+
+00:12:09,920 --> 00:12:14,089
+woken up and there's input and then it
+
+00:12:11,540 --> 00:12:16,130
+does a simplistic battle so it keeps
+
+00:12:14,089 --> 00:12:17,270
+spinning and receive from center until
+
+00:12:16,130 --> 00:12:19,850
+there's nothing to eat and then goes
+
+00:12:17,270 --> 00:12:21,740
+back to port the end message version is
+
+00:12:19,850 --> 00:12:26,030
+the same as that it just does a batch
+
+00:12:21,740 --> 00:12:27,530
+size of 64 the packet and map arms I'm
+
+00:12:26,030 --> 00:12:28,900
+not using Pakistan out for all of these
+
+00:12:27,530 --> 00:12:32,660
+things I'm just looking at a single
+
+00:12:28,900 --> 00:12:36,200
+server single thread performance so tea
+
+00:12:32,660 --> 00:12:39,710
+packet p2 am using 2048 bytes frames and
+
+00:12:36,200 --> 00:12:41,120
+just getting basic resolves the tea pack
+
+00:12:39,710 --> 00:12:43,339
+it really has a lot of a degrees of
+
+00:12:41,120 --> 00:12:46,670
+freedom so here you get woken up on a
+
+00:12:43,339 --> 00:12:48,290
+block and you can set things up with
+
+00:12:46,670 --> 00:12:50,150
+different size blocks different sizes of
+
+00:12:48,290 --> 00:12:52,730
+frames for block letters to share and I
+
+00:12:50,150 --> 00:12:55,070
+played around with this a bit and we
+
+00:12:52,730 --> 00:12:57,530
+found the numbers I will report other
+
+00:12:55,070 --> 00:12:59,720
+ones which give you the best balance
+
+00:12:57,530 --> 00:13:01,760
+between the throughput and the CP
+
+00:12:59,720 --> 00:13:04,280
+utilization this is not necessarily the
+
+00:13:01,760 --> 00:13:06,500
+best possible throughput the best
+
+00:13:04,280 --> 00:13:08,570
+possible food came with 100% CPU
+
+00:13:06,500 --> 00:13:10,760
+sensation so while those are good hero
+
+00:13:08,570 --> 00:13:12,680
+numbers the actual thing that will
+
+00:13:10,760 --> 00:13:14,960
+probably work for us in practice is to
+
+00:13:12,680 --> 00:13:17,810
+also have some serialization so I'll
+
+00:13:14,960 --> 00:13:19,670
+talk about that and again for the other
+
+00:13:17,810 --> 00:13:21,790
+settings that we did we had the SD FM
+
+00:13:19,670 --> 00:13:25,190
+setting for RSS
+
+00:13:21,790 --> 00:13:27,350
+so this is the numbers for just basic
+
+00:13:25,190 --> 00:13:30,050
+micro benchmarking so you can see that
+
+00:13:27,350 --> 00:13:33,740
+going from UDP to tea packets v2 you've
+
+00:13:30,050 --> 00:13:37,190
+almost doubled the troop the last barn
+
+00:13:33,740 --> 00:13:39,709
+the histogram is for v3 and if I set it
+
+00:13:37,190 --> 00:13:41,180
+up so that I try to get the best part of
+
+00:13:39,709 --> 00:13:43,130
+the throughput it would be the same or
+
+00:13:41,180 --> 00:13:45,110
+better than v2 but we deliberately
+
+00:13:43,130 --> 00:13:47,390
+screech it around a bit so that we
+
+00:13:45,110 --> 00:13:50,899
+actually managed to have CP utilization
+
+00:13:47,390 --> 00:13:54,500
+that works only about 50% what did we do
+
+00:13:50,899 --> 00:13:55,880
+to get that so we had 64 clients for a
+
+00:13:54,500 --> 00:13:57,740
+single server and he tried a few
+
+00:13:55,880 --> 00:14:00,020
+different types of settings for the
+
+00:13:57,740 --> 00:14:02,420
+number of frames per block so if you set
+
+00:14:00,020 --> 00:14:04,580
+up 16 frames per block for a single
+
+00:14:02,420 --> 00:14:06,470
+burst of 64 clients you can fill up four
+
+00:14:04,580 --> 00:14:08,480
+blocks immediately so the client gets
+
+00:14:06,470 --> 00:14:10,670
+the application gets woken up its charge
+
+00:14:08,480 --> 00:14:12,170
+processing one block when it releases it
+
+00:14:10,670 --> 00:14:14,180
+there are still three other block so it
+
+00:14:12,170 --> 00:14:15,560
+can keep spinning arm CPU is a large
+
+00:14:14,180 --> 00:14:18,080
+zero percent idle you get the best
+
+00:14:15,560 --> 00:14:20,540
+possible throughput at the other end of
+
+00:14:18,080 --> 00:14:23,930
+the spectrum if you put 64 frames in one
+
+00:14:20,540 --> 00:14:25,880
+block you have the worst coming in
+
+00:14:23,930 --> 00:14:27,290
+application gets woken up it has to
+
+00:14:25,880 --> 00:14:29,480
+process everything and flush the block
+
+00:14:27,290 --> 00:14:31,100
+and then give the block back to the
+
+00:14:29,480 --> 00:14:31,520
+kernel and the next block is filled and
+
+00:14:31,100 --> 00:14:34,250
+so on
+
+00:14:31,520 --> 00:14:35,990
+so the best possible balance is when you
+
+00:14:34,250 --> 00:14:37,640
+have 32 frames per block because when
+
+00:14:35,990 --> 00:14:39,920
+what happens is you have the application
+
+00:14:37,640 --> 00:14:41,270
+processing a block in user space and at
+
+00:14:39,920 --> 00:14:42,050
+the same time the kernel is filling in
+
+00:14:41,270 --> 00:14:44,330
+the next block
+
+00:14:42,050 --> 00:14:45,560
+right so that gave me about in this in
+
+00:14:44,330 --> 00:14:48,620
+this experiment it gave me about 35
+
+00:14:45,560 --> 00:14:50,660
+percent idle for the CPU and if you try
+
+00:14:48,620 --> 00:14:53,209
+expose you it's always one half if you
+
+00:14:50,660 --> 00:14:55,279
+go to 128 clients then the best possible
+
+00:14:53,209 --> 00:14:58,940
+number is for 64 clients per block so
+
+00:14:55,279 --> 00:15:01,070
+what this what this suggests is that if
+
+00:14:58,940 --> 00:15:03,320
+you could statistically sample your
+
+00:15:01,070 --> 00:15:05,300
+infiltrating and dynamically adjust the
+
+00:15:03,320 --> 00:15:07,250
+Facebook lock you could make sure that
+
+00:15:05,300 --> 00:15:08,779
+your frames per block is about half and
+
+00:15:07,250 --> 00:15:10,520
+you know that's that's an interesting
+
+00:15:08,779 --> 00:15:12,940
+thing to try don't it's not possible
+
+00:15:10,520 --> 00:15:16,640
+today but it's something to think about
+
+00:15:12,940 --> 00:15:18,770
+so just to reiterate what I just said
+
+00:15:16,640 --> 00:15:20,480
+well okay not looking just at a
+
+00:15:18,770 --> 00:15:22,100
+throughput we're also looking at CP
+
+00:15:20,480 --> 00:15:25,040
+utilization and the number of times you
+
+00:15:22,100 --> 00:15:27,800
+fall back to fall for UDP receive a
+
+00:15:25,040 --> 00:15:29,900
+message and T packet be to the CPUs get
+
+00:15:27,800 --> 00:15:31,430
+100% busy and a steady state you never
+
+00:15:29,900 --> 00:15:35,630
+fall dr. pol there's always something
+
+00:15:31,430 --> 00:15:37,430
+coming in with T packet d3
+
+00:15:35,630 --> 00:15:39,380
+you are able to adjust this a bit more
+
+00:15:37,430 --> 00:15:42,350
+we actually saw average posts per second
+
+00:15:39,380 --> 00:15:43,940
+ago 13.7 and you know what were the
+
+00:15:42,350 --> 00:15:45,680
+surgeons if the client if not cannot
+
+00:15:43,940 --> 00:15:48,339
+step up your receive by the silver has
+
+00:15:45,680 --> 00:15:51,950
+better control over the vacuum this way
+
+00:15:48,339 --> 00:15:53,390
+so what's happening right now right now
+
+00:15:51,950 --> 00:15:56,630
+I'm trying to take all of this and put
+
+00:15:53,390 --> 00:15:58,640
+it into the IP CLW library and finding
+
+00:15:56,630 --> 00:16:02,360
+out where the rubber hits the road so
+
+00:15:58,640 --> 00:16:04,580
+one of the things is that now that I
+
+00:16:02,360 --> 00:16:06,140
+have to provide an entire frame I have
+
+00:16:04,580 --> 00:16:07,880
+to supply the ethernet header and the IP
+
+00:16:06,140 --> 00:16:09,680
+header so that means I have to be
+
+00:16:07,880 --> 00:16:11,720
+correctly synced up with the colonel's
+
+00:16:09,680 --> 00:16:13,730
+control plane with the current cid and
+
+00:16:11,720 --> 00:16:16,250
+our state so as means I had to keep
+
+00:16:13,730 --> 00:16:19,040
+track of a separatist reg that tracks
+
+00:16:16,250 --> 00:16:21,350
+all of this or changes to state and that
+
+00:16:19,040 --> 00:16:24,470
+extra work that needs to be done
+
+00:16:21,350 --> 00:16:25,730
+I am also punting on the fragmentation
+
+00:16:24,470 --> 00:16:28,400
+and reassembly but I can't do that
+
+00:16:25,730 --> 00:16:30,770
+forever so when I run this in production
+
+00:16:28,400 --> 00:16:33,260
+I might not be even able to set jumble
+
+00:16:30,770 --> 00:16:35,630
+on the first half switch so at that
+
+00:16:33,260 --> 00:16:37,700
+point I really need to figure out where
+
+00:16:35,630 --> 00:16:39,970
+to do the IP strike and reassembly
+
+00:16:37,700 --> 00:16:44,060
+either in user space or the kernel and
+
+00:16:39,970 --> 00:16:46,880
+this is where the request for UFO comes
+
+00:16:44,060 --> 00:16:50,779
+in I'll give some numbers to support
+
+00:16:46,880 --> 00:16:52,490
+that request so the other thing is UDP
+
+00:16:50,779 --> 00:16:54,350
+checksum right now I'm cheating and not
+
+00:16:52,490 --> 00:16:55,850
+providing a UDP checksum but I can't do
+
+00:16:54,350 --> 00:16:58,970
+that in production I have to give a UDP
+
+00:16:55,850 --> 00:17:02,240
+checksum and I know that everybody likes
+
+00:16:58,970 --> 00:17:04,429
+to curse out escape off but escape us or
+
+00:17:02,240 --> 00:17:05,990
+not all badness the fact that there is
+
+00:17:04,429 --> 00:17:07,429
+an escape before the bottom end of TF
+
+00:17:05,990 --> 00:17:11,059
+socket is kind of nice because I can
+
+00:17:07,429 --> 00:17:15,490
+offload checksum at that point assuming
+
+00:17:11,059 --> 00:17:19,130
+that the packet is within the MPO so
+
+00:17:15,490 --> 00:17:22,910
+when all of this is done the next thing
+
+00:17:19,130 --> 00:17:26,329
+that I will do is to run this with our
+
+00:17:22,910 --> 00:17:28,010
+CR test bench benchmark so what a CRS
+
+00:17:26,329 --> 00:17:30,470
+it's a cluster atomic benchmark which
+
+00:17:28,010 --> 00:17:32,090
+simulates a typical our DBMS workload
+
+00:17:30,470 --> 00:17:34,160
+and the results of all these details is
+
+00:17:32,090 --> 00:17:36,290
+just to show what kind of complexities
+
+00:17:34,160 --> 00:17:39,650
+there in the backend and why this is not
+
+00:17:36,290 --> 00:17:41,570
+just network i/o so the CRS test suite
+
+00:17:39,650 --> 00:17:43,270
+can switch between various types of
+
+00:17:41,570 --> 00:17:45,980
+transports it can switch between
+
+00:17:43,270 --> 00:17:48,470
+InfiniBand and our DMA can do UDP can do
+
+00:17:45,980 --> 00:17:50,510
+our HTTP what
+
+00:17:48,470 --> 00:17:52,340
+it does is it simulates a lock
+
+00:17:50,510 --> 00:17:54,530
+management service which actually
+
+00:17:52,340 --> 00:17:57,080
+contacts a real Exadata database in the
+
+00:17:54,530 --> 00:17:58,940
+backend and warms up it's its buffer
+
+00:17:57,080 --> 00:18:00,620
+cache we call these Xcode buffers so
+
+00:17:58,940 --> 00:18:03,110
+what that means is a single database
+
+00:18:00,620 --> 00:18:05,299
+instance holds the lock buffer and then
+
+00:18:03,110 --> 00:18:08,390
+a client comes in and asks for a block
+
+00:18:05,299 --> 00:18:10,370
+from that instance of ownership so you
+
+00:18:08,390 --> 00:18:12,169
+have to get a read-only copy and then
+
+00:18:10,370 --> 00:18:15,409
+ship it this is the 8k packet that gets
+
+00:18:12,169 --> 00:18:18,679
+sent out so all of this is very CPU
+
+00:18:15,409 --> 00:18:20,750
+bound so given that the back-end stuff
+
+00:18:18,679 --> 00:18:23,360
+is CPU bound given that the input is
+
+00:18:20,750 --> 00:18:25,010
+coming in as fast as possible then CP
+
+00:18:23,360 --> 00:18:27,289
+utilization is the bottom if we don't
+
+00:18:25,010 --> 00:18:29,140
+want to waste any more CPU cycles on
+
+00:18:27,289 --> 00:18:31,280
+anything that we don't have to and
+
+00:18:29,140 --> 00:18:34,940
+especially fragmentation and reassembly
+
+00:18:31,280 --> 00:18:37,700
+if my NIC can do it for me I can spend
+
+00:18:34,940 --> 00:18:43,400
+my CPU cycles doing others so this is
+
+00:18:37,700 --> 00:18:46,669
+where us hole comes in so another some
+
+00:18:43,400 --> 00:18:48,289
+actual data to support that UFO claim so
+
+00:18:46,669 --> 00:18:49,730
+we ran the sphere test of speed and
+
+00:18:48,289 --> 00:18:53,059
+initially the objective was just to
+
+00:18:49,730 --> 00:18:54,500
+compare RDS TCP performance with UDP the
+
+00:18:53,059 --> 00:18:57,230
+initial thing was just to make sure our
+
+00:18:54,500 --> 00:18:59,539
+dctp did not regress so the fear tester
+
+00:18:57,230 --> 00:19:01,460
+suite can run this with different sets
+
+00:18:59,539 --> 00:19:03,919
+of clients will be 13 to 1 to 4 all the
+
+00:19:01,460 --> 00:19:06,020
+way up to 64 and for each value of n
+
+00:19:03,919 --> 00:19:08,419
+clients what it will do is it will give
+
+00:19:06,020 --> 00:19:10,400
+me the throughput and latency both so
+
+00:19:08,419 --> 00:19:11,659
+when you're running this test suite one
+
+00:19:10,400 --> 00:19:13,669
+of the things we thought is let's just
+
+00:19:11,659 --> 00:19:15,950
+try a poor-man's UDP offload let's just
+
+00:19:13,669 --> 00:19:18,980
+put jumbo in there and see how what it
+
+00:19:15,950 --> 00:19:21,740
+does the results are actually quite
+
+00:19:18,980 --> 00:19:25,010
+interesting so there's a number of
+
+00:19:21,740 --> 00:19:28,309
+things with this graph the x axis shows
+
+00:19:25,010 --> 00:19:30,440
+the throughput in thousands of packets
+
+00:19:28,309 --> 00:19:33,440
+for thousands of logs per second each
+
+00:19:30,440 --> 00:19:36,470
+block is 8 K bytes the y-axis gives you
+
+00:19:33,440 --> 00:19:37,730
+the latency in microseconds each data
+
+00:19:36,470 --> 00:19:41,510
+point and there is for a certain number
+
+00:19:37,730 --> 00:19:44,960
+of lines so for example this is 64
+
+00:19:41,510 --> 00:19:48,110
+clients this is 1 2 and so on
+
+00:19:44,960 --> 00:19:51,169
+then the graphs themselves this is block
+
+00:19:48,110 --> 00:19:52,970
+UDP this is already HTTP our DHCP with
+
+00:19:51,169 --> 00:19:55,159
+jumbo frames and this is UDP which
+
+00:19:52,970 --> 00:19:56,780
+number friends so a lot of questions
+
+00:19:55,159 --> 00:19:59,720
+come up when you look at this graph what
+
+00:19:56,780 --> 00:20:01,810
+is this flat part what is this wall so
+
+00:19:59,720 --> 00:20:04,270
+the flat part is that
+
+00:20:01,810 --> 00:20:06,550
+as you add more clients in you have
+
+00:20:04,270 --> 00:20:08,620
+still not hit the server-side bottling
+
+00:20:06,550 --> 00:20:11,800
+so what happens is there's more client
+
+00:20:08,620 --> 00:20:13,930
+here latency is staying the same but in
+
+00:20:11,800 --> 00:20:16,480
+throughput is increasing at some point
+
+00:20:13,930 --> 00:20:17,740
+your HP server side bottleneck so that's
+
+00:20:16,480 --> 00:20:20,110
+when you hit the wall so you add more
+
+00:20:17,740 --> 00:20:21,630
+clients and your throughput stays the
+
+00:20:20,110 --> 00:20:24,880
+same but your latency keeps increasing
+
+00:20:21,630 --> 00:20:27,100
+so otherwise next question is why is the
+
+00:20:24,880 --> 00:20:29,260
+wall for we call this a wall the
+
+00:20:27,100 --> 00:20:32,710
+vertical line so why is the wall for our
+
+00:20:29,260 --> 00:20:34,690
+DSD TP to the right of unity what
+
+00:20:32,710 --> 00:20:36,490
+happens with CDP is that we still have
+
+00:20:34,690 --> 00:20:38,470
+to do this guaranteed reliable order
+
+00:20:36,490 --> 00:20:40,570
+delivery and so on and we do this with
+
+00:20:38,470 --> 00:20:42,250
+all this sequence numbers and acts and
+
+00:20:40,570 --> 00:20:45,400
+retransmits and all of that stuff in
+
+00:20:42,250 --> 00:20:48,340
+userspace so each client is doing a mini
+
+00:20:45,400 --> 00:20:50,200
+TCP congestion issues but it's all the
+
+00:20:48,340 --> 00:20:53,770
+way the user space so it's vulnerable to
+
+00:20:50,200 --> 00:20:55,180
+scheduling delays on the other hand PCP
+
+00:20:53,770 --> 00:20:57,310
+is doing this in a much more efficient
+
+00:20:55,180 --> 00:21:00,450
+way as one congestion machine in the
+
+00:20:57,310 --> 00:21:04,690
+kernel so it's able to get much better
+
+00:21:00,450 --> 00:21:07,600
+server latency than the UDP case so then
+
+00:21:04,690 --> 00:21:09,220
+what happens when we go to jumbo the
+
+00:21:07,600 --> 00:21:11,740
+guys look at this and they said why is
+
+00:21:09,220 --> 00:21:13,900
+it that for jumbo UTeach RDS PCP doesn't
+
+00:21:11,740 --> 00:21:16,060
+move as much to the right as UDP does so
+
+00:21:13,900 --> 00:21:17,980
+what happens to the UDP is you went from
+
+00:21:16,060 --> 00:21:20,680
+464 clients he went from the latency of
+
+00:21:17,980 --> 00:21:23,260
+about 2,700 microseconds to a latency
+
+00:21:20,680 --> 00:21:26,140
+over 18 hundred microseconds and your
+
+00:21:23,260 --> 00:21:27,850
+wall went from like twenty three twenty
+
+00:21:26,140 --> 00:21:29,740
+four hundred twenty four thousand blocks
+
+00:21:27,850 --> 00:21:32,250
+per second to about 34,000 locks per
+
+00:21:29,740 --> 00:21:34,510
+second so that was very impressive so
+
+00:21:32,250 --> 00:21:35,770
+and then they had no changes to the
+
+00:21:34,510 --> 00:21:41,050
+application code so they just loved it
+
+00:21:35,770 --> 00:21:44,650
+so this is just what I just said so the
+
+00:21:41,050 --> 00:21:46,210
+question was why is jumbo being making
+
+00:21:44,650 --> 00:21:48,640
+such a big difference for UDP but nasty
+
+00:21:46,210 --> 00:21:50,410
+VT so unity protocol layer is mostly
+
+00:21:48,640 --> 00:21:52,690
+stateless it just as a simple header and
+
+00:21:50,410 --> 00:21:55,300
+most of the heavy lifting is being done
+
+00:21:52,690 --> 00:21:56,560
+with fragmentation and reassembly right
+
+00:21:55,300 --> 00:21:58,660
+when you do jumbo you're taking away
+
+00:21:56,560 --> 00:22:01,240
+that load and so things get much faster
+
+00:21:58,660 --> 00:22:03,400
+the suicide latency gets much better now
+
+00:22:01,240 --> 00:22:05,560
+TCP already has TSO and is already
+
+00:22:03,400 --> 00:22:08,950
+sending pretty large packets down to the
+
+00:22:05,560 --> 00:22:11,110
+driver at the same time tcp even with
+
+00:22:08,950 --> 00:22:13,390
+TSO still has to do some a lot of work
+
+00:22:11,110 --> 00:22:15,770
+to keep track of protocol state so
+
+00:22:13,390 --> 00:22:19,550
+whilst RDS tcp does Ben
+
+00:22:15,770 --> 00:22:21,560
+it from jumbo frames it's not as much so
+
+00:22:19,550 --> 00:22:23,480
+the model the theory is given that we
+
+00:22:21,560 --> 00:22:27,440
+have so many UDP based protocols coming
+
+00:22:23,480 --> 00:22:29,000
+up so UFO would be really nice to have
+
+00:22:27,440 --> 00:22:32,900
+no changes to application and suddenly
+
+00:22:29,000 --> 00:22:35,360
+everything got so much better I'll come
+
+00:22:32,900 --> 00:22:37,850
+back to that in a bit but some of the
+
+00:22:35,360 --> 00:22:40,370
+other lessons learnt along the way
+
+00:22:37,850 --> 00:22:40,940
+so one is system tuning has to be done
+
+00:22:40,370 --> 00:22:43,550
+with caution
+
+00:22:40,940 --> 00:22:45,830
+even though we I complained initially
+
+00:22:43,550 --> 00:22:48,050
+about DP DK not doing being fair to
+
+00:22:45,830 --> 00:22:50,030
+other network protocols I'm also doing
+
+00:22:48,050 --> 00:22:51,170
+that when I do s DSM that's not
+
+00:22:50,030 --> 00:22:54,320
+something that's going to fly in
+
+00:22:51,170 --> 00:22:56,360
+production when you actually run this in
+
+00:22:54,320 --> 00:22:58,760
+production I cannot disable iommu I
+
+00:22:56,360 --> 00:23:00,980
+cannot turn off Ethernet flow control I
+
+00:22:58,760 --> 00:23:03,020
+cannot go and tweak this couldn't
+
+00:23:00,980 --> 00:23:04,760
+tunable to savour some types of
+
+00:23:03,020 --> 00:23:05,990
+connected sockets versus others because
+
+00:23:04,760 --> 00:23:07,070
+there are a number of other services
+
+00:23:05,990 --> 00:23:08,840
+running on these machines
+
+00:23:07,070 --> 00:23:10,670
+some people are doing rocky other people
+
+00:23:08,840 --> 00:23:14,750
+are doing different kinds of and assess
+
+00:23:10,670 --> 00:23:16,910
+so tuning one cannot hurt the other also
+
+00:23:14,750 --> 00:23:18,980
+when you do this in production things
+
+00:23:16,910 --> 00:23:20,780
+like TCP dumps need to continue to be
+
+00:23:18,980 --> 00:23:23,240
+able to work because that's what we need
+
+00:23:20,780 --> 00:23:27,260
+to be able to do win we actually debug
+
+00:23:23,240 --> 00:23:29,600
+problems the other takeaway from all of
+
+00:23:27,260 --> 00:23:31,940
+this was I need to do fragmentation and
+
+00:23:29,600 --> 00:23:35,270
+reassembly somewhere and that is
+
+00:23:31,940 --> 00:23:36,890
+non-trivial obviously the kernel does it
+
+00:23:35,270 --> 00:23:39,350
+and it struggles to do it but it's the
+
+00:23:36,890 --> 00:23:40,760
+policy we've been working on this for
+
+00:23:39,350 --> 00:23:42,680
+many years so it probably does it in a
+
+00:23:40,760 --> 00:23:46,160
+smart way so that is an issue that I
+
+00:23:42,680 --> 00:23:47,630
+have to deal with the other thing here
+
+00:23:46,160 --> 00:23:51,020
+is something that has been touched on
+
+00:23:47,630 --> 00:23:53,120
+before the thing that Steven said in the
+
+00:23:51,020 --> 00:23:54,860
+morning can you do this without having
+
+00:23:53,120 --> 00:24:00,410
+to have the application bend over
+
+00:23:54,860 --> 00:24:02,390
+backwards lock onto that so even it's
+
+00:24:00,410 --> 00:24:03,830
+all of this zero copy and shared memory
+
+00:24:02,390 --> 00:24:06,320
+I cannot really use that this is a
+
+00:24:03,830 --> 00:24:07,910
+library which is using send message so
+
+00:24:06,320 --> 00:24:09,410
+it's giving the receive message and it's
+
+00:24:07,910 --> 00:24:11,780
+giving me a buffer it thinks it owns the
+
+00:24:09,410 --> 00:24:13,310
+buffer I am now have if I now go and
+
+00:24:11,780 --> 00:24:14,630
+tell them well you own the buffer but
+
+00:24:13,310 --> 00:24:16,070
+then you have to turn on the spit and
+
+00:24:14,630 --> 00:24:17,270
+hand it back to the kernel and sometimes
+
+00:24:16,070 --> 00:24:18,980
+it belongs to you and sometimes it
+
+00:24:17,270 --> 00:24:22,430
+belongs to the kernel that's a lot of
+
+00:24:18,980 --> 00:24:25,010
+changes in the library the closest thing
+
+00:24:22,430 --> 00:24:28,580
+that does that in IP CLW today is as
+
+00:24:25,010 --> 00:24:29,480
+somebody pointed out our DMA so what I'm
+
+00:24:28,580 --> 00:24:31,160
+working on right now
+
+00:24:29,480 --> 00:24:32,720
+is trying to figure out what RDMA is
+
+00:24:31,160 --> 00:24:34,850
+doing with all of this memory regions
+
+00:24:32,720 --> 00:24:39,020
+and stuff and trying to map the same
+
+00:24:34,850 --> 00:24:40,400
+things for the standard Ethernet tcp/ip
+
+00:24:39,020 --> 00:24:42,440
+path so that it doesn't release be a
+
+00:24:40,400 --> 00:24:44,690
+packet socket but that seems to be where
+
+00:24:42,440 --> 00:24:46,580
+we are headed at this point now on the
+
+00:24:44,690 --> 00:24:48,650
+other hand when we shave off the V copy
+
+00:24:46,580 --> 00:24:50,240
+on the RX side which is a function of
+
+00:24:48,650 --> 00:24:51,500
+John Testament that's a good thing
+
+00:24:50,240 --> 00:24:54,440
+because that's doing things without
+
+00:24:51,500 --> 00:24:57,559
+asking me to change all of my library
+
+00:24:54,440 --> 00:25:03,710
+api's so that's the sort of thing that
+
+00:24:57,559 --> 00:25:06,530
+is welcome but you know so what's
+
+00:25:03,710 --> 00:25:09,320
+happening now is as I said I'm working
+
+00:25:06,530 --> 00:25:12,470
+on converting the IP CLW libraries to
+
+00:25:09,320 --> 00:25:15,710
+use the packet v2 and v3 in the best
+
+00:25:12,470 --> 00:25:17,360
+possible way the short way I have things
+
+00:25:15,710 --> 00:25:18,770
+working but they are using a mem copy
+
+00:25:17,360 --> 00:25:21,919
+into user space buffer so that
+
+00:25:18,770 --> 00:25:24,980
+definitely save me anything so I need to
+
+00:25:21,919 --> 00:25:27,710
+make it also leverage the shared memory
+
+00:25:24,980 --> 00:25:29,809
+part of it what I would like to have is
+
+00:25:27,710 --> 00:25:31,940
+not I need to deal with fragmentation
+
+00:25:29,809 --> 00:25:35,900
+and reassembly at some point so I'm
+
+00:25:31,940 --> 00:25:38,299
+trying to get some pushing I'm trying to
+
+00:25:35,900 --> 00:25:40,490
+push my UFO I understand that the
+
+00:25:38,299 --> 00:25:44,210
+problems with UFO are doing check sums
+
+00:25:40,490 --> 00:25:45,679
+of 64 65 K packets but if I have a 65 K
+
+00:25:44,210 --> 00:25:47,840
+packet I have to do that in the stack
+
+00:25:45,679 --> 00:25:50,049
+today anyway and I am willing to
+
+00:25:47,840 --> 00:25:52,730
+compromise and say if you can give me
+
+00:25:50,049 --> 00:25:54,710
+UFO and check them afloat for up to 9 K
+
+00:25:52,730 --> 00:25:56,540
+packets that's good enough for me so
+
+00:25:54,710 --> 00:25:59,750
+that I'll go I'd say I'll do it in
+
+00:25:56,540 --> 00:26:01,850
+software for the bigger package the
+
+00:25:59,750 --> 00:26:05,179
+other scientist kai thing is that if all
+
+00:26:01,850 --> 00:26:06,860
+of this works somebody suggested that it
+
+00:26:05,179 --> 00:26:09,530
+might be nice to have the same sort of
+
+00:26:06,860 --> 00:26:11,210
+shims for other sake types like ideas so
+
+00:26:09,530 --> 00:26:16,250
+that's another thing down the road that
+
+00:26:11,210 --> 00:26:22,070
+we may wanted to pursue so that's what I
+
+00:26:16,250 --> 00:26:26,750
+had key questions great so remembering
+
+00:26:22,070 --> 00:26:29,210
+back in my early long ago um there was
+
+00:26:26,750 --> 00:26:34,070
+actually impersonate cops we discussed
+
+00:26:29,210 --> 00:26:36,740
+the problem that NFS over UDP gets data
+
+00:26:34,070 --> 00:26:39,620
+corruption and the reason is is because
+
+00:26:36,740 --> 00:26:41,750
+the IP sequence numbers are short and
+
+00:26:39,620 --> 00:26:42,559
+gets recycled fairly fast even on a one
+
+00:26:41,750 --> 00:26:44,389
+gig network
+
+00:26:42,559 --> 00:26:47,509
+a 10 gig network I think it's like 10
+
+00:26:44,389 --> 00:26:50,379
+seconds so how do you keep Oracle from
+
+00:26:47,509 --> 00:26:54,379
+getting data corruption do you have some
+
+00:26:50,379 --> 00:26:59,779
+on large UDP packets if you're going to
+
+00:26:54,379 --> 00:27:02,570
+start getting fragmentation so uh an
+
+00:26:59,779 --> 00:27:04,399
+effective entity speed but no it used to
+
+00:27:02,570 --> 00:27:06,740
+run over UDP and then you could also run
+
+00:27:04,399 --> 00:27:11,269
+over TCP if you ran it over UDP you got
+
+00:27:06,740 --> 00:27:13,879
+data corruption right so we actually
+
+00:27:11,269 --> 00:27:14,929
+rely on the kernel unity module and the
+
+00:27:13,879 --> 00:27:16,039
+kernel need to be check time to make
+
+00:27:14,929 --> 00:27:19,940
+take care of it check something the
+
+00:27:16,039 --> 00:27:24,200
+thing is that you can get the IP checks
+
+00:27:19,940 --> 00:27:27,559
+our UDP checksum that is not safe for
+
+00:27:24,200 --> 00:27:29,659
+data because you can there it there's
+
+00:27:27,559 --> 00:27:32,210
+too many cases where you can get data
+
+00:27:29,659 --> 00:27:34,759
+flips to get the same checksum yeah but
+
+00:27:32,210 --> 00:27:36,860
+you also have even the checksum right no
+
+00:27:34,759 --> 00:27:38,779
+but that doesn't cover a fragmented UDP
+
+00:27:36,860 --> 00:27:41,360
+packet of what you have happen is you
+
+00:27:38,779 --> 00:27:44,059
+have a foot one fragmented UDP packet
+
+00:27:41,360 --> 00:27:47,690
+this one IP segment of it
+
+00:27:44,059 --> 00:27:49,610
+yes it's hanging around and another one
+
+00:27:47,690 --> 00:27:53,929
+comes along that just happens to hit the
+
+00:27:49,610 --> 00:27:57,590
+same we have the quench number and maybe
+
+00:27:53,929 --> 00:27:59,629
+the checksum comes through clean and
+
+00:27:57,590 --> 00:28:00,679
+you'll get data corruption yeah we
+
+00:27:59,629 --> 00:28:03,259
+haven't seen this in practice
+
+00:28:00,679 --> 00:28:05,240
+ok IBM burp I think was rusty reported
+
+00:28:03,259 --> 00:28:07,220
+IBM had seen it but the database also
+
+00:28:05,240 --> 00:28:16,399
+does its own cross-checking of the
+
+00:28:07,220 --> 00:28:19,039
+payload ok what was the Linux version
+
+00:28:16,399 --> 00:28:23,169
+you use it for the comparison between
+
+00:28:19,039 --> 00:28:25,789
+UDP and packet because the 100 percent
+
+00:28:23,169 --> 00:28:29,590
+difference looks fun to me which
+
+00:28:25,789 --> 00:28:39,049
+balances when you compare UDP versus
+
+00:28:29,590 --> 00:28:41,029
+histogram this one yeah okay let's do
+
+00:28:39,049 --> 00:28:43,490
+you remember what what was the Linux
+
+00:28:41,029 --> 00:28:45,889
+version during your test what are the
+
+00:28:43,490 --> 00:28:47,840
+what I did a Linux version the Linux I
+
+00:28:45,889 --> 00:28:51,350
+Taliban did I was using some versions
+
+00:28:47,840 --> 00:28:53,539
+and exited 4.9 something oh the cousin
+
+00:28:51,350 --> 00:28:55,559
+number were completely changing for that
+
+00:28:53,539 --> 00:28:57,389
+it doesn't really recent it was so
+
+00:28:55,559 --> 00:29:01,019
+got nine two four ten something in the
+
+00:28:57,389 --> 00:29:04,440
+green know the tundra went in 4.11 but
+
+00:29:01,019 --> 00:29:06,419
+that's why mmm I could find exact you
+
+00:29:04,440 --> 00:29:10,080
+shouldn't have this difference between
+
+00:29:06,419 --> 00:29:11,940
+European key packets anymore so okay
+
+00:29:10,080 --> 00:29:15,509
+whether a specific combination of for
+
+00:29:11,940 --> 00:29:19,919
+all the commits Kazan by Paula Ebben II
+
+00:29:15,509 --> 00:29:27,559
+from regatta okay okay I can find you
+
+00:29:19,919 --> 00:29:30,240
+the exact RC and get back to you hi so I
+
+00:29:27,559 --> 00:29:32,100
+I really would like to discourage you
+
+00:29:30,240 --> 00:29:33,899
+from using tea packet it seems like a
+
+00:29:32,100 --> 00:29:35,490
+lot of duplication your application and
+
+00:29:33,899 --> 00:29:37,679
+a lot of synchronization of state in the
+
+00:29:35,490 --> 00:29:39,179
+control plane it sounds to me like you
+
+00:29:37,679 --> 00:29:41,879
+need as you said receive multiple
+
+00:29:39,179 --> 00:29:44,220
+message and but what you also it sounds
+
+00:29:41,879 --> 00:29:47,299
+like to me that you don't have is you
+
+00:29:44,220 --> 00:29:50,070
+need a send multiple message that paces
+
+00:29:47,299 --> 00:29:51,090
+that's a fair statement because you
+
+00:29:50,070 --> 00:29:53,090
+don't want it you don't want to have a
+
+00:29:51,090 --> 00:29:55,499
+burstiness on the send either
+
+00:29:53,090 --> 00:29:57,059
+so the send multiple message goes back
+
+00:29:55,499 --> 00:29:59,700
+to what I said about the Exide batching
+
+00:29:57,059 --> 00:30:01,110
+because this is a first response it's
+
+00:29:59,700 --> 00:30:02,519
+kind of risky to do send multiple
+
+00:30:01,110 --> 00:30:04,259
+message because you're going to wake up
+
+00:30:02,519 --> 00:30:07,440
+a batch of right so if you had a paste
+
+00:30:04,259 --> 00:30:09,299
+version of that where you could say I
+
+00:30:07,440 --> 00:30:11,669
+don't want to spam the network I want
+
+00:30:09,299 --> 00:30:13,889
+you to send these but but but I want you
+
+00:30:11,669 --> 00:30:15,809
+to put some delay between each one that
+
+00:30:13,889 --> 00:30:17,999
+would that would satisfy your need I
+
+00:30:15,809 --> 00:30:19,799
+think actually I I'm not sure I think
+
+00:30:17,999 --> 00:30:21,629
+that one of the big things one of the
+
+00:30:19,799 --> 00:30:25,169
+big benefits of the effect is the shared
+
+00:30:21,629 --> 00:30:27,059
+memory and that is why my IPCL w
+
+00:30:25,169 --> 00:30:29,340
+conversion is not seeing any big
+
+00:30:27,059 --> 00:30:32,070
+improvement over UDP at this point okay
+
+00:30:29,340 --> 00:30:33,809
+I think that saving the system call is
+
+00:30:32,070 --> 00:30:35,759
+part of fixity doing a shared memory the
+
+00:30:33,809 --> 00:30:38,850
+because the shared memory is probably
+
+00:30:35,759 --> 00:30:41,009
+the big part so then but then you have
+
+00:30:38,850 --> 00:30:42,299
+to do all this work particularly in the
+
+00:30:41,009 --> 00:30:44,369
+headers and all that other stuff that
+
+00:30:42,299 --> 00:30:47,129
+you need to take care of so you need
+
+00:30:44,369 --> 00:30:48,809
+something in between and I know what we
+
+00:30:47,129 --> 00:30:51,240
+don't have anything what what I what I
+
+00:30:48,809 --> 00:30:53,039
+wanted to really understand was when you
+
+00:30:51,240 --> 00:30:54,960
+set if I understood you right when you
+
+00:30:53,039 --> 00:30:56,970
+said when you set your your wakeup
+
+00:30:54,960 --> 00:30:59,100
+threshold with I guess it didn't matter
+
+00:30:56,970 --> 00:31:04,169
+whether it was tea packet or received
+
+00:30:59,100 --> 00:31:06,629
+multiple message to 6216 you said you
+
+00:31:04,169 --> 00:31:09,510
+were always at that slide yeah it was
+
+00:31:06,629 --> 00:31:11,669
+always it was always there's always data
+
+00:31:09,510 --> 00:31:13,470
+so presumably you woke up process 16
+
+00:31:11,669 --> 00:31:15,929
+sent some packets out the clients
+
+00:31:13,470 --> 00:31:18,150
+received their responses and so produced
+
+00:31:15,929 --> 00:31:19,410
+more more more data yeah that's what you
+
+00:31:18,150 --> 00:31:20,790
+said because they don't they don't they
+
+00:31:19,410 --> 00:31:23,130
+don't they don't send you date
+
+00:31:20,790 --> 00:31:25,440
+continuously they they wait for the
+
+00:31:23,130 --> 00:31:28,350
+response and send more yeah okay and
+
+00:31:25,440 --> 00:31:30,090
+then at 32 it was a balance but I
+
+00:31:28,350 --> 00:31:32,610
+noticed in your numbers so now I'm
+
+00:31:30,090 --> 00:31:35,760
+actually really surprised so you go from
+
+00:31:32,610 --> 00:31:39,750
+from zero percent utilization to 35
+
+00:31:35,760 --> 00:31:42,390
+percent for free yeah for idle yeah but
+
+00:31:39,750 --> 00:31:43,919
+your packet per second only goes down it
+
+00:31:42,390 --> 00:31:45,840
+didn't calculate the percentage but it
+
+00:31:43,919 --> 00:31:49,470
+looks like looks like it's about ten
+
+00:31:45,840 --> 00:31:51,080
+percent something like that right forty
+
+00:31:49,470 --> 00:31:54,059
+thousand on four hundred thousand
+
+00:31:51,080 --> 00:31:57,299
+packets right so that seems really
+
+00:31:54,059 --> 00:31:59,520
+surprising to me because it seems to me
+
+00:31:57,299 --> 00:32:04,549
+that that either must be a point in
+
+00:31:59,520 --> 00:32:07,380
+between 16 and 32 where you are in fact
+
+00:32:04,549 --> 00:32:09,000
+you like you've just hit a wall clearly
+
+00:32:07,380 --> 00:32:11,190
+you've hit a wall so it must be a point
+
+00:32:09,000 --> 00:32:14,280
+a little bit further back where your I
+
+00:32:11,190 --> 00:32:18,210
+your CPU idle is still significant so
+
+00:32:14,280 --> 00:32:20,549
+but your number is still almost 41 is so
+
+00:32:18,210 --> 00:32:22,559
+44,000 the reason we can unroll between
+
+00:32:20,549 --> 00:32:24,360
+16 in 52 because these go in powers of
+
+00:32:22,559 --> 00:32:26,880
+two so right so you just can't can't
+
+00:32:24,360 --> 00:32:30,030
+can't Ania that number okay so so that's
+
+00:32:26,880 --> 00:32:32,820
+that you could you could I don't know
+
+00:32:30,030 --> 00:32:33,809
+you could insert a 16 and then an EIN
+
+00:32:32,820 --> 00:32:36,240
+thing I got right
+
+00:32:33,809 --> 00:32:38,210
+maybe but oh yes I just wanted as is
+
+00:32:36,240 --> 00:32:41,040
+very surprised but but the point is that
+
+00:32:38,210 --> 00:32:42,990
+your your system clearly can offer a
+
+00:32:41,040 --> 00:32:44,700
+higher load and you could process more
+
+00:32:42,990 --> 00:32:46,140
+packets but you don't want to do that
+
+00:32:44,700 --> 00:32:47,669
+because I guess I understand what you're
+
+00:32:46,140 --> 00:32:50,220
+saying is that you wanted you're trying
+
+00:32:47,669 --> 00:32:51,840
+not to kill yourself processing them but
+
+00:32:50,220 --> 00:32:54,540
+that in fact there is in fact additional
+
+00:32:51,840 --> 00:32:57,120
+load and you're just you're just not
+
+00:32:54,540 --> 00:32:58,980
+accepting it yeah but that's because I
+
+00:32:57,120 --> 00:33:00,780
+know that in practice first of all my
+
+00:32:58,980 --> 00:33:02,970
+client is not going to be able to fill
+
+00:33:00,780 --> 00:33:04,140
+up the input files I know that and I was
+
+00:33:02,970 --> 00:33:06,720
+trying to simulate that for the bench
+
+00:33:04,140 --> 00:33:10,080
+micro benchmark right the other thing is
+
+00:33:06,720 --> 00:33:12,690
+that if I can still process a pretty
+
+00:33:10,080 --> 00:33:13,980
+good throughput and I keep the c2 and
+
+00:33:12,690 --> 00:33:15,480
+you keep the CPU idle for other
+
+00:33:13,980 --> 00:33:17,370
+applications that is interesting to me
+
+00:33:15,480 --> 00:33:18,690
+because it's not just the back and there
+
+00:33:17,370 --> 00:33:20,700
+might be other services running on the
+
+00:33:18,690 --> 00:33:22,360
+machine which wants the CPU utilization
+
+00:33:20,700 --> 00:33:25,450
+but how much
+
+00:33:22,360 --> 00:33:27,940
+that was because when you process 64 32
+
+00:33:25,450 --> 00:33:30,100
+at a time that you then caught woke up
+
+00:33:27,940 --> 00:33:32,320
+that many clients which then killed you
+
+00:33:30,100 --> 00:33:34,870
+again so I mean if you had an output at
+
+00:33:32,320 --> 00:33:40,120
+a send rate pacing would you be able to
+
+00:33:34,870 --> 00:33:41,110
+do something different because it sounds
+
+00:33:40,120 --> 00:33:42,750
+to me like that's what you're really
+
+00:33:41,110 --> 00:33:45,790
+experiencing is you're causing a
+
+00:33:42,750 --> 00:33:47,050
+stampeding herd every time you send some
+
+00:33:45,790 --> 00:33:50,590
+every time you wake up and you process
+
+00:33:47,050 --> 00:33:52,450
+some traffic at 64 then you wake up 64
+
+00:33:50,590 --> 00:33:55,090
+clients who then send you lots of data
+
+00:33:52,450 --> 00:33:57,880
+again I'm not just the herd though right
+
+00:33:55,090 --> 00:33:59,530
+I mean yes this is kind of an artificial
+
+00:33:57,880 --> 00:34:01,810
+thing because I have 64 clients and
+
+00:33:59,530 --> 00:34:03,310
+there is there's a bottleneck there but
+
+00:34:01,810 --> 00:34:04,450
+even if I had my clients I think by
+
+00:34:03,310 --> 00:34:06,280
+being able to balance things is a
+
+00:34:04,450 --> 00:34:07,960
+valuable thing but but at this point
+
+00:34:06,280 --> 00:34:09,850
+you're not pacing your output even with
+
+00:34:07,960 --> 00:34:11,680
+with tea packet you're not doing any
+
+00:34:09,850 --> 00:34:14,170
+kind of output pacing you're just
+
+00:34:11,680 --> 00:34:16,270
+letting the the driver take care of it
+
+00:34:14,170 --> 00:34:17,920
+pretty much you know gee packing you can
+
+00:34:16,270 --> 00:34:19,720
+just let the draw the driver take care
+
+00:34:17,920 --> 00:34:21,670
+with with send multiple you have to do
+
+00:34:19,720 --> 00:34:24,550
+the system call and change your own pick
+
+00:34:21,670 --> 00:34:29,410
+your own time to send great right okay
+
+00:34:24,550 --> 00:34:31,660
+thanks normal questions please what
+
+00:34:29,410 --> 00:34:33,700
+we'll put up on the penalty box if you
+
+00:34:31,660 --> 00:34:35,070
+want to talk to him but let's give a
+
+00:34:33,700 --> 00:34:36,850
+round of applause please
+
+00:34:35,070 --> 00:34:39,699
+[Applause]
+
+00:34:36,850 --> 00:34:39,699
+
+YouTube URL: https://www.youtube.com/watch?v=JFvuJySDZdk
+
+

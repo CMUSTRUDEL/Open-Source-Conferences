@@ -1,0 +1,4144 @@
+Title: "TLSv1.3 from scratch" - Joel Sing (LCA 2021 Online)
+Publication date: 2021-01-31
+Playlist: linux.conf.au 2021
+Description: 
+	Joel Sing
+
+https://lca2021.linux.org.au/schedule/presentation/50/
+
+Following the publication of RFC 8446 in August 2018, the LibreSSL project wanted to add support for TLSv1.3. However, rather than shoehorning it into the existing code used by the TLSv1.2 stack, it was decided that the slower approach of developing a new TLS stack from scratch would be preferable. Over the course of a year or so, three people worked for approximately six weeks to produce a TLS stack consisting of just under 7,000 lines of C code.
+
+This talk will look at the design decisions made and approaches taken while implementing a TLS stack from scratch. We'll discuss the challenges of fitting new code into an existing long standing API, along with various problems encountered due to assumptions made in existing open source software, particularly failure modes triggered by changes in API behaviour. Interoperability will be covered, along with approaches to testing complex protocols. We'll also look at some of the pitfalls and implementation complexities that originate from the RFC.
+
+linux.conf.au is a conference about the Linux operating system, and all aspects of the thriving ecosystem of Free and Open Source Software that has grown up around it. Run since 1999, in a different Australian or New Zealand city each year, by a team of local volunteers, LCA invites more than 500 people to learn from the people who shape the future of Open Source. For more information on the conference see https://linux.conf.au/
+
+Produced by Next Day Video Australia: https://nextdayvideo.com.au
+
+#linux.conf.au #linux #foss #opensource
+
+Sun Jan 24 16:40:00 2021 at Pia Andrews Conservatory
+Captions: 
+	00:00:10,820 --> 00:00:14,060
+[Music]
+
+00:00:15,280 --> 00:00:20,000
+to the internet
+
+00:00:16,320 --> 00:00:23,199
+and welcome to the last talk for the day
+
+00:00:20,000 --> 00:00:24,960
+did you know that rfc 8446 is a
+
+00:00:23,199 --> 00:00:25,680
+specification document published by the
+
+00:00:24,960 --> 00:00:28,880
+internet
+
+00:00:25,680 --> 00:00:30,960
+engineering task force which specifies
+
+00:00:28,880 --> 00:00:32,559
+the 1.3 version of the transport layer
+
+00:00:30,960 --> 00:00:34,320
+security protocol
+
+00:00:32,559 --> 00:00:36,320
+in this talk joel singh is going to tell
+
+00:00:34,320 --> 00:00:37,520
+us about the libra ssl project's
+
+00:00:36,320 --> 00:00:39,440
+decision to start
+
+00:00:37,520 --> 00:00:40,719
+a new stack to implement this
+
+00:00:39,440 --> 00:00:43,680
+specification
+
+00:00:40,719 --> 00:00:44,239
+instead of adopting adapting their
+
+00:00:43,680 --> 00:00:46,719
+existing
+
+00:00:44,239 --> 00:00:47,360
+code base joel was one of the three
+
+00:00:46,719 --> 00:00:50,160
+developers
+
+00:00:47,360 --> 00:00:51,840
+who took on this task and is also one of
+
+00:00:50,160 --> 00:00:54,640
+the founders of the libra ssl
+
+00:00:51,840 --> 00:00:55,840
+project in this question we are hoping
+
+00:00:54,640 --> 00:00:57,360
+to have time
+
+00:00:55,840 --> 00:00:59,280
+in this session we're hoping to have
+
+00:00:57,360 --> 00:01:00,239
+time for questions at the end of the
+
+00:00:59,280 --> 00:01:02,320
+talk so
+
+00:01:00,239 --> 00:01:04,320
+like we've been doing all day throw your
+
+00:01:02,320 --> 00:01:06,080
+questions up into the chat
+
+00:01:04,320 --> 00:01:07,760
+and then we'll have a conversation with
+
+00:01:06,080 --> 00:01:11,520
+joel after the talk
+
+00:01:07,760 --> 00:01:14,159
+but for now joel take it away
+
+00:01:11,520 --> 00:01:14,880
+thanks for the introduction the purpose
+
+00:01:14,159 --> 00:01:16,400
+of the
+
+00:01:14,880 --> 00:01:18,240
+several things that i'm hoping to sort
+
+00:01:16,400 --> 00:01:19,600
+of convey as far as this talk's
+
+00:01:18,240 --> 00:01:22,400
+concerned
+
+00:01:19,600 --> 00:01:24,240
+i'm going to try and avoid getting too
+
+00:01:22,400 --> 00:01:26,320
+deep into the trenches
+
+00:01:24,240 --> 00:01:27,680
+obviously there's a lot involved that we
+
+00:01:26,320 --> 00:01:29,280
+could talk about as far as
+
+00:01:27,680 --> 00:01:30,799
+the technical specifications the
+
+00:01:29,280 --> 00:01:33,040
+cryptography behind it
+
+00:01:30,799 --> 00:01:34,320
+but it's also to give you a look at the
+
+00:01:33,040 --> 00:01:36,720
+ins and insides
+
+00:01:34,320 --> 00:01:39,280
+to basically how the way that we
+
+00:01:36,720 --> 00:01:40,880
+approached this particular project
+
+00:01:39,280 --> 00:01:42,960
+why we decided to implement it from
+
+00:01:40,880 --> 00:01:46,720
+scratch and obviously some of the
+
+00:01:42,960 --> 00:01:46,720
+war stories along the way
+
+00:01:47,360 --> 00:01:51,280
+so before we dive in at a high level
+
+00:01:49,920 --> 00:01:53,920
+what does tls do
+
+00:01:51,280 --> 00:01:55,200
+well transport layer security is used to
+
+00:01:53,920 --> 00:01:57,840
+provide authentication
+
+00:01:55,200 --> 00:01:58,399
+privacy and data integrity the way that
+
+00:01:57,840 --> 00:01:59,759
+we do this
+
+00:01:58,399 --> 00:02:01,840
+is through the application of
+
+00:01:59,759 --> 00:02:03,600
+cryptography and
+
+00:02:01,840 --> 00:02:05,600
+in a lot of cases you know for example
+
+00:02:03,600 --> 00:02:06,479
+if we're using https we don't
+
+00:02:05,600 --> 00:02:09,360
+particularly
+
+00:02:06,479 --> 00:02:11,120
+care so much about you know what it's
+
+00:02:09,360 --> 00:02:13,040
+actually doing under the covers we care
+
+00:02:11,120 --> 00:02:14,319
+more about what it's actually providing
+
+00:02:13,040 --> 00:02:16,879
+to us but
+
+00:02:14,319 --> 00:02:17,680
+obviously you know as far as a tls stack
+
+00:02:16,879 --> 00:02:20,959
+is concerned
+
+00:02:17,680 --> 00:02:22,800
+we need to get into the nitty-gritty so
+
+00:02:20,959 --> 00:02:24,560
+as far as tls is concerned we mean
+
+00:02:22,800 --> 00:02:26,239
+authentication
+
+00:02:24,560 --> 00:02:28,080
+we're basically wanting to ensure that
+
+00:02:26,239 --> 00:02:30,640
+we're actually talking to the peer
+
+00:02:28,080 --> 00:02:32,720
+that we think we're talking to obviously
+
+00:02:30,640 --> 00:02:35,440
+we could be talking to someone else
+
+00:02:32,720 --> 00:02:37,120
+who's impersonating the other end and
+
+00:02:35,440 --> 00:02:40,160
+this would not be a good thing
+
+00:02:37,120 --> 00:02:42,000
+we want privacy in form of you know
+
+00:02:40,160 --> 00:02:43,920
+encryption and decryption so that we
+
+00:02:42,000 --> 00:02:44,959
+don't actually allow eavesdropping of
+
+00:02:43,920 --> 00:02:47,840
+our traffic
+
+00:02:44,959 --> 00:02:49,680
+and we also want integrity in the form
+
+00:02:47,840 --> 00:02:50,080
+of a mac or an aid which we'll talk
+
+00:02:49,680 --> 00:02:51,599
+about
+
+00:02:50,080 --> 00:02:53,680
+a little bit later on so that we can
+
+00:02:51,599 --> 00:02:56,800
+actually detect any modification that's
+
+00:02:53,680 --> 00:02:56,800
+been made to the data
+
+00:02:57,440 --> 00:03:00,720
+so a tls stack what does that actually
+
+00:03:00,239 --> 00:03:03,360
+do
+
+00:03:00,720 --> 00:03:04,560
+well you know we've got a bunch of steps
+
+00:03:03,360 --> 00:03:06,159
+at a very high level
+
+00:03:04,560 --> 00:03:08,159
+we have to negotiate the protocol
+
+00:03:06,159 --> 00:03:10,879
+version and the cryptographic parameters
+
+00:03:08,159 --> 00:03:12,239
+that we're going to use for this
+
+00:03:10,879 --> 00:03:13,840
+particular session or this particular
+
+00:03:12,239 --> 00:03:15,519
+conversation
+
+00:03:13,840 --> 00:03:18,000
+obviously there are multiple tls
+
+00:03:15,519 --> 00:03:19,920
+versions around tls 1.3 being
+
+00:03:18,000 --> 00:03:21,440
+the most recent but you know the other
+
+00:03:19,920 --> 00:03:22,319
+end that you're talking to the server
+
+00:03:21,440 --> 00:03:24,560
+may
+
+00:03:22,319 --> 00:03:25,680
+not support tls 1.3 or maybe we're
+
+00:03:24,560 --> 00:03:27,519
+talking with a client that doesn't
+
+00:03:25,680 --> 00:03:29,280
+support tls 1.3 so
+
+00:03:27,519 --> 00:03:31,040
+we need a way of detecting what the
+
+00:03:29,280 --> 00:03:32,560
+maximum protocol version is that both
+
+00:03:31,040 --> 00:03:35,840
+hands can use we have to select
+
+00:03:32,560 --> 00:03:38,959
+cryptographic parameters in terms of
+
+00:03:35,840 --> 00:03:40,080
+the the cipher suites the algorithms etc
+
+00:03:38,959 --> 00:03:43,360
+that we're going to use
+
+00:03:40,080 --> 00:03:45,760
+to actually communicate as mentioned
+
+00:03:43,360 --> 00:03:47,120
+we want some form of authentication so
+
+00:03:45,760 --> 00:03:47,760
+typically we're going to authenticate
+
+00:03:47,120 --> 00:03:49,599
+the peer
+
+00:03:47,760 --> 00:03:51,360
+in most cases this means that we're only
+
+00:03:49,599 --> 00:03:53,120
+going to authenticate the server we can
+
+00:03:51,360 --> 00:03:54,640
+also authenticate the client
+
+00:03:53,120 --> 00:03:56,640
+and we'll do this using public and
+
+00:03:54,640 --> 00:03:58,159
+private keys now this means we're using
+
+00:03:56,640 --> 00:04:00,239
+asymmetric cryptography
+
+00:03:58,159 --> 00:04:01,760
+that's expensive we could do the entire
+
+00:04:00,239 --> 00:04:03,599
+thing that particular
+
+00:04:01,760 --> 00:04:06,400
+way but it's generally not going to work
+
+00:04:03,599 --> 00:04:08,000
+well and certainly not going to scale
+
+00:04:06,400 --> 00:04:09,439
+so we need some way of being able to
+
+00:04:08,000 --> 00:04:12,560
+derive a symmetric key
+
+00:04:09,439 --> 00:04:13,680
+that's specifically for the use during
+
+00:04:12,560 --> 00:04:15,200
+this tls session
+
+00:04:13,680 --> 00:04:16,720
+and again this is something that's built
+
+00:04:15,200 --> 00:04:18,560
+into the tls stack
+
+00:04:16,720 --> 00:04:20,320
+once we've got a symmetric key we can do
+
+00:04:18,560 --> 00:04:22,160
+symmetric cryptography
+
+00:04:20,320 --> 00:04:23,440
+in order to encrypt and decrypt data
+
+00:04:22,160 --> 00:04:24,400
+that's sent over the connection we can
+
+00:04:23,440 --> 00:04:26,160
+add some other
+
+00:04:24,400 --> 00:04:29,840
+good things in and we can get data
+
+00:04:26,160 --> 00:04:29,840
+integrity as well
+
+00:04:30,080 --> 00:04:33,199
+a little bit of a primer or background
+
+00:04:31,680 --> 00:04:36,560
+on tls 1.3
+
+00:04:33,199 --> 00:04:38,720
+the rfc 8446 was finally published in
+
+00:04:36,560 --> 00:04:41,440
+august of 2018
+
+00:04:38,720 --> 00:04:42,240
+now this was after about three years of
+
+00:04:41,440 --> 00:04:45,120
+development
+
+00:04:42,240 --> 00:04:46,240
+and revision it's 160 pages of
+
+00:04:45,120 --> 00:04:49,600
+specification
+
+00:04:46,240 --> 00:04:51,360
+it's quite a read and a good water paper
+
+00:04:49,600 --> 00:04:53,520
+if you like to print it out
+
+00:04:51,360 --> 00:04:54,720
+and it also has dependencies on a pile
+
+00:04:53,520 --> 00:04:57,120
+of other rfcs
+
+00:04:54,720 --> 00:04:59,280
+so it's not something which is simple or
+
+00:04:57,120 --> 00:05:01,520
+straightforward
+
+00:04:59,280 --> 00:05:03,520
+it was reworked multiple times and the
+
+00:05:01,520 --> 00:05:05,520
+biggest reason behind this
+
+00:05:03,520 --> 00:05:07,840
+the the biggest differences between what
+
+00:05:05,520 --> 00:05:10,000
+tls 1.3 was at the very beginning
+
+00:05:07,840 --> 00:05:12,240
+and what it was at the end is that we
+
+00:05:10,000 --> 00:05:14,400
+have to deal with middle boxes
+
+00:05:12,240 --> 00:05:16,240
+there's wonderful things sitting on
+
+00:05:14,400 --> 00:05:18,479
+various particularly corporate networks
+
+00:05:16,240 --> 00:05:20,000
+which will basically intercept and
+
+00:05:18,479 --> 00:05:22,880
+interfere with
+
+00:05:20,000 --> 00:05:25,840
+network traffic and in doing so a lot of
+
+00:05:22,880 --> 00:05:26,720
+them are very specific to tls 1.2 and
+
+00:05:25,840 --> 00:05:28,400
+earlier
+
+00:05:26,720 --> 00:05:30,080
+so sending things which don't look like
+
+00:05:28,400 --> 00:05:31,840
+1.2 were
+
+00:05:30,080 --> 00:05:33,840
+resulting in things breaking and
+
+00:05:31,840 --> 00:05:35,039
+obviously a lot of those 1.3 traffic not
+
+00:05:33,840 --> 00:05:36,960
+getting through
+
+00:05:35,039 --> 00:05:40,080
+so the end result of it being reworked
+
+00:05:36,960 --> 00:05:43,039
+was that the tls 1.3 specification
+
+00:05:40,080 --> 00:05:45,120
+smells a lot like tls 1.2 session
+
+00:05:43,039 --> 00:05:47,520
+resumption on the wire and there's
+
+00:05:45,120 --> 00:05:49,360
+various ways that we can negotiate how
+
+00:05:47,520 --> 00:05:50,880
+much we actually look like tls 1.2
+
+00:05:49,360 --> 00:05:51,840
+session resumption or not
+
+00:05:50,880 --> 00:05:54,080
+what's known as a middlebox
+
+00:05:51,840 --> 00:05:56,240
+compatibility mode
+
+00:05:54,080 --> 00:05:57,919
+we also use lots of extensions and most
+
+00:05:56,240 --> 00:06:01,199
+things are actually hidden inside
+
+00:05:57,919 --> 00:06:03,039
+tls 1.2 application data records so
+
+00:06:01,199 --> 00:06:05,120
+we basically do some very basic
+
+00:06:03,039 --> 00:06:06,240
+conversation on the wire we then switch
+
+00:06:05,120 --> 00:06:09,919
+to
+
+00:06:06,240 --> 00:06:11,680
+essentially tls 1.3 inside tls 1.2
+
+00:06:09,919 --> 00:06:13,039
+application data records and the rest
+
+00:06:11,680 --> 00:06:15,360
+happens kind of out of the view of
+
+00:06:13,039 --> 00:06:18,319
+middle boxes
+
+00:06:15,360 --> 00:06:20,000
+so yeah obviously working in the tech
+
+00:06:18,319 --> 00:06:22,080
+industry a lot of us come across this
+
+00:06:20,000 --> 00:06:24,240
+new specifications out well it's got to
+
+00:06:22,080 --> 00:06:26,000
+be better
+
+00:06:24,240 --> 00:06:27,919
+this is true there's lots of aspects to
+
+00:06:26,000 --> 00:06:30,960
+tls 1.3 which are better
+
+00:06:27,919 --> 00:06:33,520
+but that doesn't mean that tls 1.2 is
+
+00:06:30,960 --> 00:06:35,520
+necessarily bad or suddenly a problem
+
+00:06:33,520 --> 00:06:38,720
+so part of this was we weren't in a
+
+00:06:35,520 --> 00:06:41,840
+screaming hurry to get 1.3 out the door
+
+00:06:38,720 --> 00:06:44,319
+um if we appropriately configure tls 1.2
+
+00:06:41,840 --> 00:06:46,400
+we can still get good security from it
+
+00:06:44,319 --> 00:06:48,000
+so we want to be using cypher suites
+
+00:06:46,400 --> 00:06:52,080
+that have aeid
+
+00:06:48,000 --> 00:06:54,080
+and pfs by aad we mean authenticated
+
+00:06:52,080 --> 00:06:55,759
+encryption with associated data and this
+
+00:06:54,080 --> 00:06:56,560
+is basically encryption modes that
+
+00:06:55,759 --> 00:06:58,960
+combine
+
+00:06:56,560 --> 00:07:00,160
+confidentiality with authenticity or
+
+00:06:58,960 --> 00:07:02,000
+integrity
+
+00:07:00,160 --> 00:07:03,680
+it's hard to get wrong it's generally
+
+00:07:02,000 --> 00:07:05,840
+easily implemented from an algorithmic
+
+00:07:03,680 --> 00:07:08,560
+perspective and we also protect the
+
+00:07:05,840 --> 00:07:10,720
+pseudoheader in addition to
+
+00:07:08,560 --> 00:07:12,400
+the actual data that's contained inside
+
+00:07:10,720 --> 00:07:13,840
+so things like the sequence numbers that
+
+00:07:12,400 --> 00:07:16,639
+we're transmitting
+
+00:07:13,840 --> 00:07:18,400
+we know whether that's been tampered
+
+00:07:16,639 --> 00:07:20,639
+with in any way shape or form and we can
+
+00:07:18,400 --> 00:07:23,840
+obviously deal with that
+
+00:07:20,639 --> 00:07:25,280
+with perfect forward secrecy we want to
+
+00:07:23,840 --> 00:07:27,360
+have session keys that are not
+
+00:07:25,280 --> 00:07:28,479
+recoverable if private keys are leaked
+
+00:07:27,360 --> 00:07:31,759
+so
+
+00:07:28,479 --> 00:07:34,240
+obviously if we rely on the
+
+00:07:31,759 --> 00:07:35,199
+private keys that the server has for its
+
+00:07:34,240 --> 00:07:37,039
+certificate
+
+00:07:35,199 --> 00:07:39,120
+if that information is leaked then if
+
+00:07:37,039 --> 00:07:40,319
+we're able to recover the the session
+
+00:07:39,120 --> 00:07:42,240
+data and decrypt
+
+00:07:40,319 --> 00:07:43,599
+tls that we sniffed off the wire that's
+
+00:07:42,240 --> 00:07:46,800
+not a good thing
+
+00:07:43,599 --> 00:07:47,520
+so we can avoid this by using ecghe or
+
+00:07:46,800 --> 00:07:49,599
+dhe
+
+00:07:47,520 --> 00:07:51,680
+both forms of ephemeral diffie-hellman
+
+00:07:49,599 --> 00:07:53,599
+and we have keys that are unique per
+
+00:07:51,680 --> 00:07:55,360
+session and are not recoverable
+
+00:07:53,599 --> 00:07:57,280
+but do be aware of session resumption if
+
+00:07:55,360 --> 00:07:59,599
+using tls 1.2 because
+
+00:07:57,280 --> 00:08:02,160
+the mechanisms which provide this
+
+00:07:59,599 --> 00:08:04,319
+effectively circumvent pfs at least
+
+00:08:02,160 --> 00:08:06,879
+to some period of time depending on key
+
+00:08:04,319 --> 00:08:06,879
+rotation
+
+00:08:07,120 --> 00:08:12,000
+so the main difference is with tls 1.3
+
+00:08:10,240 --> 00:08:14,319
+we have improved performance
+
+00:08:12,000 --> 00:08:16,639
+some of the design goals of as far as
+
+00:08:14,319 --> 00:08:18,639
+the the rfc was concerned was to reduce
+
+00:08:16,639 --> 00:08:19,520
+the number of rtt's or round trips
+
+00:08:18,639 --> 00:08:22,879
+needed
+
+00:08:19,520 --> 00:08:24,560
+in order to basically get a session
+
+00:08:22,879 --> 00:08:26,639
+going
+
+00:08:24,560 --> 00:08:28,560
+more of the handshake data is actually
+
+00:08:26,639 --> 00:08:30,960
+protected so we engage
+
+00:08:28,560 --> 00:08:32,719
+the encryption and basically protect
+
+00:08:30,960 --> 00:08:35,120
+more of the traffic on the network
+
+00:08:32,719 --> 00:08:36,959
+now with tls 1.3 we send a couple of
+
+00:08:35,120 --> 00:08:38,560
+very basic client hello server hello
+
+00:08:36,959 --> 00:08:40,159
+messages and from then on
+
+00:08:38,560 --> 00:08:42,399
+everything else is protected or
+
+00:08:40,159 --> 00:08:45,120
+encrypted
+
+00:08:42,399 --> 00:08:46,080
+there is no renegotiation so with tls
+
+00:08:45,120 --> 00:08:50,320
+1.2
+
+00:08:46,080 --> 00:08:52,320
+we can be halfway through a conversation
+
+00:08:50,320 --> 00:08:54,640
+that's you know encrypted using tls and
+
+00:08:52,320 --> 00:08:57,040
+suddenly say hey we want to renegotiate
+
+00:08:54,640 --> 00:08:59,040
+and we'll basically change the cipher
+
+00:08:57,040 --> 00:08:59,600
+suite the algorithms the keys everything
+
+00:08:59,040 --> 00:09:03,120
+that's
+
+00:08:59,600 --> 00:09:05,360
+yeah that we were using can change
+
+00:09:03,120 --> 00:09:07,360
+this adds a bunch of complexity to tls
+
+00:09:05,360 --> 00:09:09,040
+1.2 particularly being that we can
+
+00:09:07,360 --> 00:09:11,200
+essentially re-start
+
+00:09:09,040 --> 00:09:12,480
+you know the negotiation process at any
+
+00:09:11,200 --> 00:09:14,640
+point in time
+
+00:09:12,480 --> 00:09:16,080
+and it makes things harder to to make it
+
+00:09:14,640 --> 00:09:18,640
+robust and reliable
+
+00:09:16,080 --> 00:09:20,320
+tls 1.3 remove this entirely we can
+
+00:09:18,640 --> 00:09:22,240
+refresh or update the keys but that's
+
+00:09:20,320 --> 00:09:24,080
+all we can do
+
+00:09:22,240 --> 00:09:27,040
+it has a minimal number of strong cipher
+
+00:09:24,080 --> 00:09:29,120
+suites surprisingly aad and pfs
+
+00:09:27,040 --> 00:09:32,240
+these basically are you know the same as
+
+00:09:29,120 --> 00:09:34,880
+what we would be using with tls 1.2
+
+00:09:32,240 --> 00:09:35,680
+with appropriate configuration and we
+
+00:09:34,880 --> 00:09:37,200
+have a bunch of
+
+00:09:35,680 --> 00:09:40,080
+legacy and weak algorithms that have
+
+00:09:37,200 --> 00:09:41,839
+been removed things like static rsa
+
+00:09:40,080 --> 00:09:43,920
+so you know if we're using static rsa
+
+00:09:41,839 --> 00:09:45,920
+we're encrypting something with
+
+00:09:43,920 --> 00:09:47,680
+usually you know keys that are public
+
+00:09:45,920 --> 00:09:49,920
+private keys and we then decrypt it and
+
+00:09:47,680 --> 00:09:50,560
+obviously pfs doesn't work well or if at
+
+00:09:49,920 --> 00:09:54,080
+all
+
+00:09:50,560 --> 00:09:54,080
+and it's generally harder to get wrong
+
+00:09:54,320 --> 00:09:57,360
+for those of you who are involved in
+
+00:09:56,320 --> 00:10:00,320
+open source projects
+
+00:09:57,360 --> 00:10:01,680
+i'm sure you've come across this sort of
+
+00:10:00,320 --> 00:10:04,079
+question as well
+
+00:10:01,680 --> 00:10:05,839
+obviously now that we know about tls 1.3
+
+00:10:04,079 --> 00:10:08,320
+and it's obviously has some improvements
+
+00:10:05,839 --> 00:10:10,880
+can we have it yet
+
+00:10:08,320 --> 00:10:11,600
+so one approach we could have taken was
+
+00:10:10,880 --> 00:10:13,600
+to simply
+
+00:10:11,600 --> 00:10:15,519
+retrofit or shoehorn it into the
+
+00:10:13,600 --> 00:10:18,079
+existing tls stack
+
+00:10:15,519 --> 00:10:19,519
+now there are a number of reasons why we
+
+00:10:18,079 --> 00:10:21,360
+didn't necessarily want to take this
+
+00:10:19,519 --> 00:10:23,519
+approach
+
+00:10:21,360 --> 00:10:25,440
+there are problems still with the stack
+
+00:10:23,519 --> 00:10:28,959
+that we have it was inherited from
+
+00:10:25,440 --> 00:10:31,040
+openssl when we forked and one of those
+
+00:10:28,959 --> 00:10:33,600
+is the less than ideal state machine
+
+00:10:31,040 --> 00:10:35,120
+so this opens us up to things like
+
+00:10:33,600 --> 00:10:36,640
+shortly after the heartbleed incident
+
+00:10:35,120 --> 00:10:38,320
+there were some
+
+00:10:36,640 --> 00:10:41,120
+more fun things found in the form of
+
+00:10:38,320 --> 00:10:43,040
+early ccs or ccs injection attacks
+
+00:10:41,120 --> 00:10:44,160
+and here we'd basically get an out of
+
+00:10:43,040 --> 00:10:45,279
+order message
+
+00:10:44,160 --> 00:10:46,560
+basically saying we should change
+
+00:10:45,279 --> 00:10:48,000
+surface back but we haven't actually
+
+00:10:46,560 --> 00:10:49,360
+negotiated the keys
+
+00:10:48,000 --> 00:10:53,360
+or derived the keys that we should be
+
+00:10:49,360 --> 00:10:54,959
+using and therefore things went haywire
+
+00:10:53,360 --> 00:10:56,880
+there's still code that did pointer
+
+00:10:54,959 --> 00:10:59,040
+munching in the record layers
+
+00:10:56,880 --> 00:11:01,279
+we had removed a lot of the stuff that
+
+00:10:59,040 --> 00:11:02,800
+was considered dangerous and and
+
+00:11:01,279 --> 00:11:05,519
+certainly
+
+00:11:02,800 --> 00:11:06,560
+going to potentially be exploited but at
+
+00:11:05,519 --> 00:11:08,640
+the same time
+
+00:11:06,560 --> 00:11:09,760
+we had stuff there that you know and
+
+00:11:08,640 --> 00:11:13,680
+still have stuff there which
+
+00:11:09,760 --> 00:11:14,880
+isn't ideal the early code
+
+00:11:13,680 --> 00:11:16,720
+is designed to do encryption and
+
+00:11:14,880 --> 00:11:18,720
+decryption in place so it allocates
+
+00:11:16,720 --> 00:11:20,320
+single buffers up front it puts the
+
+00:11:18,720 --> 00:11:22,399
+plain text into a buffer
+
+00:11:20,320 --> 00:11:23,760
+it's then encrypting it and then using
+
+00:11:22,399 --> 00:11:25,680
+the same data
+
+00:11:23,760 --> 00:11:27,200
+but the same buffer to basically send
+
+00:11:25,680 --> 00:11:30,160
+data to the network
+
+00:11:27,200 --> 00:11:31,440
+so you're only one step away from things
+
+00:11:30,160 --> 00:11:32,399
+going horribly wrong where the
+
+00:11:31,440 --> 00:11:34,480
+encryption process
+
+00:11:32,399 --> 00:11:36,160
+failed or got skipped and suddenly
+
+00:11:34,480 --> 00:11:37,360
+you're sending clear text out over the
+
+00:11:36,160 --> 00:11:39,519
+network
+
+00:11:37,360 --> 00:11:40,720
+and the other problem here is that
+
+00:11:39,519 --> 00:11:43,200
+obviously you know everything's
+
+00:11:40,720 --> 00:11:44,959
+happening in a single address space
+
+00:11:43,200 --> 00:11:46,320
+so if you can determine what the address
+
+00:11:44,959 --> 00:11:48,160
+is of that buffer
+
+00:11:46,320 --> 00:11:51,440
+then obviously you can you know
+
+00:11:48,160 --> 00:11:54,639
+potentially make use of that in order to
+
+00:11:51,440 --> 00:11:57,040
+grab information from the process
+
+00:11:54,639 --> 00:11:58,959
+dtls introduces a bunch of fun so the
+
+00:11:57,040 --> 00:12:00,720
+various tentacles which
+
+00:11:58,959 --> 00:12:03,440
+are basically hooking and reaching and
+
+00:12:00,720 --> 00:12:05,440
+there's also lots of layering violations
+
+00:12:03,440 --> 00:12:07,920
+so as far as the layering violations are
+
+00:12:05,440 --> 00:12:09,839
+concerned
+
+00:12:07,920 --> 00:12:11,440
+lib ssl for example has a bunch of
+
+00:12:09,839 --> 00:12:13,680
+structs they in turn
+
+00:12:11,440 --> 00:12:15,360
+reference a bunch of other structs those
+
+00:12:13,680 --> 00:12:18,079
+in turn reference other structs
+
+00:12:15,360 --> 00:12:19,120
+and there is basically nothing to stop
+
+00:12:18,079 --> 00:12:21,200
+most of the code
+
+00:12:19,120 --> 00:12:24,079
+reaching in and changing things or you
+
+00:12:21,200 --> 00:12:27,040
+know freeing porter's retaining pointers
+
+00:12:24,079 --> 00:12:28,079
+cushions to any of those layers and this
+
+00:12:27,040 --> 00:12:30,320
+leads to various fun
+
+00:12:28,079 --> 00:12:31,200
+in terms of you know code refactoring
+
+00:12:30,320 --> 00:12:34,240
+double freeze
+
+00:12:31,200 --> 00:12:34,240
+other security issues
+
+00:12:34,320 --> 00:12:38,000
+to add to ls 1.3 to the existing stack
+
+00:12:37,360 --> 00:12:40,079
+we would also
+
+00:12:38,000 --> 00:12:41,680
+require a lot of code which looked like
+
+00:12:40,079 --> 00:12:43,760
+the following
+
+00:12:41,680 --> 00:12:45,200
+if we have some particular version being
+
+00:12:43,760 --> 00:12:46,959
+tls 1.3
+
+00:12:45,200 --> 00:12:48,240
+then do something otherwise do something
+
+00:12:46,959 --> 00:12:50,240
+else
+
+00:12:48,240 --> 00:12:52,560
+this obviously isn't ideal from a
+
+00:12:50,240 --> 00:12:53,519
+maintainability perspective and it means
+
+00:12:52,560 --> 00:12:55,839
+that
+
+00:12:53,519 --> 00:12:58,000
+in terms of just working with the code
+
+00:12:55,839 --> 00:13:00,800
+base we end up with a lot much
+
+00:12:58,000 --> 00:13:01,600
+larger functions more code and harder to
+
+00:13:00,800 --> 00:13:04,560
+to
+
+00:13:01,600 --> 00:13:06,000
+reason and review any bugs that we
+
+00:13:04,560 --> 00:13:08,240
+introduced would also potentially
+
+00:13:06,000 --> 00:13:09,279
+impact tls 1.2 users which we didn't
+
+00:13:08,240 --> 00:13:11,519
+want
+
+00:13:09,279 --> 00:13:13,040
+obviously a lot of tls 1.2 code doesn't
+
+00:13:11,519 --> 00:13:14,240
+apply to ls 1.3
+
+00:13:13,040 --> 00:13:16,079
+and there's also different state
+
+00:13:14,240 --> 00:13:17,920
+machines but above
+
+00:13:16,079 --> 00:13:19,839
+all it was a perfect opportunity for us
+
+00:13:17,920 --> 00:13:21,600
+to redesign and re-implement and this
+
+00:13:19,839 --> 00:13:24,079
+was probably the slower approach
+
+00:13:21,600 --> 00:13:25,120
+you know as i said can we have it yet no
+
+00:13:24,079 --> 00:13:26,959
+not quite
+
+00:13:25,120 --> 00:13:28,720
+but overall we felt that this was the
+
+00:13:26,959 --> 00:13:30,639
+better approach for everyone in the long
+
+00:13:28,720 --> 00:13:33,279
+run both us in terms of maintaining
+
+00:13:30,639 --> 00:13:34,000
+the code but also the you know users and
+
+00:13:33,279 --> 00:13:37,360
+consumers
+
+00:13:34,000 --> 00:13:37,360
+as far as the the end product
+
+00:13:37,519 --> 00:13:40,639
+so i wanted to talk a little bit about
+
+00:13:39,040 --> 00:13:43,839
+the approach that we took to
+
+00:13:40,639 --> 00:13:45,600
+implementation um a big part of this was
+
+00:13:43,839 --> 00:13:46,880
+divide and conquer so
+
+00:13:45,600 --> 00:13:48,240
+obviously there's separate parts
+
+00:13:46,880 --> 00:13:48,800
+separate functionality which i'll talk
+
+00:13:48,240 --> 00:13:52,320
+about
+
+00:13:48,800 --> 00:13:54,160
+more in a moment we had three people who
+
+00:13:52,320 --> 00:13:56,160
+are essentially working on this you know
+
+00:13:54,160 --> 00:13:59,279
+we're all all do it on our spare time
+
+00:13:56,160 --> 00:14:01,760
+so none of us are full time at this so
+
+00:13:59,279 --> 00:14:03,760
+we if we could split up things into
+
+00:14:01,760 --> 00:14:05,360
+their individual parts and we could
+
+00:14:03,760 --> 00:14:07,839
+you know have an individual developer
+
+00:14:05,360 --> 00:14:10,639
+working on an individual feature
+
+00:14:07,839 --> 00:14:10,959
+then that becomes quite easy to have you
+
+00:14:10,639 --> 00:14:12,399
+know
+
+00:14:10,959 --> 00:14:13,760
+we can basically come back and say okay
+
+00:14:12,399 --> 00:14:15,360
+i've now finished that bit it works
+
+00:14:13,760 --> 00:14:17,440
+here's the code here's the test let's
+
+00:14:15,360 --> 00:14:19,199
+glue it into the rest
+
+00:14:17,440 --> 00:14:22,000
+we aimed for a minimal feature set so
+
+00:14:19,199 --> 00:14:24,240
+let's start out with the basics
+
+00:14:22,000 --> 00:14:25,920
+we implemented the client first and the
+
+00:14:24,240 --> 00:14:27,600
+server later and there's a bunch of
+
+00:14:25,920 --> 00:14:30,720
+reasons for this now
+
+00:14:27,600 --> 00:14:33,440
+to get a client working is less code
+
+00:14:30,720 --> 00:14:34,800
+than writing a server there are a lot of
+
+00:14:33,440 --> 00:14:36,000
+overlapping things which we'll see
+
+00:14:34,800 --> 00:14:39,199
+shortly
+
+00:14:36,000 --> 00:14:42,240
+but at the same time most client code is
+
+00:14:39,199 --> 00:14:44,000
+is short-lived processes it's also you
+
+00:14:42,240 --> 00:14:46,000
+know obviously reaching out negotiating
+
+00:14:44,000 --> 00:14:49,360
+to an endpoint that you usually
+
+00:14:46,000 --> 00:14:50,160
+have some level of trust to so in terms
+
+00:14:49,360 --> 00:14:52,160
+of if there were
+
+00:14:50,160 --> 00:14:54,240
+security issues in the code or
+
+00:14:52,160 --> 00:14:56,000
+reliability issues in the code
+
+00:14:54,240 --> 00:14:57,360
+now for example something which wasn't
+
+00:14:56,000 --> 00:14:57,760
+ended up being an l point of view
+
+00:14:57,360 --> 00:15:00,000
+reference
+
+00:14:57,760 --> 00:15:01,440
+obviously crashing a client which you
+
+00:15:00,000 --> 00:15:03,519
+know can be re-run
+
+00:15:01,440 --> 00:15:04,880
+is is safer than having a server process
+
+00:15:03,519 --> 00:15:06,959
+that you can crash or you know
+
+00:15:04,880 --> 00:15:10,000
+potentially do something nasty to
+
+00:15:06,959 --> 00:15:12,000
+so we want to do the client working and
+
+00:15:10,000 --> 00:15:13,519
+and basically stabilize first at least
+
+00:15:12,000 --> 00:15:14,880
+that way we knew that most of the parts
+
+00:15:13,519 --> 00:15:16,160
+of the code were working we'd come back
+
+00:15:14,880 --> 00:15:17,199
+and implement the server in fact we
+
+00:15:16,160 --> 00:15:19,519
+actually
+
+00:15:17,199 --> 00:15:20,959
+cut separate releases one which enabled
+
+00:15:19,519 --> 00:15:22,560
+the client one which later on then
+
+00:15:20,959 --> 00:15:24,480
+enabled server
+
+00:15:22,560 --> 00:15:26,079
+but above all we wanted to make sure
+
+00:15:24,480 --> 00:15:27,279
+that things were modular and this is
+
+00:15:26,079 --> 00:15:28,800
+something
+
+00:15:27,279 --> 00:15:31,600
+we'll talk about in a little bit more
+
+00:15:28,800 --> 00:15:34,560
+detail so as i mentioned earlier the
+
+00:15:31,600 --> 00:15:36,480
+lib ssl code base is basically a whole
+
+00:15:34,560 --> 00:15:37,600
+pile of structs which all contain
+
+00:15:36,480 --> 00:15:39,759
+references to other structs which
+
+00:15:37,600 --> 00:15:42,800
+contain references to more structs
+
+00:15:39,759 --> 00:15:45,040
+and you have no isolation between
+
+00:15:42,800 --> 00:15:46,079
+any of the code right the most things
+
+00:15:45,040 --> 00:15:48,800
+can change
+
+00:15:46,079 --> 00:15:49,440
+you know any part of that information
+
+00:15:48,800 --> 00:15:51,360
+obviously
+
+00:15:49,440 --> 00:15:52,880
+you know we can we can do fun things in
+
+00:15:51,360 --> 00:15:54,560
+terms of the address space if we really
+
+00:15:52,880 --> 00:15:55,519
+wanted to do it but in terms of just
+
+00:15:54,560 --> 00:15:58,160
+writing pure c
+
+00:15:55,519 --> 00:15:58,560
+code you know there is no protections
+
+00:15:58,160 --> 00:16:01,600
+and
+
+00:15:58,560 --> 00:16:02,000
+no isolation in place so we wanted to
+
+00:16:01,600 --> 00:16:03,519
+build
+
+00:16:02,000 --> 00:16:06,000
+small components that were
+
+00:16:03,519 --> 00:16:08,079
+self-contained and easily tested
+
+00:16:06,000 --> 00:16:09,920
+in doing so we wanted to remove and
+
+00:16:08,079 --> 00:16:10,480
+reduce the layering violations that were
+
+00:16:09,920 --> 00:16:12,480
+there
+
+00:16:10,480 --> 00:16:14,399
+we wanted to use opaque structs and
+
+00:16:12,480 --> 00:16:15,199
+well-defined operations on each of those
+
+00:16:14,399 --> 00:16:17,120
+structs
+
+00:16:15,199 --> 00:16:18,800
+and this in turn makes the code easier
+
+00:16:17,120 --> 00:16:19,279
+to review and also easier to reason
+
+00:16:18,800 --> 00:16:21,920
+about
+
+00:16:19,279 --> 00:16:23,360
+so you know if i'm changing code how do
+
+00:16:21,920 --> 00:16:25,519
+i tell whether that particular
+
+00:16:23,360 --> 00:16:26,959
+piece of memory is being freed has
+
+00:16:25,519 --> 00:16:28,399
+something else
+
+00:16:26,959 --> 00:16:30,480
+changed it does something else have a
+
+00:16:28,399 --> 00:16:32,560
+reference to it if it's you know
+
+00:16:30,480 --> 00:16:34,480
+only referenced in functions in one
+
+00:16:32,560 --> 00:16:36,240
+particular file obviously that's easy to
+
+00:16:34,480 --> 00:16:37,600
+confirm or review particularly when
+
+00:16:36,240 --> 00:16:40,639
+you're making changes or
+
+00:16:37,600 --> 00:16:43,759
+refactoring code so
+
+00:16:40,639 --> 00:16:44,720
+we ended up with a lot of independent
+
+00:16:43,759 --> 00:16:46,720
+structs which
+
+00:16:44,720 --> 00:16:47,839
+essentially gave us a similar sort of
+
+00:16:46,720 --> 00:16:50,480
+pattern so we would have
+
+00:16:47,839 --> 00:16:51,600
+a struct that was defined obviously code
+
+00:16:50,480 --> 00:16:53,680
+outside of
+
+00:16:51,600 --> 00:16:55,040
+that immediate compilation unit couldn't
+
+00:16:53,680 --> 00:16:57,600
+tell what was going on
+
+00:16:55,040 --> 00:16:59,279
+inside that struct so again as i said
+
+00:16:57,600 --> 00:17:00,160
+nothing could actually free pointers on
+
+00:16:59,279 --> 00:17:02,399
+us or do
+
+00:17:00,160 --> 00:17:04,720
+nasty things behind our back we would
+
+00:17:02,399 --> 00:17:07,199
+have a new and a free function
+
+00:17:04,720 --> 00:17:09,439
+and possibly others which would know how
+
+00:17:07,199 --> 00:17:09,919
+to allocate itself and clean up after
+
+00:17:09,439 --> 00:17:11,839
+itself
+
+00:17:09,919 --> 00:17:13,120
+and then obviously perform some series
+
+00:17:11,839 --> 00:17:15,199
+of operations
+
+00:17:13,120 --> 00:17:16,720
+and this meant that we could obviously
+
+00:17:15,199 --> 00:17:18,480
+build these we could test them
+
+00:17:16,720 --> 00:17:21,600
+we could make sure that things were
+
+00:17:18,480 --> 00:17:24,480
+working as intended
+
+00:17:21,600 --> 00:17:25,439
+so let's look at the parts of atls stack
+
+00:17:24,480 --> 00:17:28,960
+and
+
+00:17:25,439 --> 00:17:32,160
+certainly true for tls 1.3
+
+00:17:28,960 --> 00:17:32,799
+we have some application interface and
+
+00:17:32,160 --> 00:17:34,240
+so
+
+00:17:32,799 --> 00:17:36,000
+you know obviously the end goal is for
+
+00:17:34,240 --> 00:17:36,880
+some application to be able to send
+
+00:17:36,000 --> 00:17:38,720
+information
+
+00:17:36,880 --> 00:17:40,640
+securely you know obviously we need some
+
+00:17:38,720 --> 00:17:42,000
+way of being able to trigger a handshake
+
+00:17:40,640 --> 00:17:43,440
+we need to be able to read and write
+
+00:17:42,000 --> 00:17:45,440
+application data and we need to shut
+
+00:17:43,440 --> 00:17:47,760
+down when we're done
+
+00:17:45,440 --> 00:17:49,520
+we need a handstand state machine and
+
+00:17:47,760 --> 00:17:52,400
+this is basically what implements
+
+00:17:49,520 --> 00:17:54,480
+the actual protocol itself so in order
+
+00:17:52,400 --> 00:17:56,160
+to establish a secure session
+
+00:17:54,480 --> 00:17:58,320
+what series of messages do we need to
+
+00:17:56,160 --> 00:18:00,400
+send what steps do we need to take
+
+00:17:58,320 --> 00:18:01,840
+in order and what code do we need to run
+
+00:18:00,400 --> 00:18:04,400
+in order to actually arrive
+
+00:18:01,840 --> 00:18:06,320
+at a point where we can send protected
+
+00:18:04,400 --> 00:18:09,200
+application data
+
+00:18:06,320 --> 00:18:10,080
+we need a key schedule so obviously in
+
+00:18:09,200 --> 00:18:12,799
+order to
+
+00:18:10,080 --> 00:18:13,679
+be able to encrypt information using
+
+00:18:12,799 --> 00:18:16,160
+symmetric
+
+00:18:13,679 --> 00:18:17,039
+key symmetric cryptography we need keys
+
+00:18:16,160 --> 00:18:19,840
+for that
+
+00:18:17,039 --> 00:18:22,320
+and so there's a section of the rfc
+
+00:18:19,840 --> 00:18:24,000
+which defines how we go about doing this
+
+00:18:22,320 --> 00:18:25,440
+and we need a record layer which is
+
+00:18:24,000 --> 00:18:28,559
+basically where we're adding
+
+00:18:25,440 --> 00:18:29,039
+and removing tls now the wire at the
+
+00:18:28,559 --> 00:18:30,799
+bottom
+
+00:18:29,039 --> 00:18:32,880
+this could be anything so this maybe
+
+00:18:30,799 --> 00:18:34,320
+we're riding onto network we could be
+
+00:18:32,880 --> 00:18:36,799
+running under a pipe we could be writing
+
+00:18:34,320 --> 00:18:38,880
+into a buffer it doesn't really matter
+
+00:18:36,799 --> 00:18:40,160
+but at the end of the day we're sending
+
+00:18:38,880 --> 00:18:42,080
+tls records
+
+00:18:40,160 --> 00:18:45,280
+to somewhere and reading them back again
+
+00:18:42,080 --> 00:18:45,280
+from something at the other end
+
+00:18:45,840 --> 00:18:50,320
+the handstake state machine now this was
+
+00:18:48,799 --> 00:18:52,480
+certainly a fun part
+
+00:18:50,320 --> 00:18:54,720
+one of our developers theo bueller was
+
+00:18:52,480 --> 00:18:57,520
+largely responsible for this
+
+00:18:54,720 --> 00:18:58,960
+and we took an approach which was
+
+00:18:57,520 --> 00:19:00,880
+loosely based on
+
+00:18:58,960 --> 00:19:04,160
+s2n's state machine that they'd
+
+00:19:00,880 --> 00:19:06,400
+implemented for tls 1.2
+
+00:19:04,160 --> 00:19:09,600
+now this basically provides us with a
+
+00:19:06,400 --> 00:19:10,960
+directed acyclic graph
+
+00:19:09,600 --> 00:19:13,120
+basically this means that there is no
+
+00:19:10,960 --> 00:19:15,840
+loops or cycles which can occur and
+
+00:19:13,120 --> 00:19:17,520
+we're safe from out of order messages so
+
+00:19:15,840 --> 00:19:19,200
+like mentioned earlier we can't end up
+
+00:19:17,520 --> 00:19:21,679
+in a situation where we suddenly get
+
+00:19:19,200 --> 00:19:23,440
+for example an early change cipher spec
+
+00:19:21,679 --> 00:19:25,679
+message and things go hey
+
+00:19:23,440 --> 00:19:27,919
+we have a very set sequence of things
+
+00:19:25,679 --> 00:19:28,400
+that we require and if they don't match
+
+00:19:27,919 --> 00:19:30,960
+then we
+
+00:19:28,400 --> 00:19:33,039
+simply file it's worth noting that the
+
+00:19:30,960 --> 00:19:35,039
+rsc doesn't actually
+
+00:19:33,039 --> 00:19:37,760
+implement this as a directed acyclic
+
+00:19:35,039 --> 00:19:39,200
+graph now it does actually have a loop
+
+00:19:37,760 --> 00:19:41,760
+thankfully we can actually flatten that
+
+00:19:39,200 --> 00:19:42,640
+out and a lot of theo's work was
+
+00:19:41,760 --> 00:19:44,559
+actually spent
+
+00:19:42,640 --> 00:19:46,400
+not writing code but sitting with pen
+
+00:19:44,559 --> 00:19:47,039
+and paper simply trying to figure out
+
+00:19:46,400 --> 00:19:49,280
+what the
+
+00:19:47,039 --> 00:19:50,960
+appropriate sequence or series of steps
+
+00:19:49,280 --> 00:19:53,760
+was
+
+00:19:50,960 --> 00:19:55,120
+on top of this he built some very cool
+
+00:19:53,760 --> 00:19:58,320
+visualization which
+
+00:19:55,120 --> 00:20:00,480
+we have in in regress the full graph
+
+00:19:58,320 --> 00:20:01,440
+i'll provide as a link from the the
+
+00:20:00,480 --> 00:20:04,320
+slides
+
+00:20:01,440 --> 00:20:04,880
+um but just a very simplified basically
+
+00:20:04,320 --> 00:20:07,440
+that the
+
+00:20:04,880 --> 00:20:09,039
+most simple series of messages that we
+
+00:20:07,440 --> 00:20:12,240
+can exchange
+
+00:20:09,039 --> 00:20:14,320
+is visible here uh so you know
+
+00:20:12,240 --> 00:20:16,559
+when if you want to build this you
+
+00:20:14,320 --> 00:20:17,440
+simply cd into the appropriate directory
+
+00:20:16,559 --> 00:20:20,720
+and run
+
+00:20:17,440 --> 00:20:23,120
+make handshake.svg and it pops what this
+
+00:20:20,720 --> 00:20:24,080
+handshake state machine is is currently
+
+00:20:23,120 --> 00:20:27,120
+showing as a
+
+00:20:24,080 --> 00:20:28,320
+graph and this made it yeah it's both
+
+00:20:27,120 --> 00:20:29,200
+interesting to look at but it's also
+
+00:20:28,320 --> 00:20:31,520
+very useful
+
+00:20:29,200 --> 00:20:33,039
+in terms of diagnosing you know how
+
+00:20:31,520 --> 00:20:35,280
+things are working and obviously
+
+00:20:33,039 --> 00:20:38,480
+reviewing what you're doing
+
+00:20:35,280 --> 00:20:40,080
+um theo did present an entire
+
+00:20:38,480 --> 00:20:43,520
+presentation on this
+
+00:20:40,080 --> 00:20:44,720
+i'll link to that at the last slide
+
+00:20:43,520 --> 00:20:47,360
+you can go and look that up if you're
+
+00:20:44,720 --> 00:20:50,240
+interested but in general terms
+
+00:20:47,360 --> 00:20:50,880
+we have lists of states that we switch
+
+00:20:50,240 --> 00:20:54,000
+between
+
+00:20:50,880 --> 00:20:56,159
+based on negotiated parameters so
+
+00:20:54,000 --> 00:20:57,679
+if we know that we're operating with or
+
+00:20:56,159 --> 00:21:00,240
+without a particular state
+
+00:20:57,679 --> 00:21:02,159
+then obviously the the next message
+
+00:21:00,240 --> 00:21:03,919
+that's expected or required is going to
+
+00:21:02,159 --> 00:21:06,000
+be some particular message
+
+00:21:03,919 --> 00:21:07,039
+we can send or receive that we can then
+
+00:21:06,000 --> 00:21:10,400
+switch between
+
+00:21:07,039 --> 00:21:11,919
+lists or within the table but they must
+
+00:21:10,400 --> 00:21:13,360
+all have the same prefix so
+
+00:21:11,919 --> 00:21:15,280
+obviously we've had the same series of
+
+00:21:13,360 --> 00:21:17,600
+messages
+
+00:21:15,280 --> 00:21:19,440
+we did make some minor changes to the
+
+00:21:17,600 --> 00:21:20,559
+way this worked during implementation
+
+00:21:19,440 --> 00:21:22,000
+and particularly when
+
+00:21:20,559 --> 00:21:23,679
+now i think the biggest changes came
+
+00:21:22,000 --> 00:21:24,240
+when we actually got to writing the
+
+00:21:23,679 --> 00:21:26,559
+server
+
+00:21:24,240 --> 00:21:27,600
+and decided that or discovered that some
+
+00:21:26,559 --> 00:21:30,240
+of it was actually
+
+00:21:27,600 --> 00:21:31,039
+written worked better if we inverted it
+
+00:21:30,240 --> 00:21:34,080
+so
+
+00:21:31,039 --> 00:21:34,640
+rather than saying with a particular
+
+00:21:34,080 --> 00:21:36,159
+condition
+
+00:21:34,640 --> 00:21:38,559
+we would say without a particular
+
+00:21:36,159 --> 00:21:38,559
+condition
+
+00:21:38,960 --> 00:21:43,120
+where this gets difficult is when the
+
+00:21:41,120 --> 00:21:45,039
+next state is not actually known
+
+00:21:43,120 --> 00:21:46,799
+and if you're designing a protocol i'd
+
+00:21:45,039 --> 00:21:48,320
+encourage you to take this into
+
+00:21:46,799 --> 00:21:51,120
+consideration
+
+00:21:48,320 --> 00:21:51,760
+um there's a one particular step
+
+00:21:51,120 --> 00:21:53,280
+unfortunately
+
+00:21:51,760 --> 00:21:55,039
+there's only thankfully there's only one
+
+00:21:53,280 --> 00:21:57,919
+but unfortunately there is one
+
+00:21:55,039 --> 00:21:58,320
+where in telus 1.3 we don't actually
+
+00:21:57,919 --> 00:22:00,080
+know
+
+00:21:58,320 --> 00:22:01,679
+whether we're going to get a client
+
+00:22:00,080 --> 00:22:04,159
+certificate request sent
+
+00:22:01,679 --> 00:22:05,760
+from the server to the client until we
+
+00:22:04,159 --> 00:22:07,600
+actually read the next message
+
+00:22:05,760 --> 00:22:08,960
+and so this means we can't actually
+
+00:22:07,600 --> 00:22:10,400
+advance the state machine
+
+00:22:08,960 --> 00:22:11,679
+in the direction that we want we
+
+00:22:10,400 --> 00:22:12,320
+basically have to assume that we're
+
+00:22:11,679 --> 00:22:15,679
+going to have
+
+00:22:12,320 --> 00:22:17,360
+a a client certificate request and we
+
+00:22:15,679 --> 00:22:19,120
+have to have some special condition code
+
+00:22:17,360 --> 00:22:20,880
+which basically says okay that wasn't
+
+00:22:19,120 --> 00:22:22,640
+actually what i thought it was and then
+
+00:22:20,880 --> 00:22:23,600
+let's flip the state machine and call
+
+00:22:22,640 --> 00:22:26,000
+into the
+
+00:22:23,600 --> 00:22:27,679
+other state that it could have been and
+
+00:22:26,000 --> 00:22:28,240
+this is a little disappointing but in
+
+00:22:27,679 --> 00:22:31,760
+general
+
+00:22:28,240 --> 00:22:31,760
+yeah things worked out pretty well
+
+00:22:32,000 --> 00:22:35,360
+the key schedule side of things was
+
+00:22:33,760 --> 00:22:38,480
+implemented yeah
+
+00:22:35,360 --> 00:22:39,120
+by mostly by bob beck and this is
+
+00:22:38,480 --> 00:22:42,080
+basically
+
+00:22:39,120 --> 00:22:43,520
+the key derivation process so as i
+
+00:22:42,080 --> 00:22:47,440
+mentioned earlier
+
+00:22:43,520 --> 00:22:49,280
+with tls 1.3 we switch to
+
+00:22:47,440 --> 00:22:51,679
+protected records much earlier in the
+
+00:22:49,280 --> 00:22:53,520
+process so we have
+
+00:22:51,679 --> 00:22:54,799
+what's essentially there's a bunch of
+
+00:22:53,520 --> 00:22:56,240
+different secrets that we need
+
+00:22:54,799 --> 00:22:58,320
+we have early secrets we also have
+
+00:22:56,240 --> 00:22:59,840
+handshake secrets which protect the
+
+00:22:58,320 --> 00:23:01,840
+the handshake messages that are being
+
+00:22:59,840 --> 00:23:03,360
+encoded and then we have any number of
+
+00:23:01,840 --> 00:23:05,360
+application traffic secrets
+
+00:23:03,360 --> 00:23:07,120
+which are basically what we're using to
+
+00:23:05,360 --> 00:23:08,559
+protect application traffic data and
+
+00:23:07,120 --> 00:23:12,080
+obviously if we re-key
+
+00:23:08,559 --> 00:23:15,280
+we roll over to the next secret etc
+
+00:23:12,080 --> 00:23:18,720
+the one of the changes with tls 1.3 is
+
+00:23:15,280 --> 00:23:21,840
+this is defined as using a hkdf based
+
+00:23:18,720 --> 00:23:23,039
+process for generating key material in
+
+00:23:21,840 --> 00:23:25,280
+tls 1.2
+
+00:23:23,039 --> 00:23:27,039
+it uses a prf or a pseudo random
+
+00:23:25,280 --> 00:23:30,720
+function and then partitions
+
+00:23:27,039 --> 00:23:34,080
+the output hkdf is generally considered
+
+00:23:30,720 --> 00:23:36,400
+more easier to to analyze from a
+
+00:23:34,080 --> 00:23:40,000
+cryptography and security perspective
+
+00:23:36,400 --> 00:23:41,840
+hkdf is in turn a hmac basis
+
+00:23:40,000 --> 00:23:44,240
+extract and expand key derivation
+
+00:23:41,840 --> 00:23:46,320
+function i mentioned obviously tls 1.3
+
+00:23:44,240 --> 00:23:46,720
+has dependencies on other rscs this is
+
+00:23:46,320 --> 00:23:50,559
+one of
+
+00:23:46,720 --> 00:23:52,480
+many and hmac in turn is a hash based
+
+00:23:50,559 --> 00:23:54,480
+message authentication code so
+
+00:23:52,480 --> 00:23:55,520
+if you like to expand things entirely we
+
+00:23:54,480 --> 00:23:58,000
+have a hash
+
+00:23:55,520 --> 00:23:59,679
+based message authentication code based
+
+00:23:58,000 --> 00:24:02,080
+extract and expand a key derivation
+
+00:23:59,679 --> 00:24:02,080
+function
+
+00:24:02,159 --> 00:24:06,080
+the key schedule itself there's a lot of
+
+00:24:04,080 --> 00:24:06,640
+very subtle complexity here and it's
+
+00:24:06,080 --> 00:24:10,080
+also
+
+00:24:06,640 --> 00:24:12,159
+hard to debug some of this is
+
+00:24:10,080 --> 00:24:13,840
+due just simply to the the way that you
+
+00:24:12,159 --> 00:24:15,200
+know for example there weren't many test
+
+00:24:13,840 --> 00:24:16,240
+vectors available at the time we're
+
+00:24:15,200 --> 00:24:17,520
+implementing it
+
+00:24:16,240 --> 00:24:19,600
+if you don't match up with the test
+
+00:24:17,520 --> 00:24:20,240
+vectors then it becomes hard to trace
+
+00:24:19,600 --> 00:24:22,559
+back to
+
+00:24:20,240 --> 00:24:23,600
+what's actually gone wrong and why and
+
+00:24:22,559 --> 00:24:25,360
+one of the funniest
+
+00:24:23,600 --> 00:24:27,440
+challenges we had here was we
+
+00:24:25,360 --> 00:24:28,159
+misinterpreted a section of the rfc
+
+00:24:27,440 --> 00:24:31,039
+which said
+
+00:24:28,159 --> 00:24:31,600
+to feed in well we originally understood
+
+00:24:31,039 --> 00:24:34,159
+to main
+
+00:24:31,600 --> 00:24:36,159
+feed in a zero length string into the
+
+00:24:34,159 --> 00:24:38,159
+hkdf it actually meant we needed to run
+
+00:24:36,159 --> 00:24:38,799
+that through a hash first and then feed
+
+00:24:38,159 --> 00:24:40,480
+it in
+
+00:24:38,799 --> 00:24:42,799
+and obviously the outcome is completely
+
+00:24:40,480 --> 00:24:44,960
+different but it's subtle and easy
+
+00:24:42,799 --> 00:24:48,320
+enough to miss
+
+00:24:44,960 --> 00:24:50,880
+the record layer is one of the
+
+00:24:48,320 --> 00:24:52,720
+larger you know annoyances as far as
+
+00:24:50,880 --> 00:24:54,480
+this is concerned it's not a
+
+00:24:52,720 --> 00:24:56,159
+substantially complex
+
+00:24:54,480 --> 00:24:58,159
+part of code but there's a bunch of
+
+00:24:56,159 --> 00:24:59,679
+things that you know it has to do and it
+
+00:24:58,159 --> 00:25:02,960
+has to get right
+
+00:24:59,679 --> 00:25:04,480
+and basically tls records uh we have a
+
+00:25:02,960 --> 00:25:06,080
+five byte header
+
+00:25:04,480 --> 00:25:07,760
+and we have a payload which happens to
+
+00:25:06,080 --> 00:25:08,559
+be based on the record protection that
+
+00:25:07,760 --> 00:25:11,039
+we're currently
+
+00:25:08,559 --> 00:25:12,400
+having gauge so when we're in plain text
+
+00:25:11,039 --> 00:25:14,400
+mode we'll simply
+
+00:25:12,400 --> 00:25:15,919
+write the raw bytes onto the wire and
+
+00:25:14,400 --> 00:25:17,360
+read them from the wire
+
+00:25:15,919 --> 00:25:19,520
+obviously we have to add and remove the
+
+00:25:17,360 --> 00:25:20,799
+five bytes of header in the process
+
+00:25:19,520 --> 00:25:22,720
+once we actually engage record
+
+00:25:20,799 --> 00:25:24,559
+protection we're going to do some number
+
+00:25:22,720 --> 00:25:26,720
+of cryptography
+
+00:25:24,559 --> 00:25:28,000
+cryptographic steps in order to
+
+00:25:26,720 --> 00:25:30,080
+basically add or remove
+
+00:25:28,000 --> 00:25:31,760
+record protection and we need to deal
+
+00:25:30,080 --> 00:25:33,840
+with hands-dragging messages application
+
+00:25:31,760 --> 00:25:35,360
+data and alerts in the process
+
+00:25:33,840 --> 00:25:37,520
+to be able to write some data whether
+
+00:25:35,360 --> 00:25:39,120
+that be a handshake message or some
+
+00:25:37,520 --> 00:25:41,279
+application data we take a chunk of
+
+00:25:39,120 --> 00:25:42,000
+bytes we have a maximum plain text limit
+
+00:25:41,279 --> 00:25:45,200
+and we apply
+
+00:25:42,000 --> 00:25:47,200
+record prediction we write it out we re
+
+00:25:45,200 --> 00:25:48,880
+do the process on for reading data
+
+00:25:47,200 --> 00:25:50,480
+simply you know backwards we read a
+
+00:25:48,880 --> 00:25:51,840
+record from the wire we remove record
+
+00:25:50,480 --> 00:25:53,039
+protection and we make the bytes
+
+00:25:51,840 --> 00:25:54,480
+available
+
+00:25:53,039 --> 00:25:56,159
+that on its own doesn't sound too
+
+00:25:54,480 --> 00:25:58,080
+complex but
+
+00:25:56,159 --> 00:25:59,760
+weird things can happen and this is the
+
+00:25:58,080 --> 00:26:02,080
+sort of stuff that you have to
+
+00:25:59,760 --> 00:26:03,600
+deal with in the record layer you know
+
+00:26:02,080 --> 00:26:05,120
+it's possible that we may not be able to
+
+00:26:03,600 --> 00:26:06,320
+write out all of the record that we've
+
+00:26:05,120 --> 00:26:08,480
+created all at once
+
+00:26:06,320 --> 00:26:10,000
+you know obviously there's no guarantees
+
+00:26:08,480 --> 00:26:11,600
+that the underlying
+
+00:26:10,000 --> 00:26:13,440
+wire that we're writing it to can accept
+
+00:26:11,600 --> 00:26:14,799
+all the bytes so we may need multiple
+
+00:26:13,440 --> 00:26:17,039
+right processors
+
+00:26:14,799 --> 00:26:18,320
+we can also need to do a write before
+
+00:26:17,039 --> 00:26:20,640
+instead of reading
+
+00:26:18,320 --> 00:26:22,080
+for example if we've been reading and
+
+00:26:20,640 --> 00:26:23,360
+suddenly encountered a problem we need
+
+00:26:22,080 --> 00:26:24,880
+to send an alert so we might actually
+
+00:26:23,360 --> 00:26:26,640
+need to write instead
+
+00:26:24,880 --> 00:26:28,480
+and we can also receive alerts or
+
+00:26:26,640 --> 00:26:32,000
+handshake messages when we're actually
+
+00:26:28,480 --> 00:26:34,559
+wanting application data
+
+00:26:32,000 --> 00:26:35,200
+we also wanted to address a number of
+
+00:26:34,559 --> 00:26:37,360
+safety
+
+00:26:35,200 --> 00:26:39,039
+or security concerns in the process so
+
+00:26:37,360 --> 00:26:41,120
+we wanted to avoid spinning
+
+00:26:39,039 --> 00:26:42,960
+generally processing one record only and
+
+00:26:41,120 --> 00:26:45,120
+returning back up and this meant that
+
+00:26:42,960 --> 00:26:47,520
+the application can choose
+
+00:26:45,120 --> 00:26:50,400
+how often and when it basically drives
+
+00:26:47,520 --> 00:26:53,120
+reads and writes from the network
+
+00:26:50,400 --> 00:26:54,880
+we also used the crypto byte apis
+
+00:26:53,120 --> 00:26:56,799
+extensively these were something that
+
+00:26:54,880 --> 00:26:58,400
+came from boring ssl but they're
+
+00:26:56,799 --> 00:27:01,120
+basically apis that
+
+00:26:58,400 --> 00:27:03,840
+have inbuilt bounds checking for us we
+
+00:27:01,120 --> 00:27:05,520
+zeroed memory as appropriate and we also
+
+00:27:03,840 --> 00:27:08,080
+wanted to ensure that we didn't have
+
+00:27:05,520 --> 00:27:10,000
+data left around when operations
+
+00:27:08,080 --> 00:27:12,000
+didn't succeed so if something fails
+
+00:27:10,000 --> 00:27:15,919
+then obviously don't make it available
+
+00:27:12,000 --> 00:27:17,279
+vice versa and we have a handshaking
+
+00:27:15,919 --> 00:27:20,080
+process so we have to
+
+00:27:17,279 --> 00:27:21,679
+drive the state machine we need to send
+
+00:27:20,080 --> 00:27:22,720
+and receive handshake messages via the
+
+00:27:21,679 --> 00:27:24,799
+record layer
+
+00:27:22,720 --> 00:27:26,640
+in doing so we advance the key schedule
+
+00:27:24,799 --> 00:27:27,679
+we update keys in the record layer
+
+00:27:26,640 --> 00:27:30,240
+itself
+
+00:27:27,679 --> 00:27:32,080
+and once we've finished the handshake
+
+00:27:30,240 --> 00:27:35,120
+process we then allow application data
+
+00:27:32,080 --> 00:27:38,159
+to be sent and received
+
+00:27:35,120 --> 00:27:40,240
+now we had a working tls 1.3 stack
+
+00:27:38,159 --> 00:27:42,480
+but we have to actually better use that
+
+00:27:40,240 --> 00:27:43,360
+via the legacy stack and the legacy api
+
+00:27:42,480 --> 00:27:46,399
+and this also
+
+00:27:43,360 --> 00:27:49,919
+took up a chunk of interesting work
+
+00:27:46,399 --> 00:27:52,720
+so the legacy stack is driven by
+
+00:27:49,919 --> 00:27:54,080
+the the s lib ssl api which is generally
+
+00:27:52,720 --> 00:27:57,200
+ssl connect except
+
+00:27:54,080 --> 00:28:00,320
+read write shutdown and get error and
+
+00:27:57,200 --> 00:28:00,880
+these have interesting behavior some of
+
+00:28:00,320 --> 00:28:03,039
+it's
+
+00:28:00,880 --> 00:28:04,640
+documented not all of it necessarily is
+
+00:28:03,039 --> 00:28:07,919
+or was
+
+00:28:04,640 --> 00:28:09,440
+but in general we start with if tls 1.3
+
+00:28:07,919 --> 00:28:11,360
+is enabled we start with the new stack
+
+00:28:09,440 --> 00:28:13,279
+we then hand off to the legacy stack
+
+00:28:11,360 --> 00:28:15,520
+when we detect that we aren't actually
+
+00:28:13,279 --> 00:28:17,760
+going to do tls 1.3
+
+00:28:15,520 --> 00:28:19,120
+but we need to match existing behavior
+
+00:28:17,760 --> 00:28:21,360
+there's a bunch of
+
+00:28:19,120 --> 00:28:22,799
+various modes and options that we need
+
+00:28:21,360 --> 00:28:25,120
+to deal with and
+
+00:28:22,799 --> 00:28:26,880
+basically respect and we also need to
+
+00:28:25,120 --> 00:28:28,559
+make sure that we return the same errors
+
+00:28:26,880 --> 00:28:30,399
+states and callbacks otherwise
+
+00:28:28,559 --> 00:28:32,000
+various applications get grumpy with us
+
+00:28:30,399 --> 00:28:34,000
+and this took a little bit time to
+
+00:28:32,000 --> 00:28:36,080
+figure out
+
+00:28:34,000 --> 00:28:37,360
+so issues that we encountered on that
+
+00:28:36,080 --> 00:28:40,960
+front
+
+00:28:37,360 --> 00:28:41,679
+liba ssl is a very old api the api
+
+00:28:40,960 --> 00:28:44,559
+itself
+
+00:28:41,679 --> 00:28:46,480
+isn't entirely ideal but there's also
+
+00:28:44,559 --> 00:28:47,440
+lots of very poorly written consumer
+
+00:28:46,480 --> 00:28:50,799
+code
+
+00:28:47,440 --> 00:28:53,120
+so if we take ssl read for example
+
+00:28:50,799 --> 00:28:54,960
+it's defined that you know there are
+
+00:28:53,120 --> 00:28:57,919
+certain conditions under which ssl
+
+00:28:54,960 --> 00:29:00,399
+read will fail and it will basically
+
+00:28:57,919 --> 00:29:02,640
+result in ssl get error returning
+
+00:29:00,399 --> 00:29:04,480
+a condition with want read in which case
+
+00:29:02,640 --> 00:29:07,360
+you have to repeat it
+
+00:29:04,480 --> 00:29:08,480
+now a lot of code that exists
+
+00:29:07,360 --> 00:29:09,039
+particularly stuff that was written
+
+00:29:08,480 --> 00:29:10,880
+years ago
+
+00:29:09,039 --> 00:29:12,559
+simply calls this a read and never
+
+00:29:10,880 --> 00:29:14,720
+expects this condition to occur
+
+00:29:12,559 --> 00:29:15,919
+and in most cases they get it right
+
+00:29:14,720 --> 00:29:16,799
+because the other end doesn't
+
+00:29:15,919 --> 00:29:18,159
+renegotiate
+
+00:29:16,799 --> 00:29:20,000
+and therefore they don't run into this
+
+00:29:18,159 --> 00:29:23,200
+particular problem but
+
+00:29:20,000 --> 00:29:23,840
+in the case of tls 1.3 one of the other
+
+00:29:23,200 --> 00:29:26,880
+changes
+
+00:29:23,840 --> 00:29:27,840
+is that instead of doing things like you
+
+00:29:26,880 --> 00:29:30,159
+know
+
+00:29:27,840 --> 00:29:31,440
+either key exchanging the form or key
+
+00:29:30,159 --> 00:29:34,640
+updates rather in the form
+
+00:29:31,440 --> 00:29:35,200
+of renegotiation or providing session
+
+00:29:34,640 --> 00:29:37,120
+tickets
+
+00:29:35,200 --> 00:29:38,399
+as part of the actual handshake process
+
+00:29:37,120 --> 00:29:40,880
+these are actually
+
+00:29:38,399 --> 00:29:41,440
+provided or implemented as handshake
+
+00:29:40,880 --> 00:29:43,520
+messages
+
+00:29:41,440 --> 00:29:44,960
+that actually occur in band post
+
+00:29:43,520 --> 00:29:47,520
+handshake
+
+00:29:44,960 --> 00:29:48,159
+so we can actually have a situation
+
+00:29:47,520 --> 00:29:50,480
+where
+
+00:29:48,159 --> 00:29:52,080
+something wants to read some code read
+
+00:29:50,480 --> 00:29:54,159
+some application data
+
+00:29:52,080 --> 00:29:56,159
+we call ssl read what we actually pull
+
+00:29:54,159 --> 00:29:58,799
+off the other off the wire from
+
+00:29:56,159 --> 00:30:00,480
+for example the server is basically new
+
+00:29:58,799 --> 00:30:02,320
+session keys in a post handshake
+
+00:30:00,480 --> 00:30:04,799
+handshake message
+
+00:30:02,320 --> 00:30:06,720
+once we've got that well obviously we've
+
+00:30:04,799 --> 00:30:08,000
+got no application data to return so
+
+00:30:06,720 --> 00:30:10,799
+what do we do well
+
+00:30:08,000 --> 00:30:12,080
+we could return zero bytes things don't
+
+00:30:10,799 --> 00:30:14,240
+tend to like that because that usually
+
+00:30:12,080 --> 00:30:16,159
+indicates end of file
+
+00:30:14,240 --> 00:30:17,600
+and particularly if we don't actually
+
+00:30:16,159 --> 00:30:19,360
+have code that is
+
+00:30:17,600 --> 00:30:21,279
+written well and checks the appropriate
+
+00:30:19,360 --> 00:30:24,159
+retry states and and
+
+00:30:21,279 --> 00:30:25,039
+retries as a program so there's a an
+
+00:30:24,159 --> 00:30:28,159
+option or a mode
+
+00:30:25,039 --> 00:30:30,399
+called ssl mode auto retry
+
+00:30:28,159 --> 00:30:31,600
+the approach that open ssl took when
+
+00:30:30,399 --> 00:30:34,559
+they implemented
+
+00:30:31,600 --> 00:30:36,640
+tls 1.3 is that they just flipped auto
+
+00:30:34,559 --> 00:30:38,159
+retry from being off by default to being
+
+00:30:36,640 --> 00:30:40,320
+on by default and this meant
+
+00:30:38,159 --> 00:30:41,840
+that badly written consumer code
+
+00:30:40,320 --> 00:30:44,000
+continued to work
+
+00:30:41,840 --> 00:30:44,960
+what this did though was broke various
+
+00:30:44,000 --> 00:30:48,000
+things that
+
+00:30:44,960 --> 00:30:50,880
+handled blocking sockets correctly and
+
+00:30:48,000 --> 00:30:52,640
+actually wanted to know if they had read
+
+00:30:50,880 --> 00:30:55,679
+something in and didn't actually
+
+00:30:52,640 --> 00:30:57,120
+process anything so there's then flags
+
+00:30:55,679 --> 00:31:00,720
+and options to basically
+
+00:30:57,120 --> 00:31:02,240
+obviously switch this off um some code
+
+00:31:00,720 --> 00:31:04,080
+that was working with blocking soccer
+
+00:31:02,240 --> 00:31:05,840
+center had to go and implement this and
+
+00:31:04,080 --> 00:31:07,440
+we basically followed and ended up
+
+00:31:05,840 --> 00:31:09,039
+following suit
+
+00:31:07,440 --> 00:31:10,559
+there are other modes and options which
+
+00:31:09,039 --> 00:31:12,640
+we also need to respect so things like
+
+00:31:10,559 --> 00:31:13,919
+ssl mode enable partial right and
+
+00:31:12,640 --> 00:31:14,720
+basically what this means is that when
+
+00:31:13,919 --> 00:31:18,159
+you call ssl
+
+00:31:14,720 --> 00:31:21,120
+right rather than simply saying
+
+00:31:18,159 --> 00:31:23,200
+okay i wrote out x number of bytes and
+
+00:31:21,120 --> 00:31:24,720
+you can do advance your pointers and and
+
+00:31:23,200 --> 00:31:27,600
+you know do you your bookkeeping and
+
+00:31:24,720 --> 00:31:29,919
+call me again we actually have to loop
+
+00:31:27,600 --> 00:31:32,399
+and just keep going so if this option is
+
+00:31:29,919 --> 00:31:34,080
+not enabled which it's not by default
+
+00:31:32,399 --> 00:31:35,840
+and so in that case we actually need to
+
+00:31:34,080 --> 00:31:39,039
+spin inside
+
+00:31:35,840 --> 00:31:40,000
+the record layer itself or in basically
+
+00:31:39,039 --> 00:31:42,640
+the mapping between
+
+00:31:40,000 --> 00:31:44,399
+the new stack and the old stack and
+
+00:31:42,640 --> 00:31:45,360
+ensure that we write out all the data
+
+00:31:44,399 --> 00:31:47,440
+that existed
+
+00:31:45,360 --> 00:31:48,640
+and this was actually a fun i remember
+
+00:31:47,440 --> 00:31:52,000
+running into a
+
+00:31:48,640 --> 00:31:55,200
+interesting bug where open ldap
+
+00:31:52,000 --> 00:31:57,519
+slap slap d was would fail if used with
+
+00:31:55,200 --> 00:31:58,320
+gnu tls for this exact same reason good
+
+00:31:57,519 --> 00:32:01,760
+new tls
+
+00:31:58,320 --> 00:32:03,919
+didn't handle looping and so you
+
+00:32:01,760 --> 00:32:05,760
+get partial rights back and slap d did
+
+00:32:03,919 --> 00:32:09,760
+not like that
+
+00:32:05,760 --> 00:32:11,679
+and we also earlier i mentioned that
+
+00:32:09,760 --> 00:32:13,279
+we made a design decision that we would
+
+00:32:11,679 --> 00:32:15,519
+reach basically take
+
+00:32:13,279 --> 00:32:16,799
+one record and return back from the
+
+00:32:15,519 --> 00:32:18,720
+record layer
+
+00:32:16,799 --> 00:32:20,080
+yeah in the case of receiving certain
+
+00:32:18,720 --> 00:32:22,000
+states we
+
+00:32:20,080 --> 00:32:23,600
+obviously would bounce back up certain
+
+00:32:22,000 --> 00:32:24,640
+applications didn't like that so we then
+
+00:32:23,600 --> 00:32:26,960
+need to actually
+
+00:32:24,640 --> 00:32:29,600
+implement retrying within the record
+
+00:32:26,960 --> 00:32:31,600
+layer in certain conditions
+
+00:32:29,600 --> 00:32:33,279
+we also ran into some interoperability
+
+00:32:31,600 --> 00:32:37,600
+fun along the way some of it
+
+00:32:33,279 --> 00:32:39,120
+you know our own fault some of it not um
+
+00:32:37,600 --> 00:32:41,360
+as i've mentioned earlier there's a
+
+00:32:39,120 --> 00:32:44,080
+middle box compatibility mode so we can
+
+00:32:41,360 --> 00:32:45,039
+as a client we can basically set a
+
+00:32:44,080 --> 00:32:47,440
+certain
+
+00:32:45,039 --> 00:32:49,760
+series of bytes to being a particular
+
+00:32:47,440 --> 00:32:49,760
+value
+
+00:32:50,000 --> 00:32:53,679
+which will then mean that we've enabled
+
+00:32:51,679 --> 00:32:55,600
+middle box compatibility mode
+
+00:32:53,679 --> 00:32:56,880
+if we do that then the server and the
+
+00:32:55,600 --> 00:32:58,960
+client should send
+
+00:32:56,880 --> 00:33:01,200
+change cipher spec messages which are
+
+00:32:58,960 --> 00:33:03,919
+from tls 1.2
+
+00:33:01,200 --> 00:33:04,320
+in certain points of the handshake and
+
+00:33:03,919 --> 00:33:07,200
+this
+
+00:33:04,320 --> 00:33:09,200
+makes it look like we're doing tls 1.2
+
+00:33:07,200 --> 00:33:12,960
+session resumption
+
+00:33:09,200 --> 00:33:14,880
+fizz which is uh facebook's tls stack
+
+00:33:12,960 --> 00:33:16,080
+had an interesting and i think it still
+
+00:33:14,880 --> 00:33:19,039
+has an interesting
+
+00:33:16,080 --> 00:33:20,960
+way of doing this where rather than just
+
+00:33:19,039 --> 00:33:21,360
+sending one change cipher spec message
+
+00:33:20,960 --> 00:33:23,039
+so
+
+00:33:21,360 --> 00:33:24,640
+normally with tls 1.2 we would be
+
+00:33:23,039 --> 00:33:25,679
+operating in plain text mode we'll do
+
+00:33:24,640 --> 00:33:27,440
+the handshake
+
+00:33:25,679 --> 00:33:28,799
+once we've negotiated the cryptographic
+
+00:33:27,440 --> 00:33:30,320
+parameters we would have a change
+
+00:33:28,799 --> 00:33:30,960
+self-respect message at which point we
+
+00:33:30,320 --> 00:33:32,960
+switch
+
+00:33:30,960 --> 00:33:34,399
+to record protection and now
+
+00:33:32,960 --> 00:33:35,919
+everything's encrypted
+
+00:33:34,399 --> 00:33:37,679
+so we would normally only have one of
+
+00:33:35,919 --> 00:33:40,720
+these on the wire fizz
+
+00:33:37,679 --> 00:33:41,679
+well it happens to send two so we'd
+
+00:33:40,720 --> 00:33:43,760
+written the code
+
+00:33:41,679 --> 00:33:45,440
+and obviously the the record layer
+
+00:33:43,760 --> 00:33:47,360
+basically was looking for one of these
+
+00:33:45,440 --> 00:33:48,559
+and if we got more than that we'd bail
+
+00:33:47,360 --> 00:33:50,320
+out
+
+00:33:48,559 --> 00:33:52,080
+when we started doing some some testing
+
+00:33:50,320 --> 00:33:53,600
+and ran into this particular problem we
+
+00:33:52,080 --> 00:33:55,919
+obviously had to change that
+
+00:33:53,600 --> 00:33:57,440
+the rsa is a little bit ambiguous as to
+
+00:33:55,919 --> 00:33:59,120
+how many or the fact that you shouldn't
+
+00:33:57,440 --> 00:34:00,640
+say more than one so we'll let them get
+
+00:33:59,120 --> 00:34:03,279
+away with it but last time i checked
+
+00:34:00,640 --> 00:34:03,919
+fizz you could actually send ccs
+
+00:34:03,279 --> 00:34:06,640
+messages
+
+00:34:03,919 --> 00:34:08,159
+at any point in the the stream and it
+
+00:34:06,640 --> 00:34:11,200
+just wouldn't care
+
+00:34:08,159 --> 00:34:12,399
+good tls was interesting because it it
+
+00:34:11,200 --> 00:34:14,399
+is obviously an independent
+
+00:34:12,399 --> 00:34:16,639
+implementation um
+
+00:34:14,399 --> 00:34:18,639
+having software monocultures is
+
+00:34:16,639 --> 00:34:20,159
+generally considered bad and so the the
+
+00:34:18,639 --> 00:34:20,879
+fact that there's multiple tailor stacks
+
+00:34:20,159 --> 00:34:23,359
+out there
+
+00:34:20,879 --> 00:34:25,280
+these days is is certainly a good thing
+
+00:34:23,359 --> 00:34:26,879
+um and it will actually reject various
+
+00:34:25,280 --> 00:34:28,639
+things that other stacks don't so we ran
+
+00:34:26,879 --> 00:34:29,919
+into situations where we actually found
+
+00:34:28,639 --> 00:34:31,599
+bugs in our own
+
+00:34:29,919 --> 00:34:33,119
+code or things that we you know had
+
+00:34:31,599 --> 00:34:35,200
+implemented and
+
+00:34:33,119 --> 00:34:36,639
+probably shouldn't have or at least
+
+00:34:35,200 --> 00:34:40,159
+implementing the way we implemented
+
+00:34:36,639 --> 00:34:41,200
+that obviously testing against openssl
+
+00:34:40,159 --> 00:34:42,879
+or other
+
+00:34:41,200 --> 00:34:45,919
+other stacks wouldn't necessarily tell
+
+00:34:42,879 --> 00:34:47,839
+us hello retro request is also worth a
+
+00:34:45,919 --> 00:34:50,560
+mention
+
+00:34:47,839 --> 00:34:52,560
+as i said early on we implemented the
+
+00:34:50,560 --> 00:34:54,159
+bare minimum features so
+
+00:34:52,560 --> 00:34:56,960
+one of the things i haven't mentioned is
+
+00:34:54,159 --> 00:34:59,680
+that as part of the tls 1.3 handshake
+
+00:34:56,960 --> 00:35:02,800
+the client actually generates
+
+00:34:59,680 --> 00:35:04,800
+shared or it generates parts of keys
+
+00:35:02,800 --> 00:35:06,720
+before it actually starts the the
+
+00:35:04,800 --> 00:35:08,560
+conversation so that the server then can
+
+00:35:06,720 --> 00:35:11,440
+complete the difficult
+
+00:35:08,560 --> 00:35:13,280
+ephemeral exchange in a single round
+
+00:35:11,440 --> 00:35:15,200
+trip now in the case where the client
+
+00:35:13,280 --> 00:35:18,560
+happens to pick one particular
+
+00:35:15,200 --> 00:35:20,079
+set of of curves uh we end up in a
+
+00:35:18,560 --> 00:35:21,520
+situation where the server may not
+
+00:35:20,079 --> 00:35:23,200
+support that and then we then have to
+
+00:35:21,520 --> 00:35:25,520
+turn around and basically say no no
+
+00:35:23,200 --> 00:35:26,640
+go back and try again but use this
+
+00:35:25,520 --> 00:35:28,400
+particular
+
+00:35:26,640 --> 00:35:30,320
+this particular curve or this particular
+
+00:35:28,400 --> 00:35:32,160
+algorithm the process
+
+00:35:30,320 --> 00:35:34,079
+um and so we were actually interested to
+
+00:35:32,160 --> 00:35:35,760
+see how far we could go without actually
+
+00:35:34,079 --> 00:35:36,720
+implementing this until we ran into some
+
+00:35:35,760 --> 00:35:38,720
+servers and i
+
+00:35:36,720 --> 00:35:39,920
+think one of them was twitter's image
+
+00:35:38,720 --> 00:35:42,320
+server if
+
+00:35:39,920 --> 00:35:45,920
+memory says correctly where they simply
+
+00:35:42,320 --> 00:35:48,240
+didn't implement curve25519
+
+00:35:45,920 --> 00:35:49,760
+and they would basically send back a
+
+00:35:48,240 --> 00:35:51,359
+high retro request so
+
+00:35:49,760 --> 00:35:53,440
+obviously we went and implemented that
+
+00:35:51,359 --> 00:35:55,760
+code
+
+00:35:53,440 --> 00:35:57,359
+verification and testing was certainly a
+
+00:35:55,760 --> 00:35:59,359
+large part of this and obviously
+
+00:35:57,359 --> 00:36:01,040
+writing new code we wanted to write
+
+00:35:59,359 --> 00:36:03,280
+regress tests and unit tests
+
+00:36:01,040 --> 00:36:04,240
+and make sure that you know the code
+
+00:36:03,280 --> 00:36:07,760
+that we wrote
+
+00:36:04,240 --> 00:36:09,680
+behaves as intended and remains that way
+
+00:36:07,760 --> 00:36:11,119
+one of the other things that was done uh
+
+00:36:09,680 --> 00:36:14,560
+theobuel are also
+
+00:36:11,119 --> 00:36:15,359
+integrated tls fuzzer with our rigorous
+
+00:36:14,560 --> 00:36:18,480
+tests and
+
+00:36:15,359 --> 00:36:20,400
+this has been immensely helpful tls
+
+00:36:18,480 --> 00:36:22,800
+fuzzer is basically a
+
+00:36:20,400 --> 00:36:25,119
+pseudo telestack which sends all sorts
+
+00:36:22,800 --> 00:36:27,359
+of bogus messages and and
+
+00:36:25,119 --> 00:36:29,200
+basically make sure that we adhere to
+
+00:36:27,359 --> 00:36:30,480
+appropriate things as far as
+
+00:36:29,200 --> 00:36:32,640
+the protocol and specification is
+
+00:36:30,480 --> 00:36:34,480
+concerned this detected a lot of things
+
+00:36:32,640 --> 00:36:37,040
+which we didn't necessarily have
+
+00:36:34,480 --> 00:36:38,000
+quite right um and and fix a lot of
+
+00:36:37,040 --> 00:36:41,040
+things but also
+
+00:36:38,000 --> 00:36:42,960
+in the probably the the worst bug that
+
+00:36:41,040 --> 00:36:44,480
+we had which i think was a null point d
+
+00:36:42,960 --> 00:36:46,480
+reference at one point
+
+00:36:44,480 --> 00:36:48,960
+uh tls fuzzer didn't actually detect and
+
+00:36:46,480 --> 00:36:50,640
+so it was a case of okay let's go and
+
+00:36:48,960 --> 00:36:52,000
+write an implementation for tls fuzzo
+
+00:36:50,640 --> 00:36:55,520
+let's get that upstreamed and that in
+
+00:36:52,000 --> 00:36:56,079
+turn found bugs in nss and i think a new
+
+00:36:55,520 --> 00:36:58,480
+teles
+
+00:36:56,079 --> 00:37:00,400
+or at least one other was two stacks i
+
+00:36:58,480 --> 00:37:02,720
+can't remember exactly which two
+
+00:37:00,400 --> 00:37:04,560
+we also have integration with oss fuzz
+
+00:37:02,720 --> 00:37:06,720
+so this is one of google's
+
+00:37:04,560 --> 00:37:08,720
+projects but basically this runs things
+
+00:37:06,720 --> 00:37:11,359
+like asan and msan against
+
+00:37:08,720 --> 00:37:12,000
+our code at regular intervals and we
+
+00:37:11,359 --> 00:37:13,680
+obviously
+
+00:37:12,000 --> 00:37:15,280
+detect things like memory leaks and bad
+
+00:37:13,680 --> 00:37:17,440
+code as a result
+
+00:37:15,280 --> 00:37:18,480
+we also have the open bsd ports tree and
+
+00:37:17,440 --> 00:37:21,280
+this is a
+
+00:37:18,480 --> 00:37:22,000
+huge help as well because there is lots
+
+00:37:21,280 --> 00:37:22,960
+of different code
+
+00:37:22,000 --> 00:37:25,119
+out there there's lots of different
+
+00:37:22,960 --> 00:37:27,760
+things that use slid ssl
+
+00:37:25,119 --> 00:37:28,480
+there's lots of different ways that this
+
+00:37:27,760 --> 00:37:30,880
+code
+
+00:37:28,480 --> 00:37:32,079
+twists and breaks the apis and things
+
+00:37:30,880 --> 00:37:33,599
+that expect
+
+00:37:32,079 --> 00:37:35,599
+certain behavior that's been there for
+
+00:37:33,599 --> 00:37:38,160
+years so having
+
+00:37:35,599 --> 00:37:40,079
+people who you know obviously using this
+
+00:37:38,160 --> 00:37:42,000
+code and running it against
+
+00:37:40,079 --> 00:37:43,520
+the the stack that we're developing
+
+00:37:42,000 --> 00:37:44,160
+people would usually yell when things
+
+00:37:43,520 --> 00:37:45,680
+break and
+
+00:37:44,160 --> 00:37:47,359
+and tell us hey suddenly i can't
+
+00:37:45,680 --> 00:37:49,200
+actually you know connect to
+
+00:37:47,359 --> 00:37:51,200
+twitter images as a case maybe okay
+
+00:37:49,200 --> 00:37:52,240
+let's go and look at why okay let's go
+
+00:37:51,200 --> 00:37:53,359
+and add that particular bit of
+
+00:37:52,240 --> 00:37:56,720
+functionality
+
+00:37:53,359 --> 00:38:00,079
+um so that was certainly a big help
+
+00:37:56,720 --> 00:38:01,119
+so in summary we now have a tls 1.3
+
+00:38:00,079 --> 00:38:03,280
+implementation
+
+00:38:01,119 --> 00:38:04,880
+we essentially wrote it from scratch and
+
+00:38:03,280 --> 00:38:08,320
+there's a little bit of hand waving over
+
+00:38:04,880 --> 00:38:11,119
+over some aspects of that you know the
+
+00:38:08,320 --> 00:38:12,079
+the tls extension handling code we
+
+00:38:11,119 --> 00:38:14,640
+rewrote
+
+00:38:12,079 --> 00:38:15,359
+um sometime earlier and reused that so
+
+00:38:14,640 --> 00:38:17,440
+there's this
+
+00:38:15,359 --> 00:38:18,480
+some things that sort of sit to the side
+
+00:38:17,440 --> 00:38:20,400
+in that respect but
+
+00:38:18,480 --> 00:38:22,320
+the the entire stack itself is certainly
+
+00:38:20,400 --> 00:38:23,680
+from scratch
+
+00:38:22,320 --> 00:38:25,359
+there's some additional functionality
+
+00:38:23,680 --> 00:38:27,119
+that's still desired
+
+00:38:25,359 --> 00:38:28,960
+it's not you know impacting
+
+00:38:27,119 --> 00:38:29,920
+functionality but we still want to add
+
+00:38:28,960 --> 00:38:32,560
+it and so we'll get
+
+00:38:29,920 --> 00:38:32,960
+to doing that but the main thing there's
+
+00:38:32,560 --> 00:38:35,920
+lots
+
+00:38:32,960 --> 00:38:37,440
+that was learned a long way um both in
+
+00:38:35,920 --> 00:38:38,960
+terms of
+
+00:38:37,440 --> 00:38:41,280
+obviously you know starting with a clean
+
+00:38:38,960 --> 00:38:43,839
+slide and implementing a
+
+00:38:41,280 --> 00:38:44,720
+a tls 1.3 stack and the complexities of
+
+00:38:43,839 --> 00:38:47,119
+that
+
+00:38:44,720 --> 00:38:48,320
+but also you know trying to figure out
+
+00:38:47,119 --> 00:38:51,359
+reverse engineer
+
+00:38:48,320 --> 00:38:53,280
+behavior that is from an existing api
+
+00:38:51,359 --> 00:38:55,760
+that really needs to be documented and
+
+00:38:53,280 --> 00:38:57,839
+obviously getting that documented and
+
+00:38:55,760 --> 00:38:58,880
+certainly a big shout out to ingo
+
+00:38:57,839 --> 00:39:01,119
+schwartz who
+
+00:38:58,880 --> 00:39:02,400
+is you know with the openbsd project who
+
+00:39:01,119 --> 00:39:04,960
+also works on a lot of their
+
+00:39:02,400 --> 00:39:07,040
+documentation um which is extremely
+
+00:39:04,960 --> 00:39:09,040
+helpful
+
+00:39:07,040 --> 00:39:10,320
+and to top things off we're starting to
+
+00:39:09,040 --> 00:39:11,680
+rework the legacy stack
+
+00:39:10,320 --> 00:39:15,040
+using the same design and the same
+
+00:39:11,680 --> 00:39:16,800
+approach and so it's tls 1.3 the new
+
+00:39:15,040 --> 00:39:18,480
+stack has been a good proving ground
+
+00:39:16,800 --> 00:39:20,160
+and we're basically working backwards
+
+00:39:18,480 --> 00:39:23,359
+now to
+
+00:39:20,160 --> 00:39:25,440
+go from the record layer back up and um
+
+00:39:23,359 --> 00:39:28,240
+i have to poke some people and annoy
+
+00:39:25,440 --> 00:39:30,160
+some people to get me a new tails 1.2
+
+00:39:28,240 --> 00:39:33,280
+state machine
+
+00:39:30,160 --> 00:39:36,400
+but that's where we are so
+
+00:39:33,280 --> 00:39:37,760
+thank you i hope this has been useful if
+
+00:39:36,400 --> 00:39:40,880
+there's questions
+
+00:39:37,760 --> 00:39:41,680
+then we can take those that was a really
+
+00:39:40,880 --> 00:39:45,440
+great talk
+
+00:39:41,680 --> 00:39:47,040
+thanks joel um i do have plenty of
+
+00:39:45,440 --> 00:39:48,160
+questions because i'm a serial
+
+00:39:47,040 --> 00:39:50,000
+questioner
+
+00:39:48,160 --> 00:39:51,520
+so i'm going to leap off with some of
+
+00:39:50,000 --> 00:39:54,160
+those if there's anyone
+
+00:39:51,520 --> 00:39:55,200
+in the chat who's got some questions
+
+00:39:54,160 --> 00:39:57,920
+that's just come to them
+
+00:39:55,200 --> 00:39:58,960
+put them in the chat and it's even
+
+00:39:57,920 --> 00:40:02,240
+better to interrupt
+
+00:39:58,960 --> 00:40:04,480
+my stream of questions
+
+00:40:02,240 --> 00:40:05,599
+so first of all when starting off on
+
+00:40:04,480 --> 00:40:08,960
+this change
+
+00:40:05,599 --> 00:40:10,960
+did you do much to tell your users about
+
+00:40:08,960 --> 00:40:13,520
+the plan and
+
+00:40:10,960 --> 00:40:16,000
+throughout the year as it turned out how
+
+00:40:13,520 --> 00:40:19,119
+it was going
+
+00:40:16,000 --> 00:40:20,160
+so the the main communication outside of
+
+00:40:19,119 --> 00:40:22,240
+openvsd
+
+00:40:20,160 --> 00:40:24,560
+so you know libra ssl is part of the
+
+00:40:22,240 --> 00:40:27,599
+open bsd project so anyone who's
+
+00:40:24,560 --> 00:40:28,880
+working with openbsd and and familiar
+
+00:40:27,599 --> 00:40:30,000
+with it is sort of keeping track of
+
+00:40:28,880 --> 00:40:32,400
+where things are at but
+
+00:40:30,000 --> 00:40:35,200
+outside of that so libra ssl portable is
+
+00:40:32,400 --> 00:40:37,040
+basically a
+
+00:40:35,200 --> 00:40:38,240
+a portable version that's taken from the
+
+00:40:37,040 --> 00:40:40,560
+open bsd code and
+
+00:40:38,240 --> 00:40:41,920
+and has additional glue added to it so
+
+00:40:40,560 --> 00:40:45,359
+that it works elsewhere
+
+00:40:41,920 --> 00:40:48,319
+and we have a couple of developers
+
+00:40:45,359 --> 00:40:50,319
+that that specifically work on that but
+
+00:40:48,319 --> 00:40:51,839
+we had github issues where we were
+
+00:40:50,319 --> 00:40:52,640
+basically you know providing some
+
+00:40:51,839 --> 00:40:54,640
+details
+
+00:40:52,640 --> 00:40:55,920
+but you know the the bursty nature of
+
+00:40:54,640 --> 00:40:57,599
+this sort of work is that
+
+00:40:55,920 --> 00:40:59,040
+you know we'd go from having not much
+
+00:40:57,599 --> 00:41:00,160
+working to having a client working at
+
+00:40:59,040 --> 00:41:02,319
+which point you know
+
+00:41:00,160 --> 00:41:03,680
+it would be available so whilst there
+
+00:41:02,319 --> 00:41:05,119
+was certainly updates as much as
+
+00:41:03,680 --> 00:41:05,760
+possible it wasn't something we could
+
+00:41:05,119 --> 00:41:07,119
+sort of say
+
+00:41:05,760 --> 00:41:08,400
+you know we're going to expect this to
+
+00:41:07,119 --> 00:41:09,200
+be finished at this particular point in
+
+00:41:08,400 --> 00:41:11,040
+time you know
+
+00:41:09,200 --> 00:41:12,400
+we have what we refer to as hackathons
+
+00:41:11,040 --> 00:41:14,800
+so we get a bunch of people together in
+
+00:41:12,400 --> 00:41:16,480
+a location at various points in time and
+
+00:41:14,800 --> 00:41:17,839
+yeah we see how much work we can get
+
+00:41:16,480 --> 00:41:21,119
+done so
+
+00:41:17,839 --> 00:41:21,760
+cool we've got a question from robert i
+
+00:41:21,119 --> 00:41:25,680
+think
+
+00:41:21,760 --> 00:41:28,640
+uh how can 160 page spec have confidence
+
+00:41:25,680 --> 00:41:30,800
+in an implementable spec without a
+
+00:41:28,640 --> 00:41:32,960
+reference implementation
+
+00:41:30,800 --> 00:41:34,880
+did your feedback did you feedback your
+
+00:41:32,960 --> 00:41:38,400
+improvements like using a dag
+
+00:41:34,880 --> 00:41:40,839
+back to the rfc authors so
+
+00:41:38,400 --> 00:41:42,079
+in terms of an implementable
+
+00:41:40,839 --> 00:41:45,359
+specification
+
+00:41:42,079 --> 00:41:47,440
+i think working from it is certainly
+
+00:41:45,359 --> 00:41:49,359
+doable and certainly a lot more so than
+
+00:41:47,440 --> 00:41:51,680
+than some other specifications
+
+00:41:49,359 --> 00:41:52,720
+but at the same time a reference spec is
+
+00:41:51,680 --> 00:41:55,760
+probably critical
+
+00:41:52,720 --> 00:41:56,720
+like yeah if i take the key schedule as
+
+00:41:55,760 --> 00:41:58,240
+a classic example
+
+00:41:56,720 --> 00:41:59,760
+we would have completely got that wrong
+
+00:41:58,240 --> 00:42:02,160
+had we not been able to test that
+
+00:41:59,760 --> 00:42:02,720
+against a reference implementation other
+
+00:42:02,160 --> 00:42:04,880
+things
+
+00:42:02,720 --> 00:42:06,000
+such as the the record layer is
+
+00:42:04,880 --> 00:42:06,800
+certainly going to be easier and
+
+00:42:06,000 --> 00:42:08,319
+different
+
+00:42:06,800 --> 00:42:10,800
+um in terms of feeding things back to
+
+00:42:08,319 --> 00:42:13,599
+the rfc authors i'm not sure that that's
+
+00:42:10,800 --> 00:42:15,599
+been done um i could certainly follow up
+
+00:42:13,599 --> 00:42:19,200
+with theo and see if he's had any
+
+00:42:15,599 --> 00:42:22,400
+any conversation with them at all
+
+00:42:19,200 --> 00:42:22,720
+um i think i know the answer to this one
+
+00:42:22,400 --> 00:42:26,079
+but
+
+00:42:22,720 --> 00:42:28,720
+after 2 month effort are you comfortable
+
+00:42:26,079 --> 00:42:30,319
+with the decision to rewrite or
+
+00:42:28,720 --> 00:42:32,240
+is this something you would have done
+
+00:42:30,319 --> 00:42:34,319
+differently
+
+00:42:32,240 --> 00:42:35,520
+no certainly for me personally i
+
+00:42:34,319 --> 00:42:36,480
+wouldn't have done anything differently
+
+00:42:35,520 --> 00:42:38,240
+because
+
+00:42:36,480 --> 00:42:40,000
+it was really going to be the only way
+
+00:42:38,240 --> 00:42:43,119
+that we could end up with code that
+
+00:42:40,000 --> 00:42:43,520
+you could be comfortable in using as i
+
+00:42:43,119 --> 00:42:45,680
+said
+
+00:42:43,520 --> 00:42:48,319
+earlier i'm currently reworking parts of
+
+00:42:45,680 --> 00:42:50,720
+the existing tls 1.2 stack to basically
+
+00:42:48,319 --> 00:42:54,720
+retrofit the same design too
+
+00:42:50,720 --> 00:42:55,440
+and it's it's a minefield so you're
+
+00:42:54,720 --> 00:42:57,680
+having a
+
+00:42:55,440 --> 00:42:59,760
+clean slate and calling code that we can
+
+00:42:57,680 --> 00:43:01,599
+yeah we know is working the way that we
+
+00:42:59,760 --> 00:43:02,640
+want it it has made a world of
+
+00:43:01,599 --> 00:43:06,640
+difference
+
+00:43:02,640 --> 00:43:08,720
+yeah um amity isaacs asks do you think
+
+00:43:06,640 --> 00:43:12,960
+lib ssl api needs an overhaul
+
+00:43:08,720 --> 00:43:16,800
+considering the tls 1.3 requirements
+
+00:43:12,960 --> 00:43:19,520
+uh the short answer is yes so i
+
+00:43:16,800 --> 00:43:20,000
+i gave a presentation four years ago i
+
+00:43:19,520 --> 00:43:22,800
+believe
+
+00:43:20,000 --> 00:43:24,240
+with linux confer you and one of the the
+
+00:43:22,800 --> 00:43:26,079
+topic of that particular presentation
+
+00:43:24,240 --> 00:43:29,440
+was lib tls which was a
+
+00:43:26,079 --> 00:43:30,960
+new api which you know myself and
+
+00:43:29,440 --> 00:43:32,640
+another couple of developers had worked
+
+00:43:30,960 --> 00:43:34,960
+on to basically
+
+00:43:32,640 --> 00:43:36,640
+make a interface that was more
+
+00:43:34,960 --> 00:43:38,400
+posix-like and and certainly a lot
+
+00:43:36,640 --> 00:43:40,480
+harder to get wrong
+
+00:43:38,400 --> 00:43:42,079
+so i think we've done that in a lot of
+
+00:43:40,480 --> 00:43:44,960
+cases but there's also
+
+00:43:42,079 --> 00:43:46,480
+a lot of weirdness in terms of some of
+
+00:43:44,960 --> 00:43:48,240
+some of the new functionality that's
+
+00:43:46,480 --> 00:43:51,359
+coming with tls 1.3
+
+00:43:48,240 --> 00:43:53,520
+and the the way that that interacts is
+
+00:43:51,359 --> 00:43:55,760
+strange and awkward and and you know if
+
+00:43:53,520 --> 00:43:56,560
+you can avoid using the lib ssl api then
+
+00:43:55,760 --> 00:43:59,920
+i'd certainly
+
+00:43:56,560 --> 00:44:01,359
+suggest you to yeah there seems to be a
+
+00:43:59,920 --> 00:44:03,760
+tension between
+
+00:44:01,359 --> 00:44:04,960
+api compatibility and protocol
+
+00:44:03,760 --> 00:44:07,200
+engineering
+
+00:44:04,960 --> 00:44:09,599
+do you have any reflections on how the
+
+00:44:07,200 --> 00:44:12,000
+tls 1.3
+
+00:44:09,599 --> 00:44:14,400
+protocol or specification ended up after
+
+00:44:12,000 --> 00:44:17,200
+you had to implement it
+
+00:44:14,400 --> 00:44:19,920
+do you mean from the middle box
+
+00:44:17,200 --> 00:44:21,760
+compatibility side or from the api
+
+00:44:19,920 --> 00:44:23,359
+if you're able to speak directly to the
+
+00:44:21,760 --> 00:44:24,960
+authors of the standard
+
+00:44:23,359 --> 00:44:26,480
+would you say after implementing it
+
+00:44:24,960 --> 00:44:27,839
+actually i really wish you hadn't done
+
+00:44:26,480 --> 00:44:30,160
+that thing
+
+00:44:27,839 --> 00:44:31,920
+so the the biggest things which i you
+
+00:44:30,160 --> 00:44:34,160
+know certainly being
+
+00:44:31,920 --> 00:44:35,920
+more clear with things like the key
+
+00:44:34,160 --> 00:44:38,160
+schedule and and
+
+00:44:35,920 --> 00:44:40,240
+particularly reasoning why something
+
+00:44:38,160 --> 00:44:42,000
+needs to be fed through a hash rather
+
+00:44:40,240 --> 00:44:44,480
+than simply feeding through
+
+00:44:42,000 --> 00:44:46,000
+an empty value which yeah there's not a
+
+00:44:44,480 --> 00:44:47,040
+lot of difference too but it's it's the
+
+00:44:46,000 --> 00:44:48,400
+sort of thing that makes a big
+
+00:44:47,040 --> 00:44:50,240
+difference in terms of
+
+00:44:48,400 --> 00:44:51,839
+whether the resulting code works or
+
+00:44:50,240 --> 00:44:55,599
+doesn't um
+
+00:44:51,839 --> 00:44:57,599
+things like the dag and and being
+
+00:44:55,599 --> 00:44:59,520
+more clear with things like middle box
+
+00:44:57,599 --> 00:45:00,720
+compatibility mode and how many ccs
+
+00:44:59,520 --> 00:45:02,880
+messages you could send
+
+00:45:00,720 --> 00:45:04,800
+so there's those sorts of things which
+
+00:45:02,880 --> 00:45:07,680
+would certainly have made life easier
+
+00:45:04,800 --> 00:45:09,359
+yeah cool well thank you for that joel i
+
+00:45:07,680 --> 00:45:15,359
+really enjoyed that talk
+
+00:45:09,359 --> 00:45:15,359
+
+YouTube URL: https://www.youtube.com/watch?v=asxDaJBkDxc
+
+

@@ -1,0 +1,1517 @@
+Title: Forwarding syscalls to userspace
+Publication date: 2020-01-09
+Playlist: linux.conf.au 2019
+Description: 
+	Tycho Andersen
+
+https://2019.linux.conf.au/schedule/presentation/236/
+
+Containers are ever popular, and are increasingly presented as an alternative to virtual machines. However, there are some obvious gaps in the API available to containers vs. what's available to root on the host. For example, containers cannot safely load kernel modules, or mount arbitrary filesystems.
+In this talk, Tycho will present a kernel patchset in development for passing syscalls off to a userspace handler, which can perform actions on behalf of the task that performed the syscall. For example, if a container tries to load a kernel module, the userspace daemon might check that the module is in a whitelist, and load the host's version of the module instead. The container is safely allowed to load kernel modules, whereas before it was not.
+
+linux.conf.au is a conference about the Linux operating system, and all aspects of the thriving ecosystem of Free and Open Source Software that has grown up around it. Run since 1999, in a different Australian or New Zealand city each year, by a team of local volunteers, LCA invites more than 500 people to learn from the people who shape the future of Open Source. For more information on the conference see https://linux.conf.au/
+
+#linux.conf.au #linux #foss #opensource
+Captions: 
+	00:00:04,040 --> 00:00:09,900
+hey hey
+
+00:00:05,640 --> 00:00:12,870
+hi I'm taiko Anderson I am engineer at
+
+00:00:09,900 --> 00:00:14,490
+Cisco working on Linux platforms I think
+
+00:00:12,870 --> 00:00:16,020
+my boss would be mad if I flew all the
+
+00:00:14,490 --> 00:00:18,330
+way here and I didn't tell you that
+
+00:00:16,020 --> 00:00:20,789
+we're hiring so this sounds interesting
+
+00:00:18,330 --> 00:00:22,289
+come work come work with me today I'm
+
+00:00:20,789 --> 00:00:24,240
+going to talk to you about forwarding
+
+00:00:22,289 --> 00:00:27,900
+syscalls to user space and when I
+
+00:00:24,240 --> 00:00:29,670
+originally submitted this this was still
+
+00:00:27,900 --> 00:00:34,950
+a work in progress but now it has landed
+
+00:00:29,670 --> 00:00:37,140
+in the 5.0 RCS so hooray and when they
+
+00:00:34,950 --> 00:00:39,300
+do talks they tell you to say something
+
+00:00:37,140 --> 00:00:42,600
+controversial at the beginning so what I
+
+00:00:39,300 --> 00:00:49,649
+want to do is load kernel modules from
+
+00:00:42,600 --> 00:00:51,329
+inside containers that good so I don't
+
+00:00:49,649 --> 00:00:52,770
+really want to do that because one of
+
+00:00:51,329 --> 00:00:55,410
+the things that you use containers for
+
+00:00:52,770 --> 00:00:57,449
+is you use them to run old user space
+
+00:00:55,410 --> 00:00:59,129
+that you don't necessarily really know
+
+00:00:57,449 --> 00:01:00,539
+what's in there or maybe you work for
+
+00:00:59,129 --> 00:01:02,460
+this company that's been around for a
+
+00:01:00,539 --> 00:01:04,739
+really long time and has cold code older
+
+00:01:02,460 --> 00:01:08,400
+than you do you are and so you have to
+
+00:01:04,739 --> 00:01:10,320
+get that working and you don't really
+
+00:01:08,400 --> 00:01:11,820
+want to mess with that code I mean it
+
+00:01:10,320 --> 00:01:14,159
+expects to be able to do all kinds of
+
+00:01:11,820 --> 00:01:17,280
+things one of the things maybe is load
+
+00:01:14,159 --> 00:01:19,170
+kernel modules and you know they don't
+
+00:01:17,280 --> 00:01:20,820
+realize that their kernel modules build
+
+00:01:19,170 --> 00:01:22,650
+against some super old kernel and you're
+
+00:01:20,820 --> 00:01:24,720
+using a really modern kernel so what you
+
+00:01:22,650 --> 00:01:26,580
+really want to do is kind of intercept
+
+00:01:24,720 --> 00:01:29,340
+this call and just load the right one
+
+00:01:26,580 --> 00:01:33,060
+that you trust that's built by somebody
+
+00:01:29,340 --> 00:01:35,700
+you trust and kind of lie to the to the
+
+00:01:33,060 --> 00:01:37,590
+old user space and say it worked and
+
+00:01:35,700 --> 00:01:40,920
+they will get the functionality because
+
+00:01:37,590 --> 00:01:43,890
+the kernel API doesn't break and nothing
+
+00:01:40,920 --> 00:01:46,799
+insecure happens something else you
+
+00:01:43,890 --> 00:01:48,899
+might be interested in doing is mounting
+
+00:01:46,799 --> 00:01:50,399
+from inside containers so there is a
+
+00:01:48,899 --> 00:01:54,540
+flag I think it's called
+
+00:01:50,399 --> 00:01:56,909
+FS user NS mount or something particular
+
+00:01:54,540 --> 00:01:58,469
+file systems can enable being mounted
+
+00:01:56,909 --> 00:02:02,420
+from inside and unprivileged container
+
+00:01:58,469 --> 00:02:04,649
+but in general this is not supported and
+
+00:02:02,420 --> 00:02:08,489
+the code basically looks something like
+
+00:02:04,649 --> 00:02:12,840
+this you you can only do mounts as real
+
+00:02:08,489 --> 00:02:13,740
+root which is reasonable because file
+
+00:02:12,840 --> 00:02:17,280
+systems have a lot of
+
+00:02:13,740 --> 00:02:18,540
+like this so this is you know x4 feels
+
+00:02:17,280 --> 00:02:20,580
+super this is the part where they're
+
+00:02:18,540 --> 00:02:22,080
+parsing out some of the stuff that's on
+
+00:02:20,580 --> 00:02:24,030
+the disk and there's like a thousand
+
+00:02:22,080 --> 00:02:26,240
+lines of parsing code and this is not
+
+00:02:24,030 --> 00:02:28,500
+necessarily bad x4 has lots of features
+
+00:02:26,240 --> 00:02:30,330
+this is you know if you look in this
+
+00:02:28,500 --> 00:02:32,340
+file it's lots of endianness conversion
+
+00:02:30,330 --> 00:02:35,250
+it's like you can imagine sizes things
+
+00:02:32,340 --> 00:02:38,100
+break in here whatever and in particular
+
+00:02:35,250 --> 00:02:40,740
+this has always been only been able to
+
+00:02:38,100 --> 00:02:43,800
+only route can do this so there's really
+
+00:02:40,740 --> 00:02:45,630
+been no security implications of this we
+
+00:02:43,800 --> 00:02:47,490
+never assumed that some user could write
+
+00:02:45,630 --> 00:02:49,680
+some bad data to a block device and then
+
+00:02:47,490 --> 00:02:51,180
+exploit this code but now all the
+
+00:02:49,680 --> 00:02:55,140
+container people have come along and
+
+00:02:51,180 --> 00:02:59,220
+said well we want to allow this so this
+
+00:02:55,140 --> 00:03:03,120
+is you know kind of a sort of a problem
+
+00:02:59,220 --> 00:03:06,600
+I guess you might say but the reality is
+
+00:03:03,120 --> 00:03:08,670
+that people want to do this and there is
+
+00:03:06,600 --> 00:03:10,830
+you can imagine there's a way to do it
+
+00:03:08,670 --> 00:03:12,470
+safely so if you think about what
+
+00:03:10,830 --> 00:03:17,040
+happens when you're deploying a
+
+00:03:12,470 --> 00:03:19,740
+container on a cloud or something you
+
+00:03:17,040 --> 00:03:21,510
+might write some image to the disk
+
+00:03:19,740 --> 00:03:23,250
+that's an X for image or whatever and
+
+00:03:21,510 --> 00:03:24,930
+then your container tries to mount it
+
+00:03:23,250 --> 00:03:27,570
+but if you know that block device has
+
+00:03:24,930 --> 00:03:28,800
+never been exposed to the container you
+
+00:03:27,570 --> 00:03:30,510
+know that nobody has ever had an
+
+00:03:28,800 --> 00:03:33,240
+opportunity to write malicious data and
+
+00:03:30,510 --> 00:03:36,000
+so only some legit image is there and
+
+00:03:33,240 --> 00:03:37,950
+you might want to allow this so what
+
+00:03:36,000 --> 00:03:40,410
+would that look like if we wanted to do
+
+00:03:37,950 --> 00:03:43,890
+that basically the container would do
+
+00:03:40,410 --> 00:03:45,930
+some mount we would go into the kernel
+
+00:03:43,890 --> 00:03:48,800
+and there would be some magic in the
+
+00:03:45,930 --> 00:03:51,060
+kernel and that would forward something
+
+00:03:48,800 --> 00:03:52,950
+to a like a daemon or something
+
+00:03:51,060 --> 00:03:54,990
+listening on the host that would set an
+
+00:03:52,950 --> 00:03:57,210
+S to the container do the mount set
+
+00:03:54,990 --> 00:04:00,660
+everything up and then basically lie to
+
+00:03:57,210 --> 00:04:05,370
+the mount command and say sure this all
+
+00:04:00,660 --> 00:04:07,020
+works everything's fine so the question
+
+00:04:05,370 --> 00:04:08,310
+is how do we implement that it turns out
+
+00:04:07,020 --> 00:04:11,970
+there is a number of different ways to
+
+00:04:08,310 --> 00:04:15,000
+do this the most obvious way is P trace
+
+00:04:11,970 --> 00:04:17,700
+so you attach to every process in the
+
+00:04:15,000 --> 00:04:20,630
+container and then you just step through
+
+00:04:17,700 --> 00:04:20,630
+the syscalls
+
+00:04:20,939 --> 00:04:27,520
+forever because you have to look at
+
+00:04:24,159 --> 00:04:29,349
+everything and turns out this is slow
+
+00:04:27,520 --> 00:04:31,090
+you absolutely do not want to step
+
+00:04:29,349 --> 00:04:35,590
+through every system call that the
+
+00:04:31,090 --> 00:04:37,780
+container makes forever so but it is
+
+00:04:35,590 --> 00:04:40,180
+possible so it turns out that people
+
+00:04:37,780 --> 00:04:43,689
+thought about this and there's a there's
+
+00:04:40,180 --> 00:04:46,270
+a set comp implementation of this and so
+
+00:04:43,689 --> 00:04:47,770
+there's a special this is BPF assembly
+
+00:04:46,270 --> 00:04:50,009
+you don't really have to the part in red
+
+00:04:47,770 --> 00:04:54,069
+is the important part where basically
+
+00:04:50,009 --> 00:04:55,840
+you can attach a set comp filter and you
+
+00:04:54,069 --> 00:04:57,969
+can attach to P trace and you can just
+
+00:04:55,840 --> 00:04:59,979
+say P trace continued but then when this
+
+00:04:57,969 --> 00:05:02,139
+set can't filter triggers you get a P
+
+00:04:59,979 --> 00:05:03,939
+trace event and so that means you're
+
+00:05:02,139 --> 00:05:06,460
+still P trace attached to the process
+
+00:05:03,939 --> 00:05:08,529
+but you don't have to do the whole step
+
+00:05:06,460 --> 00:05:09,490
+through every syscall you only step
+
+00:05:08,529 --> 00:05:12,279
+through the ones that you're interested
+
+00:05:09,490 --> 00:05:16,659
+in so this is a you know obviously a
+
+00:05:12,279 --> 00:05:18,129
+vast improvement but the question is how
+
+00:05:16,659 --> 00:05:19,449
+do you debug something now that you're
+
+00:05:18,129 --> 00:05:21,460
+using this so for example you have a
+
+00:05:19,449 --> 00:05:24,310
+container it's doing some stuff you have
+
+00:05:21,460 --> 00:05:26,710
+this P trace attached thing that's
+
+00:05:24,310 --> 00:05:30,069
+supporting mountain whatever but you can
+
+00:05:26,710 --> 00:05:32,710
+only p trace attached to one only one
+
+00:05:30,069 --> 00:05:34,870
+person can p trace attached to a task at
+
+00:05:32,710 --> 00:05:39,819
+a time so you use what's called the
+
+00:05:34,870 --> 00:05:41,379
+Fineman algorithm which is you just
+
+00:05:39,819 --> 00:05:43,330
+think about it really there isn't really
+
+00:05:41,379 --> 00:05:46,750
+a good way to debug stuff without p
+
+00:05:43,330 --> 00:05:51,479
+trace so one of the other motivations
+
+00:05:46,750 --> 00:05:55,089
+for this is that you you want to allow
+
+00:05:51,479 --> 00:05:56,169
+debugging or people to figure out what's
+
+00:05:55,089 --> 00:05:58,060
+going on in containers and actually
+
+00:05:56,169 --> 00:06:00,129
+didn't make a slide on this but people
+
+00:05:58,060 --> 00:06:02,080
+actually use p trace in normal code
+
+00:06:00,129 --> 00:06:05,469
+execution if you're familiar with
+
+00:06:02,080 --> 00:06:06,729
+upstart a long time ago or you might be
+
+00:06:05,469 --> 00:06:11,580
+if you're still running really old user
+
+00:06:06,729 --> 00:06:13,779
+space you upstart p traces tag
+
+00:06:11,580 --> 00:06:15,490
+services that it's starting in order to
+
+00:06:13,779 --> 00:06:17,110
+figure out when they do things like bind
+
+00:06:15,490 --> 00:06:19,750
+so I can figure out when stuff's ready
+
+00:06:17,110 --> 00:06:23,550
+this is sort of a precursor to the
+
+00:06:19,750 --> 00:06:26,409
+system D socket activation stuff was was
+
+00:06:23,550 --> 00:06:27,969
+was that so basically if you're using
+
+00:06:26,409 --> 00:06:29,919
+this then all of a sudden you can't run
+
+00:06:27,969 --> 00:06:34,220
+upstart based just drills anymore which
+
+00:06:29,919 --> 00:06:38,600
+may again not be a great thing so
+
+00:06:34,220 --> 00:06:41,630
+so we're almost there but instead of set
+
+00:06:38,600 --> 00:06:45,860
+comp rat trace we want a new thing which
+
+00:06:41,630 --> 00:06:50,180
+is set comp ret user note if I'm an
+
+00:06:45,860 --> 00:06:53,110
+engineer I don't name things well and so
+
+00:06:50,180 --> 00:06:55,520
+what does that look like so when your
+
+00:06:53,110 --> 00:06:58,240
+what the way this works is there's a
+
+00:06:55,520 --> 00:07:01,940
+file descriptor and there's kind of a
+
+00:06:58,240 --> 00:07:03,470
+notification and a response and the way
+
+00:07:01,940 --> 00:07:08,900
+you interact with it is there so my
+
+00:07:03,470 --> 00:07:11,840
+octal you can send or receive requests
+
+00:07:08,900 --> 00:07:16,460
+do whatever you want to do and then send
+
+00:07:11,840 --> 00:07:21,200
+a response things to note here there's
+
+00:07:16,460 --> 00:07:23,000
+an ID there turns out there's a time of
+
+00:07:21,200 --> 00:07:25,220
+check time of use issue so you might get
+
+00:07:23,000 --> 00:07:27,500
+this notification if the task dies and a
+
+00:07:25,220 --> 00:07:29,090
+new task spawns with the same pit you
+
+00:07:27,500 --> 00:07:31,490
+don't want to take over that task and
+
+00:07:29,090 --> 00:07:33,740
+then start injecting all sorts of
+
+00:07:31,490 --> 00:07:35,090
+whatever stuff into its address space or
+
+00:07:33,740 --> 00:07:38,270
+it's a mountain namespaces or whatever
+
+00:07:35,090 --> 00:07:42,110
+so this ID is a is a sort of a cookie
+
+00:07:38,270 --> 00:07:44,990
+that you can use and there's some stuff
+
+00:07:42,110 --> 00:07:48,440
+in the API that allows you to verify is
+
+00:07:44,990 --> 00:07:50,360
+that task still alive is it the same
+
+00:07:48,440 --> 00:07:52,760
+task that started the system call that
+
+00:07:50,360 --> 00:07:56,660
+way you can kind of avoid this time of
+
+00:07:52,760 --> 00:07:59,240
+check time abuse thing and then sitcom
+
+00:07:56,660 --> 00:08:03,200
+notif responds you send the ID and then
+
+00:07:59,240 --> 00:08:06,140
+value error and flags why is there two
+
+00:08:03,200 --> 00:08:08,840
+responses one is Val and one is error it
+
+00:08:06,140 --> 00:08:11,060
+turns out on some architectures you
+
+00:08:08,840 --> 00:08:13,300
+return errors from a system call on a
+
+00:08:11,060 --> 00:08:17,690
+different register than you return
+
+00:08:13,300 --> 00:08:19,700
+successful options and so the whole
+
+00:08:17,690 --> 00:08:21,710
+kernel has this infrastructure to handle
+
+00:08:19,700 --> 00:08:23,930
+this and that's why this is exposed to
+
+00:08:21,710 --> 00:08:26,680
+user space as well because you may be on
+
+00:08:23,930 --> 00:08:32,440
+an architecture where that's important
+
+00:08:26,680 --> 00:08:36,020
+so how do we get one of these things
+
+00:08:32,440 --> 00:08:38,450
+when you install a filter you can say
+
+00:08:36,020 --> 00:08:41,500
+give me a listener so you can pass a
+
+00:08:38,450 --> 00:08:44,780
+program that has the special return code
+
+00:08:41,500 --> 00:08:47,700
+and you can say give me an FD back that
+
+00:08:44,780 --> 00:08:51,780
+is that I can do these
+
+00:08:47,700 --> 00:08:55,650
+I octaves or pull on and then you can
+
+00:08:51,780 --> 00:08:56,970
+send message or similar to some server
+
+00:08:55,650 --> 00:08:59,700
+or there's a million different ways to
+
+00:08:56,970 --> 00:09:01,230
+get this file descriptor out of here one
+
+00:08:59,700 --> 00:09:03,900
+notable thing if you saw earlier
+
+00:09:01,230 --> 00:09:07,500
+versions of this patch set there was
+
+00:09:03,900 --> 00:09:09,240
+also there used to be a P trace way to
+
+00:09:07,500 --> 00:09:11,070
+do this where you could p trace attach
+
+00:09:09,240 --> 00:09:13,500
+to a task and then get one of these
+
+00:09:11,070 --> 00:09:16,050
+notification file descriptors we ditched
+
+00:09:13,500 --> 00:09:20,160
+that and the reason was that the LS m
+
+00:09:16,050 --> 00:09:23,760
+people rightly so you could you could
+
+00:09:20,160 --> 00:09:25,320
+potentially get access to a task with
+
+00:09:23,760 --> 00:09:28,770
+more privileged than you have by
+
+00:09:25,320 --> 00:09:31,980
+attaching to its filters and they didn't
+
+00:09:28,770 --> 00:09:33,540
+like that so we ditched that it turns
+
+00:09:31,980 --> 00:09:34,680
+out there's a there is a safe way to do
+
+00:09:33,540 --> 00:09:36,060
+it but I thought it was kind of a hack
+
+00:09:34,680 --> 00:09:40,680
+and we didn't really need this anyway so
+
+00:09:36,060 --> 00:09:42,270
+I just dropped it but potentially there
+
+00:09:40,680 --> 00:09:43,770
+are some other use cases so you don't
+
+00:09:42,270 --> 00:09:45,870
+have to do this whole send message dance
+
+00:09:43,770 --> 00:09:48,150
+if you don't want to if you're
+
+00:09:45,870 --> 00:09:53,610
+interested in doing that come talk to me
+
+00:09:48,150 --> 00:09:55,650
+so question is what is do stuff look
+
+00:09:53,610 --> 00:09:59,760
+like what how would you actually go
+
+00:09:55,650 --> 00:10:04,620
+about implementing that so it turns out
+
+00:09:59,760 --> 00:10:07,050
+this is sort of slightly complex so the
+
+00:10:04,620 --> 00:10:10,650
+the struct set comp data which is the
+
+00:10:07,050 --> 00:10:12,000
+original that's the thing previously and
+
+00:10:10,650 --> 00:10:13,650
+the kernel you would get exposed that
+
+00:10:12,000 --> 00:10:16,020
+has all of the register information and
+
+00:10:13,650 --> 00:10:18,600
+stuff it doesn't include contents of
+
+00:10:16,020 --> 00:10:20,430
+memory because of the classic time of
+
+00:10:18,600 --> 00:10:23,090
+check time of use where there's two
+
+00:10:20,430 --> 00:10:25,590
+threads one of them makes a system call
+
+00:10:23,090 --> 00:10:27,600
+set comm validates this stuff then the
+
+00:10:25,590 --> 00:10:29,700
+other thread modifies the the same
+
+00:10:27,600 --> 00:10:31,320
+memory area it goes through the VFS or
+
+00:10:29,700 --> 00:10:35,610
+whatever and mounts the wrong thing and
+
+00:10:31,320 --> 00:10:38,280
+yeah you've exploited it but we can sort
+
+00:10:35,610 --> 00:10:43,770
+of work around that with this this new
+
+00:10:38,280 --> 00:10:46,590
+world here what we do is we we use this
+
+00:10:43,770 --> 00:10:49,230
+ID and so we open a bunch of we would
+
+00:10:46,590 --> 00:10:51,750
+open a resource say like proc pig mem or
+
+00:10:49,230 --> 00:10:54,150
+something so we can map the tasks memory
+
+00:10:51,750 --> 00:10:56,610
+and then check to make sure that we're
+
+00:10:54,150 --> 00:11:00,210
+still using the same system call request
+
+00:10:56,610 --> 00:11:01,270
+I don't have a example of that in a
+
+00:11:00,210 --> 00:11:03,460
+second
+
+00:11:01,270 --> 00:11:04,900
+again you have to when you're accessing
+
+00:11:03,460 --> 00:11:06,700
+memory you have to do it through one of
+
+00:11:04,900 --> 00:11:10,030
+the existing interfaces including P
+
+00:11:06,700 --> 00:11:11,890
+trace but you don't have to be attached
+
+00:11:10,030 --> 00:11:17,470
+to the whole time so what that kind of
+
+00:11:11,890 --> 00:11:20,470
+looks like is I guess this is a an
+
+00:11:17,470 --> 00:11:24,040
+example of a policy and you can see here
+
+00:11:20,470 --> 00:11:27,670
+we open proc big memory and then here's
+
+00:11:24,040 --> 00:11:30,310
+one of the special commands that you can
+
+00:11:27,670 --> 00:11:32,140
+check to see is this ID still valid
+
+00:11:30,310 --> 00:11:33,220
+meaning are we still in the same system
+
+00:11:32,140 --> 00:11:35,260
+call I'm not I didn't
+
+00:11:33,220 --> 00:11:38,860
+just open the proc bid mam of some other
+
+00:11:35,260 --> 00:11:41,580
+process so you can you can avoid the
+
+00:11:38,860 --> 00:11:46,570
+first time I checked I'm of use there
+
+00:11:41,580 --> 00:11:49,090
+and then you read whatever memory you're
+
+00:11:46,570 --> 00:11:50,890
+interested in using and then you avoid
+
+00:11:49,090 --> 00:11:54,040
+time of check time of use number 2 and
+
+00:11:50,890 --> 00:11:55,870
+this this one is the one that the lack
+
+00:11:54,040 --> 00:11:58,840
+of memory information instruct SEP comp
+
+00:11:55,870 --> 00:12:02,590
+data is avoiding so the problem is that
+
+00:11:58,840 --> 00:12:05,380
+these two threads can one can change the
+
+00:12:02,590 --> 00:12:07,330
+memory content out from under the second
+
+00:12:05,380 --> 00:12:09,490
+filter but if we copy that into our
+
+00:12:07,330 --> 00:12:13,720
+address space before we apply a policy
+
+00:12:09,490 --> 00:12:15,070
+then we can avoid that because the
+
+00:12:13,720 --> 00:12:18,610
+thread presumably can't write to our
+
+00:12:15,070 --> 00:12:23,020
+address space as well the tracing daemon
+
+00:12:18,610 --> 00:12:25,300
+or whatever is address space so there's
+
+00:12:23,020 --> 00:12:29,980
+a few implementation issues with this
+
+00:12:25,300 --> 00:12:32,070
+the first big one is synchronization it
+
+00:12:29,980 --> 00:12:36,400
+was hard
+
+00:12:32,070 --> 00:12:38,950
+there's seccomp has some stuff like this
+
+00:12:36,400 --> 00:12:41,620
+tea sink thing where you can install
+
+00:12:38,950 --> 00:12:44,160
+filters in parrot and sibling threads
+
+00:12:41,620 --> 00:12:46,900
+which makes things kind of complicated
+
+00:12:44,160 --> 00:12:49,060
+the second one is this IDE needs to be
+
+00:12:46,900 --> 00:12:51,210
+globally unique and the way we solve
+
+00:12:49,060 --> 00:12:56,470
+that is basically by using lots of bits
+
+00:12:51,210 --> 00:12:58,510
+so the ID increases every time it gets
+
+00:12:56,470 --> 00:13:03,220
+changed every time there's a new system
+
+00:12:58,510 --> 00:13:05,590
+call and we just use the U 64 so that it
+
+00:13:03,220 --> 00:13:06,880
+would wrap extremely infrequently who
+
+00:13:05,590 --> 00:13:10,630
+where that is like every five hundred
+
+00:13:06,880 --> 00:13:14,649
+and eighty years or something so you
+
+00:13:10,630 --> 00:13:17,680
+know that's just use lots of bits this
+
+00:13:14,649 --> 00:13:22,360
+one there's I think a couple of threads
+
+00:13:17,680 --> 00:13:24,939
+on this but the command and control
+
+00:13:22,360 --> 00:13:30,490
+protocol is using an octal instead of a
+
+00:13:24,939 --> 00:13:32,889
+right and that's because right is for
+
+00:13:30,490 --> 00:13:34,899
+data and not for command and control
+
+00:13:32,889 --> 00:13:37,839
+stuff like this and basically the
+
+00:13:34,899 --> 00:13:40,149
+problem is if you have a set UID binary
+
+00:13:37,839 --> 00:13:42,189
+that functions sort of like cat and you
+
+00:13:40,149 --> 00:13:47,069
+have one of these file descriptors you
+
+00:13:42,189 --> 00:13:51,879
+can cat commands into this thing and do
+
+00:13:47,069 --> 00:13:53,439
+bad stuff so don't do that for
+
+00:13:51,879 --> 00:13:57,610
+everything one in the future I have
+
+00:13:53,439 --> 00:14:03,300
+replied to some other threads telling
+
+00:13:57,610 --> 00:14:06,790
+people to not do this but just a public
+
+00:14:03,300 --> 00:14:10,589
+announcement the the next thing is to
+
+00:14:06,790 --> 00:14:14,139
+switch the file descriptor C groups so
+
+00:14:10,589 --> 00:14:15,429
+SCM writes is I guess actually never
+
+00:14:14,139 --> 00:14:17,249
+mind I should have dropped this because
+
+00:14:15,429 --> 00:14:19,540
+we don't do that anymore
+
+00:14:17,249 --> 00:14:22,379
+there is no P trace command I mentioned
+
+00:14:19,540 --> 00:14:27,480
+this earlier because of LSMs
+
+00:14:22,379 --> 00:14:31,660
+wanting to do the privilege checking
+
+00:14:27,480 --> 00:14:34,509
+it's possible but safe so this the FD
+
+00:14:31,660 --> 00:14:36,939
+passing stuff so the the deal here is
+
+00:14:34,509 --> 00:14:39,579
+there are certain system calls that
+
+00:14:36,939 --> 00:14:44,379
+return file descriptors so things like
+
+00:14:39,579 --> 00:14:46,870
+open or socket or whatever these these
+
+00:14:44,379 --> 00:14:48,220
+system calls if you want to emulate them
+
+00:14:46,870 --> 00:14:49,809
+through this framework you need to have
+
+00:14:48,220 --> 00:14:52,290
+a way of returning a file descriptor
+
+00:14:49,809 --> 00:14:55,149
+which basically means you need to have a
+
+00:14:52,290 --> 00:14:58,059
+way of injecting a file descriptor into
+
+00:14:55,149 --> 00:15:02,819
+another task there's I tried a couple of
+
+00:14:58,059 --> 00:15:04,899
+different implementations of this and
+
+00:15:02,819 --> 00:15:08,470
+there's some patches here that are
+
+00:15:04,899 --> 00:15:11,019
+fairly small but kind of controversial
+
+00:15:08,470 --> 00:15:14,049
+because the VFS people don't like it
+
+00:15:11,019 --> 00:15:16,240
+when task a modifies task B's file
+
+00:15:14,049 --> 00:15:18,160
+descriptor table however there are a
+
+00:15:16,240 --> 00:15:20,589
+bunch of helpers that basically do
+
+00:15:18,160 --> 00:15:22,720
+exactly this and this is just adding one
+
+00:15:20,589 --> 00:15:24,129
+more helper to that list I don't
+
+00:15:22,720 --> 00:15:26,139
+actually need this for what we're doing
+
+00:15:24,129 --> 00:15:28,120
+so I just kind of punt it
+
+00:15:26,139 --> 00:15:29,710
+but if you
+
+00:15:28,120 --> 00:15:31,779
+want to come along and use this for self
+
+00:15:29,710 --> 00:15:33,130
+stuff like open or socket you will
+
+00:15:31,779 --> 00:15:35,020
+presumably want something like this
+
+00:15:33,130 --> 00:15:41,339
+there are implementations they're fairly
+
+00:15:35,020 --> 00:15:44,790
+small you know check it out so that
+
+00:15:41,339 --> 00:15:48,279
+what's the status of this it's alive
+
+00:15:44,790 --> 00:15:52,779
+please check it out there's a bunch of
+
+00:15:48,279 --> 00:15:55,330
+stuff that I've fixed in the various RCS
+
+00:15:52,779 --> 00:15:57,640
+there's some sample code here which I'll
+
+00:15:55,330 --> 00:16:01,510
+go through in a second if there's no
+
+00:15:57,640 --> 00:16:04,060
+questions and there's also some self
+
+00:16:01,510 --> 00:16:06,370
+tests that test all kinds of things
+
+00:16:04,060 --> 00:16:08,050
+about it and then I also have just while
+
+00:16:06,370 --> 00:16:10,630
+I was working on this I wrote a bunch of
+
+00:16:08,050 --> 00:16:13,600
+little utilities to do set comm based
+
+00:16:10,630 --> 00:16:15,730
+stuff including there's cool things like
+
+00:16:13,600 --> 00:16:17,890
+you can trick the kernel into leaking
+
+00:16:15,730 --> 00:16:19,810
+Easter restart cysts into user space and
+
+00:16:17,890 --> 00:16:26,020
+so there's a bunch of other interesting
+
+00:16:19,810 --> 00:16:28,029
+things there so it's around so now I can
+
+00:16:26,020 --> 00:16:31,420
+do a demo but I feel like first if
+
+00:16:28,029 --> 00:16:33,209
+there's any questions maybe I can take
+
+00:16:31,420 --> 00:16:38,430
+that otherwise I can keep yammering
+
+00:16:33,209 --> 00:16:38,430
+anyone yeah
+
+00:16:41,880 --> 00:16:46,920
+you're referencing the file descriptor
+
+00:16:43,649 --> 00:16:51,440
+parsing I suspect the one thing if we
+
+00:16:46,920 --> 00:16:55,290
+don't on table support would be DUP -
+
+00:16:51,440 --> 00:16:57,810
+right so there's there's a couple of
+
+00:16:55,290 --> 00:17:01,350
+different issues and basically the one
+
+00:16:57,810 --> 00:17:03,209
+helper is that's missing is the one that
+
+00:17:01,350 --> 00:17:05,970
+you need in order to support DEP - so
+
+00:17:03,209 --> 00:17:08,880
+there's I think there's install FD and
+
+00:17:05,970 --> 00:17:10,770
+somebody else's and there's allocate FD
+
+00:17:08,880 --> 00:17:12,689
+in somebody else's FD table but there's
+
+00:17:10,770 --> 00:17:14,610
+no replace F T in somebody else's table
+
+00:17:12,689 --> 00:17:15,780
+and that's the one that we need to add
+
+00:17:14,610 --> 00:17:18,780
+in order to completely support
+
+00:17:15,780 --> 00:17:20,880
+everything that dub - but in in those
+
+00:17:18,780 --> 00:17:23,039
+patches there's I mean it it's you know
+
+00:17:20,880 --> 00:17:26,400
+it's like ten lines to add this helper
+
+00:17:23,039 --> 00:17:28,770
+and the actual set comp code to do that
+
+00:17:26,400 --> 00:17:30,120
+is pretty small it's really just just
+
+00:17:28,770 --> 00:17:33,750
+somebody you want to fight the battle of
+
+00:17:30,120 --> 00:17:36,080
+getting this into the VF s but the other
+
+00:17:33,750 --> 00:17:38,850
+their other help was there so it seems
+
+00:17:36,080 --> 00:17:40,919
+in theory like a it should be possible
+
+00:17:38,850 --> 00:17:42,840
+but if you wanted to do this without
+
+00:17:40,919 --> 00:17:44,039
+supporting DUP - it would be possible to
+
+00:17:42,840 --> 00:17:51,530
+implement it today with what's already
+
+00:17:44,039 --> 00:17:51,530
+in the VF s so yeah other questions
+
+00:17:55,630 --> 00:17:58,200
+yeah
+
+00:18:03,679 --> 00:18:08,340
+yes so isn't that a case for just
+
+00:18:06,750 --> 00:18:12,240
+process to process communication with
+
+00:18:08,340 --> 00:18:15,150
+pipes or RPC or something yeah I mean
+
+00:18:12,240 --> 00:18:19,050
+the problem is that the user space
+
+00:18:15,150 --> 00:18:20,790
+expects is old and expects to be able to
+
+00:18:19,050 --> 00:18:22,110
+do a system call some system call that
+
+00:18:20,790 --> 00:18:23,700
+you don't necessarily want to let it do
+
+00:18:22,110 --> 00:18:25,500
+or you don't really want to do that
+
+00:18:23,700 --> 00:18:27,420
+system call you kind of wanted we have
+
+00:18:25,500 --> 00:18:29,190
+that right sorry
+
+00:18:27,420 --> 00:18:31,860
+LD preload you can redirect the mount
+
+00:18:29,190 --> 00:18:34,679
+call to a library assuming the binary is
+
+00:18:31,860 --> 00:18:37,650
+dynamically linked right there's go and
+
+00:18:34,679 --> 00:18:39,960
+lots of other things really the only
+
+00:18:37,650 --> 00:18:44,160
+concrete interface is the SIS call
+
+00:18:39,960 --> 00:18:48,500
+interface what about the generic
+
+00:18:44,160 --> 00:18:48,500
+solution for redirecting any sis caller
+
+00:18:50,059 --> 00:18:57,000
+is that what this is or you are just
+
+00:18:54,929 --> 00:18:58,950
+redirecting them out sister :
+
+00:18:57,000 --> 00:19:00,720
+no well so you can write a filter so you
+
+00:18:58,950 --> 00:19:04,140
+can write a BPF filter that matches
+
+00:19:00,720 --> 00:19:07,400
+whatever sis call you want so the
+
+00:19:04,140 --> 00:19:09,570
+examples I've given here our mount or
+
+00:19:07,400 --> 00:19:12,300
+make note I think was the other one
+
+00:19:09,570 --> 00:19:14,360
+or something but it really it's just a
+
+00:19:12,300 --> 00:19:17,910
+second filter with a special return code
+
+00:19:14,360 --> 00:19:21,210
+okay and what I also didn't understand
+
+00:19:17,910 --> 00:19:24,570
+as the second process which is meant for
+
+00:19:21,210 --> 00:19:28,650
+interception is a certain process which
+
+00:19:24,570 --> 00:19:31,140
+is prepared for doing this interception
+
+00:19:28,650 --> 00:19:33,900
+in some way yes so so it's not an
+
+00:19:31,140 --> 00:19:36,480
+anonymous communication so the patterns
+
+00:19:33,900 --> 00:19:38,400
+are known to each other at least one of
+
+00:19:36,480 --> 00:19:40,770
+them is known yes so the way people
+
+00:19:38,400 --> 00:19:42,809
+typically set up container runtimes
+
+00:19:40,770 --> 00:19:44,850
+today there's some daemon that spawns
+
+00:19:42,809 --> 00:19:46,950
+the container and often it has a
+
+00:19:44,850 --> 00:19:49,770
+watchdog that is actually the parent of
+
+00:19:46,950 --> 00:19:52,860
+in it and so you can imagine either that
+
+00:19:49,770 --> 00:19:54,510
+watchdog or something else that's known
+
+00:19:52,860 --> 00:19:56,280
+to the container engine in it the
+
+00:19:54,510 --> 00:19:58,440
+container engine is running as routes on
+
+00:19:56,280 --> 00:20:00,120
+the host it has all the power so it's
+
+00:19:58,440 --> 00:20:01,950
+the one that can decide to do these
+
+00:20:00,120 --> 00:20:03,750
+operations or not based on some policy
+
+00:20:01,950 --> 00:20:05,700
+okay so we're just wondering what about
+
+00:20:03,750 --> 00:20:07,770
+circuits if you just have a listen
+
+00:20:05,700 --> 00:20:10,530
+caller and a semantics and listen listen
+
+00:20:07,770 --> 00:20:13,740
+to to something and then you spawn a new
+
+00:20:10,530 --> 00:20:16,050
+handler in this other process space for
+
+00:20:13,740 --> 00:20:17,010
+it so it's it's a known only thing it's
+
+00:20:16,050 --> 00:20:18,540
+just
+
+00:20:17,010 --> 00:20:22,260
+well I think this is the standard way
+
+00:20:18,540 --> 00:20:24,600
+UNIX has worked for decades now our next
+
+00:20:22,260 --> 00:20:26,190
+link interface or whatever so I think
+
+00:20:24,600 --> 00:20:27,870
+there are more than 10 types of
+
+00:20:26,190 --> 00:20:28,200
+communication between user space and
+
+00:20:27,870 --> 00:20:35,400
+kernel
+
+00:20:28,200 --> 00:20:37,530
+space at least you're saying no just
+
+00:20:35,400 --> 00:20:41,850
+wondering because listen except would be
+
+00:20:37,530 --> 00:20:46,010
+for example something which and it has
+
+00:20:41,850 --> 00:20:48,750
+the task of spawning sub processes it
+
+00:20:46,010 --> 00:20:52,940
+doesn't tell you about it interfere with
+
+00:20:48,750 --> 00:20:56,250
+it this is a classical method yeah so
+
+00:20:52,940 --> 00:21:00,419
+your I guess if I'm understanding your
+
+00:20:56,250 --> 00:21:04,410
+question it's why are we implementing
+
+00:21:00,419 --> 00:21:09,750
+this versus just using accept and for
+
+00:21:04,410 --> 00:21:11,429
+example right and the reason just goes
+
+00:21:09,750 --> 00:21:14,910
+back to I have a whole bunch of code
+
+00:21:11,429 --> 00:21:16,950
+that I don't you know really want to
+
+00:21:14,910 --> 00:21:18,809
+make like make a bunch of changes to or
+
+00:21:16,950 --> 00:21:22,320
+whatever we have this very concrete
+
+00:21:18,809 --> 00:21:24,960
+boundary that's the syscall boundary can
+
+00:21:22,320 --> 00:21:27,210
+we you know manipulate this instead of
+
+00:21:24,960 --> 00:21:29,190
+changing this code to do some accept or
+
+00:21:27,210 --> 00:21:30,450
+you know because then we have to go and
+
+00:21:29,190 --> 00:21:31,890
+make a bunch of changes to this code
+
+00:21:30,450 --> 00:21:35,970
+that already assumes it can do a mount
+
+00:21:31,890 --> 00:21:37,950
+or whatever other questions yeah hi does
+
+00:21:35,970 --> 00:21:42,990
+this work on Cisco's that the kernel
+
+00:21:37,950 --> 00:21:45,990
+doesn't understand yes in particular
+
+00:21:42,990 --> 00:21:48,270
+there is no restrictions on the filter
+
+00:21:45,990 --> 00:21:51,090
+you right so for example you can invent
+
+00:21:48,270 --> 00:21:53,580
+your own syscalls with this because all
+
+00:21:51,090 --> 00:21:57,390
+you do is just call number of this and
+
+00:21:53,580 --> 00:21:58,590
+then you know assuming the user space
+
+00:21:57,390 --> 00:22:00,210
+statement is there to catch it and
+
+00:21:58,590 --> 00:22:03,179
+intercept it and sort of do the right
+
+00:22:00,210 --> 00:22:05,309
+thing then yes so you could use it
+
+00:22:03,179 --> 00:22:08,490
+potentially the emulate of operating
+
+00:22:05,309 --> 00:22:10,020
+system Cisco interfaces yeah there's
+
+00:22:08,490 --> 00:22:11,940
+there's a whole bunch of things that you
+
+00:22:10,020 --> 00:22:14,760
+could use this for that I have probably
+
+00:22:11,940 --> 00:22:17,490
+not thought of we have a very specific
+
+00:22:14,760 --> 00:22:19,559
+use case again and the functionality is
+
+00:22:17,490 --> 00:22:20,940
+not totally complete for examples this
+
+00:22:19,559 --> 00:22:24,290
+calls like listen accept these things
+
+00:22:20,940 --> 00:22:28,409
+that are returning file descriptors
+
+00:22:24,290 --> 00:22:30,330
+you're going to need to you'll have to
+
+00:22:28,409 --> 00:22:30,930
+do some work there but the basics are
+
+00:22:30,330 --> 00:22:32,370
+there at least
+
+00:22:30,930 --> 00:22:34,800
+for Mountain some things that container
+
+00:22:32,370 --> 00:22:36,900
+runtimes want to do kind of right now or
+
+00:22:34,800 --> 00:22:41,520
+five years ago
+
+00:22:36,900 --> 00:22:43,830
+other questions one minute okay
+
+00:22:41,520 --> 00:22:45,390
+I'll if there's no more questions the
+
+00:22:43,830 --> 00:22:50,550
+demos not that exciting the codes in the
+
+00:22:45,390 --> 00:22:50,700
+tree so just go look there instead thank
+
+00:22:50,550 --> 00:22:56,609
+you
+
+00:22:50,700 --> 00:22:56,609
+
+YouTube URL: https://www.youtube.com/watch?v=sqvF_Mdtzgg
+
+

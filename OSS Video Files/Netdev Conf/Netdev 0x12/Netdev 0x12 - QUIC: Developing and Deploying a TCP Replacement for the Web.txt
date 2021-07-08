@@ -1,0 +1,4403 @@
+Title: Netdev 0x12 - QUIC: Developing and Deploying a TCP Replacement for the Web
+Publication date: 2018-08-01
+Playlist: Netdev 0x12
+Description: 
+	Is TCP - at 44 - too old, slow, and have bad habits that can't be fixed?
+Does shaving a few milliseconds of latency on a web transaction matter that much to call out for a new transport?
+The new kid on the block, QUIC thinks so. QUIC has been globally deployed at Google on thousands of servers. If you are running chrome as a browser and using YouTube, you are likely using QUIC. Estimates are 7% of the internet traffic is now QUIC.
+
+In this talk, Jana Iyengar and Ian Swett provided an overview of QUIC, its motivations, and the performance improvements observed at Google. They discussed performance bottlenecks in Linux kernel UDP that were seen at Google's servers, what was done to overcome them, and what work remains to be done in the kernel as QUIC becomes more widely deployed.
+
+Presented on July 13th, 2018, at Netdev 0x12 in Montreal
+
+More info:
+https://www.netdevconf.org/0x12/session.html?developing-and-deploying-a-tcp-replacement-for-the-web
+Captions: 
+	00:00:00,000 --> 00:00:05,819
+we'll talk about CPU utilization and and
+
+00:00:03,030 --> 00:00:12,120
+problems that we faced a scaling quick
+
+00:00:05,819 --> 00:00:13,440
+on Linux so my affiliation is fastly but
+
+00:00:12,120 --> 00:00:14,700
+I used to be at Google so a lot of the
+
+00:00:13,440 --> 00:00:17,820
+stuff that I'm going to talk about our
+
+00:00:14,700 --> 00:00:25,050
+experiences that I had that we had while
+
+00:00:17,820 --> 00:00:27,119
+deploying quick at Google there's a
+
+00:00:25,050 --> 00:00:29,519
+fairly detailed paper that we published
+
+00:00:27,119 --> 00:00:31,199
+at sitcom last year and I encourage you
+
+00:00:29,519 --> 00:00:36,300
+if you're interested in more data and
+
+00:00:31,199 --> 00:00:38,370
+more detailed evaluation with off quick
+
+00:00:36,300 --> 00:00:40,200
+I encourage you to go pick up the paper
+
+00:00:38,370 --> 00:00:41,610
+and take a look we'll touch upon some of
+
+00:00:40,200 --> 00:00:44,010
+these things but we won't get into the
+
+00:00:41,610 --> 00:00:48,480
+details of performance evaluation
+
+00:00:44,010 --> 00:00:52,920
+outside of CPU here so let's start with
+
+00:00:48,480 --> 00:00:56,969
+a very quick history quick was developed
+
+00:00:52,920 --> 00:01:01,109
+as a HTTP transport at Google and it
+
+00:00:56,969 --> 00:01:02,910
+started deployment in in 2014 and the
+
+00:01:01,109 --> 00:01:07,590
+deployment was between all Google
+
+00:01:02,910 --> 00:01:10,140
+services and Chrome as a client and also
+
+00:01:07,590 --> 00:01:12,000
+mobile apps apps that Google shipped
+
+00:01:10,140 --> 00:01:13,409
+such as Google Search app YouTube app
+
+00:01:12,000 --> 00:01:15,900
+and so on and so forth so the
+
+00:01:13,409 --> 00:01:19,710
+deployments are in 2014 at a slow burn
+
+00:01:15,900 --> 00:01:23,070
+and we saw a fair amount of improved
+
+00:01:19,710 --> 00:01:25,290
+application performance as we deployed
+
+00:01:23,070 --> 00:01:29,130
+quick we saw YouTube video Reber firs
+
+00:01:25,290 --> 00:01:31,350
+went down or or the improvement was 15
+
+00:01:29,130 --> 00:01:34,350
+to 18 percent with quick over TLS and
+
+00:01:31,350 --> 00:01:35,610
+TCP and Google search latency went down
+
+00:01:34,350 --> 00:01:37,320
+by three point six to eight percent
+
+00:01:35,610 --> 00:01:38,759
+again I'm not gonna go into the details
+
+00:01:37,320 --> 00:01:40,619
+of the distributions and so on they are
+
+00:01:38,759 --> 00:01:44,189
+all there in the paper but this is a
+
+00:01:40,619 --> 00:01:46,770
+summary of the benefits that we saw with
+
+00:01:44,189 --> 00:01:48,390
+quick so obviously we wanted more quick
+
+00:01:46,770 --> 00:01:52,560
+more traffic to be using quick and
+
+00:01:48,390 --> 00:01:54,869
+that's what we did and as of about a
+
+00:01:52,560 --> 00:01:58,799
+year ago 35 percent of Google's egress
+
+00:01:54,869 --> 00:02:01,380
+traffic was quit that's increased but
+
+00:01:58,799 --> 00:02:03,030
+that's what the numbers are from about a
+
+00:02:01,380 --> 00:02:06,719
+year ago and that's about seven percent
+
+00:02:03,030 --> 00:02:08,099
+of of Internet traffic globally this is
+
+00:02:06,719 --> 00:02:11,160
+why a quick should be of interest to
+
+00:02:08,099 --> 00:02:13,290
+this group it's effectively a a
+
+00:02:11,160 --> 00:02:16,680
+transport that's the
+
+00:02:13,290 --> 00:02:19,230
+has wide deployment and and as I will
+
+00:02:16,680 --> 00:02:21,240
+describe the idea process and other
+
+00:02:19,230 --> 00:02:26,490
+participants in the idea of process we
+
+00:02:21,240 --> 00:02:28,980
+expect this number to grow the IDF has
+
+00:02:26,490 --> 00:02:31,080
+started so we created a quick working
+
+00:02:28,980 --> 00:02:33,600
+group in the IDF in October of 2016
+
+00:02:31,080 --> 00:02:35,790
+which has been going very strong there
+
+00:02:33,600 --> 00:02:37,590
+has been a lot of work in the in the
+
+00:02:35,790 --> 00:02:39,540
+standards group to modularize and
+
+00:02:37,590 --> 00:02:43,350
+standardize quick and I'll talk a brief
+
+00:02:39,540 --> 00:02:49,590
+bit about these changes in in subsequent
+
+00:02:43,350 --> 00:02:54,210
+slides so let's look at very briefly how
+
+00:02:49,590 --> 00:02:57,600
+a quick deployment looked at Google so
+
+00:02:54,210 --> 00:02:59,970
+this is in 2015 and we started a deploy
+
+00:02:57,600 --> 00:03:02,400
+quick and slowly increase it we had
+
+00:02:59,970 --> 00:03:03,780
+controls again these controls in the way
+
+00:03:02,400 --> 00:03:06,420
+that we deployed this as described in
+
+00:03:03,780 --> 00:03:09,510
+the paper but in very briefly we were
+
+00:03:06,420 --> 00:03:14,760
+able to control the amount of quake that
+
+00:03:09,510 --> 00:03:16,500
+we were serving so percentages slowly
+
+00:03:14,760 --> 00:03:18,390
+increased as we you know saw
+
+00:03:16,500 --> 00:03:21,690
+improvements and nothing broke terribly
+
+00:03:18,390 --> 00:03:23,880
+we kept increasing it steadily until
+
+00:03:21,690 --> 00:03:28,140
+some point when we decided we had to
+
+00:03:23,880 --> 00:03:31,140
+turn off quick this was a crypto bug at
+
+00:03:28,140 --> 00:03:34,880
+the client we we found it turned off
+
+00:03:31,140 --> 00:03:37,650
+quick immediately it was a very rare a
+
+00:03:34,880 --> 00:03:39,120
+bug that had very rare occurrence but we
+
+00:03:37,650 --> 00:03:41,070
+wanted to make sure that we ironed it
+
+00:03:39,120 --> 00:03:45,180
+out before deploying quick so we turned
+
+00:03:41,070 --> 00:03:48,330
+it off we fixed it and shipped it out
+
+00:03:45,180 --> 00:03:52,230
+again in January of 2016 and you can see
+
+00:03:48,330 --> 00:03:55,200
+that that's that quick ramp up again of
+
+00:03:52,230 --> 00:03:58,250
+quick after that point and deployment
+
+00:03:55,200 --> 00:04:01,020
+was steady up until like August of 2016
+
+00:03:58,250 --> 00:04:03,090
+when we saw a huge increase in quick
+
+00:04:01,020 --> 00:04:07,140
+traffic anybody want to venture a guess
+
+00:04:03,090 --> 00:04:11,100
+what that might be this is me checking
+
+00:04:07,140 --> 00:04:15,660
+to see if you are all still awake and if
+
+00:04:11,100 --> 00:04:18,390
+you are not wake up was it YouTube says
+
+00:04:15,660 --> 00:04:21,510
+system Shepherd it it was but more
+
+00:04:18,390 --> 00:04:24,030
+precisely this was all YouTube is a lot
+
+00:04:21,510 --> 00:04:25,800
+of the traffic even before them
+
+00:04:24,030 --> 00:04:32,610
+was it the Olympics the Olympics didn't
+
+00:04:25,800 --> 00:04:37,170
+last for five months I'll answer it this
+
+00:04:32,610 --> 00:04:40,890
+is YouTube on YouTube mobile app on on
+
+00:04:37,170 --> 00:04:44,220
+on Android so this was basically YouTube
+
+00:04:40,890 --> 00:04:48,080
+mobile specifically so we launched it to
+
+00:04:44,220 --> 00:04:51,210
+a full full throttle on on mobile and
+
+00:04:48,080 --> 00:04:52,470
+that bump is because of mobile so if
+
+00:04:51,210 --> 00:04:55,680
+you're all wondering where mobile is
+
+00:04:52,470 --> 00:04:59,090
+it's a lot of our traffic a lot of the
+
+00:04:55,680 --> 00:04:59,090
+Internet's traffic is in fact on mobile
+
+00:04:59,900 --> 00:05:05,010
+so what are we talking about what is
+
+00:05:02,460 --> 00:05:12,270
+quick how many people here by the way no
+
+00:05:05,010 --> 00:05:13,620
+quick really well some what well how
+
+00:05:12,270 --> 00:05:17,130
+many of you heard of it before you
+
+00:05:13,620 --> 00:05:18,510
+walked into this room today okay good
+
+00:05:17,130 --> 00:05:23,550
+some of this will actually be useful
+
+00:05:18,510 --> 00:05:26,760
+then so what is quick that's your your
+
+00:05:23,550 --> 00:05:29,450
+your standard HD PS serving stack you
+
+00:05:26,760 --> 00:05:32,250
+have HD b2 in this particular case
+
+00:05:29,450 --> 00:05:34,110
+running on top of TLS running on top of
+
+00:05:32,250 --> 00:05:36,150
+TCP which runs on top of IP and that's
+
+00:05:34,110 --> 00:05:39,300
+your nice little internet stack that's
+
+00:05:36,150 --> 00:05:42,919
+what we all love and use quick eats up a
+
+00:05:39,300 --> 00:05:45,690
+whole bunch of it so quick effectively
+
+00:05:42,919 --> 00:05:48,390
+gives the same service as you would have
+
+00:05:45,690 --> 00:05:53,130
+gotten sitting on top of HD p2 there but
+
+00:05:48,390 --> 00:05:57,240
+it gives you gives that it subsumes a
+
+00:05:53,130 --> 00:05:59,669
+big chunk of HTTP to TLS and TCP and it
+
+00:05:57,240 --> 00:06:04,040
+runs over UDP now what you're seeing
+
+00:05:59,669 --> 00:06:06,030
+here what I'm calling G quick is a newer
+
+00:06:04,040 --> 00:06:08,100
+subtle differentiation that I'm going to
+
+00:06:06,030 --> 00:06:10,110
+make now this is Google's implementation
+
+00:06:08,100 --> 00:06:13,650
+of quick Google's deployment of quick
+
+00:06:10,110 --> 00:06:15,750
+I'm calling it G quick because we now
+
+00:06:13,650 --> 00:06:18,360
+have quick at the ITF which is really
+
+00:06:15,750 --> 00:06:20,160
+what we are calling quick so to separate
+
+00:06:18,360 --> 00:06:23,160
+this out we are calling this particular
+
+00:06:20,160 --> 00:06:24,510
+version of quick G quick and I'll talk
+
+00:06:23,160 --> 00:06:28,530
+about that briefly again later
+
+00:06:24,510 --> 00:06:30,480
+but G quick as we had it at Google had
+
+00:06:28,530 --> 00:06:32,580
+this thing called quick crypto which
+
+00:06:30,480 --> 00:06:33,990
+effectively replaced TLS it was a
+
+00:06:32,580 --> 00:06:36,120
+completely different protocol it was a
+
+00:06:33,990 --> 00:06:37,200
+new handshake protocol and it worked in
+
+00:06:36,120 --> 00:06:42,020
+consort with quake
+
+00:06:37,200 --> 00:06:45,260
+to not just to exchange keys but also do
+
+00:06:42,020 --> 00:06:48,360
+encrypt packets and everything else and
+
+00:06:45,260 --> 00:06:50,190
+each DB ran on top of that so we had a
+
+00:06:48,360 --> 00:06:51,660
+mapping that allowed us to provide the
+
+00:06:50,190 --> 00:06:54,180
+same service as you would have gotten
+
+00:06:51,660 --> 00:06:56,010
+over HTTP - but with a completely
+
+00:06:54,180 --> 00:06:58,170
+different little shim sitting on top of
+
+00:06:56,010 --> 00:07:01,680
+quake and of course it all ran on top of
+
+00:06:58,170 --> 00:07:03,360
+you DB the work at the IETF has been to
+
+00:07:01,680 --> 00:07:04,650
+standardize this and to modularize this
+
+00:07:03,360 --> 00:07:06,780
+and to standardize this in a way that
+
+00:07:04,650 --> 00:07:08,280
+people can use existing components
+
+00:07:06,780 --> 00:07:11,970
+existing standards instead of having to
+
+00:07:08,280 --> 00:07:14,520
+build everything brand-new and so the
+
+00:07:11,970 --> 00:07:18,150
+idea of quick which is what this figure
+
+00:07:14,520 --> 00:07:20,700
+shows has TLS 1.3 effectively as the
+
+00:07:18,150 --> 00:07:23,040
+handshake protocol so we are
+
+00:07:20,700 --> 00:07:24,660
+standardizing quick with TLS 1.3 and
+
+00:07:23,040 --> 00:07:26,700
+that's where the future is going to be
+
+00:07:24,660 --> 00:07:29,340
+all quick implementations are going to
+
+00:07:26,700 --> 00:07:32,040
+use are using T 1.3 now even G quick is
+
+00:07:29,340 --> 00:07:34,530
+moving there and the quic protocol
+
+00:07:32,040 --> 00:07:36,630
+itself has changed in in in in subtle
+
+00:07:34,530 --> 00:07:38,490
+ways but in not not significantly in
+
+00:07:36,630 --> 00:07:39,570
+terms of performance changing way so we
+
+00:07:38,490 --> 00:07:41,160
+expect that a lot of all of the
+
+00:07:39,570 --> 00:07:43,350
+performance benefits that we talk about
+
+00:07:41,160 --> 00:07:49,260
+here will continue to hold as we go into
+
+00:07:43,350 --> 00:07:50,850
+ITF quick so these are the drafts the
+
+00:07:49,260 --> 00:07:53,970
+IDF drafts that describe these
+
+00:07:50,850 --> 00:07:56,960
+components and I won't go into the
+
+00:07:53,970 --> 00:07:59,190
+details here again you can look them up
+
+00:07:56,960 --> 00:08:02,520
+so the outline of the rest of the talk
+
+00:07:59,190 --> 00:08:05,580
+is this I'll talk for just a couple of
+
+00:08:02,520 --> 00:08:07,320
+slides on quick design and about some
+
+00:08:05,580 --> 00:08:09,570
+experiments and experiences that we've
+
+00:08:07,320 --> 00:08:13,350
+had deploying building and deploying
+
+00:08:09,570 --> 00:08:14,910
+quick and I hope those are those were
+
+00:08:13,350 --> 00:08:16,230
+enlightening to us some of them are
+
+00:08:14,910 --> 00:08:18,150
+enlightening to us for sure some of them
+
+00:08:16,230 --> 00:08:21,900
+I expected but some of them were
+
+00:08:18,150 --> 00:08:23,730
+absolutely surprising to us and then
+
+00:08:21,900 --> 00:08:26,310
+we'll talk about scaling quick on Linux
+
+00:08:23,730 --> 00:08:27,030
+the pain points that we had what we've
+
+00:08:26,310 --> 00:08:32,130
+done since
+
+00:08:27,030 --> 00:08:35,099
+and what remains to be done so
+
+00:08:32,130 --> 00:08:36,599
+quicks design goals the first design
+
+00:08:35,099 --> 00:08:39,060
+goal that we had in quake was
+
+00:08:36,599 --> 00:08:41,010
+deployability and a vulnerability we
+
+00:08:39,060 --> 00:08:44,970
+wanted quick to be built and shipped
+
+00:08:41,010 --> 00:08:46,590
+within our lifetimes actually within the
+
+00:08:44,970 --> 00:08:48,360
+order of a year or so right like so we
+
+00:08:46,590 --> 00:08:49,770
+wanted it to be shipped as quickly as
+
+00:08:48,360 --> 00:08:50,550
+possible and we wanted it shipped on the
+
+00:08:49,770 --> 00:08:51,870
+Internet
+
+00:08:50,550 --> 00:08:55,160
+as quickly as possible we weren't
+
+00:08:51,870 --> 00:08:57,810
+wanting to wait for operating system
+
+00:08:55,160 --> 00:08:59,910
+operating systems on the client side to
+
+00:08:57,810 --> 00:09:03,930
+pick it up for middleboxes to pick it up
+
+00:08:59,910 --> 00:09:06,240
+so the obvious thing for us to do was to
+
+00:09:03,930 --> 00:09:09,450
+layer this on top of UDP we could ship
+
+00:09:06,240 --> 00:09:12,029
+it immediately on the clients because at
+
+00:09:09,450 --> 00:09:14,010
+Google we we were able to ship this
+
+00:09:12,029 --> 00:09:16,260
+instead of Chrome and instead of mobile
+
+00:09:14,010 --> 00:09:18,450
+clients and that way
+
+00:09:16,260 --> 00:09:20,760
+we didn't need or require operating
+
+00:09:18,450 --> 00:09:24,300
+system support for quick we had the UDP
+
+00:09:20,760 --> 00:09:27,120
+interface in addition it allowed us to
+
+00:09:24,300 --> 00:09:28,110
+get through middle boxes and that was
+
+00:09:27,120 --> 00:09:30,209
+some of the biggest problems now I
+
+00:09:28,110 --> 00:09:33,060
+personally have worked with sed be
+
+00:09:30,209 --> 00:09:35,820
+foreign to have had worked with SDB for
+
+00:09:33,060 --> 00:09:38,779
+a number of years and a lot of the
+
+00:09:35,820 --> 00:09:42,450
+problems that plagued sed by deployment
+
+00:09:38,779 --> 00:09:44,670
+were are good things to avoid one of
+
+00:09:42,450 --> 00:09:47,339
+those things is having to modify nuts
+
+00:09:44,670 --> 00:09:48,870
+and middleboxes layering this on top of
+
+00:09:47,339 --> 00:09:50,550
+UDP allows you to get through a whole
+
+00:09:48,870 --> 00:09:51,899
+bunch of middle boxes we have de down
+
+00:09:50,550 --> 00:09:54,810
+you DB reach ability if you're
+
+00:09:51,899 --> 00:09:58,200
+interested but ya ask if you're
+
+00:09:54,810 --> 00:10:00,149
+interested so we wanted to make sure
+
+00:09:58,200 --> 00:10:02,640
+that we could get this deployed so we
+
+00:10:00,149 --> 00:10:04,110
+layer this on top of UDP we wanted to
+
+00:10:02,640 --> 00:10:06,959
+make sure that this was not going to get
+
+00:10:04,110 --> 00:10:08,670
+ossified in the future and so we
+
+00:10:06,959 --> 00:10:10,680
+encrypted and authenticated all the
+
+00:10:08,670 --> 00:10:13,589
+headers the protocol headers so that
+
+00:10:10,680 --> 00:10:16,920
+middle boxes could not write to them or
+
+00:10:13,589 --> 00:10:20,570
+modify them and those are things that
+
+00:10:16,920 --> 00:10:22,709
+have continued to remain a strong
+
+00:10:20,570 --> 00:10:24,899
+philosophies and quick going through the
+
+00:10:22,709 --> 00:10:26,880
+IETF process in fact into some agree
+
+00:10:24,899 --> 00:10:28,380
+they've gotten strengthened there are
+
+00:10:26,880 --> 00:10:33,690
+more pieces of the quic header that have
+
+00:10:28,380 --> 00:10:35,430
+gotten encrypted and hidden low latency
+
+00:10:33,690 --> 00:10:36,990
+secure low latency and secure connection
+
+00:10:35,430 --> 00:10:39,149
+establishment was critical to us we
+
+00:10:36,990 --> 00:10:41,910
+wanted to reduce latency that was one of
+
+00:10:39,149 --> 00:10:44,190
+the big important goals of quit was to
+
+00:10:41,910 --> 00:10:45,959
+was to make the transport itself a low
+
+00:10:44,190 --> 00:10:49,829
+latency platform on which he built
+
+00:10:45,959 --> 00:10:52,440
+services so we basically built in a zero
+
+00:10:49,829 --> 00:10:56,970
+rtd handshake in quick crypto that's
+
+00:10:52,440 --> 00:10:59,279
+carried on to TLS 1.3 and we basically
+
+00:10:56,970 --> 00:11:03,480
+it's roughly similar to running TCP fast
+
+00:10:59,279 --> 00:11:07,800
+open plus zeros 1.3 with the width
+
+00:11:03,480 --> 00:11:09,779
+the additional benefit that with with
+
+00:11:07,800 --> 00:11:11,760
+quick zero RTD you can send more than
+
+00:11:09,779 --> 00:11:17,610
+one packet in the first round trip time
+
+00:11:11,760 --> 00:11:19,380
+which you can't with TCP fast open quick
+
+00:11:17,610 --> 00:11:21,410
+provides stream and streams and
+
+00:11:19,380 --> 00:11:26,339
+multiplexing if you are familiar with
+
+00:11:21,410 --> 00:11:28,320
+what s CDP or HDPE to provided you draft
+
+00:11:26,339 --> 00:11:31,199
+you know the idea of streams but I'll
+
+00:11:28,320 --> 00:11:32,790
+give you a very brief summary streams
+
+00:11:31,199 --> 00:11:35,250
+are basically lightweight abstractions
+
+00:11:32,790 --> 00:11:38,490
+within an existing connection what is a
+
+00:11:35,250 --> 00:11:40,620
+connection a connection is a security
+
+00:11:38,490 --> 00:11:42,870
+context a crypto context it's a
+
+00:11:40,620 --> 00:11:46,350
+congestion control context at this point
+
+00:11:42,870 --> 00:11:50,760
+and it's also potentially a it also has
+
+00:11:46,350 --> 00:11:53,490
+a flow control context within that you
+
+00:11:50,760 --> 00:11:55,470
+can you can have streams that allow a
+
+00:11:53,490 --> 00:11:57,750
+receiver to receive packets out of order
+
+00:11:55,470 --> 00:11:59,970
+your fm you may be familiar with the TCP
+
+00:11:57,750 --> 00:12:01,829
+in order pair of line blocking problem
+
+00:11:59,970 --> 00:12:04,470
+where if one packet is lost subsequent
+
+00:12:01,829 --> 00:12:06,600
+packets are held up in at the receiver
+
+00:12:04,470 --> 00:12:08,160
+and they do not get delivered this
+
+00:12:06,600 --> 00:12:10,079
+problem is solved when we have something
+
+00:12:08,160 --> 00:12:11,639
+like streams within a connection because
+
+00:12:10,079 --> 00:12:14,040
+the receiver is able to deliver data
+
+00:12:11,639 --> 00:12:15,630
+that's received within a stream in order
+
+00:12:14,040 --> 00:12:18,630
+as long as it's an order within that
+
+00:12:15,630 --> 00:12:20,160
+stream so it's really an API thing it's
+
+00:12:18,630 --> 00:12:23,279
+an abstraction that an application can
+
+00:12:20,160 --> 00:12:25,440
+use if it wants to it doesn't improve on
+
+00:12:23,279 --> 00:12:27,240
+the wire performance as much as it
+
+00:12:25,440 --> 00:12:28,980
+improves head-of-line blocking or reduce
+
+00:12:27,240 --> 00:12:35,490
+a set of line blocking and receiver side
+
+00:12:28,980 --> 00:12:39,089
+blocking performance quick also has
+
+00:12:35,490 --> 00:12:42,750
+better loss recovery we basically
+
+00:12:39,089 --> 00:12:44,190
+learned from TCP maybe had years of
+
+00:12:42,750 --> 00:12:46,230
+experience with TCP we've seen
+
+00:12:44,190 --> 00:12:48,060
+everything that's gone into DCP over the
+
+00:12:46,230 --> 00:12:51,089
+years and how many things have been
+
+00:12:48,060 --> 00:12:54,540
+hacked into it to try and fit within the
+
+00:12:51,089 --> 00:12:56,850
+existing protocol framework and we were
+
+00:12:54,540 --> 00:12:59,819
+able to simply basically build them up
+
+00:12:56,850 --> 00:13:01,110
+from scratch with the right signaling so
+
+00:12:59,819 --> 00:13:02,819
+we just happened to have better loss
+
+00:13:01,110 --> 00:13:05,880
+recovery because we happen to be able to
+
+00:13:02,819 --> 00:13:09,029
+learn from pcps experiences and we were
+
+00:13:05,880 --> 00:13:11,069
+able to build in richer signaling such
+
+00:13:09,029 --> 00:13:14,189
+as we do not have the retransmission
+
+00:13:11,069 --> 00:13:16,240
+ambiguity problem because a new packet
+
+00:13:14,189 --> 00:13:18,550
+gets a new sequence number a new
+
+00:13:16,240 --> 00:13:20,320
+number we call them in in quick we've
+
+00:13:18,550 --> 00:13:23,230
+separated send ordering from receive
+
+00:13:20,320 --> 00:13:25,209
+ordering what I mean is in in so in TCP
+
+00:13:23,230 --> 00:13:27,100
+you have one sequence number that's used
+
+00:13:25,209 --> 00:13:28,540
+for sending as well as for receiving so
+
+00:13:27,100 --> 00:13:29,709
+when you read an Smita packet the same
+
+00:13:28,540 --> 00:13:33,070
+sequence number goes on the
+
+00:13:29,709 --> 00:13:34,600
+retransmission in quick if you read
+
+00:13:33,070 --> 00:13:36,580
+transmit a packet the contents of the
+
+00:13:34,600 --> 00:13:38,290
+packet are retransmitted but the packet
+
+00:13:36,580 --> 00:13:40,420
+itself is brand-new and it gets a new
+
+00:13:38,290 --> 00:13:42,910
+packet number so packet number is going
+
+00:13:40,420 --> 00:13:46,000
+out or monotonically increasing on the
+
+00:13:42,910 --> 00:13:47,890
+receive side you open up the packet and
+
+00:13:46,000 --> 00:13:51,160
+the delivery sequence number is inside
+
+00:13:47,890 --> 00:13:54,130
+it's per stream so we've separated those
+
+00:13:51,160 --> 00:13:55,899
+two concepts and those in the end that
+
+00:13:54,130 --> 00:13:59,380
+allows us to do a lot of more
+
+00:13:55,899 --> 00:14:01,870
+interesting things but loss recovery the
+
+00:13:59,380 --> 00:14:03,459
+implementation in chromium also has
+
+00:14:01,870 --> 00:14:04,480
+fairly flexible congestion control and
+
+00:14:03,459 --> 00:14:06,550
+in general we are encouraging
+
+00:14:04,480 --> 00:14:09,010
+implementers to keep the condition
+
+00:14:06,550 --> 00:14:11,709
+control API open and inflexible so that
+
+00:14:09,010 --> 00:14:12,940
+we can do experimentation they can do
+
+00:14:11,709 --> 00:14:18,070
+experimentation with congestion control
+
+00:14:12,940 --> 00:14:19,899
+moving forward quick has the ability to
+
+00:14:18,070 --> 00:14:22,990
+support connection migration and
+
+00:14:19,899 --> 00:14:24,880
+multipath and the protocol now supports
+
+00:14:22,990 --> 00:14:29,079
+connection migration not multipath fully
+
+00:14:24,880 --> 00:14:32,230
+yet but it uses an explicit 18 byte up
+
+00:14:29,079 --> 00:14:34,120
+to 18 byte connection ID that is used to
+
+00:14:32,230 --> 00:14:35,380
+identify the connection this is separate
+
+00:14:34,120 --> 00:14:36,399
+from the four table the four table is
+
+00:14:35,380 --> 00:14:38,050
+useful at the beginning when you're
+
+00:14:36,399 --> 00:14:41,230
+setting up the connection but after that
+
+00:14:38,050 --> 00:14:44,110
+quick relies on the connection ID for
+
+00:14:41,230 --> 00:14:45,760
+routing and for various things so as
+
+00:14:44,110 --> 00:14:47,620
+long as you have the connection ID even
+
+00:14:45,760 --> 00:14:52,180
+if the 40 people changes perhaps because
+
+00:14:47,620 --> 00:14:54,010
+of not rebinding you repeat as does if
+
+00:14:52,180 --> 00:14:54,520
+you're familiar with Nats and how Nats
+
+00:14:54,010 --> 00:14:56,829
+work
+
+00:14:54,520 --> 00:14:58,990
+Nats basically map your internal four
+
+00:14:56,829 --> 00:15:00,520
+table to an external 40 power on your
+
+00:14:58,990 --> 00:15:02,110
+internal IP address and port to an
+
+00:15:00,520 --> 00:15:04,750
+external IP address in Port the public
+
+00:15:02,110 --> 00:15:06,040
+IP address and port and that binding can
+
+00:15:04,750 --> 00:15:08,410
+change if there's a pause in the
+
+00:15:06,040 --> 00:15:11,350
+connection that typically in TCP tends
+
+00:15:08,410 --> 00:15:14,020
+to be that pause can be longer because
+
+00:15:11,350 --> 00:15:16,120
+those Nats look for fins to go through
+
+00:15:14,020 --> 00:15:18,160
+to drop state but in UDP they don't know
+
+00:15:16,120 --> 00:15:19,600
+when the connection is over so they tend
+
+00:15:18,160 --> 00:15:22,000
+to have more aggressive timeouts so we
+
+00:15:19,600 --> 00:15:24,820
+wanted to build this into into quake so
+
+00:15:22,000 --> 00:15:27,040
+this allows provides a connection better
+
+00:15:24,820 --> 00:15:28,120
+resilience against not rebinding but
+
+00:15:27,040 --> 00:15:30,700
+that also gives us the ability to
+
+00:15:28,120 --> 00:15:33,550
+migrate connections to new IP address
+
+00:15:30,700 --> 00:15:35,529
+and the same thing can also allow us to
+
+00:15:33,550 --> 00:15:36,970
+do things like multipath again you as
+
+00:15:35,529 --> 00:15:38,350
+long as you have a connection identifier
+
+00:15:36,970 --> 00:15:39,550
+that's distinct from the four people
+
+00:15:38,350 --> 00:15:40,750
+there are a lot of things you can do you
+
+00:15:39,550 --> 00:15:42,459
+can change the four duple you can use
+
+00:15:40,750 --> 00:15:44,140
+multiple four tuples there are things
+
+00:15:42,459 --> 00:15:45,820
+that one could do currently the protocol
+
+00:15:44,140 --> 00:15:47,560
+allows for connection migration we
+
+00:15:45,820 --> 00:15:49,810
+expect that the next version of the
+
+00:15:47,560 --> 00:15:57,580
+protocol will will will support
+
+00:15:49,810 --> 00:15:59,350
+multipath so I'm not going to go into
+
+00:15:57,580 --> 00:16:00,730
+the details of like I said the
+
+00:15:59,350 --> 00:16:02,950
+performance evaluation but there's one
+
+00:16:00,730 --> 00:16:07,089
+set of numbers that I want to want to
+
+00:16:02,950 --> 00:16:10,959
+show you and this is perhaps I think one
+
+00:16:07,089 --> 00:16:14,050
+of the more I think it's it's it shows
+
+00:16:10,959 --> 00:16:16,540
+something that's valuable so if you look
+
+00:16:14,050 --> 00:16:18,450
+at quick improvement it's like I so do
+
+00:16:16,540 --> 00:16:21,490
+the mean numbers are there but
+
+00:16:18,450 --> 00:16:24,220
+geographically it's not equal and that's
+
+00:16:21,490 --> 00:16:25,149
+an interesting thing to look at so if
+
+00:16:24,220 --> 00:16:27,580
+you look at South Korea which has
+
+00:16:25,149 --> 00:16:30,520
+excellent connectivity over all the the
+
+00:16:27,580 --> 00:16:32,500
+mean min RTD as we measured is about 38
+
+00:16:30,520 --> 00:16:34,930
+milliseconds the retransmit rate for TCP
+
+00:16:32,500 --> 00:16:37,120
+connections is about 1% which is which
+
+00:16:34,930 --> 00:16:40,000
+is really good by the way
+
+00:16:37,120 --> 00:16:41,230
+there's not very much in improvement the
+
+00:16:40,000 --> 00:16:43,270
+reduction in rebuff rate is an
+
+00:16:41,230 --> 00:16:44,709
+improvement again three buffers are
+
+00:16:43,270 --> 00:16:45,850
+basically things that you don't want
+
+00:16:44,709 --> 00:16:47,110
+this is the amount of time that you look
+
+00:16:45,850 --> 00:16:48,850
+at the spinny wheel when you are
+
+00:16:47,110 --> 00:16:51,700
+watching a video that's basically what a
+
+00:16:48,850 --> 00:16:52,720
+rebuff aerators so the less of time you
+
+00:16:51,700 --> 00:16:55,300
+are looking at this penny wheel the
+
+00:16:52,720 --> 00:16:59,140
+better it is so this improvement is is
+
+00:16:55,300 --> 00:17:01,450
+effective goodness and this this you do
+
+00:16:59,140 --> 00:17:03,940
+see improvement on mobile but on desktop
+
+00:17:01,450 --> 00:17:06,339
+it's basically zero if you go to the US
+
+00:17:03,940 --> 00:17:08,699
+which has a crappier network then then
+
+00:17:06,339 --> 00:17:12,459
+South Korea and many other countries
+
+00:17:08,699 --> 00:17:15,730
+it's a you see the improvements start to
+
+00:17:12,459 --> 00:17:17,199
+increase its when you get to places like
+
+00:17:15,730 --> 00:17:20,520
+India which have really crappy
+
+00:17:17,199 --> 00:17:24,220
+connectivity that you see the bulk of
+
+00:17:20,520 --> 00:17:26,260
+quicks improvement so what this really
+
+00:17:24,220 --> 00:17:28,809
+tells you is that quick pulls in the
+
+00:17:26,260 --> 00:17:30,780
+tail quick is really really a lot of the
+
+00:17:28,809 --> 00:17:33,340
+mean there the weight is in the tail and
+
+00:17:30,780 --> 00:17:35,440
+this is the tail we care about we care
+
+00:17:33,340 --> 00:17:37,870
+about improving connectivity for for
+
+00:17:35,440 --> 00:17:40,900
+users who have terribly sucky
+
+00:17:37,870 --> 00:17:43,210
+connectivity we care about improving
+
+00:17:40,900 --> 00:17:43,900
+transport performance over poor links
+
+00:17:43,210 --> 00:17:46,000
+the
+
+00:17:43,900 --> 00:17:50,170
+those users don't have very many other
+
+00:17:46,000 --> 00:17:51,670
+options so I did want to show you the
+
+00:17:50,170 --> 00:17:53,140
+slide because I wanted to show you that
+
+00:17:51,670 --> 00:17:55,750
+quickest and improving performance for
+
+00:17:53,140 --> 00:17:56,800
+all of us here who have you know really
+
+00:17:55,750 --> 00:17:59,080
+good connectivity it's actually
+
+00:17:56,800 --> 00:18:02,980
+improving performance for users who have
+
+00:17:59,080 --> 00:18:04,840
+crappy connectivity and users who we all
+
+00:18:02,980 --> 00:18:08,290
+care about improving them improving
+
+00:18:04,840 --> 00:18:12,100
+performance for so I'm going to move to
+
+00:18:08,290 --> 00:18:14,500
+just a few experiments and experiences
+
+00:18:12,100 --> 00:18:16,020
+again thes these are all of these are
+
+00:18:14,500 --> 00:18:22,500
+actually described in the paper as well
+
+00:18:16,020 --> 00:18:25,870
+but one in particular that I find very
+
+00:18:22,500 --> 00:18:27,210
+that we were surprised by was we thought
+
+00:18:25,870 --> 00:18:30,520
+that we did encrypt the headers and
+
+00:18:27,210 --> 00:18:33,130
+quick wouldn't get ossified she's a
+
+00:18:30,520 --> 00:18:36,040
+great thing to think about and we said
+
+00:18:33,130 --> 00:18:40,540
+we had like I said authenticated all the
+
+00:18:36,040 --> 00:18:43,059
+headers encrypted some of them so we
+
+00:18:40,540 --> 00:18:45,220
+didn't encrypt all the headers some of
+
+00:18:43,059 --> 00:18:46,420
+them had to be left visible of course
+
+00:18:45,220 --> 00:18:48,309
+they couldn't be modified but they were
+
+00:18:46,420 --> 00:18:49,210
+left visible what happened is that the
+
+00:18:48,309 --> 00:18:52,030
+first byte
+
+00:18:49,210 --> 00:18:55,390
+the flags byte when we flipped a flag in
+
+00:18:52,030 --> 00:18:57,520
+there suddenly chrome couldn't reach you
+
+00:18:55,390 --> 00:19:01,929
+could you could not use Chrome to reach
+
+00:18:57,520 --> 00:19:04,170
+Google anymore this happened and the
+
+00:19:01,929 --> 00:19:07,210
+problem was that there was a particular
+
+00:19:04,170 --> 00:19:09,700
+firewall vendor who had decided to build
+
+00:19:07,210 --> 00:19:11,080
+a quick classifier and the way they
+
+00:19:09,700 --> 00:19:13,390
+built the quick classifier was they
+
+00:19:11,080 --> 00:19:15,790
+looked on the wire at Lisa V dump and
+
+00:19:13,390 --> 00:19:19,000
+said it looks like all quick traffic has
+
+00:19:15,790 --> 00:19:22,570
+seven as the first byte so guess what my
+
+00:19:19,000 --> 00:19:26,740
+classifier is going to be the first byte
+
+00:19:22,570 --> 00:19:29,740
+is seven it's quick not probably it's
+
+00:19:26,740 --> 00:19:30,970
+quick and so when we changed the first
+
+00:19:29,740 --> 00:19:35,740
+byte from seven to something it's a
+
+00:19:30,970 --> 00:19:37,750
+flags byte we flip the flag suddenly the
+
+00:19:35,740 --> 00:19:40,390
+middle box would allow the handshake to
+
+00:19:37,750 --> 00:19:42,040
+go through and then black hole
+
+00:19:40,390 --> 00:19:44,710
+everything else now this was the worst
+
+00:19:42,040 --> 00:19:46,360
+for us because we saw in chrome chrome
+
+00:19:44,710 --> 00:19:47,679
+would raise TCP and quick connections
+
+00:19:46,360 --> 00:19:49,300
+and if the quick connection handshake
+
+00:19:47,679 --> 00:19:51,880
+went through it would say quick works
+
+00:19:49,300 --> 00:19:54,340
+I'm going to switch to using quick this
+
+00:19:51,880 --> 00:19:56,380
+firewall happily allowed the handshake
+
+00:19:54,340 --> 00:19:57,520
+to go through and then said I still
+
+00:19:56,380 --> 00:19:59,080
+don't know what the stripe
+
+00:19:57,520 --> 00:20:00,300
+look at this packet go I don't know what
+
+00:19:59,080 --> 00:20:02,410
+this is but I'm gonna let it through
+
+00:20:00,300 --> 00:20:03,520
+back comes a packet I don't know what it
+
+00:20:02,410 --> 00:20:05,920
+is but I'm gonna let it through and now
+
+00:20:03,520 --> 00:20:07,390
+decides probably because the
+
+00:20:05,920 --> 00:20:09,130
+decision-making process is happening on
+
+00:20:07,390 --> 00:20:12,160
+a separate thread somewhere where it
+
+00:20:09,130 --> 00:20:13,679
+goes I'm not gonna let this this this
+
+00:20:12,160 --> 00:20:16,720
+traffic through anymore and black hold
+
+00:20:13,679 --> 00:20:20,050
+subsequent packets on that four table so
+
+00:20:16,720 --> 00:20:22,150
+we basically had a we had to roll back
+
+00:20:20,050 --> 00:20:23,980
+we talked to the firewall vendor who had
+
+00:20:22,150 --> 00:20:26,670
+never seen the quick spec did not know
+
+00:20:23,980 --> 00:20:29,679
+what it was but built classifier anyways
+
+00:20:26,670 --> 00:20:31,540
+this is the ossification that we are up
+
+00:20:29,679 --> 00:20:33,280
+against this was surprising to us
+
+00:20:31,540 --> 00:20:35,250
+because we had we had this was before
+
+00:20:33,280 --> 00:20:41,559
+the idea process happened this was in
+
+00:20:35,250 --> 00:20:43,270
+2015 15 or 16 years before the ITF
+
+00:20:41,559 --> 00:20:45,400
+process has started so there was not a
+
+00:20:43,270 --> 00:20:48,490
+there was a quick design document that
+
+00:20:45,400 --> 00:20:50,170
+we had was public but they decided to
+
+00:20:48,490 --> 00:20:52,179
+build a classifier for a proprietary
+
+00:20:50,170 --> 00:20:55,600
+protocol without consulting the
+
+00:20:52,179 --> 00:20:57,190
+documentation and so we realized that
+
+00:20:55,600 --> 00:20:59,530
+even getting them to actually read the
+
+00:20:57,190 --> 00:21:00,820
+documentation is already a task that we
+
+00:20:59,530 --> 00:21:03,130
+would like to see if we can pick into
+
+00:21:00,820 --> 00:21:05,170
+the protocol and that some of some work
+
+00:21:03,130 --> 00:21:08,679
+that's that's gone into that into the in
+
+00:21:05,170 --> 00:21:10,720
+the ITF work but ultimately we realize
+
+00:21:08,679 --> 00:21:14,830
+that was for me at least a moment of
+
+00:21:10,720 --> 00:21:16,600
+like yeah this there's a quote here from
+
+00:21:14,830 --> 00:21:18,670
+the tussles paper which if you haven't
+
+00:21:16,600 --> 00:21:19,780
+please go read it which says the
+
+00:21:18,670 --> 00:21:22,570
+ultimate difference of the end to end
+
+00:21:19,780 --> 00:21:25,679
+mode is end-to-end encryption and that's
+
+00:21:22,570 --> 00:21:25,679
+been a guiding principle for us
+
+00:21:26,130 --> 00:21:34,210
+this slide shows basically how rapidly
+
+00:21:31,360 --> 00:21:36,309
+we had we have iterated on quick over
+
+00:21:34,210 --> 00:21:39,970
+time and the colors you're seeing here
+
+00:21:36,309 --> 00:21:41,950
+are basically versions and the fraction
+
+00:21:39,970 --> 00:21:43,270
+of traffic on the y-axis so you're
+
+00:21:41,950 --> 00:21:45,820
+seeing how quickly we were able to
+
+00:21:43,270 --> 00:21:47,460
+deploy different quick versions largely
+
+00:21:45,820 --> 00:21:51,580
+because we are operating in user space
+
+00:21:47,460 --> 00:21:55,150
+we were basically shipping changes to
+
+00:21:51,580 --> 00:21:57,990
+chromium on a six weekly cycle and we
+
+00:21:55,150 --> 00:22:00,660
+were changing our server
+
+00:21:57,990 --> 00:22:02,670
+or use userspace server implementation
+
+00:22:00,660 --> 00:22:05,480
+also rapidly so we were able to move
+
+00:22:02,670 --> 00:22:08,820
+quite faster quite fast with with
+
+00:22:05,480 --> 00:22:13,020
+shipping new versions we were also able
+
+00:22:08,820 --> 00:22:14,610
+to use a lot of tools that were away
+
+00:22:13,020 --> 00:22:17,130
+that are available in user space and
+
+00:22:14,610 --> 00:22:20,010
+that really helped us make the
+
+00:22:17,130 --> 00:22:21,480
+implementation quite solid being in user
+
+00:22:20,010 --> 00:22:22,800
+space also allowed us to do better
+
+00:22:21,480 --> 00:22:24,780
+integration of tracing and logging
+
+00:22:22,800 --> 00:22:26,820
+infrastructure that most server
+
+00:22:24,780 --> 00:22:28,350
+deployments have most of our deployments
+
+00:22:26,820 --> 00:22:30,510
+have pretty rich infrastructure when it
+
+00:22:28,350 --> 00:22:32,820
+comes to logging and and all of that
+
+00:22:30,510 --> 00:22:34,200
+tends to live in user space so being in
+
+00:22:32,820 --> 00:22:40,440
+user space allowed us to integrate with
+
+00:22:34,200 --> 00:22:41,700
+them seamlessly and quite rapidly I am
+
+00:22:40,440 --> 00:22:44,040
+NOT going to go into this this seems
+
+00:22:41,700 --> 00:22:45,300
+like a like I mean if we can talk about
+
+00:22:44,040 --> 00:22:46,800
+this if anybody's interested about the
+
+00:22:45,300 --> 00:22:48,480
+fec experiments we had with quick we
+
+00:22:46,800 --> 00:22:50,640
+implemented and then turned it off
+
+00:22:48,480 --> 00:22:52,559
+I'm happy to talk about that later but
+
+00:22:50,640 --> 00:22:57,390
+come up and ask if you want to talk
+
+00:22:52,559 --> 00:22:59,490
+about this we spent a lot of time in
+
+00:22:57,390 --> 00:23:03,240
+that period before the massive ramp up
+
+00:22:59,490 --> 00:23:05,309
+with mobile on improving quicks CPU
+
+00:23:03,240 --> 00:23:06,870
+utilization because that was necessary
+
+00:23:05,309 --> 00:23:09,179
+before we could allow we could we could
+
+00:23:06,870 --> 00:23:10,559
+serve that much traffic on quick and to
+
+00:23:09,179 --> 00:23:12,480
+talk about the details in that
+
+00:23:10,559 --> 00:23:16,470
+particular period where we reduced
+
+00:23:12,480 --> 00:23:20,000
+quicks CPU footprint from 3.5 X 2 to X
+
+00:23:16,470 --> 00:23:20,000
+I'll hand it off to Ian
+
+00:23:21,130 --> 00:23:28,450
+[Music]
+
+00:23:23,970 --> 00:23:31,539
+everyone uh yeah so I mean sweat I do
+
+00:23:28,450 --> 00:23:34,390
+still workable uh so I think but uh yeah
+
+00:23:31,539 --> 00:23:36,490
+Jenna looked relatively recently so
+
+00:23:34,390 --> 00:23:39,640
+there were some major sources for CPU
+
+00:23:36,490 --> 00:23:42,640
+utilization when we got to in the 3.5 X
+
+00:23:39,640 --> 00:23:44,440
+to X range crypto was a pretty big one
+
+00:23:42,640 --> 00:23:47,110
+at the time we're using a fair amount of
+
+00:23:44,440 --> 00:23:49,510
+chacha xx and if you're familiar cha-cha
+
+00:23:47,110 --> 00:23:52,419
+xx does not have a es ni instructions
+
+00:23:49,510 --> 00:23:53,740
+okay so obviously it's not a es but it
+
+00:23:52,419 --> 00:23:55,419
+is quite a bit faster on a lot of mobile
+
+00:23:53,740 --> 00:23:58,780
+devices which also don't have a as
+
+00:23:55,419 --> 00:24:01,120
+acceleration and so by default if the
+
+00:23:58,780 --> 00:24:03,760
+mobile device didn't have a s
+
+00:24:01,120 --> 00:24:05,320
+instructions we would use cha-cha 20 so
+
+00:24:03,760 --> 00:24:07,659
+it was kind of costly ascending
+
+00:24:05,320 --> 00:24:10,900
+receiving UDP were by far the largest
+
+00:24:07,659 --> 00:24:13,900
+costs and even today those are still the
+
+00:24:10,900 --> 00:24:16,750
+largest costs the internal state of
+
+00:24:13,900 --> 00:24:20,710
+quick is definitely a lot less cash
+
+00:24:16,750 --> 00:24:21,370
+efficient than the current TCP code that
+
+00:24:20,710 --> 00:24:23,200
+makes sense
+
+00:24:21,370 --> 00:24:25,720
+you know it's four years old and rapidly
+
+00:24:23,200 --> 00:24:28,360
+evolving whereas the TCP code is much
+
+00:24:25,720 --> 00:24:31,059
+much older and people spend an extensive
+
+00:24:28,360 --> 00:24:32,380
+amount of time optimizing it and so in
+
+00:24:31,059 --> 00:24:34,360
+the in the worst case scenario one
+
+00:24:32,380 --> 00:24:36,880
+person actually said who formerly worked
+
+00:24:34,360 --> 00:24:38,409
+at Intel said that a quick is actually a
+
+00:24:36,880 --> 00:24:41,530
+visitor framework that happens to
+
+00:24:38,409 --> 00:24:42,970
+implement a networking transport so
+
+00:24:41,530 --> 00:24:44,440
+because there are quite a few callbacks
+
+00:24:42,970 --> 00:24:45,850
+and such in a fair amount of indirection
+
+00:24:44,440 --> 00:24:49,659
+so you know there's a fair amount of
+
+00:24:45,850 --> 00:24:53,110
+work to to mitigate that quick also has
+
+00:24:49,659 --> 00:24:55,240
+encrypted acknowledgments and so not
+
+00:24:53,110 --> 00:24:57,340
+only are they encrypted but the cost of
+
+00:24:55,240 --> 00:24:58,840
+processing kind of an acknowledgment and
+
+00:24:57,340 --> 00:25:00,220
+quic is a little bit higher than TCP
+
+00:24:58,840 --> 00:25:02,559
+anyway due to kind of have the data
+
+00:25:00,220 --> 00:25:07,150
+structures laid out so that that's a
+
+00:25:02,559 --> 00:25:09,520
+little more costly so what do we do for
+
+00:25:07,150 --> 00:25:11,320
+cha-cha 20 was actually it was easy from
+
+00:25:09,520 --> 00:25:13,960
+my perspective I asked David Benjamin
+
+00:25:11,320 --> 00:25:18,010
+from boring SSL to land some ham
+
+00:25:13,960 --> 00:25:19,570
+optimized assembly and he you know
+
+00:25:18,010 --> 00:25:20,830
+nicely did that for me and then
+
+00:25:19,570 --> 00:25:23,200
+everything was pretty much fine
+
+00:25:20,830 --> 00:25:24,340
+particularly on places where we have a V
+
+00:25:23,200 --> 00:25:27,640
+X now
+
+00:25:24,340 --> 00:25:31,450
+cha-cha xx is it's quite fast fairly
+
+00:25:27,640 --> 00:25:33,760
+comparable to a BAS GCM actually employs
+
+00:25:31,450 --> 00:25:35,260
+crypto also helped we're a little
+
+00:25:33,760 --> 00:25:36,250
+surprised to see that but I think
+
+00:25:35,260 --> 00:25:38,620
+a lot of our machines are actually
+
+00:25:36,250 --> 00:25:40,480
+memory bandwidth limited so just
+
+00:25:38,620 --> 00:25:45,550
+touching one little chunk less memory is
+
+00:25:40,480 --> 00:25:47,550
+helpful on the send and receive side a
+
+00:25:45,550 --> 00:25:50,770
+while ago we actually switched to using
+
+00:25:47,550 --> 00:25:53,140
+packet rx ring and that was actually a
+
+00:25:50,770 --> 00:25:54,790
+quite a substantial CPU savings my
+
+00:25:53,140 --> 00:25:57,370
+memory at the time is that it was kind
+
+00:25:54,790 --> 00:25:59,290
+of a about a 10% win over all is the is
+
+00:25:57,370 --> 00:26:00,700
+the ballpark we're talking so so pretty
+
+00:25:59,290 --> 00:26:02,320
+substantial
+
+00:26:00,700 --> 00:26:04,270
+we've more recently tried some
+
+00:26:02,320 --> 00:26:06,100
+experiments switching back to UDP
+
+00:26:04,270 --> 00:26:07,780
+sockets but it turns out at least at the
+
+00:26:06,100 --> 00:26:12,400
+moment it's still still the one to use
+
+00:26:07,780 --> 00:26:15,160
+rx ring and more recently UDP gso is
+
+00:26:12,400 --> 00:26:17,560
+landed and that is very very promising
+
+00:26:15,160 --> 00:26:18,640
+we don't have it fully deployed yet I'm
+
+00:26:17,560 --> 00:26:22,060
+going to talk about it a little bit more
+
+00:26:18,640 --> 00:26:23,200
+in detail later but that's you know an
+
+00:26:22,060 --> 00:26:25,050
+incredible improvement in terms that
+
+00:26:23,200 --> 00:26:27,280
+they overall send performance because
+
+00:26:25,050 --> 00:26:29,140
+today it's not that uncommon for us to
+
+00:26:27,280 --> 00:26:30,790
+consume something on the order of 30
+
+00:26:29,140 --> 00:26:32,860
+percent of our CPU just sending UDP
+
+00:26:30,790 --> 00:26:35,170
+packets on the server it kind of depends
+
+00:26:32,860 --> 00:26:36,610
+on the environment but and we've seen as
+
+00:26:35,170 --> 00:26:41,410
+high as 50 but that was a particularly
+
+00:26:36,610 --> 00:26:44,110
+pathological Android device so quick
+
+00:26:41,410 --> 00:26:47,050
+internal state yeah we optimized for
+
+00:26:44,110 --> 00:26:49,870
+cache efficiency we redid all of our
+
+00:26:47,050 --> 00:26:51,430
+data structures to you know use a you
+
+00:26:49,870 --> 00:26:53,320
+know double ended queues and vectors and
+
+00:26:51,430 --> 00:26:54,970
+other things they're much more efficient
+
+00:26:53,320 --> 00:26:57,040
+and of course we've minimized
+
+00:26:54,970 --> 00:26:58,090
+allocations in mem copy so standard
+
+00:26:57,040 --> 00:27:00,460
+stuff than I'm sure you're all familiar
+
+00:26:58,090 --> 00:27:04,200
+with we also do virtualized some things
+
+00:27:00,460 --> 00:27:06,130
+and you know made things you know
+
+00:27:04,200 --> 00:27:10,450
+minimized interfaces in pointer
+
+00:27:06,130 --> 00:27:11,950
+following and encrypted acts so the
+
+00:27:10,450 --> 00:27:13,840
+solution of this one was not to really
+
+00:27:11,950 --> 00:27:15,760
+we did actually make a crossing quite a
+
+00:27:13,840 --> 00:27:17,430
+bit faster recently but the main
+
+00:27:15,760 --> 00:27:20,320
+solution was just to send fewer of them
+
+00:27:17,430 --> 00:27:22,390
+so we now have this feature called act
+
+00:27:20,320 --> 00:27:26,200
+estimation it doesn't actually reduce
+
+00:27:22,390 --> 00:27:29,440
+acts by 1/10 but turns out decimation
+
+00:27:26,200 --> 00:27:30,940
+doesn't mean that anyway long story but
+
+00:27:29,440 --> 00:27:33,280
+it does reduce the accurate to either
+
+00:27:30,940 --> 00:27:36,340
+every 10 packets or 1/4 of an RTT
+
+00:27:33,280 --> 00:27:38,260
+whichever comes first and that reduces
+
+00:27:36,340 --> 00:27:40,630
+CPU utilization quite a bit and it gets
+
+00:27:38,260 --> 00:27:42,220
+to the point where you know and at least
+
+00:27:40,630 --> 00:27:46,230
+in theory of the Act processing cost of
+
+00:27:42,220 --> 00:27:46,230
+quick and tcp should be quite comparable
+
+00:27:49,830 --> 00:27:55,770
+so here here's how kind of I would
+
+00:27:53,700 --> 00:27:57,800
+recommend these sockets at the moment
+
+00:27:55,770 --> 00:27:59,970
+for quick this is how we're doing it
+
+00:27:57,800 --> 00:28:01,530
+certainly there are other ways to go and
+
+00:27:59,970 --> 00:28:04,050
+we've we've considered a lot of options
+
+00:28:01,530 --> 00:28:05,760
+but and this this knowledge is sort of
+
+00:28:04,050 --> 00:28:09,750
+gathered from various kernel developers
+
+00:28:05,760 --> 00:28:11,160
+at Google like Eric and Willem and you
+
+00:28:09,750 --> 00:28:12,870
+know I trust their advice to a large
+
+00:28:11,160 --> 00:28:15,630
+extent and if I misquote them then they
+
+00:28:12,870 --> 00:28:16,530
+should feel free to correctly so the
+
+00:28:15,630 --> 00:28:20,160
+current model is that we're using a
+
+00:28:16,530 --> 00:28:21,660
+socket per thread on with s eries part
+
+00:28:20,160 --> 00:28:24,450
+on the receive side so this is basically
+
+00:28:21,660 --> 00:28:26,970
+a receive only socket it does not ever
+
+00:28:24,450 --> 00:28:29,880
+send packets this provides a staple
+
+00:28:26,970 --> 00:28:32,160
+fortune pull hash among flows most the
+
+00:28:29,880 --> 00:28:34,950
+time that you know it works out very
+
+00:28:32,160 --> 00:28:39,420
+well and then the app dispatch is based
+
+00:28:34,950 --> 00:28:41,610
+on quick connection ID so for NAT
+
+00:28:39,420 --> 00:28:43,530
+rebinding we've actually found that
+
+00:28:41,610 --> 00:28:44,610
+connection migration and sorry Netra
+
+00:28:43,530 --> 00:28:46,490
+binding and connection migration
+
+00:28:44,610 --> 00:28:48,960
+combined are much less than 1% of all
+
+00:28:46,490 --> 00:28:50,400
+active connections so that might
+
+00:28:48,960 --> 00:28:52,320
+increase a little bit as connection
+
+00:28:50,400 --> 00:28:53,700
+migration prevalence increases but I
+
+00:28:52,320 --> 00:28:56,340
+still think we're talking about less
+
+00:28:53,700 --> 00:28:58,020
+than 1% of connections so we're relying
+
+00:28:56,340 --> 00:28:59,790
+in 4-tuple is largely adequate at least
+
+00:28:58,020 --> 00:29:01,380
+from a computational perspective you can
+
+00:28:59,790 --> 00:29:02,880
+sort of optimize for the fast path case
+
+00:29:01,380 --> 00:29:06,390
+and do 4-tuple
+
+00:29:02,880 --> 00:29:08,130
+flow hashing for quite a while and then
+
+00:29:06,390 --> 00:29:11,250
+you can other toss packets between
+
+00:29:08,130 --> 00:29:14,640
+threads if necessary or potentially you
+
+00:29:11,250 --> 00:29:20,310
+can look at using a BBF to provide
+
+00:29:14,640 --> 00:29:22,050
+connection ID based steering so on the
+
+00:29:20,310 --> 00:29:25,020
+sin side we're also using a socket per
+
+00:29:22,050 --> 00:29:26,120
+thread for sending at the moment
+
+00:29:25,020 --> 00:29:28,860
+actually it turns out where you're using
+
+00:29:26,120 --> 00:29:31,950
+raw sockets because we want to do some
+
+00:29:28,860 --> 00:29:33,720
+Geryon MPLS in certain circumstances but
+
+00:29:31,950 --> 00:29:35,130
+that's sort of a detail we have found
+
+00:29:33,720 --> 00:29:36,960
+actually raw sockets are very slightly
+
+00:29:35,130 --> 00:29:39,390
+faster than UDP sockets at least in some
+
+00:29:36,960 --> 00:29:41,820
+circumstances but it's not a completely
+
+00:29:39,390 --> 00:29:43,620
+clear to me why so you know someone can
+
+00:29:41,820 --> 00:29:49,140
+elucidate that that certainly be
+
+00:29:43,620 --> 00:29:51,360
+interesting but you know we found that
+
+00:29:49,140 --> 00:29:54,060
+basically using a socket per connection
+
+00:29:51,360 --> 00:29:55,320
+was was basically impractical for a
+
+00:29:54,060 --> 00:29:57,000
+variety of reasons and it wasn't really
+
+00:29:55,320 --> 00:29:59,360
+helpful
+
+00:29:57,000 --> 00:30:02,640
+so there are some issues with this verge
+
+00:29:59,360 --> 00:30:04,950
+we can't use FQ pacing even though we
+
+00:30:02,640 --> 00:30:06,390
+have the cutest installed because we
+
+00:30:04,950 --> 00:30:08,760
+have many many flows that share a socket
+
+00:30:06,390 --> 00:30:10,669
+and there's no possible way that there
+
+00:30:08,760 --> 00:30:13,140
+is a correct pacing rate for all of them
+
+00:30:10,669 --> 00:30:14,970
+we need an extra large 10 buffer because
+
+00:30:13,140 --> 00:30:17,520
+we asked some money flows to avoid
+
+00:30:14,970 --> 00:30:19,260
+constantly getting bright blocked and
+
+00:30:17,520 --> 00:30:21,870
+actually the kind of the worst practical
+
+00:30:19,260 --> 00:30:23,580
+problem is that the fqq disc cutter
+
+00:30:21,870 --> 00:30:25,500
+creates an inherent unfairness between
+
+00:30:23,580 --> 00:30:29,220
+quick and TCP once the NIC starts
+
+00:30:25,500 --> 00:30:31,200
+getting limited because you're you know
+
+00:30:29,220 --> 00:30:34,500
+basically a thousand quick flows might
+
+00:30:31,200 --> 00:30:38,700
+be competing against one TCP flow for
+
+00:30:34,500 --> 00:30:39,990
+egress time on the neck so you know most
+
+00:30:38,700 --> 00:30:41,159
+of the time obviously you don't want to
+
+00:30:39,990 --> 00:30:42,960
+run your neck at a hundred percent
+
+00:30:41,159 --> 00:30:45,330
+anyway so as long as you're not running
+
+00:30:42,960 --> 00:30:47,070
+your neck like you know literally over
+
+00:30:45,330 --> 00:30:48,600
+the ten o'clock right it's it's largely
+
+00:30:47,070 --> 00:30:51,630
+fine but there are a few locations where
+
+00:30:48,600 --> 00:30:55,010
+things get hot especially if something
+
+00:30:51,630 --> 00:30:55,010
+else some other piece of hardware breaks
+
+00:30:56,570 --> 00:31:00,210
+as I mentioned before packet sockets
+
+00:30:58,980 --> 00:31:02,490
+with shared memory are still a
+
+00:31:00,210 --> 00:31:06,000
+substantial ooh rude improvement over
+
+00:31:02,490 --> 00:31:07,559
+plain rice over use port it's very
+
+00:31:06,000 --> 00:31:10,169
+possible that might be something we can
+
+00:31:07,559 --> 00:31:12,559
+improve on in the future but at the
+
+00:31:10,169 --> 00:31:15,570
+moment we're continuing to to use them
+
+00:31:12,559 --> 00:31:17,280
+packet sockets with TX ring we're not
+
+00:31:15,570 --> 00:31:18,780
+really a big win at least when we tested
+
+00:31:17,280 --> 00:31:21,510
+them the last time it's not really clear
+
+00:31:18,780 --> 00:31:24,419
+why but most importantly using packet
+
+00:31:21,510 --> 00:31:24,990
+sockets for send is an enormous pain in
+
+00:31:24,419 --> 00:31:26,640
+the ass
+
+00:31:24,990 --> 00:31:30,600
+for lack of a better word like the
+
+00:31:26,640 --> 00:31:31,080
+number of issues we had it's it's a lot
+
+00:31:30,600 --> 00:31:34,710
+of work
+
+00:31:31,080 --> 00:31:36,570
+so the yeah I'm sure you know it all
+
+00:31:34,710 --> 00:31:38,520
+makes sense that's true now but we
+
+00:31:36,570 --> 00:31:40,289
+thought we had environments where we you
+
+00:31:38,520 --> 00:31:42,900
+know the the extra CPU benefit of using
+
+00:31:40,289 --> 00:31:45,630
+packet sockets would be beneficial and
+
+00:31:42,900 --> 00:31:46,980
+the hassle was was substantial and there
+
+00:31:45,630 --> 00:31:47,970
+were a lot of edge cases use that we
+
+00:31:46,980 --> 00:31:50,549
+just did not anticipate
+
+00:31:47,970 --> 00:31:53,309
+so even using raw sockets versus packet
+
+00:31:50,549 --> 00:31:54,690
+sockets ease is massively easier these
+
+00:31:53,309 --> 00:31:59,120
+and packet sockets on receive side is
+
+00:31:54,690 --> 00:31:59,120
+quite simple so listen learned
+
+00:32:00,019 --> 00:32:05,919
+so now we have UDP gso achieves
+
+00:32:03,679 --> 00:32:09,470
+performance that's pretty similar to TCP
+
+00:32:05,919 --> 00:32:10,730
+for UDP sending its well I think we'll
+
+00:32:09,470 --> 00:32:12,679
+in this benchmark said like two point
+
+00:32:10,730 --> 00:32:14,090
+seven five times faster but you know
+
+00:32:12,679 --> 00:32:19,190
+it's approximately three times faster
+
+00:32:14,090 --> 00:32:20,600
+than current UDP sending without GSO it
+
+00:32:19,190 --> 00:32:24,080
+does release all the data grams that you
+
+00:32:20,600 --> 00:32:25,789
+send it once so based on my map that
+
+00:32:24,080 --> 00:32:28,850
+means you don't get the full CPU savings
+
+00:32:25,789 --> 00:32:31,669
+of sending 64k at one millisecond
+
+00:32:28,850 --> 00:32:35,029
+intervals until you hit 512 megabits per
+
+00:32:31,669 --> 00:32:37,519
+second so you basically there have to
+
+00:32:35,029 --> 00:32:39,559
+choose between kind of a much more lumpy
+
+00:32:37,519 --> 00:32:43,429
+send pattern than you might ideally like
+
+00:32:39,559 --> 00:32:44,659
+or not getting the full CPU benefits and
+
+00:32:43,429 --> 00:32:46,399
+so that's sort of the trade-off work
+
+00:32:44,659 --> 00:32:50,000
+we're trying to balance right now as we
+
+00:32:46,399 --> 00:32:51,529
+deploy this but yeah ideally in the
+
+00:32:50,000 --> 00:32:53,000
+future it would be possible to actually
+
+00:32:51,529 --> 00:32:56,480
+split up one of these segments after
+
+00:32:53,000 --> 00:32:58,629
+quick sends it into the kernel and that
+
+00:32:56,480 --> 00:33:01,730
+would mitigate the the packet loss issue
+
+00:32:58,629 --> 00:33:03,169
+so as an example I think recently we did
+
+00:33:01,730 --> 00:33:05,210
+some experiments where we kind of forced
+
+00:33:03,169 --> 00:33:08,389
+quick to send Bert you know in bursts
+
+00:33:05,210 --> 00:33:11,629
+and I think if you forced it to send in
+
+00:33:08,389 --> 00:33:13,490
+sixteen packet bursts the retransmit
+
+00:33:11,629 --> 00:33:15,980
+rate went up on the order of 15 to 20
+
+00:33:13,490 --> 00:33:17,389
+percent in seven locations in other
+
+00:33:15,980 --> 00:33:19,970
+locations it didn't go up very much at
+
+00:33:17,389 --> 00:33:21,710
+all but in those locations you also had
+
+00:33:19,970 --> 00:33:26,149
+a much smaller CPU benefit so there's
+
+00:33:21,710 --> 00:33:29,210
+this kind of trade-off that the you know
+
+00:33:26,149 --> 00:33:32,470
+larger sensor cheaper obviously but more
+
+00:33:29,210 --> 00:33:32,470
+likely to cause and cause loss
+
+00:33:34,310 --> 00:33:37,850
+pakya pacing as van said much better
+
+00:33:37,010 --> 00:33:39,770
+than I can
+
+00:33:37,850 --> 00:33:40,760
+minimum release time-based pacing is
+
+00:33:39,770 --> 00:33:43,070
+awesome
+
+00:33:40,760 --> 00:33:47,420
+and is I'm very excited to see it coming
+
+00:33:43,070 --> 00:33:48,770
+to the Linux kernel it's a it makes you
+
+00:33:47,420 --> 00:33:51,080
+know reasoning about congestion control
+
+00:33:48,770 --> 00:33:52,580
+like much much easier it makes kind of
+
+00:33:51,080 --> 00:33:55,250
+controlling how much queue you have in
+
+00:33:52,580 --> 00:33:56,420
+front of you much much easier and in
+
+00:33:55,250 --> 00:33:58,880
+theory it should be possible to
+
+00:33:56,420 --> 00:34:01,550
+implement it much more efficiently than
+
+00:33:58,880 --> 00:34:03,170
+a lot of other pacing schemes and it
+
+00:34:01,550 --> 00:34:04,850
+works out really well ideally for quick
+
+00:34:03,170 --> 00:34:06,200
+because you know instead of having this
+
+00:34:04,850 --> 00:34:07,730
+shared socket where I actually have a
+
+00:34:06,200 --> 00:34:09,920
+queue with a big huge disk and the
+
+00:34:07,730 --> 00:34:11,540
+queueing discipline that's you know
+
+00:34:09,920 --> 00:34:13,280
+among many many connections I can
+
+00:34:11,540 --> 00:34:14,660
+actually each connection can say I want
+
+00:34:13,280 --> 00:34:17,900
+to send at this time I want to send it
+
+00:34:14,660 --> 00:34:19,420
+this time I'll using the same socket so
+
+00:34:17,900 --> 00:34:22,700
+I can put some links down there to the
+
+00:34:19,420 --> 00:34:24,440
+transmit time patch the FQ patch that I
+
+00:34:22,700 --> 00:34:27,320
+think Eric was going to send out I
+
+00:34:24,440 --> 00:34:28,850
+haven't grabbed a link for but we do
+
+00:34:27,320 --> 00:34:33,680
+actually have chromium pasting offload
+
+00:34:28,850 --> 00:34:35,240
+code already written in quick so there's
+
+00:34:33,680 --> 00:34:38,210
+all the code is wired up in the open
+
+00:34:35,240 --> 00:34:40,750
+source code to take advantage of any
+
+00:34:38,210 --> 00:34:43,250
+packet writer that actually can do
+
+00:34:40,750 --> 00:34:45,230
+release time based on flows and it works
+
+00:34:43,250 --> 00:34:46,550
+we've done some like sample tests just
+
+00:34:45,230 --> 00:34:51,830
+to make sure the code actually works as
+
+00:34:46,550 --> 00:34:52,970
+intended and it seems to work well the
+
+00:34:51,830 --> 00:34:55,490
+Dreamforce inside at least from my
+
+00:34:52,970 --> 00:34:57,890
+perspective is you'd have some set of
+
+00:34:55,490 --> 00:35:00,980
+shared memory buffers between quick and
+
+00:34:57,890 --> 00:35:02,840
+the net stack you know the net the quick
+
+00:35:00,980 --> 00:35:05,000
+would tell the net stack what the
+
+00:35:02,840 --> 00:35:07,280
+symmetric key is once quit goes forward
+
+00:35:05,000 --> 00:35:09,280
+secure and gets one RCT keys and then
+
+00:35:07,280 --> 00:35:11,960
+each packet would have a release time
+
+00:35:09,280 --> 00:35:14,120
+and you'd have some sort of timing wheel
+
+00:35:11,960 --> 00:35:15,680
+or other data structure inside the net
+
+00:35:14,120 --> 00:35:18,410
+stack that would be you know managing
+
+00:35:15,680 --> 00:35:20,690
+this release time based pacing and then
+
+00:35:18,410 --> 00:35:22,640
+you know the net stack would would copy
+
+00:35:20,690 --> 00:35:24,170
+it onto the NIC appropriately so you
+
+00:35:22,640 --> 00:35:26,540
+know this should you'd still have one
+
+00:35:24,170 --> 00:35:29,570
+copy in this architecture of you know
+
+00:35:26,540 --> 00:35:31,100
+from the shared memory to the neck but
+
+00:35:29,570 --> 00:35:32,900
+possibly you know that copy could also
+
+00:35:31,100 --> 00:35:34,970
+be where you do the crypto I don't know
+
+00:35:32,900 --> 00:35:36,650
+I'm certainly not an expert on Nix but
+
+00:35:34,970 --> 00:35:40,040
+but something along this model is sort
+
+00:35:36,650 --> 00:35:42,680
+of sort of where I would hope to see
+
+00:35:40,040 --> 00:35:45,090
+things go in the long term
+
+00:35:42,680 --> 00:35:46,890
+so what what do we need to do or what
+
+00:35:45,090 --> 00:35:49,890
+what might we want to do to make things
+
+00:35:46,890 --> 00:35:52,410
+better so on the receive side
+
+00:35:49,890 --> 00:35:56,580
+I know Willem and a few others have
+
+00:35:52,410 --> 00:35:58,980
+talked about possibly doing a UDP lro so
+
+00:35:56,580 --> 00:36:00,860
+that might make a regular UDP socket
+
+00:35:58,980 --> 00:36:04,500
+that doesn't have escalated privileges
+
+00:36:00,860 --> 00:36:06,120
+as fast as packet sockets and that would
+
+00:36:04,500 --> 00:36:07,590
+be a nice benefit there are a lot of
+
+00:36:06,120 --> 00:36:09,480
+environments where we either are
+
+00:36:07,590 --> 00:36:11,310
+deploying quick or we'd like to deploy
+
+00:36:09,480 --> 00:36:14,940
+quick what we don't have escalated
+
+00:36:11,310 --> 00:36:17,550
+privileges cryptid offload both the API
+
+00:36:14,940 --> 00:36:20,340
+and support for it I think it's kind of
+
+00:36:17,550 --> 00:36:22,380
+an open issue as to exactly how that API
+
+00:36:20,340 --> 00:36:25,530
+would look how generic it would be or
+
+00:36:22,380 --> 00:36:26,610
+whether it be specific to quick I know
+
+00:36:25,530 --> 00:36:28,130
+there are a lot of people talking about
+
+00:36:26,610 --> 00:36:32,310
+it I think it's an interesting area of
+
+00:36:28,130 --> 00:36:34,950
+improvement and I you know it's it's a
+
+00:36:32,310 --> 00:36:37,020
+little bit a matter of you know having
+
+00:36:34,950 --> 00:36:39,000
+the hardware vendors and everyone talked
+
+00:36:37,020 --> 00:36:41,160
+to the quick developers and make sure
+
+00:36:39,000 --> 00:36:43,410
+that something that works for Google and
+
+00:36:41,160 --> 00:36:44,640
+Facebook and all the various people who
+
+00:36:43,410 --> 00:36:48,660
+are interested in deploying quick at
+
+00:36:44,640 --> 00:36:51,090
+scale it works for all of them and then
+
+00:36:48,660 --> 00:36:55,140
+some sort of API to allow pacing multi
+
+00:36:51,090 --> 00:36:58,620
+Datagram UDP stones so you know some way
+
+00:36:55,140 --> 00:37:00,350
+to to fragment up the UDP gso chunks so
+
+00:36:58,620 --> 00:37:06,330
+we don't have to compromise between
+
+00:37:00,350 --> 00:37:09,150
+packet loss and CPU utilization so I
+
+00:37:06,330 --> 00:37:11,640
+want to say thanks to Willem and Eric in
+
+00:37:09,150 --> 00:37:13,530
+particular who have you know really
+
+00:37:11,640 --> 00:37:17,340
+landed some awesome patches in the last
+
+00:37:13,530 --> 00:37:20,430
+few years and also I guess he's just
+
+00:37:17,340 --> 00:37:24,210
+recently written blended the TX nine
+
+00:37:20,430 --> 00:37:26,970
+patch and anyone else who I failed to
+
+00:37:24,210 --> 00:37:29,550
+mention who has improved EDP in Linux in
+
+00:37:26,970 --> 00:37:31,950
+the recent past and Tom Herbert for s
+
+00:37:29,550 --> 00:37:35,520
+eries port which is pretty much totally
+
+00:37:31,950 --> 00:37:38,100
+necessary to make any of this work so
+
+00:37:35,520 --> 00:37:40,480
+and so my IGF drafts are linked to you
+
+00:37:38,100 --> 00:37:44,230
+for your information
+
+00:37:40,480 --> 00:37:54,609
+and now it's questions unless people
+
+00:37:44,230 --> 00:37:55,839
+want to kind of like I put the mics it's
+
+00:37:54,609 --> 00:37:57,070
+not break time yet so you don't get
+
+00:37:55,839 --> 00:38:01,000
+their coffee until you ask questions
+
+00:37:57,070 --> 00:38:04,660
+don't hi thanks for presenting I think
+
+00:38:01,000 --> 00:38:08,980
+this is a very important for community
+
+00:38:04,660 --> 00:38:12,550
+to see a protocol like quick thinking I
+
+00:38:08,980 --> 00:38:15,339
+like about its alternative to TCP that's
+
+00:38:12,550 --> 00:38:17,170
+okay but the part where vendors can't
+
+00:38:15,339 --> 00:38:17,619
+look into transport headers that's just
+
+00:38:17,170 --> 00:38:19,570
+awesome
+
+00:38:17,619 --> 00:38:22,960
+so I love that part can you go back to
+
+00:38:19,570 --> 00:38:27,030
+the wish list slide sure could you say
+
+00:38:22,960 --> 00:38:33,070
+that's less awesome the one after this
+
+00:38:27,030 --> 00:38:35,500
+okay so for the first one so my my
+
+00:38:33,070 --> 00:38:39,790
+concept for this was we would have some
+
+00:38:35,500 --> 00:38:44,819
+sort of UDP gyro that would dump you
+
+00:38:39,790 --> 00:38:47,220
+into a BPF program for port so we added
+
+00:38:44,819 --> 00:38:50,650
+capabilities to do per port
+
+00:38:47,220 --> 00:38:52,960
+G ro for things like the X plane and
+
+00:38:50,650 --> 00:38:55,210
+what-have-you but we could have the back
+
+00:38:52,960 --> 00:38:57,609
+end just be a random BPF program with a
+
+00:38:55,210 --> 00:38:58,960
+few BPF helpers you could do two URL so
+
+00:38:57,609 --> 00:39:00,880
+the advantage of that is now we can
+
+00:38:58,960 --> 00:39:03,040
+support quick G ro and the kernel
+
+00:39:00,880 --> 00:39:04,690
+without actually telling the kernel
+
+00:39:03,040 --> 00:39:08,770
+about quick which i think is a pretty
+
+00:39:04,690 --> 00:39:10,599
+good goal number two I'm wondering how
+
+00:39:08,770 --> 00:39:14,220
+close this would be to all the work we
+
+00:39:10,599 --> 00:39:17,230
+did in K TLS and then that kind of
+
+00:39:14,220 --> 00:39:19,930
+merges into the TLS offload which
+
+00:39:17,230 --> 00:39:21,880
+becomes a the API for that is Katie LS
+
+00:39:19,930 --> 00:39:23,109
+so do you know do you know how close C's
+
+00:39:21,880 --> 00:39:25,300
+would be and whether or not we could
+
+00:39:23,109 --> 00:39:26,560
+kind of leverage those I think you could
+
+00:39:25,300 --> 00:39:29,079
+leverage a lot of the code that was
+
+00:39:26,560 --> 00:39:30,430
+lended for a catalyst but the my
+
+00:39:29,079 --> 00:39:32,770
+understanding is the key TLS framing
+
+00:39:30,430 --> 00:39:35,859
+does actual TOS framing on both the send
+
+00:39:32,770 --> 00:39:37,960
+and receive side and so because quick
+
+00:39:35,859 --> 00:39:40,089
+the quick encryption layer looks a
+
+00:39:37,960 --> 00:39:41,589
+little bit different from the TLS layer
+
+00:39:40,089 --> 00:39:44,230
+in terms of kind of what its clinical
+
+00:39:41,589 --> 00:39:46,150
+record layer looks like you you still
+
+00:39:44,230 --> 00:39:49,210
+require some substantial either
+
+00:39:46,150 --> 00:39:49,960
+modifications or a new API so it wasn't
+
+00:39:49,210 --> 00:39:51,430
+I
+
+00:39:49,960 --> 00:39:53,470
+I think probably you'd actually need a
+
+00:39:51,430 --> 00:39:55,630
+whole different API unfortunately
+
+00:39:53,470 --> 00:39:57,100
+more substantial changes you need a
+
+00:39:55,630 --> 00:40:00,930
+different framing to be implemented
+
+00:39:57,100 --> 00:40:03,190
+inside the kernel for four quick packets
+
+00:40:00,930 --> 00:40:05,500
+yeah I mean if you get into that again
+
+00:40:03,190 --> 00:40:07,870
+that that would probably be a BPF sort
+
+00:40:05,500 --> 00:40:11,680
+of thing and then have the BPF helper to
+
+00:40:07,870 --> 00:40:14,020
+call some some crypto it's not
+
+00:40:11,680 --> 00:40:15,880
+unreasonable and and I think that the
+
+00:40:14,020 --> 00:40:17,890
+model here for quick and the kernel
+
+00:40:15,880 --> 00:40:19,570
+seems to be yeah we want to we probably
+
+00:40:17,890 --> 00:40:22,360
+want to do accelerations but without
+
+00:40:19,570 --> 00:40:24,490
+teaching anything anything specific to
+
+00:40:22,360 --> 00:40:26,020
+the kernel about quick and then
+
+00:40:24,490 --> 00:40:28,600
+obviously we want to apply this
+
+00:40:26,020 --> 00:40:30,010
+abstraction to the future protocols you
+
+00:40:28,600 --> 00:40:32,940
+know the quick replacement or whatever
+
+00:40:30,010 --> 00:40:35,380
+so I think that that model would be good
+
+00:40:32,940 --> 00:40:37,000
+Katie Ellis is a little bit different
+
+00:40:35,380 --> 00:40:39,640
+because we did a lot of work in it is in
+
+00:40:37,000 --> 00:40:41,530
+so hopefully there's something we can
+
+00:40:39,640 --> 00:40:43,840
+leverage from that I think that model
+
+00:40:41,530 --> 00:40:48,390
+actually is is good also because it
+
+00:40:43,840 --> 00:40:51,010
+allows evolution of quick and doesn't
+
+00:40:48,390 --> 00:40:55,150
+evolution of quick doesn't get blocked
+
+00:40:51,010 --> 00:40:59,290
+by newer kernel new kernels well I mean
+
+00:40:55,150 --> 00:41:01,390
+so quick is just the the fact that you
+
+00:40:59,290 --> 00:41:03,700
+wanted to do quick because it's UDP and
+
+00:41:01,390 --> 00:41:05,370
+in users in user space because it can't
+
+00:41:03,700 --> 00:41:09,220
+update kernels that was a symptom of
+
+00:41:05,370 --> 00:41:11,160
+kind of a larger problem of it it is
+
+00:41:09,220 --> 00:41:13,030
+hard to deploy kernels we realized that
+
+00:41:11,160 --> 00:41:14,920
+but then when you go down the
+
+00:41:13,030 --> 00:41:17,890
+programmability path like of XP pinon
+
+00:41:14,920 --> 00:41:20,830
+BPF that actually eventually will kind
+
+00:41:17,890 --> 00:41:22,570
+of evolve to where we can do we can
+
+00:41:20,830 --> 00:41:24,100
+change the kernel without actually
+
+00:41:22,570 --> 00:41:25,660
+changing the kernel so yeah that's one
+
+00:41:24,100 --> 00:41:28,690
+of the major motivations and why we have
+
+00:41:25,660 --> 00:41:30,910
+so much BPF and xdp discussion because
+
+00:41:28,690 --> 00:41:35,260
+we want that programmability user
+
+00:41:30,910 --> 00:41:38,320
+program ability especially a comment
+
+00:41:35,260 --> 00:41:40,660
+about the crypto API I think Katie LS
+
+00:41:38,320 --> 00:41:43,180
+should fit this quite well because we've
+
+00:41:40,660 --> 00:41:45,910
+built it to be extensible it supports
+
+00:41:43,180 --> 00:41:48,460
+only TLS 1.2 right now but for example
+
+00:41:45,910 --> 00:41:52,180
+extending 48 icewine point 3 also
+
+00:41:48,460 --> 00:41:53,740
+requires a change in framing and a lot
+
+00:41:52,180 --> 00:41:54,920
+of similar changes that should be
+
+00:41:53,740 --> 00:41:58,010
+similar too
+
+00:41:54,920 --> 00:42:01,040
+to quake I think the main question about
+
+00:41:58,010 --> 00:42:03,440
+quick encrypt offload is whether we are
+
+00:42:01,040 --> 00:42:06,140
+willing to introduce quick crypto as
+
+00:42:03,440 --> 00:42:08,540
+part of the kernel meaning that this
+
+00:42:06,140 --> 00:42:11,329
+part is unlikely to be changing
+
+00:42:08,540 --> 00:42:13,579
+frequently over the years and that's
+
+00:42:11,329 --> 00:42:19,790
+sort of a question if you are seeing
+
+00:42:13,579 --> 00:42:21,260
+this happening the when we talked about
+
+00:42:19,790 --> 00:42:22,700
+this the other day I think the the thing
+
+00:42:21,260 --> 00:42:24,680
+that I don't think is going to change is
+
+00:42:22,700 --> 00:42:25,910
+the model that there is going to be a
+
+00:42:24,680 --> 00:42:27,559
+portion of the packet that is
+
+00:42:25,910 --> 00:42:30,430
+unencrypted and antenna gated an
+
+00:42:27,559 --> 00:42:32,690
+abortion that's going to be encrypted
+
+00:42:30,430 --> 00:42:34,460
+but there's also things like packet and
+
+00:42:32,690 --> 00:42:36,230
+more encryption and in the current IDF
+
+00:42:34,460 --> 00:42:37,970
+specs which as we talked about make
+
+00:42:36,230 --> 00:42:41,089
+things a little more complicated and so
+
+00:42:37,970 --> 00:42:42,619
+I think what you really a you know
+
+00:42:41,089 --> 00:42:43,819
+hoping for is that all three of those
+
+00:42:42,619 --> 00:42:45,559
+things are sort of invariants that
+
+00:42:43,819 --> 00:42:47,180
+there's some portion that authenticated
+
+00:42:45,559 --> 00:42:49,339
+there's a packet number that's encrypted
+
+00:42:47,180 --> 00:42:51,920
+in a certain way as a function of the
+
+00:42:49,339 --> 00:42:53,420
+encrypted content and I would certainly
+
+00:42:51,920 --> 00:42:55,069
+hope that that remains fairly constant
+
+00:42:53,420 --> 00:42:57,619
+but you know it's not in the current
+
+00:42:55,069 --> 00:43:00,349
+invariants doc so you know oh I guess
+
+00:42:57,619 --> 00:43:02,329
+all bets are off technically okay
+
+00:43:00,349 --> 00:43:04,780
+hopefully maybe we can discuss it in the
+
+00:43:02,329 --> 00:43:07,400
+idea for something yes that's possible I
+
+00:43:04,780 --> 00:43:09,319
+have a question about the slide where
+
+00:43:07,400 --> 00:43:11,740
+you show the performance differences of
+
+00:43:09,319 --> 00:43:16,880
+TLS and quick
+
+00:43:11,740 --> 00:43:21,140
+you've mentioned it's 3.5 x + 2 X what's
+
+00:43:16,880 --> 00:43:23,869
+the baseline here that you are comparing
+
+00:43:21,140 --> 00:43:26,480
+to here in the event out the the 3
+
+00:43:23,869 --> 00:43:28,309
+that's CPU utilization so when we
+
+00:43:26,480 --> 00:43:31,250
+started the optimization process around
+
+00:43:28,309 --> 00:43:32,839
+March of 2016
+
+00:43:31,250 --> 00:43:36,859
+quick was using about three point five
+
+00:43:32,839 --> 00:43:38,660
+times as much CPU as TCP with the OS for
+
+00:43:36,859 --> 00:43:39,770
+doing video surfing in particular this
+
+00:43:38,660 --> 00:43:42,079
+is a video server and workload that
+
+00:43:39,770 --> 00:43:43,430
+we're concerned about and then by the
+
+00:43:42,079 --> 00:43:47,540
+time we got to around August or
+
+00:43:43,430 --> 00:43:49,970
+September it was closer to t-rex ok so
+
+00:43:47,540 --> 00:43:51,829
+it's just the relationship between quick
+
+00:43:49,970 --> 00:43:55,609
+and TLS there is no baseline that's like
+
+00:43:51,829 --> 00:43:56,839
+1x TCP or something no no it's I mean
+
+00:43:55,609 --> 00:43:59,750
+we're continuing to do work to make
+
+00:43:56,839 --> 00:44:02,200
+things better but getting getting from 2
+
+00:43:59,750 --> 00:44:05,450
+X 2 1 X is a little bit harder than
+
+00:44:02,200 --> 00:44:06,330
+getting from 3.5 x - 2 X yeah the music
+
+00:44:05,450 --> 00:44:09,000
+playing here the
+
+00:44:06,330 --> 00:44:11,970
+is serving the same YouTube video
+
+00:44:09,000 --> 00:44:14,220
+traffic over HTTP over TLS in DCPS
+
+00:44:11,970 --> 00:44:17,160
+that's the baseline the quick was
+
+00:44:14,220 --> 00:44:19,590
+consuming almost four times the CPU that
+
+00:44:17,160 --> 00:44:21,840
+that the TLS tag didn't go down to about
+
+00:44:19,590 --> 00:44:23,310
+two times I'm askin is because one of
+
+00:44:21,840 --> 00:44:26,340
+the interesting measurements we do when
+
+00:44:23,310 --> 00:44:29,520
+using TLS crypt offload is comparing TLS
+
+00:44:26,340 --> 00:44:32,670
+with buried TCP and like the baseline
+
+00:44:29,520 --> 00:44:36,300
+there with just software is like 5x if I
+
+00:44:32,670 --> 00:44:40,380
+remember correctly but I wonder what
+
+00:44:36,300 --> 00:44:41,820
+that is with quick and and TLS HTTP in
+
+00:44:40,380 --> 00:44:43,800
+general
+
+00:44:41,820 --> 00:44:48,140
+one last question you've mentioned that
+
+00:44:43,800 --> 00:44:51,420
+quick works better in countries where
+
+00:44:48,140 --> 00:44:54,210
+the connection is bad
+
+00:44:51,420 --> 00:44:56,010
+I wonder what why that is is quick
+
+00:44:54,210 --> 00:44:58,560
+better at handling for example
+
+00:44:56,010 --> 00:45:01,170
+retransmission so pocket reordering
+
+00:44:58,560 --> 00:45:03,630
+it's mostly about retransmission
+
+00:45:01,170 --> 00:45:05,940
+ambiguity so in environments where you
+
+00:45:03,630 --> 00:45:09,930
+have like rack and time stamps enabled
+
+00:45:05,940 --> 00:45:11,300
+and every like new TCP you know
+
+00:45:09,930 --> 00:45:14,160
+everything's kind of working really well
+
+00:45:11,300 --> 00:45:16,950
+the current version of TCP can can deal
+
+00:45:14,160 --> 00:45:19,250
+with packet loss and ambiguity quite
+
+00:45:16,950 --> 00:45:22,710
+well but in many deployed environments
+
+00:45:19,250 --> 00:45:26,490
+some all or many of those things are not
+
+00:45:22,710 --> 00:45:28,980
+enabled and so you quick basically like
+
+00:45:26,490 --> 00:45:30,570
+is much better at dealing with repeated
+
+00:45:28,980 --> 00:45:33,780
+retransmissions of the same packet in
+
+00:45:30,570 --> 00:45:35,280
+particular and that's a fairly common
+
+00:45:33,780 --> 00:45:37,020
+event in places like India where you
+
+00:45:35,280 --> 00:45:41,460
+have high packet loss the other
+
+00:45:37,020 --> 00:45:44,370
+situation is that at some point TCP s3
+
+00:45:41,460 --> 00:45:46,800
+sac windows actually appear to become an
+
+00:45:44,370 --> 00:45:48,650
+actual practical issue in certain
+
+00:45:46,800 --> 00:45:50,700
+environments and so there are cases when
+
+00:45:48,650 --> 00:45:52,800
+quick can continue making forward
+
+00:45:50,700 --> 00:45:56,190
+progress in TCP sort of stalls out just
+
+00:45:52,800 --> 00:45:59,520
+because you get such like so much packet
+
+00:45:56,190 --> 00:46:01,590
+loss over like little short bursts I
+
+00:45:59,520 --> 00:46:03,030
+should point out that that particular
+
+00:46:01,590 --> 00:46:08,160
+difference that those performance
+
+00:46:03,030 --> 00:46:09,720
+numbers are with cubic not a DVR the BB
+
+00:46:08,160 --> 00:46:12,450
+our numbers we didn't do it deep
+
+00:46:09,720 --> 00:46:15,620
+evaluation of them afterwards but the BB
+
+00:46:12,450 --> 00:46:15,620
+are definitely helps close that gap
+
+00:46:15,930 --> 00:46:21,930
+I think every kind a question or a
+
+00:46:18,329 --> 00:46:25,980
+comment yeah just one comment about the
+
+00:46:21,930 --> 00:46:30,259
+receiver performance on Linux Linux
+
+00:46:25,980 --> 00:46:33,150
+followed in nineteen now it work we
+
+00:46:30,259 --> 00:46:36,059
+improvement about batching their input
+
+00:46:33,150 --> 00:46:39,329
+so UDP stack will be able to get a batch
+
+00:46:36,059 --> 00:46:42,690
+of packets at once instead of one
+
+00:46:39,329 --> 00:46:45,839
+SKB at a time so it works like about
+
+00:46:42,690 --> 00:46:48,240
+twenty percent and it should provide
+
+00:46:45,839 --> 00:46:50,279
+better numbers than zero because carol
+
+00:46:48,240 --> 00:46:51,900
+doesn't work on the server side because
+
+00:46:50,279 --> 00:46:56,039
+you are receiving packets from the
+
+00:46:51,900 --> 00:46:59,119
+clients at a smaller rate none Joe put a
+
+00:46:56,039 --> 00:47:01,680
+thought for the aggregation anyway so
+
+00:46:59,119 --> 00:47:04,859
+yeah so this problem should be solved in
+
+00:47:01,680 --> 00:47:06,630
+a pod of nineteen common so when you see
+
+00:47:04,859 --> 00:47:08,670
+a clarification question when you say
+
+00:47:06,630 --> 00:47:10,109
+batching what are you what are the
+
+00:47:08,670 --> 00:47:13,049
+parameters around which your batching
+
+00:47:10,109 --> 00:47:16,650
+this is just time and the socket to
+
+00:47:13,049 --> 00:47:18,569
+which you deliver the packet so let's
+
+00:47:16,650 --> 00:47:22,289
+say you have a metric unique you have
+
+00:47:18,569 --> 00:47:24,539
+one CPU and then perform four for one
+
+00:47:22,289 --> 00:47:26,130
+cube and right now the Linux model
+
+00:47:24,539 --> 00:47:28,650
+provides a nice to be all the way down
+
+00:47:26,130 --> 00:47:31,410
+to the UDP stack for every incoming
+
+00:47:28,650 --> 00:47:34,079
+packet yeah and with the recent patch
+
+00:47:31,410 --> 00:47:37,470
+from Edward free soul are free we are
+
+00:47:34,079 --> 00:47:41,039
+batching all is skb into a list of skb
+
+00:47:37,470 --> 00:47:43,859
+and we don't need to break this list if
+
+00:47:41,039 --> 00:47:46,650
+always has to be rich the same circuit
+
+00:47:43,859 --> 00:47:50,009
+so basically it will allow two products
+
+00:47:46,650 --> 00:47:53,069
+archetype but the point the full batch
+
+00:47:50,009 --> 00:47:54,839
+is delivered to one so get and which is
+
+00:47:53,069 --> 00:47:58,380
+really help the performance if not yet
+
+00:47:54,839 --> 00:48:00,900
+uncreated but it should be for one month
+
+00:47:58,380 --> 00:48:02,670
+I guess so this actually means them that
+
+00:48:00,900 --> 00:48:05,789
+separating out connections
+
+00:48:02,670 --> 00:48:08,009
+socket but connection would defeat this
+
+00:48:05,789 --> 00:48:09,420
+batching right if you kept all the
+
+00:48:08,009 --> 00:48:11,700
+connections on one socket you would get
+
+00:48:09,420 --> 00:48:14,119
+better batching yeah so right now though
+
+00:48:11,700 --> 00:48:17,489
+the quick server use one silk it
+
+00:48:14,119 --> 00:48:19,079
+thread so person so which we hit this
+
+00:48:17,489 --> 00:48:21,869
+model it looks at that model wonderful
+
+00:48:19,079 --> 00:48:23,880
+thanks great thanks
+
+00:48:21,869 --> 00:48:25,259
+I'll go next so my question is on the
+
+00:48:23,880 --> 00:48:27,059
+receiver side optimization so you
+
+00:48:25,259 --> 00:48:29,039
+mentioned so I'm tempted to believe that
+
+00:48:27,059 --> 00:48:32,309
+the primary optimization came from the
+
+00:48:29,039 --> 00:48:34,410
+use of rx rings versus the Riu sport so
+
+00:48:32,309 --> 00:48:36,089
+Saudia sport cannot give you that kind
+
+00:48:34,410 --> 00:48:38,670
+of optimization that rx rings can't give
+
+00:48:36,089 --> 00:48:40,259
+but then the problem that I see is it
+
+00:48:38,670 --> 00:48:42,450
+works okay for multi threaded single
+
+00:48:40,259 --> 00:48:44,190
+process model but but certain
+
+00:48:42,450 --> 00:48:45,930
+applications such as service server-side
+
+00:48:44,190 --> 00:48:47,880
+applications such as Ingenix which
+
+00:48:45,930 --> 00:48:51,450
+requires which have multi worker process
+
+00:48:47,880 --> 00:48:53,039
+model there it might not work so so
+
+00:48:51,450 --> 00:48:56,630
+reuse code is the only option that I
+
+00:48:53,039 --> 00:49:00,329
+have there to make use of in which case
+
+00:48:56,630 --> 00:49:03,029
+the rx ring cannot be made use of and I
+
+00:49:00,329 --> 00:49:04,049
+have to depend upon BPF to steer the
+
+00:49:03,029 --> 00:49:05,880
+packet like you have mentioned in your
+
+00:49:04,049 --> 00:49:07,650
+slide BPO can be used to steal the
+
+00:49:05,880 --> 00:49:09,210
+packet to the right process that has to
+
+00:49:07,650 --> 00:49:11,430
+be mandatory used anyways that has to be
+
+00:49:09,210 --> 00:49:14,479
+my totally used for the future for multi
+
+00:49:11,430 --> 00:49:16,529
+path quick to work as well as I believe
+
+00:49:14,479 --> 00:49:18,630
+not binding you know is not an issue
+
+00:49:16,529 --> 00:49:21,420
+right now but with multi path quake that
+
+00:49:18,630 --> 00:49:23,009
+will definitely be an issue so BPF EBP
+
+00:49:21,420 --> 00:49:24,690
+of has to be made use of mandatory you
+
+00:49:23,009 --> 00:49:26,700
+in that case to steer it to the right
+
+00:49:24,690 --> 00:49:29,190
+processor to the right socket with
+
+00:49:26,700 --> 00:49:32,279
+reusable yeah no I read the PPF is a
+
+00:49:29,190 --> 00:49:34,289
+useful addition I yeah the point is slot
+
+00:49:32,279 --> 00:49:37,019
+is more to say that largely you can get
+
+00:49:34,289 --> 00:49:39,150
+by with s over years port and BPF is an
+
+00:49:37,019 --> 00:49:40,589
+improvement upon that for cases when you
+
+00:49:39,150 --> 00:49:43,589
+understand what the connection ID
+
+00:49:40,589 --> 00:49:48,809
+structure is for your application right
+
+00:49:43,589 --> 00:49:50,219
+yeah yeah thank you so on the graph up
+
+00:49:48,809 --> 00:49:52,229
+there that shows the drop out when you
+
+00:49:50,219 --> 00:49:54,930
+disable correct due to the crypto bug
+
+00:49:52,229 --> 00:49:57,059
+you've mentioned the recovery is gradual
+
+00:49:54,930 --> 00:49:58,950
+is that because you gradually reenable
+
+00:49:57,059 --> 00:50:00,660
+the servers or is it because the clients
+
+00:49:58,950 --> 00:50:02,969
+needed to be updated it's because the
+
+00:50:00,660 --> 00:50:04,920
+clients need to be updated and and the
+
+00:50:02,969 --> 00:50:07,619
+rollout that literally is the rollout of
+
+00:50:04,920 --> 00:50:09,150
+chrome that particular version of chrome
+
+00:50:07,619 --> 00:50:11,430
+with the fixed code so this was a
+
+00:50:09,150 --> 00:50:12,989
+client-side bug so how did the servers
+
+00:50:11,430 --> 00:50:17,369
+distinguish you grabbed a version number
+
+00:50:12,989 --> 00:50:18,730
+somewhere yes we use version numbering
+
+00:50:17,369 --> 00:50:21,369
+yeah
+
+00:50:18,730 --> 00:50:23,800
+it's just a general question so from the
+
+00:50:21,369 --> 00:50:27,640
+webserver perspective I mean um compared
+
+00:50:23,800 --> 00:50:30,550
+to TCP over TLS like you know is it
+
+00:50:27,640 --> 00:50:32,170
+actually consuming more CPU edition
+
+00:50:30,550 --> 00:50:34,480
+right now or are you actually saving it
+
+00:50:32,170 --> 00:50:39,450
+it's it's definitely still consuming
+
+00:50:34,480 --> 00:50:41,650
+more CPU particularly and possibly with
+
+00:50:39,450 --> 00:50:44,109
+you know a higher bandwidth connection
+
+00:50:41,650 --> 00:50:46,180
+with UDP gso but that would actually
+
+00:50:44,109 --> 00:50:48,570
+ameliorate a huge portion of the issue
+
+00:50:46,180 --> 00:50:51,849
+but certainly send costs are still
+
+00:50:48,570 --> 00:50:54,730
+higher for a quick at the moment and at
+
+00:50:51,849 --> 00:50:56,530
+least in our quick implementation the
+
+00:50:54,730 --> 00:50:58,480
+implementation is less optimized I can't
+
+00:50:56,530 --> 00:51:01,030
+comment on other people's I know like at
+
+00:50:58,480 --> 00:51:02,740
+this point multiple other organizations
+
+00:51:01,030 --> 00:51:05,440
+have quick implementations and it's very
+
+00:51:02,740 --> 00:51:08,079
+possible that there's are actually quite
+
+00:51:05,440 --> 00:51:09,700
+a bit more accelerated because in some
+
+00:51:08,079 --> 00:51:11,349
+cases in the case of Microsoft there's
+
+00:51:09,700 --> 00:51:13,839
+was actually implemented by the kernel
+
+00:51:11,349 --> 00:51:15,940
+team and so they came into it with like
+
+00:51:13,839 --> 00:51:17,619
+a very different perspective on CPU
+
+00:51:15,940 --> 00:51:21,220
+optimization I'm sure than like our team
+
+00:51:17,619 --> 00:51:24,730
+did ok thank you which actually just a
+
+00:51:21,220 --> 00:51:27,130
+brief sight not from there there are a
+
+00:51:24,730 --> 00:51:28,480
+lot of other organizations as Ian
+
+00:51:27,130 --> 00:51:30,010
+mentioned that are implementing and
+
+00:51:28,480 --> 00:51:32,800
+working on getting to the point that
+
+00:51:30,010 --> 00:51:34,240
+they can deploy quick so this usage and
+
+00:51:32,800 --> 00:51:37,750
+the problems that we are seeing right
+
+00:51:34,240 --> 00:51:39,190
+now are only going to get the voices are
+
+00:51:37,750 --> 00:51:41,650
+gonna get amplified so right now we have
+
+00:51:39,190 --> 00:51:44,920
+Facebook as an implementation fastly as
+
+00:51:41,650 --> 00:51:45,940
+an implementation there's Microsoft of
+
+00:51:44,920 --> 00:51:49,750
+course but it doesn't matter to this
+
+00:51:45,940 --> 00:51:53,740
+room when there are there are there are
+
+00:51:49,750 --> 00:51:57,069
+firewalls we ask why not cut nothing off
+
+00:51:53,740 --> 00:51:58,510
+but there's f5 yeah and so there are
+
+00:51:57,069 --> 00:52:01,270
+several other folks
+
+00:51:58,510 --> 00:52:03,339
+Akamai is deploying also has deployed
+
+00:52:01,270 --> 00:52:05,200
+quick as well so there are large players
+
+00:52:03,339 --> 00:52:07,869
+that are deploying quick and it would be
+
+00:52:05,200 --> 00:52:09,550
+really good to fix these issues before
+
+00:52:07,869 --> 00:52:14,710
+they get to the point of trying to scale
+
+00:52:09,550 --> 00:52:17,440
+their deployments yeah so the UDP
+
+00:52:14,710 --> 00:52:20,680
+segmentation offload right so the user
+
+00:52:17,440 --> 00:52:25,000
+space has to really create the weak
+
+00:52:20,680 --> 00:52:28,540
+packets itself and then pass this list
+
+00:52:25,000 --> 00:52:32,079
+of weak packets to the kernel right so
+
+00:52:28,540 --> 00:52:34,539
+does it help if the segmentation also is
+
+00:52:32,079 --> 00:52:38,650
+offloaded to the quick segmentation
+
+00:52:34,539 --> 00:52:40,390
+itself is offloaded to the kernel you
+
+00:52:38,650 --> 00:52:42,279
+stuff the user space having to do with
+
+00:52:40,390 --> 00:52:45,039
+that there'll be harder to do and quick
+
+00:52:42,279 --> 00:52:46,299
+because the idea of second so the reason
+
+00:52:45,039 --> 00:52:48,430
+that segmentation works the way it does
+
+00:52:46,299 --> 00:52:50,380
+for TCP is because TCP is a byte stream
+
+00:52:48,430 --> 00:52:52,209
+just send up by a byte stream down you
+
+00:52:50,380 --> 00:52:53,469
+send as many bytes as you want the
+
+00:52:52,209 --> 00:52:56,170
+kernel can segment it very well to
+
+00:52:53,469 --> 00:52:59,400
+arbitrarily wants quick has frames
+
+00:52:56,170 --> 00:53:02,589
+inside of a packet so the structure of
+
+00:52:59,400 --> 00:53:03,999
+basically you can't segment this as an
+
+00:53:02,589 --> 00:53:05,380
+arbitrary byte stream you would have to
+
+00:53:03,999 --> 00:53:07,119
+understand what those frames are and
+
+00:53:05,380 --> 00:53:09,579
+which frames need to go in the packet
+
+00:53:07,119 --> 00:53:11,380
+and break that stream at the correct
+
+00:53:09,579 --> 00:53:12,940
+boundaries so basically at that point
+
+00:53:11,380 --> 00:53:14,650
+the quick needs to be implemented in the
+
+00:53:12,940 --> 00:53:16,359
+kernel well you need to be able to parse
+
+00:53:14,650 --> 00:53:20,440
+the frames and understand them it is
+
+00:53:16,359 --> 00:53:22,029
+yeah the complexity would probably be it
+
+00:53:20,440 --> 00:53:23,529
+would be substantially larger than the K
+
+00:53:22,029 --> 00:53:24,940
+TLS integration but that would be the
+
+00:53:23,529 --> 00:53:27,849
+thing would be most in it and know it
+
+00:53:24,940 --> 00:53:29,680
+would analogous to is because K TLS
+
+00:53:27,849 --> 00:53:31,390
+creates my understanding is - it creates
+
+00:53:29,680 --> 00:53:33,190
+TLS records and so you'd have to know
+
+00:53:31,390 --> 00:53:36,969
+how to create you know quick stream
+
+00:53:33,190 --> 00:53:39,219
+frames package them into packets and
+
+00:53:36,969 --> 00:53:40,749
+then do both the regular encryption as
+
+00:53:39,219 --> 00:53:42,519
+well as the packet number encryption so
+
+00:53:40,749 --> 00:53:44,920
+I mean that the key point I think is
+
+00:53:42,519 --> 00:53:48,309
+propagated it would require crypto
+
+00:53:44,920 --> 00:53:50,589
+offload in order to even consider kind
+
+00:53:48,309 --> 00:53:53,440
+of doing what your reer describing you
+
+00:53:50,589 --> 00:53:55,930
+know you would also need so this is this
+
+00:53:53,440 --> 00:53:58,839
+is also why the more so general API
+
+00:53:55,930 --> 00:54:01,390
+might be just you know the quick can
+
+00:53:58,839 --> 00:54:03,549
+tell the colonel what offsets to break
+
+00:54:01,390 --> 00:54:05,349
+this add instead of trying to until the
+
+00:54:03,549 --> 00:54:07,539
+corner trying to parse this out if the a
+
+00:54:05,349 --> 00:54:10,239
+quick can tell the colonel where to
+
+00:54:07,539 --> 00:54:13,509
+break the stream then I expose more
+
+00:54:10,239 --> 00:54:15,459
+plausible to do that maybe a a socket
+
+00:54:13,509 --> 00:54:19,709
+option maybe it may be possible to pass
+
+00:54:15,459 --> 00:54:21,789
+the offsets of the various headers
+
+00:54:19,709 --> 00:54:22,900
+known as a socket option but it would
+
+00:54:21,789 --> 00:54:28,869
+have to be something that goes along
+
+00:54:22,900 --> 00:54:31,660
+with the right but yes thanks so on that
+
+00:54:28,869 --> 00:54:33,489
+no Joe touch has this Europeans thing
+
+00:54:31,660 --> 00:54:35,469
+going on of course where you have a
+
+00:54:33,489 --> 00:54:37,539
+fragment on there a fragment option for
+
+00:54:35,469 --> 00:54:39,819
+UDP so unit people fragmented reassemble
+
+00:54:37,539 --> 00:54:42,609
+have you considered that is that not
+
+00:54:39,819 --> 00:54:44,799
+something you could use you for what for
+
+00:54:42,609 --> 00:54:45,430
+this problems you said the trader just
+
+00:54:44,799 --> 00:54:47,380
+asked
+
+00:54:45,430 --> 00:54:49,180
+so you have a UDP message and you want
+
+00:54:47,380 --> 00:54:50,410
+the most polish to be observed right and
+
+00:54:49,180 --> 00:54:52,030
+after that quick was going to do its own
+
+00:54:50,410 --> 00:54:55,020
+thing with the message you know can you
+
+00:54:52,030 --> 00:54:57,730
+move the mic down a little bit so yep so
+
+00:54:55,020 --> 00:55:00,040
+you basically are still using UDP so you
+
+00:54:57,730 --> 00:55:01,600
+still have message bound reason the
+
+00:55:00,040 --> 00:55:02,710
+application knows what to do with the
+
+00:55:01,600 --> 00:55:04,840
+message as long as the message
+
+00:55:02,710 --> 00:55:06,910
+boundaries are observed yes right and
+
+00:55:04,840 --> 00:55:09,880
+the problem is then the message might be
+
+00:55:06,910 --> 00:55:12,550
+made bigger than em to you and then you
+
+00:55:09,880 --> 00:55:16,210
+have issues no we don't want that at all
+
+00:55:12,550 --> 00:55:19,030
+right so just so the UDP options draft
+
+00:55:16,210 --> 00:55:22,090
+from Joe touch has a fragment option
+
+00:55:19,030 --> 00:55:23,860
+which can be used to deal with the
+
+00:55:22,090 --> 00:55:25,840
+correct fragmentation reasonably at the
+
+00:55:23,860 --> 00:55:27,700
+UDP layer right so is that something
+
+00:55:25,840 --> 00:55:29,740
+that you could potentially look into
+
+00:55:27,700 --> 00:55:31,270
+because I looked at Philips carping
+
+00:55:29,740 --> 00:55:32,680
+right the UDP segmentation ring is
+
+00:55:31,270 --> 00:55:33,940
+basically doing the same thing except
+
+00:55:32,680 --> 00:55:37,150
+the application is telling you where to
+
+00:55:33,940 --> 00:55:39,400
+chop it up yeah so I think my answer
+
+00:55:37,150 --> 00:55:41,950
+would be that when I when you look at
+
+00:55:39,400 --> 00:55:45,580
+the realistic at least external internet
+
+00:55:41,950 --> 00:55:47,410
+loss rates that we deal with even if we
+
+00:55:45,580 --> 00:55:49,810
+could get UDP fragmentation to work well
+
+00:55:47,410 --> 00:55:53,020
+I think it would be a net loss because
+
+00:55:49,810 --> 00:55:55,630
+we would end up dropping so many UDP
+
+00:55:53,020 --> 00:55:57,790
+flood these large UDP packets that it
+
+00:55:55,630 --> 00:56:00,280
+would be impractical so I think yeah I
+
+00:55:57,790 --> 00:56:02,320
+think the world where we're now where we
+
+00:56:00,280 --> 00:56:04,600
+don't do fragmentation when we set the
+
+00:56:02,320 --> 00:56:06,640
+DF it I think is a better world and if
+
+00:56:04,600 --> 00:56:08,500
+anything I would prefer to go to a world
+
+00:56:06,640 --> 00:56:10,990
+where we actually have larger em to use
+
+00:56:08,500 --> 00:56:13,150
+for EDP I don't know when that's gonna
+
+00:56:10,990 --> 00:56:14,920
+happen but someday yeah yeah I
+
+00:56:13,150 --> 00:56:16,360
+completely agree that the it's important
+
+00:56:14,920 --> 00:56:17,950
+that we have the the quick header we
+
+00:56:16,360 --> 00:56:19,090
+wanted to appear on every packet that's
+
+00:56:17,950 --> 00:56:20,740
+traversing the Internet
+
+00:56:19,090 --> 00:56:23,290
+that's the only thing you can use to do
+
+00:56:20,740 --> 00:56:24,790
+loss recovery with do DB even though you
+
+00:56:23,290 --> 00:56:26,080
+get the UDV options might support
+
+00:56:24,790 --> 00:56:28,330
+fragmentation they're not gonna do loss
+
+00:56:26,080 --> 00:56:30,490
+recovery for you and the whole chunk is
+
+00:56:28,330 --> 00:56:32,880
+gonna get lost and we definitely do not
+
+00:56:30,490 --> 00:56:32,880
+want that
+
+00:56:33,050 --> 00:56:43,430
+question on the bridge the question
+
+00:56:36,710 --> 00:56:47,270
+somewhat yes are you uh you know tone
+
+00:56:43,430 --> 00:56:53,990
+video we drink your voice has changed
+
+00:56:47,270 --> 00:56:56,750
+what happened okay go ahead um I have a
+
+00:56:53,990 --> 00:56:59,720
+general question here um I was wondering
+
+00:56:56,750 --> 00:57:03,440
+if there's any experience with denial of
+
+00:56:59,720 --> 00:57:05,960
+service on quick servers like you know
+
+00:57:03,440 --> 00:57:09,350
+we are used to hearing about thin slots
+
+00:57:05,960 --> 00:57:11,650
+with TCP what what what is the
+
+00:57:09,350 --> 00:57:15,920
+experience with quick yeah
+
+00:57:11,650 --> 00:57:17,540
+to my knowledge well no we've never
+
+00:57:15,920 --> 00:57:19,490
+experienced the denial of service attack
+
+00:57:17,540 --> 00:57:26,030
+that was significant enough that it was
+
+00:57:19,490 --> 00:57:28,460
+I was notified of it so I I'm not you
+
+00:57:26,030 --> 00:57:29,810
+know in touch i this is a good thing but
+
+00:57:28,460 --> 00:57:32,030
+I am NOT closely in touch on a
+
+00:57:29,810 --> 00:57:33,950
+day-to-day basis with the Google DDoS
+
+00:57:32,030 --> 00:57:37,310
+team and so all I know is that they
+
+00:57:33,950 --> 00:57:39,590
+haven't contacted me I will note that in
+
+00:57:37,310 --> 00:57:42,109
+order for us to accept a quick handshake
+
+00:57:39,590 --> 00:57:45,230
+you have to send us at least like a 1200
+
+00:57:42,109 --> 00:57:47,900
+byte packet and so you can't really
+
+00:57:45,230 --> 00:57:49,940
+mount a syn flood you still have to put
+
+00:57:47,900 --> 00:57:51,500
+send pretty large packets to us and then
+
+00:57:49,940 --> 00:57:54,980
+in response we're only going to send you
+
+00:57:51,500 --> 00:57:56,750
+typically like three packets so I
+
+00:57:54,980 --> 00:57:58,310
+presume that people have decided that
+
+00:57:56,750 --> 00:58:00,950
+there are lower hanging fruit if they
+
+00:57:58,310 --> 00:58:02,900
+want to DDoS people yeah and also does
+
+00:58:00,950 --> 00:58:04,100
+there's some value to having confusion
+
+00:58:02,900 --> 00:58:05,750
+out there right I mean security by
+
+00:58:04,100 --> 00:58:07,490
+obfuscation isn't exactly useful long
+
+00:58:05,750 --> 00:58:09,470
+ways but in this particular case the
+
+00:58:07,490 --> 00:58:11,060
+fact that Google's deployment of quake
+
+00:58:09,470 --> 00:58:12,800
+is different from the publicly
+
+00:58:11,060 --> 00:58:14,450
+documented IETF version of quake and
+
+00:58:12,800 --> 00:58:17,810
+everything else might have attackers
+
+00:58:14,450 --> 00:58:19,700
+quite confused so we might basically
+
+00:58:17,810 --> 00:58:22,720
+have you know they might be trying to
+
+00:58:19,700 --> 00:58:26,150
+attack us with something that we go and
+
+00:58:22,720 --> 00:58:27,320
+so it's it's that's also plausible that
+
+00:58:26,150 --> 00:58:29,740
+it's happening but we just don't see it
+
+00:58:27,320 --> 00:58:29,740
+as does
+
+00:58:30,880 --> 00:58:35,150
+yeah so you you know your protocols a
+
+00:58:33,530 --> 00:58:37,220
+success when you start seeing major
+
+00:58:35,150 --> 00:58:40,790
+denial of service attacks and security
+
+00:58:37,220 --> 00:58:42,500
+calls popping up in New York Times a
+
+00:58:40,790 --> 00:58:43,910
+couple comments first of all I think you
+
+00:58:42,500 --> 00:58:45,950
+kind of invalidate it my comment about
+
+00:58:43,910 --> 00:58:48,800
+CRO it sounds like we have to have the
+
+00:58:45,950 --> 00:58:52,340
+unencrypted quick data to reconstruct
+
+00:58:48,800 --> 00:58:54,530
+the stream so it sounds like and in
+
+00:58:52,340 --> 00:58:56,750
+order to do anything interesting with
+
+00:58:54,530 --> 00:59:02,480
+quick in the kernel you would need to do
+
+00:58:56,750 --> 00:59:04,070
+the TLS quick crypto offload into the
+
+00:59:02,480 --> 00:59:06,050
+kernel I hope but there's another reason
+
+00:59:04,070 --> 00:59:08,900
+to do that so without that you probably
+
+00:59:06,050 --> 00:59:11,990
+can't do splice and for the rest of the
+
+00:59:08,900 --> 00:59:13,750
+world most of us still run file systems
+
+00:59:11,990 --> 00:59:17,890
+in the kernel so we like to splice from
+
+00:59:13,750 --> 00:59:20,780
+file to Network in order to serve video
+
+00:59:17,890 --> 00:59:23,119
+but at one quick question on the MTU so
+
+00:59:20,780 --> 00:59:25,880
+how far has quit gone with some sort of
+
+00:59:23,119 --> 00:59:27,770
+MTU path discovery or is it still
+
+00:59:25,880 --> 00:59:31,790
+assuming some minimal MTU on the
+
+00:59:27,770 --> 00:59:34,180
+internet we're assuming the ITF
+
+00:59:31,790 --> 00:59:37,820
+documents assume a minimum of 1,200
+
+00:59:34,180 --> 00:59:40,280
+Google quick operates with an MTU of
+
+00:59:37,820 --> 00:59:42,170
+around 13 40 because we found that the
+
+00:59:40,280 --> 00:59:46,010
+number of people you lose by going to
+
+00:59:42,170 --> 00:59:49,490
+maybe 1350 from 1200 to 1350 is very
+
+00:59:46,010 --> 00:59:52,820
+very very very small and then oh yeah we
+
+00:59:49,490 --> 00:59:55,780
+have slides in that and we actually
+
+00:59:52,820 --> 01:00:00,010
+implemented path MTU discovery I'm sorry
+
+00:59:55,780 --> 01:00:04,550
+what is it called the PLO and non ICMP
+
+01:00:00,010 --> 01:00:06,800
+MTU discovery and an early version just
+
+01:00:04,550 --> 01:00:08,900
+turned out not to work well and so we
+
+01:00:06,800 --> 01:00:10,790
+didn't end up deploying it but we're
+
+01:00:08,900 --> 01:00:13,369
+gonna probably revisit in the future but
+
+01:00:10,790 --> 01:00:15,109
+at the moment the fact that we need a
+
+01:00:13,369 --> 01:00:17,540
+fallback anyway and we're falling back
+
+01:00:15,109 --> 01:00:18,920
+for something like 7% of users means
+
+01:00:17,540 --> 01:00:21,859
+that if we have to fall back for another
+
+01:00:18,920 --> 01:00:24,920
+point two percent the total kind of loss
+
+01:00:21,859 --> 01:00:26,359
+of impact is pretty small well I mean it
+
+01:00:24,920 --> 01:00:28,239
+might not be an issue moving forward
+
+01:00:26,359 --> 01:00:31,239
+anyway cuz ipv6 has I mean
+
+01:00:28,239 --> 01:00:32,529
+MTO 1280 so if you just kind of you
+
+01:00:31,239 --> 01:00:35,259
+could actually probably hard code that
+
+01:00:32,529 --> 01:00:37,119
+and then IP for ya you're gonna get some
+
+01:00:35,259 --> 01:00:40,719
+occasional drops maybe deal with that
+
+01:00:37,119 --> 01:00:44,889
+yeah oh yeah and Jana conveniently
+
+01:00:40,719 --> 01:00:47,439
+pulled up to the packet size data so as
+
+01:00:44,889 --> 01:00:49,509
+you can see we we tried to target like
+
+01:00:47,439 --> 01:00:52,209
+there's a little spot a little bump with
+
+01:00:49,509 --> 01:00:55,229
+to the right of 1350 so we targeted
+
+01:00:52,209 --> 01:00:55,229
+somewhere around 1350
+
+01:01:01,920 --> 01:01:09,370
+don't run it I'm Eric any more question
+
+01:01:05,590 --> 01:01:13,240
+from aside or comment shall we do to
+
+01:01:09,370 --> 01:01:17,020
+handle cos homework assignments now Eric
+
+01:01:13,240 --> 01:01:23,980
+any last comments no no no nothing okay
+
+01:01:17,020 --> 01:01:27,660
+so let's thank our speakers thank you so
+
+01:01:23,980 --> 01:01:27,660
+
+YouTube URL: https://www.youtube.com/watch?v=LZipPUJELlM
+
+

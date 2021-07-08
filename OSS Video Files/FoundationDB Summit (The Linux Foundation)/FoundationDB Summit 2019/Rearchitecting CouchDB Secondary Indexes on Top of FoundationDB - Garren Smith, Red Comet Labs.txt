@@ -1,0 +1,1366 @@
+Title: Rearchitecting CouchDB Secondary Indexes on Top of FoundationDB - Garren Smith, Red Comet Labs
+Publication date: 2019-11-25
+Playlist: FoundationDB Summit 2019
+Description: 
+	Rearchitecting CouchDB Secondary Indexes on Top of FoundationDB - Garren Smith, Red Comet Labs
+
+How do you rewrite a database that’s been around since 2005, so your users never notice a change in behavior or have to sacrifice features, but get all the improvements in performance and consistency that FoundationDB brings?
+
+That’s the challenge we’ve taken on in rewriting Apache CouchDB to run on top of FDB. One of the biggest architectural redesigns is CouchDB’s secondary indexes: Map/Reduce, Mango, and Text Search.
+
+This talk covers the architectural solutions we’ve found for challenges such as: finding the most suitable data model for each index; managing global index state and avoiding conflicts when building indexes; ensuring that the results returned are sorted correctly; and using Apache Lucene on top of FDB for Text Search.
+
+I’ll also share the results of the benchmarking we’ve done, along with further plans we have to improve the architecture of each index.
+Captions: 
+	00:00:00,500 --> 00:00:05,090
+okay I feel so much better
+
+00:00:05,270 --> 00:00:12,719
+okay great well thanks everyone for
+
+00:00:10,080 --> 00:00:14,820
+coming and welcome to my talk we're
+
+00:00:12,719 --> 00:00:16,529
+going to talk about re-architecting cats
+
+00:00:14,820 --> 00:00:19,140
+to be secondary indexes on top of
+
+00:00:16,529 --> 00:00:21,240
+foundation DB hopefully from adam's
+
+00:00:19,140 --> 00:00:24,630
+talking I know that we building cats to
+
+00:00:21,240 --> 00:00:27,180
+be on top of foundation DB and my name
+
+00:00:24,630 --> 00:00:29,789
+is Gerren I am part of the apache
+
+00:00:27,180 --> 00:00:33,180
+couchdb team I'm on the project
+
+00:00:29,789 --> 00:00:35,040
+management committee I come from South
+
+00:00:33,180 --> 00:00:37,770
+Africa and if you like sports especially
+
+00:00:35,040 --> 00:00:38,430
+rugby with the world champions it feels
+
+00:00:37,770 --> 00:00:41,300
+amazing
+
+00:00:38,430 --> 00:00:44,430
+I'm gonna go out about it's not shames
+
+00:00:41,300 --> 00:00:47,789
+and I'm a freelance developer but the
+
+00:00:44,430 --> 00:00:50,090
+main work I do is for IBM Cloudant I've
+
+00:00:47,789 --> 00:00:52,590
+been clients out there I get to work on
+
+00:00:50,090 --> 00:00:54,960
+Apache car CB because it is the kind of
+
+00:00:52,590 --> 00:00:56,760
+the the main underlying storage that IBM
+
+00:00:54,960 --> 00:01:01,980
+Cloudant or main underlying database
+
+00:00:56,760 --> 00:01:04,290
+that IBM Cloudant is so katsumi has
+
+00:01:01,980 --> 00:01:07,170
+three main secondary indexes it's got
+
+00:01:04,290 --> 00:01:08,970
+mango MapReduce and search and we're
+
+00:01:07,170 --> 00:01:10,770
+gonna look at all three of them how
+
+00:01:08,970 --> 00:01:13,740
+we're actually implementing them on top
+
+00:01:10,770 --> 00:01:18,060
+of foundation DB so the first one we're
+
+00:01:13,740 --> 00:01:21,420
+gonna look at is mango and mango is very
+
+00:01:18,060 --> 00:01:23,400
+much quite inspired by MongoDB it's a
+
+00:01:21,420 --> 00:01:25,470
+much simpler kind of querying syntax
+
+00:01:23,400 --> 00:01:27,900
+than what we have for MapReduce and it
+
+00:01:25,470 --> 00:01:30,360
+follows the same kind of querying syntax
+
+00:01:27,900 --> 00:01:31,890
+as MongoDB you can create indexes you're
+
+00:01:30,360 --> 00:01:35,610
+querying it using the same selectors
+
+00:01:31,890 --> 00:01:37,799
+that MongoDB does so currently in cardi
+
+00:01:35,610 --> 00:01:40,470
+B it's kind of just an actual like
+
+00:01:37,799 --> 00:01:42,659
+wrapper on top of Cassidy's MapReduce
+
+00:01:40,470 --> 00:01:43,979
+indexes so every time you're making a
+
+00:01:42,659 --> 00:01:46,140
+query we're actually using MapReduce
+
+00:01:43,979 --> 00:01:47,520
+indexes underneath and then doing some a
+
+00:01:46,140 --> 00:01:50,460
+little bit of a wrapper layer on top of
+
+00:01:47,520 --> 00:01:52,460
+that but when you move to foundation DB
+
+00:01:50,460 --> 00:01:55,079
+we want to make it its own completes
+
+00:01:52,460 --> 00:01:57,540
+index and so we've taken a bit of
+
+00:01:55,079 --> 00:02:00,270
+inspiration from the foundation DB's
+
+00:01:57,540 --> 00:02:01,439
+document layer and one of the big things
+
+00:02:00,270 --> 00:02:03,899
+we're really excited about when it comes
+
+00:02:01,439 --> 00:02:05,189
+to mango is that the index updates are
+
+00:02:03,899 --> 00:02:07,740
+going to happen in the same transaction
+
+00:02:05,189 --> 00:02:09,660
+that a documents update happens so that
+
+00:02:07,740 --> 00:02:11,550
+means then that every time you do if you
+
+00:02:09,660 --> 00:02:12,930
+update documents then do a query
+
+00:02:11,550 --> 00:02:16,290
+straight afterwards and a neutron
+
+00:02:12,930 --> 00:02:17,969
+action that whole index is already up to
+
+00:02:16,290 --> 00:02:19,469
+date so we can kind of keep it update
+
+00:02:17,969 --> 00:02:22,799
+all the time don't have to build it in
+
+00:02:19,469 --> 00:02:25,829
+the background the kind of basic data
+
+00:02:22,799 --> 00:02:28,439
+model of how we want to store mango
+
+00:02:25,829 --> 00:02:31,319
+indexes in foundation DB it looks a
+
+00:02:28,439 --> 00:02:33,090
+little bit like this we have a section
+
+00:02:31,319 --> 00:02:36,120
+where we keep a list of all the indexes
+
+00:02:33,090 --> 00:02:38,730
+and then we keep the the key that those
+
+00:02:36,120 --> 00:02:40,859
+indexes are actually storing so first
+
+00:02:38,730 --> 00:02:43,290
+one he has index Rd one and we storing
+
+00:02:40,859 --> 00:02:46,200
+the keys for that on a name and age we
+
+00:02:43,290 --> 00:02:48,180
+then must to keep a build status of that
+
+00:02:46,200 --> 00:02:50,280
+whether it's building or running and a
+
+00:02:48,180 --> 00:02:52,680
+sequence that sequence is from the
+
+00:02:50,280 --> 00:02:54,989
+changes feed so what actually happens is
+
+00:02:52,680 --> 00:02:57,840
+as much as we want to update the index
+
+00:02:54,989 --> 00:02:59,340
+in the document update transaction you
+
+00:02:57,840 --> 00:03:01,590
+got an existing database that's really
+
+00:02:59,340 --> 00:03:04,469
+big you can't immediately start using it
+
+00:03:01,590 --> 00:03:06,120
+you actually need to build it first so
+
+00:03:04,469 --> 00:03:08,219
+that's what we have those two fields so
+
+00:03:06,120 --> 00:03:11,099
+we set the moment and index is created
+
+00:03:08,219 --> 00:03:12,959
+we set that build status to building and
+
+00:03:11,099 --> 00:03:15,389
+we set the sequence and the changes feed
+
+00:03:12,959 --> 00:03:17,129
+that that index was created within in
+
+00:03:15,389 --> 00:03:18,780
+the background look at all the changes
+
+00:03:17,129 --> 00:03:21,299
+feed from the beginning and build that
+
+00:03:18,780 --> 00:03:23,849
+up build that index up to that point at
+
+00:03:21,299 --> 00:03:25,769
+the same time any new doc updates that
+
+00:03:23,849 --> 00:03:27,419
+come in we're actually indexing and
+
+00:03:25,769 --> 00:03:28,889
+adding those into the index at the same
+
+00:03:27,419 --> 00:03:32,280
+time so the moment we've hit that
+
+00:03:28,889 --> 00:03:34,199
+sequence in the index in the database
+
+00:03:32,280 --> 00:03:36,959
+and building that index sorry as soon as
+
+00:03:34,199 --> 00:03:38,760
+we built that index up to that sequence
+
+00:03:36,959 --> 00:03:40,139
+point that we've stored there it's been
+
+00:03:38,760 --> 00:03:43,530
+ready to be used and we can change it to
+
+00:03:40,139 --> 00:03:46,829
+you're running how we store the fields
+
+00:03:43,530 --> 00:03:49,889
+is very kind of straightforward we the
+
+00:03:46,829 --> 00:03:52,500
+first part of the the key is the index
+
+00:03:49,889 --> 00:03:53,970
+ID then the actual keys that we store in
+
+00:03:52,500 --> 00:03:57,150
+for that database and that's how we use
+
+00:03:53,970 --> 00:03:59,970
+to query it and we store the document ID
+
+00:03:57,150 --> 00:04:02,669
+as well so that we can for Mango indexes
+
+00:03:59,970 --> 00:04:04,530
+we always with in most cases return the
+
+00:04:02,669 --> 00:04:06,329
+document as well so we can fetch all
+
+00:04:04,530 --> 00:04:08,129
+those items out of the key in that we
+
+00:04:06,329 --> 00:04:10,859
+stored in foundation DB and fetch the
+
+00:04:08,129 --> 00:04:12,269
+document and return it to the user now
+
+00:04:10,859 --> 00:04:14,609
+one of the big things we've had to look
+
+00:04:12,269 --> 00:04:17,340
+at and it applies to map indexes as well
+
+00:04:14,609 --> 00:04:19,769
+is the actual ordering foundation DB
+
+00:04:17,340 --> 00:04:22,409
+does a bad string ordering of your keys
+
+00:04:19,769 --> 00:04:24,090
+and stuff cards TB has kind of its own
+
+00:04:22,409 --> 00:04:25,560
+prior history and own way of storing
+
+00:04:24,090 --> 00:04:27,000
+things and it's got this thing called
+
+00:04:25,560 --> 00:04:30,930
+view collation so that's
+
+00:04:27,000 --> 00:04:32,130
+how cats to be orders of things in it or
+
+00:04:30,930 --> 00:04:33,900
+is it skis and it kind of looks like
+
+00:04:32,130 --> 00:04:35,730
+this where you've got special field so
+
+00:04:33,900 --> 00:04:38,430
+now false and true always come first
+
+00:04:35,730 --> 00:04:39,900
+then you got numbers one two and three
+
+00:04:38,430 --> 00:04:41,850
+and you'll notice that we don't
+
+00:04:39,900 --> 00:04:42,420
+differentiate between integers floats
+
+00:04:41,850 --> 00:04:45,690
+and doubles
+
+00:04:42,420 --> 00:04:47,160
+we've got strings arrays and objects so
+
+00:04:45,690 --> 00:04:49,290
+whenever you have anything stored in
+
+00:04:47,160 --> 00:04:51,900
+index it needs to be ordered in this way
+
+00:04:49,290 --> 00:04:54,480
+so we needed to adjust the way we store
+
+00:04:51,900 --> 00:04:56,550
+keys so that in foundation to be so that
+
+00:04:54,480 --> 00:04:58,860
+we would get this actual ordering and
+
+00:04:56,550 --> 00:05:01,410
+the way we've solved that is that every
+
+00:04:58,860 --> 00:05:03,960
+time we store a key we actually create a
+
+00:05:01,410 --> 00:05:06,390
+tuple and the first part that tuple is
+
+00:05:03,960 --> 00:05:08,190
+just a number that sits that is what it
+
+00:05:06,390 --> 00:05:10,080
+is in terms of whether it's a special
+
+00:05:08,190 --> 00:05:11,760
+and numbers and it's then starts the
+
+00:05:10,080 --> 00:05:13,740
+order the second part of the tuple is
+
+00:05:11,760 --> 00:05:16,340
+then the actual whether it's a special
+
+00:05:13,740 --> 00:05:19,070
+or a numbers and it's the original key
+
+00:05:16,340 --> 00:05:21,720
+with strings we go another step further
+
+00:05:19,070 --> 00:05:25,350
+with strings we actually use the I see
+
+00:05:21,720 --> 00:05:28,020
+you local library to store strings and
+
+00:05:25,350 --> 00:05:30,480
+order them so with Foundation DB what
+
+00:05:28,020 --> 00:05:32,580
+we've actually then do is we do a we
+
+00:05:30,480 --> 00:05:34,020
+create a sort string so every time we
+
+00:05:32,580 --> 00:05:35,700
+got string keys we run it through the
+
+00:05:34,020 --> 00:05:37,250
+ICU library creates a sort string and
+
+00:05:35,700 --> 00:05:42,810
+use that source string to store it in
+
+00:05:37,250 --> 00:05:46,169
+foundation DB so now let's look at Map
+
+00:05:42,810 --> 00:05:47,700
+Reduce indexes Map Reduce indexes are
+
+00:05:46,169 --> 00:05:49,620
+created like this what we do is we
+
+00:05:47,700 --> 00:05:52,110
+create a design documents and in that
+
+00:05:49,620 --> 00:05:53,550
+design document you create a view so Map
+
+00:05:52,110 --> 00:05:55,530
+Reduce index is also kind of called
+
+00:05:53,550 --> 00:05:58,470
+views in this case we have a map
+
+00:05:55,530 --> 00:06:00,690
+function and we met something so you can
+
+00:05:58,470 --> 00:06:03,090
+see there we omitting the an array and
+
+00:06:00,690 --> 00:06:05,760
+that is the key we're missing a class
+
+00:06:03,090 --> 00:06:08,150
+and a name and in the value of one we
+
+00:06:05,760 --> 00:06:10,979
+also then define a reduce function a
+
+00:06:08,150 --> 00:06:12,720
+reduce function as well in this case
+
+00:06:10,979 --> 00:06:15,479
+we're using one of the cars to be built
+
+00:06:12,720 --> 00:06:17,900
+in reduced functions called can't it's
+
+00:06:15,479 --> 00:06:19,800
+also possible to create your own
+
+00:06:17,900 --> 00:06:21,930
+javascript reduced functions but we
+
+00:06:19,800 --> 00:06:24,030
+really try and discourage that because
+
+00:06:21,930 --> 00:06:26,820
+most people it's really difficult to get
+
+00:06:24,030 --> 00:06:28,560
+rights once you've created this design
+
+00:06:26,820 --> 00:06:30,090
+dot like this and save them takashi
+
+00:06:28,560 --> 00:06:31,830
+because we would then build your index
+
+00:06:30,090 --> 00:06:33,630
+and the process looks a little bit like
+
+00:06:31,830 --> 00:06:35,610
+this where it reads from the changes
+
+00:06:33,630 --> 00:06:37,849
+feed fetches all the documents that it
+
+00:06:35,610 --> 00:06:39,489
+needs to put into this index
+
+00:06:37,849 --> 00:06:42,019
+runs those
+
+00:06:39,489 --> 00:06:44,569
+documents through the javascript query
+
+00:06:42,019 --> 00:06:47,119
+server from the javascript query server
+
+00:06:44,569 --> 00:06:49,509
+we get a bunch of key values those key
+
+00:06:47,119 --> 00:06:51,949
+values are then stored in foundation DB
+
+00:06:49,509 --> 00:06:53,330
+so because of this processing because we
+
+00:06:51,949 --> 00:06:55,849
+have to always stand all the documents
+
+00:06:53,330 --> 00:06:58,009
+to the JavaScript query server we can't
+
+00:06:55,849 --> 00:06:59,449
+actually do this in the actual document
+
+00:06:58,009 --> 00:07:01,399
+update transaction and it actually has
+
+00:06:59,449 --> 00:07:05,269
+to run in the background so I'll show
+
+00:07:01,399 --> 00:07:07,249
+you how we do that just now how we store
+
+00:07:05,269 --> 00:07:09,409
+what we storing in foundation DB looks a
+
+00:07:07,249 --> 00:07:12,949
+little bit like this where we store the
+
+00:07:09,409 --> 00:07:15,379
+index ID in to start off with and then
+
+00:07:12,949 --> 00:07:18,649
+we store the keys so in this case the
+
+00:07:15,379 --> 00:07:20,089
+the name and a age and we do the same
+
+00:07:18,649 --> 00:07:23,539
+encoding process I talked about with
+
+00:07:20,089 --> 00:07:25,399
+mango we saw the document ID and then in
+
+00:07:23,539 --> 00:07:27,349
+the value side which is everything in
+
+00:07:25,399 --> 00:07:30,050
+red there we store the keys again
+
+00:07:27,349 --> 00:07:31,879
+so once we've encoded the keys for
+
+00:07:30,050 --> 00:07:34,339
+foundation DB to get the correct sorting
+
+00:07:31,879 --> 00:07:37,459
+we actually can't decode it back to get
+
+00:07:34,339 --> 00:07:40,489
+the exact same keys that the users
+
+00:07:37,459 --> 00:07:42,079
+actually put in so we store those keys
+
+00:07:40,489 --> 00:07:45,229
+then in the actual value side of
+
+00:07:42,079 --> 00:07:47,449
+foundation DB along with the the value
+
+00:07:45,229 --> 00:07:48,800
+so every time we do a query we fetch
+
+00:07:47,449 --> 00:07:50,349
+those values and return both of those
+
+00:07:48,800 --> 00:07:54,469
+back to the user
+
+00:07:50,349 --> 00:07:56,689
+now with the mango DB every time of with
+
+00:07:54,469 --> 00:07:59,179
+sorry with mango indexes every time we
+
+00:07:56,689 --> 00:08:00,829
+update the index because we're doing it
+
+00:07:59,179 --> 00:08:03,769
+in that document update transaction we
+
+00:08:00,829 --> 00:08:05,389
+can fetch the old documents look at its
+
+00:08:03,769 --> 00:08:08,029
+keys that are put into the index remove
+
+00:08:05,389 --> 00:08:09,979
+those old keys look at the new document
+
+00:08:08,029 --> 00:08:12,499
+that's being updated or added into the
+
+00:08:09,979 --> 00:08:14,389
+database and add the new keys into the
+
+00:08:12,499 --> 00:08:17,509
+index so we can do that in that one
+
+00:08:14,389 --> 00:08:19,459
+transaction but with MapReduce because
+
+00:08:17,509 --> 00:08:21,409
+it's being built in the background we
+
+00:08:19,459 --> 00:08:24,469
+can't do that we can't fetch the old
+
+00:08:21,409 --> 00:08:26,569
+full document body so we have to keep
+
+00:08:24,469 --> 00:08:29,719
+another thing called what we call an ID
+
+00:08:26,569 --> 00:08:31,819
+index and the ID index keeps a list of
+
+00:08:29,719 --> 00:08:34,039
+the keys for a specific document that
+
+00:08:31,819 --> 00:08:36,709
+are added to an index so every time we
+
+00:08:34,039 --> 00:08:39,019
+update an existing index we look at the
+
+00:08:36,709 --> 00:08:40,370
+ID index for the old set of keys that
+
+00:08:39,019 --> 00:08:42,860
+this document is contributed to this
+
+00:08:40,370 --> 00:08:45,199
+index remove those out of the index get
+
+00:08:42,860 --> 00:08:47,209
+the new keys others into the index and
+
+00:08:45,199 --> 00:08:49,579
+add those into the audio index as well
+
+00:08:47,209 --> 00:08:50,800
+and that's how we keep a track that keep
+
+00:08:49,579 --> 00:08:53,360
+track of it
+
+00:08:50,800 --> 00:08:55,939
+so how do we build it
+
+00:08:53,360 --> 00:08:58,339
+so in a traditional cash be to Ankara
+
+00:08:55,939 --> 00:09:02,209
+III if you tell me building every time
+
+00:08:58,339 --> 00:09:04,610
+we have a query for view it's that we
+
+00:09:02,209 --> 00:09:06,829
+have code a quoted coordinating node and
+
+00:09:04,610 --> 00:09:09,350
+that goes in context each of the nodes
+
+00:09:06,829 --> 00:09:11,809
+in the cluster and those nodes then look
+
+00:09:09,350 --> 00:09:15,079
+at each shard for this view update that
+
+00:09:11,809 --> 00:09:16,939
+shard and updates the view sends all the
+
+00:09:15,079 --> 00:09:20,209
+results back to the the chordates
+
+00:09:16,939 --> 00:09:23,480
+coordinating node which then collates it
+
+00:09:20,209 --> 00:09:25,100
+and returns it back to the client now
+
+00:09:23,480 --> 00:09:27,350
+the the big thing with this is that each
+
+00:09:25,100 --> 00:09:29,089
+node has to have a lot of states it has
+
+00:09:27,350 --> 00:09:31,459
+to know how many nodes in the cluster
+
+00:09:29,089 --> 00:09:33,619
+will the shards are and which nodes
+
+00:09:31,459 --> 00:09:35,119
+those are and have to do as kind of a
+
+00:09:33,619 --> 00:09:37,399
+dimension earlier there's a lot of
+
+00:09:35,119 --> 00:09:39,439
+scatter gather kind of situation there
+
+00:09:37,399 --> 00:09:42,350
+so we want to avoid avoid that with
+
+00:09:39,439 --> 00:09:45,879
+foundation DB and move to a situation
+
+00:09:42,350 --> 00:09:48,350
+where each node actually doesn't know
+
+00:09:45,879 --> 00:09:49,790
+how many nodes in the system and that
+
+00:09:48,350 --> 00:09:51,949
+all the state is actually moved into
+
+00:09:49,790 --> 00:09:53,809
+foundation DB so this gives us the power
+
+00:09:51,949 --> 00:09:55,850
+of being able to add and remove nodes if
+
+00:09:53,809 --> 00:09:59,869
+you want to if you in a situation like
+
+00:09:55,850 --> 00:10:01,369
+you using kubernetes you can add nodes
+
+00:09:59,869 --> 00:10:03,169
+if the clusters under heavy load and
+
+00:10:01,369 --> 00:10:05,989
+then remove them if later you don't need
+
+00:10:03,169 --> 00:10:08,509
+them and so a great example of how we
+
+00:10:05,989 --> 00:10:12,410
+moving all the states into foundation DB
+
+00:10:08,509 --> 00:10:15,339
+is cash to be jobs now costumey jobs is
+
+00:10:12,410 --> 00:10:18,319
+a global queue for background jobs and
+
+00:10:15,339 --> 00:10:20,569
+all over the state is kept in foundation
+
+00:10:18,319 --> 00:10:23,689
+DB so the whole queue and the status of
+
+00:10:20,569 --> 00:10:25,309
+everything is in foundation DB which
+
+00:10:23,689 --> 00:10:28,970
+means we can spin up multiple workers
+
+00:10:25,309 --> 00:10:31,189
+these workers spin up they connect
+
+00:10:28,970 --> 00:10:33,290
+through the cash we jobs API and they
+
+00:10:31,189 --> 00:10:35,959
+see what jobs they can work on and build
+
+00:10:33,290 --> 00:10:38,720
+the index what's also nice then is
+
+00:10:35,959 --> 00:10:40,399
+through foundation DB again as well we
+
+00:10:38,720 --> 00:10:42,529
+can monitor for failed jobs so if a
+
+00:10:40,399 --> 00:10:44,239
+worker has an updates at at state in
+
+00:10:42,529 --> 00:10:46,279
+Qatar in foundation DB for a set number
+
+00:10:44,239 --> 00:10:48,889
+of time that means that job has failed
+
+00:10:46,279 --> 00:10:51,199
+we put that work that job item back in
+
+00:10:48,889 --> 00:10:52,850
+the foundation DBQ in the cash jobs
+
+00:10:51,199 --> 00:10:55,759
+queue they and another worker can pick
+
+00:10:52,850 --> 00:10:57,860
+it up and continue working on it along
+
+00:10:55,759 --> 00:10:59,899
+with that we've also added pub sub
+
+00:10:57,860 --> 00:11:01,639
+progress so anything that needs to know
+
+00:10:59,899 --> 00:11:04,220
+how a job is progressing can listen in
+
+00:11:01,639 --> 00:11:06,860
+and get feedback on that and know when
+
+00:11:04,220 --> 00:11:09,170
+it's ready so how we want to work with
+
+00:11:06,860 --> 00:11:12,350
+Foundation dbe's we have a view query
+
+00:11:09,170 --> 00:11:14,330
+comes in that immediately puts a job on
+
+00:11:12,350 --> 00:11:15,680
+the background queue which will then
+
+00:11:14,330 --> 00:11:17,840
+build the index and get it up to date
+
+00:11:15,680 --> 00:11:20,630
+sets up to this later States at that
+
+00:11:17,840 --> 00:11:23,030
+points oh so a work will accept that job
+
+00:11:20,630 --> 00:11:25,550
+build the view up and keep reporting a
+
+00:11:23,030 --> 00:11:28,160
+status back to the view query node that
+
+00:11:25,550 --> 00:11:30,530
+node will then know that the views up to
+
+00:11:28,160 --> 00:11:33,710
+date query that foundation DB and return
+
+00:11:30,530 --> 00:11:35,780
+the results back to the user and this is
+
+00:11:33,710 --> 00:11:37,490
+one of the sections where we still got a
+
+00:11:35,780 --> 00:11:39,680
+little bit of work around optimizing it
+
+00:11:37,490 --> 00:11:41,960
+and improving it so it's always that
+
+00:11:39,680 --> 00:11:44,600
+trade-off with the original custody
+
+00:11:41,960 --> 00:11:45,980
+because each index was split into shards
+
+00:11:44,600 --> 00:11:48,410
+we could build the whole view in
+
+00:11:45,980 --> 00:11:49,760
+parallel and build it really quickly but
+
+00:11:48,410 --> 00:11:52,250
+now because we're using a single key
+
+00:11:49,760 --> 00:11:54,470
+value storage in foundation VB at the
+
+00:11:52,250 --> 00:11:57,560
+moment we're kind of building the index
+
+00:11:54,470 --> 00:11:59,420
+all in one step one at a time so our
+
+00:11:57,560 --> 00:12:01,310
+building is a little bit slower but our
+
+00:11:59,420 --> 00:12:03,080
+queering is significantly faster now
+
+00:12:01,310 --> 00:12:05,300
+with foundation DB so that's one of the
+
+00:12:03,080 --> 00:12:11,480
+areas we are going to definitely look to
+
+00:12:05,300 --> 00:12:14,300
+to improve in the the near future so now
+
+00:12:11,480 --> 00:12:16,580
+let's look at reduce indexes so reduce
+
+00:12:14,300 --> 00:12:19,310
+indexes allow us to aggregate the map
+
+00:12:16,580 --> 00:12:21,200
+index results so if you've got a map
+
+00:12:19,310 --> 00:12:24,100
+index that return something like that
+
+00:12:21,200 --> 00:12:26,390
+where you've got some dates the reduce
+
+00:12:24,100 --> 00:12:28,610
+allows you to aggregate them based on
+
+00:12:26,390 --> 00:12:31,250
+your group level now group level is hung
+
+00:12:28,610 --> 00:12:32,510
+at what value in the array that you got
+
+00:12:31,250 --> 00:12:34,550
+so in this case you've got three items
+
+00:12:32,510 --> 00:12:37,100
+in the array so the group level is three
+
+00:12:34,550 --> 00:12:38,990
+if you set it to a group level of two
+
+00:12:37,100 --> 00:12:42,080
+you can see we can start aggregating on
+
+00:12:38,990 --> 00:12:47,360
+year and month set the group level to
+
+00:12:42,080 --> 00:12:49,250
+one and you aggregating on year so as I
+
+00:12:47,360 --> 00:12:51,410
+said reduce allowed for aggregation of
+
+00:12:49,250 --> 00:12:53,480
+map results and we support two different
+
+00:12:51,410 --> 00:12:55,460
+ways we do built-in reduce functions
+
+00:12:53,480 --> 00:12:58,580
+that cash B has and then you can also
+
+00:12:55,460 --> 00:13:01,340
+use custom JS functions now one of the
+
+00:12:58,580 --> 00:13:03,830
+things with reduce is that it relies
+
+00:13:01,340 --> 00:13:06,530
+heavily on the fact that internally
+
+00:13:03,830 --> 00:13:09,440
+kasseri is using a b-tree to store your
+
+00:13:06,530 --> 00:13:11,240
+index so every time what we do in
+
+00:13:09,440 --> 00:13:13,730
+custody is that when you store a whole
+
+00:13:11,240 --> 00:13:16,730
+lot of map key valleys you're actually
+
+00:13:13,730 --> 00:13:19,700
+storing them in the in
+
+00:13:16,730 --> 00:13:22,490
+the non-leaf nodes we storing
+
+00:13:19,700 --> 00:13:24,680
+aggregations of the results below so
+
+00:13:22,490 --> 00:13:25,850
+every time we do a reduce query we don't
+
+00:13:24,680 --> 00:13:28,010
+actually have to go right down to the
+
+00:13:25,850 --> 00:13:29,690
+leaf nodes pull those all out reduce
+
+00:13:28,010 --> 00:13:31,880
+them in real time and return the results
+
+00:13:29,690 --> 00:13:34,250
+we can actually look higher non leaf
+
+00:13:31,880 --> 00:13:36,230
+nodes and get those values out and
+
+00:13:34,250 --> 00:13:38,150
+return them which means that the result
+
+00:13:36,230 --> 00:13:41,630
+is a lot quicker to query it and a
+
+00:13:38,150 --> 00:13:43,340
+little bit more efficient but now moving
+
+00:13:41,630 --> 00:13:44,780
+to the foundation DB we're not gonna
+
+00:13:43,340 --> 00:13:47,510
+have a b-tree anymore so we have to try
+
+00:13:44,780 --> 00:13:50,510
+and adapt that way of querying to
+
+00:13:47,510 --> 00:13:52,430
+working foundation DB and so the way we
+
+00:13:50,510 --> 00:13:54,410
+we think it's going to work is we're
+
+00:13:52,430 --> 00:13:57,380
+going to use the Skip list so the Skip
+
+00:13:54,410 --> 00:14:01,640
+list is idea comes off the record layers
+
+00:13:57,380 --> 00:14:04,070
+rank index design and how a Skip list
+
+00:14:01,640 --> 00:14:07,730
+works is you have multiple levels so
+
+00:14:04,070 --> 00:14:10,850
+level naught you have all of your reduce
+
+00:14:07,730 --> 00:14:13,580
+results and each level above you have a
+
+00:14:10,850 --> 00:14:16,250
+reduced set of those so I said level one
+
+00:14:13,580 --> 00:14:18,500
+you have a reduced step and it kind of
+
+00:14:16,250 --> 00:14:21,410
+reduces less and less results higher up
+
+00:14:18,500 --> 00:14:23,600
+each time a key value is not added to a
+
+00:14:21,410 --> 00:14:25,550
+level it is then aggregated with the
+
+00:14:23,600 --> 00:14:28,280
+previous results meaning that we start
+
+00:14:25,550 --> 00:14:32,420
+getting that aggregation so when you
+
+00:14:28,280 --> 00:14:33,650
+want to do a query for reduce index we
+
+00:14:32,420 --> 00:14:35,750
+don't have to go right down to level
+
+00:14:33,650 --> 00:14:37,730
+notes to query the whole index we can
+
+00:14:35,750 --> 00:14:40,250
+actually kind of start higher up and get
+
+00:14:37,730 --> 00:14:42,680
+certain number of key values before
+
+00:14:40,250 --> 00:14:44,270
+jumping down if needed which again we're
+
+00:14:42,680 --> 00:14:46,640
+hoping is going to make it kind of same
+
+00:14:44,270 --> 00:14:48,590
+kind of efficient query like what we
+
+00:14:46,640 --> 00:14:55,340
+have with our B tree design at the
+
+00:14:48,590 --> 00:14:57,620
+moments finally we have text search so
+
+00:14:55,340 --> 00:14:59,420
+with car to b3 which will be our next
+
+00:14:57,620 --> 00:15:03,050
+release and the final release before we
+
+00:14:59,420 --> 00:15:06,800
+do the fund that foundation DB release
+
+00:15:03,050 --> 00:15:08,450
+is going to have ticks search now cloud
+
+00:15:06,800 --> 00:15:09,820
+and just have quite a while and we have
+
+00:15:08,450 --> 00:15:12,860
+open sources but it's never been
+
+00:15:09,820 --> 00:15:15,800
+official part of a release of the patchy
+
+00:15:12,860 --> 00:15:17,660
+CouchDB so from 3 onwards is going to be
+
+00:15:15,800 --> 00:15:19,850
+that which is quite mass and the fall is
+
+00:15:17,660 --> 00:15:21,530
+a very similar design to the MapReduce
+
+00:15:19,850 --> 00:15:23,600
+indexes you create a JavaScript function
+
+00:15:21,530 --> 00:15:25,010
+you say what you want to add to the text
+
+00:15:23,600 --> 00:15:28,370
+indexes and what you want to use to
+
+00:15:25,010 --> 00:15:30,310
+query and internally we actually using
+
+00:15:28,370 --> 00:15:32,620
+Leasing so under the hood we
+
+00:15:30,310 --> 00:15:34,840
+have the seen manages the specific
+
+00:15:32,620 --> 00:15:37,660
+shards for the whole text index and we
+
+00:15:34,840 --> 00:15:39,880
+kind of manage those and that's work
+
+00:15:37,660 --> 00:15:41,170
+pretty well but we've to foundation DB
+
+00:15:39,880 --> 00:15:43,750
+we didn't want to have to have that same
+
+00:15:41,170 --> 00:15:45,460
+situation where we've got foundation DB
+
+00:15:43,750 --> 00:15:47,830
+for everything and then got leucine to
+
+00:15:45,460 --> 00:15:49,180
+manage our text search text search and
+
+00:15:47,830 --> 00:15:50,470
+having to manage those shots and
+
+00:15:49,180 --> 00:15:53,490
+everything where we kind of want
+
+00:15:50,470 --> 00:15:56,440
+foundation DB to manage everything
+
+00:15:53,490 --> 00:15:58,150
+so the idea we've come up with in the
+
+00:15:56,440 --> 00:16:00,970
+design we're doing is that we still be
+
+00:15:58,150 --> 00:16:03,610
+using leucine but we kind of cut out a
+
+00:16:00,970 --> 00:16:05,740
+bit and use we implement the directory
+
+00:16:03,610 --> 00:16:08,500
+layer so instead of actually writing the
+
+00:16:05,740 --> 00:16:09,970
+text indexes to disk we're actually now
+
+00:16:08,500 --> 00:16:13,450
+using the directory layer actually
+
+00:16:09,970 --> 00:16:15,520
+writes to you Foundation DB we then add
+
+00:16:13,450 --> 00:16:18,730
+some extra optimizations on top of that
+
+00:16:15,520 --> 00:16:20,020
+we have some Java nodes that we run
+
+00:16:18,730 --> 00:16:22,360
+multiple Java nodes that stall the
+
+00:16:20,020 --> 00:16:24,700
+indexes in memory so every query will go
+
+00:16:22,360 --> 00:16:27,070
+to specific nodes that have that index
+
+00:16:24,700 --> 00:16:30,279
+in memory which then makes querying
+
+00:16:27,070 --> 00:16:32,380
+significantly faster and we also use it
+
+00:16:30,279 --> 00:16:35,880
+for building an index so it can be built
+
+00:16:32,380 --> 00:16:38,320
+in memory and queried again
+
+00:16:35,880 --> 00:16:42,190
+Kazmir Jobs is also used to build the
+
+00:16:38,320 --> 00:16:44,080
+index so the current status of where
+
+00:16:42,190 --> 00:16:47,620
+Adam gave an ask I'm a list of all the
+
+00:16:44,080 --> 00:16:49,360
+features we've implemented but we still
+
+00:16:47,620 --> 00:16:53,410
+very much the cache we layer has just
+
+00:16:49,360 --> 00:16:54,839
+began we're still kind of perfecting and
+
+00:16:53,410 --> 00:16:57,610
+learning where we can improve and
+
+00:16:54,839 --> 00:16:59,920
+learning how to think in a foundation DB
+
+00:16:57,610 --> 00:17:03,070
+way instead of a traditional way of
+
+00:16:59,920 --> 00:17:04,150
+solving our problems and everything
+
+00:17:03,070 --> 00:17:06,220
+we're doing because it's all open source
+
+00:17:04,150 --> 00:17:08,980
+you can follow along completely so you
+
+00:17:06,220 --> 00:17:11,380
+can get the source code from the patchy
+
+00:17:08,980 --> 00:17:12,910
+cash to be repo we also write our FCS
+
+00:17:11,380 --> 00:17:14,860
+for everything we've I've talked about
+
+00:17:12,910 --> 00:17:17,050
+today so if you're interested in any of
+
+00:17:14,860 --> 00:17:18,970
+the ways we've done it we've got a much
+
+00:17:17,050 --> 00:17:20,920
+more detailed RFC which really dives
+
+00:17:18,970 --> 00:17:25,410
+into how are we implementing everything
+
+00:17:20,920 --> 00:17:28,300
+and that's in our documentation repo and
+
+00:17:25,410 --> 00:17:29,530
+please join our mailing lists or we've
+
+00:17:28,300 --> 00:17:31,450
+got a slack channel as well where we
+
+00:17:29,530 --> 00:17:33,640
+talk about all of this so if you're
+
+00:17:31,450 --> 00:17:36,070
+interested in any of this please join us
+
+00:17:33,640 --> 00:17:38,860
+it's great to get some new ideas and new
+
+00:17:36,070 --> 00:17:42,280
+people getting involved and sharing how
+
+00:17:38,860 --> 00:17:43,990
+we build this all together and so thank
+
+00:17:42,280 --> 00:17:45,460
+you thank you for coming to the talk and
+
+00:17:43,990 --> 00:17:47,350
+response just say a big thank you to the
+
+00:17:45,460 --> 00:17:49,720
+cashier me community it's been really
+
+00:17:47,350 --> 00:17:52,120
+fun working with everyone as we build
+
+00:17:49,720 --> 00:17:56,429
+this all arts and it's a really nice
+
+00:17:52,120 --> 00:17:56,429
+
+YouTube URL: https://www.youtube.com/watch?v=QKzmNXrSq5w
+
+

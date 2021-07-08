@@ -1,0 +1,559 @@
+Title: Meta-Data Caching and Record Store Scalability - Alec Grieser, Apple
+Publication date: 2020-05-07
+Playlist: FoundationDB Summit 2019
+Description: 
+	Meta-Data Caching and Record Store Scalability - Alec Grieser, Apple 
+
+One common pattern for applications and layers on top of FDB is to store meta-data about the current schema in the database so that schema changes can be applied transactionally with data updates. But while this is useful and sometimes vital for ensuring that the data and schema do not drift out of sync, constant reads to a single meta-data key can be a performance bottleneck that can limit the total scale of a single data store. Using features included in FoundationDB 6.1, the Record Layer was able to add a caching mechanism for schema meta-data that still provided fully transactional updates and allowed us to push past that limit.
+Captions: 
+	00:00:00,030 --> 00:00:05,250
+hi I'm Alec I'm on the foundation DB
+
+00:00:02,909 --> 00:00:07,230
+record layer team which is one of the
+
+00:00:05,250 --> 00:00:08,970
+open-source layers that we develop on
+
+00:00:07,230 --> 00:00:10,800
+top of the foundation DB key value store
+
+00:00:08,970 --> 00:00:12,929
+and I'm here to talk about one of the
+
+00:00:10,800 --> 00:00:14,460
+features that we developed when we ran
+
+00:00:12,929 --> 00:00:16,619
+into a scalability problem when trying
+
+00:00:14,460 --> 00:00:18,359
+to take some of our record stores which
+
+00:00:16,619 --> 00:00:21,210
+is a unit of data within the record
+
+00:00:18,359 --> 00:00:23,100
+layer and add more and more requests and
+
+00:00:21,210 --> 00:00:24,810
+this is somewhat similar it's in the
+
+00:00:23,100 --> 00:00:26,550
+same space as a lot Neela mentioned just
+
+00:00:24,810 --> 00:00:28,050
+talked about and that it's about when
+
+00:00:26,550 --> 00:00:30,720
+you have too many requests going to the
+
+00:00:28,050 --> 00:00:32,579
+same the same small number of keys and
+
+00:00:30,720 --> 00:00:34,110
+it's also adam mentioned it in his talk
+
+00:00:32,579 --> 00:00:36,110
+about couchdb and so I'll go into a
+
+00:00:34,110 --> 00:00:39,270
+little more detail about how that works
+
+00:00:36,110 --> 00:00:40,500
+so this is unlike Neela mansions work
+
+00:00:39,270 --> 00:00:42,420
+which is a little bit more general this
+
+00:00:40,500 --> 00:00:44,489
+is for a very specific use case and that
+
+00:00:42,420 --> 00:00:46,410
+is a one that we think a lot of layers
+
+00:00:44,489 --> 00:00:48,870
+will run into which is when you have a
+
+00:00:46,410 --> 00:00:50,700
+small amount of metadata that you need
+
+00:00:48,870 --> 00:00:53,760
+to keep transactionally consistent with
+
+00:00:50,700 --> 00:00:56,100
+another piece of data so for example the
+
+00:00:53,760 --> 00:00:57,600
+record layer uses this for the store
+
+00:00:56,100 --> 00:00:59,370
+header which is associates with every
+
+00:00:57,600 --> 00:01:00,930
+store and that contains information that
+
+00:00:59,370 --> 00:01:03,629
+can then be used to determine what
+
+00:01:00,930 --> 00:01:04,799
+indexes are defined for example and it's
+
+00:01:03,629 --> 00:01:06,420
+important that this be turns actually
+
+00:01:04,799 --> 00:01:08,880
+consistent because if a new index is
+
+00:01:06,420 --> 00:01:11,490
+added and some instances don't know
+
+00:01:08,880 --> 00:01:13,350
+about it then those up logging instances
+
+00:01:11,490 --> 00:01:14,760
+might get more records to save and
+
+00:01:13,350 --> 00:01:16,170
+forget to index them and that can lead
+
+00:01:14,760 --> 00:01:18,960
+to consistency problems at the
+
+00:01:16,170 --> 00:01:20,970
+application level but because you're
+
+00:01:18,960 --> 00:01:23,159
+accessing with every operation every
+
+00:01:20,970 --> 00:01:25,130
+transaction that means that the write
+
+00:01:23,159 --> 00:01:28,229
+would be a read rate to the whatever
+
+00:01:25,130 --> 00:01:31,290
+storage servers are serving that key can
+
+00:01:28,229 --> 00:01:33,869
+be really high and so that becomes a
+
+00:01:31,290 --> 00:01:35,220
+scalability bottleneck you can't scale a
+
+00:01:33,869 --> 00:01:36,630
+record store now beyond the what the
+
+00:01:35,220 --> 00:01:40,979
+ability of those like small number of
+
+00:01:36,630 --> 00:01:43,590
+clusters can do and so we the solution
+
+00:01:40,979 --> 00:01:47,070
+we came up with is a transactional cache
+
+00:01:43,590 --> 00:01:48,540
+and validation key and so this involved
+
+00:01:47,070 --> 00:01:51,270
+a new foundation to be a key value store
+
+00:01:48,540 --> 00:01:54,780
+feature the metadata version key which
+
+00:01:51,270 --> 00:01:56,369
+was added in FDB 6-1 in this key to 55
+
+00:01:54,780 --> 00:01:59,270
+slash metadata version has some special
+
+00:01:56,369 --> 00:02:01,680
+properties the first is that the
+
+00:01:59,270 --> 00:02:04,049
+semantics for setting the key are very
+
+00:02:01,680 --> 00:02:06,290
+restricted the users only allowed to set
+
+00:02:04,049 --> 00:02:08,789
+it using the version stamped value of
+
+00:02:06,290 --> 00:02:10,709
+mutation which Scott mentioned in his
+
+00:02:08,789 --> 00:02:12,200
+talk earlier today and I mentioned my
+
+00:02:10,709 --> 00:02:15,080
+talk last year
+
+00:02:12,200 --> 00:02:16,910
+and some special properties this key
+
+00:02:15,080 --> 00:02:18,709
+include the fact that every time you
+
+00:02:16,910 --> 00:02:20,840
+update the key you're guaranteed to get
+
+00:02:18,709 --> 00:02:22,610
+a new value and so that means that if
+
+00:02:20,840 --> 00:02:24,140
+you transactionally update this key and
+
+00:02:22,610 --> 00:02:25,849
+some other part of your cluster then you
+
+00:02:24,140 --> 00:02:27,380
+can use changes in this key to detect
+
+00:02:25,849 --> 00:02:29,030
+that there have been changes in the
+
+00:02:27,380 --> 00:02:30,459
+other part of the cluster although it
+
+00:02:29,030 --> 00:02:33,290
+doesn't tell you what those changes were
+
+00:02:30,459 --> 00:02:35,390
+the other thing that is special about
+
+00:02:33,290 --> 00:02:38,120
+this key is it's kept in some a few
+
+00:02:35,390 --> 00:02:39,620
+special places most keys are only stored
+
+00:02:38,120 --> 00:02:41,750
+on storage servers but this is also
+
+00:02:39,620 --> 00:02:43,880
+stored on a different process called the
+
+00:02:41,750 --> 00:02:46,430
+proxies and the third property of this
+
+00:02:43,880 --> 00:02:48,620
+key is that it is limited in size to 12
+
+00:02:46,430 --> 00:02:51,260
+bytes and that's going to be important
+
+00:02:48,620 --> 00:02:53,630
+later and so then we use this in the
+
+00:02:51,260 --> 00:02:56,650
+record layer to keep a cache of this
+
+00:02:53,630 --> 00:02:59,120
+metadata and then transactionally or
+
+00:02:56,650 --> 00:03:00,440
+invalidated whenever it was updated
+
+00:02:59,120 --> 00:03:01,959
+whenever the underlying meditate was
+
+00:03:00,440 --> 00:03:04,640
+updated I'll go into how that works
+
+00:03:01,959 --> 00:03:06,830
+so here you have a diagram of an FTP
+
+00:03:04,640 --> 00:03:08,450
+cluster or an FTP client within the FTP
+
+00:03:06,830 --> 00:03:09,830
+cluster you have some proxies and you
+
+00:03:08,450 --> 00:03:11,450
+have some storage servers and a few
+
+00:03:09,830 --> 00:03:13,400
+other things but these are the important
+
+00:03:11,450 --> 00:03:14,750
+things for this talk within the proxies
+
+00:03:13,400 --> 00:03:16,220
+you can see we have the metadata version
+
+00:03:14,750 --> 00:03:17,959
+and within the storage servers we have
+
+00:03:16,220 --> 00:03:19,790
+some metadata in this case indicating
+
+00:03:17,959 --> 00:03:21,049
+that there are three indexes then on the
+
+00:03:19,790 --> 00:03:23,030
+Left you have a client and the client
+
+00:03:21,049 --> 00:03:24,680
+currently has a cache and with each
+
+00:03:23,030 --> 00:03:26,690
+cache entry it remembers the meditative
+
+00:03:24,680 --> 00:03:28,850
+version at which which the metadata was
+
+00:03:26,690 --> 00:03:31,010
+last updated and so when the client
+
+00:03:28,850 --> 00:03:32,390
+begins a transaction it always begins
+
+00:03:31,010 --> 00:03:34,370
+with a get read version request to the
+
+00:03:32,390 --> 00:03:35,870
+proxies this isn't new this is something
+
+00:03:34,370 --> 00:03:38,750
+that's been in FTV since the beginning
+
+00:03:35,870 --> 00:03:40,730
+the new thing is that now when the proxy
+
+00:03:38,750 --> 00:03:42,829
+returns the read version to the cost to
+
+00:03:40,730 --> 00:03:44,930
+the client it also returns as metadata
+
+00:03:42,829 --> 00:03:46,670
+version key and so because it's being
+
+00:03:44,930 --> 00:03:48,230
+returned with every read version this is
+
+00:03:46,670 --> 00:03:50,209
+why it's important that it's small in
+
+00:03:48,230 --> 00:03:53,000
+size so that the overhead for returning
+
+00:03:50,209 --> 00:03:55,220
+it is relatively low in this case the
+
+00:03:53,000 --> 00:03:56,630
+client can read the key when it reads
+
+00:03:55,220 --> 00:03:58,370
+the key through the standard get API
+
+00:03:56,630 --> 00:04:00,260
+instead of going to the storage servers
+
+00:03:58,370 --> 00:04:02,480
+like most reads it just uses the value
+
+00:04:00,260 --> 00:04:03,709
+it gotten the read version responds in
+
+00:04:02,480 --> 00:04:04,940
+this case you can see that the metadata
+
+00:04:03,709 --> 00:04:06,829
+version and the version and the cache
+
+00:04:04,940 --> 00:04:08,930
+are the same and so it knows it has the
+
+00:04:06,829 --> 00:04:10,280
+right metadata and so it can continue on
+
+00:04:08,930 --> 00:04:12,650
+without having to consult with the
+
+00:04:10,280 --> 00:04:14,180
+underlying storage of what its metadata
+
+00:04:12,650 --> 00:04:17,269
+was so you've saved a read and you've
+
+00:04:14,180 --> 00:04:20,659
+also decreased the scale of the limits
+
+00:04:17,269 --> 00:04:22,039
+on these storage servers so then the
+
+00:04:20,659 --> 00:04:23,479
+process of updating the metadata gets
+
+00:04:22,039 --> 00:04:25,760
+somewhat more complicated not too much
+
+00:04:23,479 --> 00:04:26,150
+more complicated now whenever you want
+
+00:04:25,760 --> 00:04:27,889
+to
+
+00:04:26,150 --> 00:04:29,300
+the metadata you just also need to
+
+00:04:27,889 --> 00:04:30,889
+include in the same transaction that the
+
+00:04:29,300 --> 00:04:33,020
+metadata version key needs to also be
+
+00:04:30,889 --> 00:04:35,150
+updated that goes to the proxy is just
+
+00:04:33,020 --> 00:04:36,889
+like all commits the proxies for that
+
+00:04:35,150 --> 00:04:39,020
+along to the storage servers and then
+
+00:04:36,889 --> 00:04:43,340
+atomically the metadata version and the
+
+00:04:39,020 --> 00:04:44,810
+metadata can be updated now if you have
+
+00:04:43,340 --> 00:04:47,150
+a client that's lagging behind that
+
+00:04:44,810 --> 00:04:48,830
+hasn't gotten the update yet now when it
+
+00:04:47,150 --> 00:04:50,840
+begins a transaction it doesn't get read
+
+00:04:48,830 --> 00:04:52,100
+version just as before it gets back the
+
+00:04:50,840 --> 00:04:53,690
+read version and the metadata version
+
+00:04:52,100 --> 00:04:54,949
+this time you can see that the metadata
+
+00:04:53,690 --> 00:04:57,139
+version and the version in the cache
+
+00:04:54,949 --> 00:04:58,430
+don't match it then uses that
+
+00:04:57,139 --> 00:05:00,080
+information to know it needs to go to
+
+00:04:58,430 --> 00:05:01,430
+the underlying storage servers get the
+
+00:05:00,080 --> 00:05:03,560
+new version of the met get the new value
+
+00:05:01,430 --> 00:05:05,060
+of the metadata and it can update its
+
+00:05:03,560 --> 00:05:07,400
+cache update its view of the world and
+
+00:05:05,060 --> 00:05:08,900
+continue on so now this client will know
+
+00:05:07,400 --> 00:05:11,960
+to update all four of the indexes for
+
+00:05:08,900 --> 00:05:14,240
+any records it saves so there are a few
+
+00:05:11,960 --> 00:05:15,710
+additional considerations one are some
+
+00:05:14,240 --> 00:05:17,300
+of the complexities of dealing with
+
+00:05:15,710 --> 00:05:20,900
+multiple tenants and Adam mentioned this
+
+00:05:17,300 --> 00:05:22,340
+in his talk and then we also had to hit
+
+00:05:20,900 --> 00:05:23,960
+the same problem because the record
+
+00:05:22,340 --> 00:05:25,910
+layer also allows for many many record
+
+00:05:23,960 --> 00:05:27,770
+stores to live on the same cluster and
+
+00:05:25,910 --> 00:05:29,120
+so there's some amount of toe stepping
+
+00:05:27,770 --> 00:05:30,320
+is kind of unavoidable because there's
+
+00:05:29,120 --> 00:05:33,199
+only one of these keys and a whole
+
+00:05:30,320 --> 00:05:34,880
+cluster but we can also play some games
+
+00:05:33,199 --> 00:05:36,919
+conflict ranges to make sure that the
+
+00:05:34,880 --> 00:05:38,870
+only thing that happens is a few extra
+
+00:05:36,919 --> 00:05:40,280
+cash and validations and then there are
+
+00:05:38,870 --> 00:05:41,710
+also some edge cases related to when
+
+00:05:40,280 --> 00:05:44,000
+exactly they need to update this key
+
+00:05:41,710 --> 00:05:46,729
+during the life cycle of this cached
+
+00:05:44,000 --> 00:05:48,830
+metadata and that all went into our
+
+00:05:46,729 --> 00:05:50,659
+implementation in the record layer so
+
+00:05:48,830 --> 00:05:51,919
+this is available now so I encourage you
+
+00:05:50,659 --> 00:05:54,470
+to check out the metadata version key
+
+00:05:51,919 --> 00:05:55,789
+added in FTB 6-1 and you can see the
+
+00:05:54,470 --> 00:05:58,370
+pull request that added it there and
+
+00:05:55,789 --> 00:06:00,169
+also you can check out the very pithily
+
+00:05:58,370 --> 00:06:02,510
+named metadata version stamp store state
+
+00:06:00,169 --> 00:06:05,380
+cache which is the thing that adds the
+
+00:06:02,510 --> 00:06:07,020
+capability of the record layer into 880
+
+00:06:05,380 --> 00:06:13,360
+thanks
+
+00:06:07,020 --> 00:06:13,360
+
+YouTube URL: https://www.youtube.com/watch?v=_mDIhQ1HLcs
+
+

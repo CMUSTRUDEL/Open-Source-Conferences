@@ -1,0 +1,1544 @@
+Title: Avoiding Conflicts in Highly-Concurrent Applications - Alec Grieser, Apple
+Publication date: 2018-12-14
+Playlist: FoundationDB Summit 2018
+Description: 
+	This is intended to be a somewhat quick how-to on how to build useful primitives using FoundationDB features to help avoid conflicts in highly-concurrent systems. In particular, thinking about minimizing contention and not running into correctness issues related to multiple workers going at once. This will be demonstrated by explaining the design of a few simple patterns that are often useful within larger applications. This could include implementing (or avoiding) an auto-incrementing primary key replacement, including the naïve approach, an approach using a max_index, and an approach using versionstamps. Another application might be a high-contention queue (like our high-contention queue layer), where applications must be able to both append to the end of a growing thing as well as allow for multiple readers to pop from the beginning. Another might be something like a semaphore where you might have multiple requests at once attempting to take or release locks and doing that in an efficient way might be important. (In principle, this could be shortened to one example to meet the 20 minute time limit.)
+Captions: 
+	00:00:00,000 --> 00:00:03,810
+I'm Alex I'm from the foundation to be
+
+00:00:01,829 --> 00:00:05,819
+Apple or from the layers team at the
+
+00:00:03,810 --> 00:00:08,220
+Apple Foundation DB team and I'm gonna
+
+00:00:05,819 --> 00:00:11,219
+be talking about a topic effective
+
+00:00:08,220 --> 00:00:14,130
+client design and so you may think that
+
+00:00:11,219 --> 00:00:15,750
+in if you're designing client
+
+00:00:14,130 --> 00:00:17,310
+applications on top of foundation DP
+
+00:00:15,750 --> 00:00:19,590
+that because you have transactions
+
+00:00:17,310 --> 00:00:21,990
+concurrency is an easy problem and in
+
+00:00:19,590 --> 00:00:23,609
+some sense it is for one thing if use
+
+00:00:21,990 --> 00:00:25,560
+transactions correctly you can be you've
+
+00:00:23,609 --> 00:00:27,570
+pretty sure that the correctness of your
+
+00:00:25,560 --> 00:00:29,849
+system is is maintained in the presence
+
+00:00:27,570 --> 00:00:31,410
+of concurrent actors the issue though is
+
+00:00:29,849 --> 00:00:33,149
+that correctness isn't the only thing
+
+00:00:31,410 --> 00:00:34,860
+you also have to worry about performance
+
+00:00:33,149 --> 00:00:36,540
+and minimizing conflicts in your
+
+00:00:34,860 --> 00:00:38,070
+workload can be one of the harder things
+
+00:00:36,540 --> 00:00:39,809
+that a layer developer or a client
+
+00:00:38,070 --> 00:00:41,790
+developer has to consider when they're
+
+00:00:39,809 --> 00:00:43,379
+trying to design their application or
+
+00:00:41,790 --> 00:00:44,700
+data model so I want to go into a few
+
+00:00:43,379 --> 00:00:47,820
+techniques on how you might minimize
+
+00:00:44,700 --> 00:00:51,570
+conflicts and design an effective data
+
+00:00:47,820 --> 00:00:54,239
+model so first going into what a
+
+00:00:51,570 --> 00:00:57,000
+conflict is so Evan talked a little bit
+
+00:00:54,239 --> 00:00:59,010
+about this in his talk but a conflict is
+
+00:00:57,000 --> 00:01:01,289
+when you have two transactions that are
+
+00:00:59,010 --> 00:01:04,350
+trying to modify the same data at once
+
+00:01:01,289 --> 00:01:06,600
+in particular in foundation DB every
+
+00:01:04,350 --> 00:01:08,070
+time you do a read the client without
+
+00:01:06,600 --> 00:01:10,350
+you even having to do anything will
+
+00:01:08,070 --> 00:01:12,510
+record what ranges of keys you read and
+
+00:01:10,350 --> 00:01:14,790
+we'll add this to a set of read conflict
+
+00:01:12,510 --> 00:01:16,799
+ranges that it keeps in memory likewise
+
+00:01:14,790 --> 00:01:19,650
+whenever you do a write it modifies a
+
+00:01:16,799 --> 00:01:21,299
+separate set of write conflicts and then
+
+00:01:19,650 --> 00:01:23,369
+when it goes to commit your transaction
+
+00:01:21,299 --> 00:01:24,659
+it submits the read conflict set and the
+
+00:01:23,369 --> 00:01:27,240
+write conflict set along with any
+
+00:01:24,659 --> 00:01:29,040
+mutations and it's these conflict ranges
+
+00:01:27,240 --> 00:01:30,479
+that it's that the resolver you use in
+
+00:01:29,040 --> 00:01:32,700
+order to determine which transactions
+
+00:01:30,479 --> 00:01:34,920
+need to be failed so what happens if you
+
+00:01:32,700 --> 00:01:37,500
+get a conflict well typically your that
+
+00:01:34,920 --> 00:01:39,420
+you're going to retry and what that
+
+00:01:37,500 --> 00:01:41,040
+means is that you have two performance
+
+00:01:39,420 --> 00:01:43,759
+problems that you'll run into one is
+
+00:01:41,040 --> 00:01:46,020
+that each time you do an unsuccessful
+
+00:01:43,759 --> 00:01:48,030
+attempt at committing something you'll
+
+00:01:46,020 --> 00:01:49,710
+end up wasting of resources on the
+
+00:01:48,030 --> 00:01:51,119
+cluster and this means that if you have
+
+00:01:49,710 --> 00:01:52,259
+a lot of conflicting things you can end
+
+00:01:51,119 --> 00:01:54,060
+up decrease in the total throughput of
+
+00:01:52,259 --> 00:01:56,159
+your system because a lot of it being
+
+00:01:54,060 --> 00:01:57,600
+used to handle these things that don't
+
+00:01:56,159 --> 00:01:59,430
+end up doing any work they don't get
+
+00:01:57,600 --> 00:02:00,360
+committed so that's a problem and the
+
+00:01:59,430 --> 00:02:02,850
+other problem is that you have an
+
+00:02:00,360 --> 00:02:05,369
+increase in observed client latency then
+
+00:02:02,850 --> 00:02:07,979
+in particular if every time you retry
+
+00:02:05,369 --> 00:02:09,780
+your if you get a request from a user
+
+00:02:07,979 --> 00:02:12,870
+every time you retry that's another
+
+00:02:09,780 --> 00:02:13,470
+round of requests to the database that
+
+00:02:12,870 --> 00:02:15,000
+your user will have
+
+00:02:13,470 --> 00:02:16,800
+to wait through and so you're observed
+
+00:02:15,000 --> 00:02:19,050
+client latency is going to be higher and
+
+00:02:16,800 --> 00:02:21,600
+so we want to so that's pretty bad if
+
+00:02:19,050 --> 00:02:23,820
+you're both decreasing your throughput
+
+00:02:21,600 --> 00:02:25,950
+and increasing your latency so what can
+
+00:02:23,820 --> 00:02:28,080
+we do about it so I'm going to outline
+
+00:02:25,950 --> 00:02:30,360
+three separate techniques that a client
+
+00:02:28,080 --> 00:02:32,850
+might use and they are using atomic
+
+00:02:30,360 --> 00:02:34,980
+operations using snapshot reads and
+
+00:02:32,850 --> 00:02:37,050
+using using version stamp operations and
+
+00:02:34,980 --> 00:02:38,520
+I'll go into what all of these are and
+
+00:02:37,050 --> 00:02:39,660
+then I'll go into a kind of a motivating
+
+00:02:38,520 --> 00:02:40,460
+use case where you can see them in
+
+00:02:39,660 --> 00:02:43,470
+action
+
+00:02:40,460 --> 00:02:45,959
+so atomic operations Tomic operations
+
+00:02:43,470 --> 00:02:47,640
+are an API that foundation DB exposes
+
+00:02:45,959 --> 00:02:50,190
+that allow you to push down work to a
+
+00:02:47,640 --> 00:02:52,410
+storage server typically all the atomic
+
+00:02:50,190 --> 00:02:54,209
+operations could be re-written as the
+
+00:02:52,410 --> 00:02:56,580
+user requesting a key from the storage
+
+00:02:54,209 --> 00:02:58,650
+server getting it back modifying it and
+
+00:02:56,580 --> 00:03:00,300
+writing it back so for example if you
+
+00:02:58,650 --> 00:03:03,000
+wanted to add one to a key you read the
+
+00:03:00,300 --> 00:03:05,310
+key you add one to its value and you you
+
+00:03:03,000 --> 00:03:08,430
+submit a commit that overwrites that
+
+00:03:05,310 --> 00:03:09,660
+value of course the problem is that if
+
+00:03:08,430 --> 00:03:11,820
+two people are trying to do this at once
+
+00:03:09,660 --> 00:03:13,260
+one of them has to fail and so the
+
+00:03:11,820 --> 00:03:15,600
+alternative is using an atomic operation
+
+00:03:13,260 --> 00:03:16,980
+you basically send a commit to the to
+
+00:03:15,600 --> 00:03:18,870
+the storage server that just says add
+
+00:03:16,980 --> 00:03:21,269
+one to the key whatever it is and you
+
+00:03:18,870 --> 00:03:23,390
+don't actually do the read you just let
+
+00:03:21,269 --> 00:03:26,100
+the storage server handle that for you
+
+00:03:23,390 --> 00:03:27,870
+one warning with this is that if you
+
+00:03:26,100 --> 00:03:30,570
+imagine a particularly bad data model
+
+00:03:27,870 --> 00:03:32,030
+for example that reads a single key and
+
+00:03:30,570 --> 00:03:34,769
+updates at every single transaction
+
+00:03:32,030 --> 00:03:36,420
+without atomic ops then you'll end up
+
+00:03:34,769 --> 00:03:38,790
+serializing all of your operations and
+
+00:03:36,420 --> 00:03:40,470
+that's bad but with atomic ops what
+
+00:03:38,790 --> 00:03:41,940
+you'll end up doing is just slamming the
+
+00:03:40,470 --> 00:03:44,220
+storage servers that are responsible for
+
+00:03:41,940 --> 00:03:46,110
+that key so you can turn your one set of
+
+00:03:44,220 --> 00:03:48,630
+performance pathologies the serialized
+
+00:03:46,110 --> 00:03:49,980
+operations into another just hotspots so
+
+00:03:48,630 --> 00:03:52,560
+they're not a panacea and you have to be
+
+00:03:49,980 --> 00:03:55,500
+a little bit careful the second
+
+00:03:52,560 --> 00:03:57,450
+technique is called snapshot reads so
+
+00:03:55,500 --> 00:03:59,100
+like I said before whenever you do a
+
+00:03:57,450 --> 00:04:00,480
+read in foundation DB the client is
+
+00:03:59,100 --> 00:04:02,910
+automatically adding a read conflict
+
+00:04:00,480 --> 00:04:04,950
+range well snapshot reads don't add that
+
+00:04:02,910 --> 00:04:06,120
+range they say I know what I'm doing
+
+00:04:04,950 --> 00:04:07,440
+don't have to read conflict range - the
+
+00:04:06,120 --> 00:04:12,090
+key on reading just do the reads and
+
+00:04:07,440 --> 00:04:13,709
+give me the values so the the idea here
+
+00:04:12,090 --> 00:04:15,440
+is that you might do some reads specula
+
+00:04:13,709 --> 00:04:17,970
+so for example let's say that you had
+
+00:04:15,440 --> 00:04:19,979
+five jobs and you wanted to pick one of
+
+00:04:17,970 --> 00:04:21,750
+them then what you could do is read all
+
+00:04:19,979 --> 00:04:23,880
+five keys at snapshot isolation level
+
+00:04:21,750 --> 00:04:26,010
+and then whichever one you actually end
+
+00:04:23,880 --> 00:04:28,020
+up picking to process in that
+
+00:04:26,010 --> 00:04:29,490
+action you call a method called a breed
+
+00:04:28,020 --> 00:04:31,380
+conflict range or a breed conflict key
+
+00:04:29,490 --> 00:04:32,760
+to add a conflict range just to the key
+
+00:04:31,380 --> 00:04:36,750
+that you actually use to determine what
+
+00:04:32,760 --> 00:04:38,580
+your operation and then carry on and if
+
+00:04:36,750 --> 00:04:40,110
+two people come in at once and they pick
+
+00:04:38,580 --> 00:04:42,780
+different keys from the five keys that
+
+00:04:40,110 --> 00:04:44,280
+end up getting modified then they can
+
+00:04:42,780 --> 00:04:45,690
+both kind of coexistence that's great
+
+00:04:44,280 --> 00:04:47,280
+and the other thing you can do a
+
+00:04:45,690 --> 00:04:49,170
+snapshot reads is if you're modifying a
+
+00:04:47,280 --> 00:04:50,340
+key using atomic ops because that key
+
+00:04:49,170 --> 00:04:53,100
+will be pretty hot if you want to
+
+00:04:50,340 --> 00:04:54,300
+include any or do something based on the
+
+00:04:53,100 --> 00:04:56,130
+key of the value of that key within your
+
+00:04:54,300 --> 00:04:57,870
+transaction you can read it at snap so I
+
+00:04:56,130 --> 00:05:00,090
+actually snapshot isolation level and
+
+00:04:57,870 --> 00:05:03,540
+not be killed by somebody else modifying
+
+00:05:00,090 --> 00:05:05,430
+it the warning here is that conflict
+
+00:05:03,540 --> 00:05:06,330
+ranges are how FDB guarantees
+
+00:05:05,430 --> 00:05:08,640
+serializability
+
+00:05:06,330 --> 00:05:10,620
+and so if you are a little bit too
+
+00:05:08,640 --> 00:05:11,940
+clever with getting rid of conflict
+
+00:05:10,620 --> 00:05:13,590
+ranges you could end up committing
+
+00:05:11,940 --> 00:05:16,620
+things that you shouldn't and then you
+
+00:05:13,590 --> 00:05:20,070
+can have interesting sessions trying to
+
+00:05:16,620 --> 00:05:22,020
+debug what's going on in prod and then
+
+00:05:20,070 --> 00:05:23,400
+the final thing is of version stamps and
+
+00:05:22,020 --> 00:05:25,380
+Ryan already mentioned version stamps in
+
+00:05:23,400 --> 00:05:28,100
+his presentation but version stamps
+
+00:05:25,380 --> 00:05:30,450
+essentially let you get a 10 byte
+
+00:05:28,100 --> 00:05:33,330
+monotonically increasing value from the
+
+00:05:30,450 --> 00:05:35,250
+database at commit time and overwrite
+
+00:05:33,330 --> 00:05:36,600
+parts of your key or parts of your value
+
+00:05:35,250 --> 00:05:38,910
+with that 10 byte monotonically
+
+00:05:36,600 --> 00:05:39,990
+increasing thing and foundation DB
+
+00:05:38,910 --> 00:05:42,090
+guarantees that within a cluster that
+
+00:05:39,990 --> 00:05:44,760
+value is unique and that value always
+
+00:05:42,090 --> 00:05:47,520
+goes up in time and this allows you to
+
+00:05:44,760 --> 00:05:49,820
+do things like handle cues in a very
+
+00:05:47,520 --> 00:05:52,230
+high contention way because there are no
+
+00:05:49,820 --> 00:05:54,390
+Recon flicks at all and everything is
+
+00:05:52,230 --> 00:05:56,790
+handled by the cluster kind of putting
+
+00:05:54,390 --> 00:05:57,150
+things in commit order a couple warnings
+
+00:05:56,790 --> 00:05:59,670
+here
+
+00:05:57,150 --> 00:06:01,440
+one version stamps are inherently non
+
+00:05:59,670 --> 00:06:03,530
+idempotent if you end up retrying a
+
+00:06:01,440 --> 00:06:06,330
+transaction you will get a different key
+
+00:06:03,530 --> 00:06:08,880
+guaranteed the second time this is the
+
+00:06:06,330 --> 00:06:10,740
+exact opposite of item potency and it
+
+00:06:08,880 --> 00:06:13,580
+also the values aren't valid across
+
+00:06:10,740 --> 00:06:15,690
+clusters you can't correlate exactly
+
+00:06:13,580 --> 00:06:17,340
+versions you get from one cluster with
+
+00:06:15,690 --> 00:06:19,320
+versions you get another or from another
+
+00:06:17,340 --> 00:06:20,790
+and that includes doing things like if
+
+00:06:19,320 --> 00:06:22,200
+you have to restore into a new cluster
+
+00:06:20,790 --> 00:06:23,670
+you're not guaranteed that the version
+
+00:06:22,200 --> 00:06:27,450
+stamps that you get back will make any
+
+00:06:23,670 --> 00:06:31,620
+sense so but they can be very powerful
+
+00:06:27,450 --> 00:06:32,610
+in certain situations and so to talk
+
+00:06:31,620 --> 00:06:34,170
+about these things I want to go through
+
+00:06:32,610 --> 00:06:39,360
+a case study and the case study is the
+
+00:06:34,170 --> 00:06:39,930
+sync problem so what is sync so sync or
+
+00:06:39,360 --> 00:06:42,449
+synchronous
+
+00:06:39,930 --> 00:06:44,400
+is a process where you might have
+
+00:06:42,449 --> 00:06:47,310
+multiple clients who want to synchronize
+
+00:06:44,400 --> 00:06:48,930
+on in some set of values in this case
+
+00:06:47,310 --> 00:06:50,610
+we're gonna use a lot of a mathematical
+
+00:06:48,930 --> 00:06:51,960
+set but you could imagine synchronizing
+
+00:06:50,610 --> 00:06:54,240
+a map or synchronizing something more
+
+00:06:51,960 --> 00:06:55,710
+interesting and so it's going to have a
+
+00:06:54,240 --> 00:06:57,360
+pretty simple API you're gonna be able
+
+00:06:55,710 --> 00:06:58,800
+to insert things into your sink machine
+
+00:06:57,360 --> 00:07:00,360
+and you're gonna be able to get things
+
+00:06:58,800 --> 00:07:03,180
+from your sink machine and you're going
+
+00:07:00,360 --> 00:07:04,889
+to be able to pass it a token from the
+
+00:07:03,180 --> 00:07:06,509
+last time you read and so you'll only
+
+00:07:04,889 --> 00:07:09,810
+get updates you're tailing updates
+
+00:07:06,509 --> 00:07:11,370
+continuously so we're gonna start with a
+
+00:07:09,810 --> 00:07:12,539
+pretty simple approach we're not going
+
+00:07:11,370 --> 00:07:14,789
+to worry about concurrency at first
+
+00:07:12,539 --> 00:07:16,229
+we're just gonna keep a key that key is
+
+00:07:14,789 --> 00:07:18,930
+going to have the maximum token we've
+
+00:07:16,229 --> 00:07:20,990
+seen so far and we're also going to keep
+
+00:07:18,930 --> 00:07:23,460
+an index of items in our sink machine
+
+00:07:20,990 --> 00:07:27,630
+index by this token value and then we
+
+00:07:23,460 --> 00:07:31,440
+just sync by doing a scan so for example
+
+00:07:27,630 --> 00:07:34,169
+here's a simple sink machine inside the
+
+00:07:31,440 --> 00:07:36,599
+cluster we have five items the max token
+
+00:07:34,169 --> 00:07:38,820
+is four items of zero through four or
+
+00:07:36,599 --> 00:07:40,770
+index zero through four so in order to
+
+00:07:38,820 --> 00:07:44,099
+insert something our client will just
+
+00:07:40,770 --> 00:07:46,020
+read the max token it gets back for is
+
+00:07:44,099 --> 00:07:47,940
+its max token and then it will commit a
+
+00:07:46,020 --> 00:07:49,380
+new transaction you can see in its reads
+
+00:07:47,940 --> 00:07:51,270
+that it has the max token and in its
+
+00:07:49,380 --> 00:07:53,699
+right set right set it has the key that
+
+00:07:51,270 --> 00:07:55,919
+it's writing to five as well as the max
+
+00:07:53,699 --> 00:07:57,210
+token and so when it inserts for show
+
+00:07:55,919 --> 00:07:59,190
+into the database because it's the only
+
+00:07:57,210 --> 00:08:00,690
+thing going on it gets added to the end
+
+00:07:59,190 --> 00:08:03,300
+and the max token gets updated
+
+00:08:00,690 --> 00:08:04,830
+atomically likewise a second client
+
+00:08:03,300 --> 00:08:06,599
+let's is trying to do a sync
+
+00:08:04,830 --> 00:08:09,389
+so it'll sync from three so it'll start
+
+00:08:06,599 --> 00:08:11,250
+scanning from for the one after it got
+
+00:08:09,389 --> 00:08:12,900
+its last token from and it'll get back
+
+00:08:11,250 --> 00:08:16,590
+to results back elderberry and
+
+00:08:12,900 --> 00:08:18,630
+Fraschilla okay here's the problem case
+
+00:08:16,590 --> 00:08:20,039
+right so you have two clients trying to
+
+00:08:18,630 --> 00:08:21,539
+insert at once one is trying to insert
+
+00:08:20,039 --> 00:08:23,849
+for show ones trying to insert Fig
+
+00:08:21,539 --> 00:08:25,830
+client one reads the max token it gets
+
+00:08:23,849 --> 00:08:28,349
+back for client two reads the max token
+
+00:08:25,830 --> 00:08:31,440
+it also gets back for now client one
+
+00:08:28,349 --> 00:08:33,750
+writes five to the database over writes
+
+00:08:31,440 --> 00:08:34,140
+two key five it succeeds because it was
+
+00:08:33,750 --> 00:08:36,870
+first
+
+00:08:34,140 --> 00:08:38,669
+but now client to client two tries to do
+
+00:08:36,870 --> 00:08:40,709
+it right and it's trying to write the
+
+00:08:38,669 --> 00:08:42,360
+exact same case trying to write five and
+
+00:08:40,709 --> 00:08:44,790
+importantly it's basing its key right
+
+00:08:42,360 --> 00:08:47,040
+the key that it's choosing on the value
+
+00:08:44,790 --> 00:08:49,140
+of max token but max token has changed
+
+00:08:47,040 --> 00:08:53,760
+since it began its transaction so the
+
+00:08:49,140 --> 00:08:54,000
+resolvers will fail it all right so this
+
+00:08:53,760 --> 00:08:56,010
+is
+
+00:08:54,000 --> 00:08:57,990
+actually kind of will work with low
+
+00:08:56,010 --> 00:08:59,490
+concurrency workloads and so if you have
+
+00:08:57,990 --> 00:09:02,730
+a few enough people trying to interact
+
+00:08:59,490 --> 00:09:06,180
+with the sink sink machine at once then
+
+00:09:02,730 --> 00:09:09,270
+you might not have a problem but but
+
+00:09:06,180 --> 00:09:12,630
+eventually you'll end up being oh I see
+
+00:09:09,270 --> 00:09:13,980
+what it's doing oh this has a volume
+
+00:09:12,630 --> 00:09:16,230
+control and every time I accidentally
+
+00:09:13,980 --> 00:09:21,030
+hit volume it like complains about I'm
+
+00:09:16,230 --> 00:09:22,470
+already at min volume whatever yes if
+
+00:09:21,030 --> 00:09:24,180
+you've too many clients of one's coming
+
+00:09:22,470 --> 00:09:25,950
+in you'll eventually be upset about
+
+00:09:24,180 --> 00:09:27,600
+having an answer client questions about
+
+00:09:25,950 --> 00:09:28,830
+how come they get random conflicts all
+
+00:09:27,600 --> 00:09:29,880
+the time and so you decide that you
+
+00:09:28,830 --> 00:09:32,430
+should want to want to make this more
+
+00:09:29,880 --> 00:09:34,980
+scalable and add the ability to handle
+
+00:09:32,430 --> 00:09:37,320
+more require more clients and ones and
+
+00:09:34,980 --> 00:09:39,210
+so the problem was that all of our
+
+00:09:37,320 --> 00:09:41,460
+clients based their next key based on
+
+00:09:39,210 --> 00:09:44,400
+the value of max token and they all
+
+00:09:41,460 --> 00:09:46,200
+choose chose the same value based on the
+
+00:09:44,400 --> 00:09:47,370
+next token they all added one and so
+
+00:09:46,200 --> 00:09:49,350
+we're going to try an approach where
+
+00:09:47,370 --> 00:09:51,390
+we're going to try and relax
+
+00:09:49,350 --> 00:09:53,430
+the reliance of max token so we're no
+
+00:09:51,390 --> 00:09:54,360
+longer going to do that read at full
+
+00:09:53,430 --> 00:09:56,190
+oscillation we're gonna do that in
+
+00:09:54,360 --> 00:09:57,810
+snapshot isolation level and then we're
+
+00:09:56,190 --> 00:09:59,460
+also going to have clients try and pick
+
+00:09:57,810 --> 00:10:02,390
+different values when they insert into
+
+00:09:59,460 --> 00:10:05,460
+the sync index through randomness so
+
+00:10:02,390 --> 00:10:06,990
+like I said just out of random value to
+
+00:10:05,460 --> 00:10:08,490
+the value you get from max token and
+
+00:10:06,990 --> 00:10:10,680
+then write that element using the new
+
+00:10:08,490 --> 00:10:12,480
+value and then we'll update the max
+
+00:10:10,680 --> 00:10:14,070
+token accordingly with the value we
+
+00:10:12,480 --> 00:10:15,839
+chose and we'll use it the max atomic
+
+00:10:14,070 --> 00:10:18,120
+operation in order to have many clients
+
+00:10:15,839 --> 00:10:20,580
+do that at once so let's see an example
+
+00:10:18,120 --> 00:10:22,410
+again of the problematic use case of two
+
+00:10:20,580 --> 00:10:23,730
+clients trying to insert at once this
+
+00:10:22,410 --> 00:10:25,200
+time you'll notice there are gaps in
+
+00:10:23,730 --> 00:10:26,550
+between the elements of the sync index
+
+00:10:25,200 --> 00:10:28,020
+and that's because we're adding a random
+
+00:10:26,550 --> 00:10:30,080
+value each time so we're sort of
+
+00:10:28,020 --> 00:10:32,430
+incrementing nicely by one we get gaps
+
+00:10:30,080 --> 00:10:34,800
+and so the first client will try via the
+
+00:10:32,430 --> 00:10:36,390
+max token it gets back 20 and let's say
+
+00:10:34,800 --> 00:10:39,270
+the second client tries to read the max
+
+00:10:36,390 --> 00:10:41,100
+token it also gets back 20 and then
+
+00:10:39,270 --> 00:10:42,240
+let's say client 1 generates a random
+
+00:10:41,100 --> 00:10:46,620
+number and it generates a very random
+
+00:10:42,240 --> 00:10:47,880
+number 7 and it writes back to key 27 so
+
+00:10:46,620 --> 00:10:49,860
+if you look at the read set of this
+
+00:10:47,880 --> 00:10:51,630
+transaction notice that max token is not
+
+00:10:49,860 --> 00:10:54,270
+within it that is because we read max
+
+00:10:51,630 --> 00:10:58,470
+token of isolation lot isolation level
+
+00:10:54,270 --> 00:11:00,420
+but we are writing Zacky 27 and also
+
+00:10:58,470 --> 00:11:02,339
+we're adding key 27 to our read set and
+
+00:11:00,420 --> 00:11:04,290
+the reason we're doing that is that if
+
+00:11:02,339 --> 00:11:06,839
+our second client happens to choose 7 as
+
+00:11:04,290 --> 00:11:07,470
+well and tries to hit to that same key
+
+00:11:06,839 --> 00:11:09,750
+we want
+
+00:11:07,470 --> 00:11:11,069
+conflicts to save us if we had made the
+
+00:11:09,750 --> 00:11:12,750
+mistake of not including that we would
+
+00:11:11,069 --> 00:11:15,750
+have had those bad production problems I
+
+00:11:12,750 --> 00:11:17,850
+mentioned earlier and so client one
+
+00:11:15,750 --> 00:11:21,990
+succeeds incorrectly Android stereo 2
+
+00:11:17,850 --> 00:11:25,819
+position 27 client to by amazing
+
+00:11:21,990 --> 00:11:30,350
+coincidence didn't pick 7 and this time
+
+00:11:25,819 --> 00:11:34,470
+tries to write fig 2 position 22 and
+
+00:11:30,350 --> 00:11:35,399
+because it doesn't have any max token
+
+00:11:34,470 --> 00:11:36,480
+has changed but it doesn't matter
+
+00:11:35,399 --> 00:11:37,949
+because it's not the read conflict set
+
+00:11:36,480 --> 00:11:39,509
+it's not writing to the same key as the
+
+00:11:37,949 --> 00:11:41,550
+other transaction so it succeeds and now
+
+00:11:39,509 --> 00:11:45,329
+fig is inserted in position 22 and our
+
+00:11:41,550 --> 00:11:47,699
+sync index so is this a good solution
+
+00:11:45,329 --> 00:11:49,500
+well in some sense we haven't exactly
+
+00:11:47,699 --> 00:11:51,300
+solved the problem and that we still
+
+00:11:49,500 --> 00:11:53,250
+have a bounded probability of conflicts
+
+00:11:51,300 --> 00:11:55,560
+right if people pick the same thing then
+
+00:11:53,250 --> 00:11:57,569
+they get a conflict so that's not great
+
+00:11:55,560 --> 00:11:58,740
+but maybe well we're okay with that but
+
+00:11:57,569 --> 00:12:01,620
+there's a deeper problem that has to do
+
+00:11:58,740 --> 00:12:03,689
+with reads so this is a little bit more
+
+00:12:01,620 --> 00:12:06,420
+involved in his three clients sorry
+
+00:12:03,689 --> 00:12:08,310
+so again we'll have two clients trying
+
+00:12:06,420 --> 00:12:12,149
+to insert at once and one client who's
+
+00:12:08,310 --> 00:12:15,329
+trying to do a sync so as before client
+
+00:12:12,149 --> 00:12:17,670
+one will read the max token and we'll
+
+00:12:15,329 --> 00:12:19,170
+have client to read the max token and
+
+00:12:17,670 --> 00:12:21,209
+then let's say client one tries to
+
+00:12:19,170 --> 00:12:23,639
+commit it generates a random number of
+
+00:12:21,209 --> 00:12:27,000
+seven again it inserts for Java in
+
+00:12:23,639 --> 00:12:28,920
+position 27 so far so good now let's say
+
+00:12:27,000 --> 00:12:31,829
+at this point client 3 tries to begin at
+
+00:12:28,920 --> 00:12:33,420
+sync so it lasts on 19 so it's going to
+
+00:12:31,829 --> 00:12:35,310
+start reading from 20 it's going to add
+
+00:12:33,420 --> 00:12:37,319
+two results back elderberry and for Java
+
+00:12:35,310 --> 00:12:40,970
+also so far so good
+
+00:12:37,319 --> 00:12:43,110
+now client to client to let's say rolls
+
+00:12:40,970 --> 00:12:46,380
+its random number generator and gets
+
+00:12:43,110 --> 00:12:49,139
+back to again well this time when we
+
+00:12:46,380 --> 00:12:51,240
+insert something into the database it's
+
+00:12:49,139 --> 00:12:52,980
+writing a position 22 it has no read
+
+00:12:51,240 --> 00:12:54,449
+conflicts that are that have been no
+
+00:12:52,980 --> 00:12:57,389
+reach no keys have been modified since
+
+00:12:54,449 --> 00:13:00,240
+it started that it cares about and so
+
+00:12:57,389 --> 00:13:02,850
+it's will successfully insert fig into
+
+00:13:00,240 --> 00:13:05,639
+the database but inserts it inserts it
+
+00:13:02,850 --> 00:13:07,350
+at position 22 and the problem there is
+
+00:13:05,639 --> 00:13:10,230
+that because client 3 has already read
+
+00:13:07,350 --> 00:13:12,329
+through 27 client 3 will never go back
+
+00:13:10,230 --> 00:13:15,089
+and sync back 22 so essentially you've
+
+00:13:12,329 --> 00:13:16,170
+had a lost right into your system so how
+
+00:13:15,089 --> 00:13:18,139
+do you fix this how do you fix this
+
+00:13:16,170 --> 00:13:21,209
+problem that some values aren't synced
+
+00:13:18,139 --> 00:13:23,309
+and as an addendum
+
+00:13:21,209 --> 00:13:25,230
+this design this basic idea of adding
+
+00:13:23,309 --> 00:13:26,490
+random numbers or randomness to the keys
+
+00:13:25,230 --> 00:13:27,899
+as you're entering entering them into
+
+00:13:26,490 --> 00:13:30,389
+the queue that's not necessarily not a
+
+00:13:27,899 --> 00:13:32,220
+tenable design for example certain job
+
+00:13:30,389 --> 00:13:34,649
+queue structures this would be perfectly
+
+00:13:32,220 --> 00:13:36,329
+fine if you're doing certain kind of
+
+00:13:34,649 --> 00:13:38,459
+roughly auto incrementing primary key
+
+00:13:36,329 --> 00:13:40,199
+type things this might be fine the only
+
+00:13:38,459 --> 00:13:43,350
+problem is that because of our read use
+
+00:13:40,199 --> 00:13:44,819
+read pattern we'll lose some updates and
+
+00:13:43,350 --> 00:13:48,089
+that's that's the exact problem we're
+
+00:13:44,819 --> 00:13:49,980
+trying to solve so if we look at this
+
+00:13:48,089 --> 00:13:52,499
+the problem was we've read through a key
+
+00:13:49,980 --> 00:13:54,959
+and then somebody else committed
+
+00:13:52,499 --> 00:13:56,369
+something before us and so the way we're
+
+00:13:54,959 --> 00:13:58,920
+gonna get around this is by making sure
+
+00:13:56,369 --> 00:14:01,019
+that every time we do a write it's at
+
+00:13:58,920 --> 00:14:03,749
+the end of everything that anyone who's
+
+00:14:01,019 --> 00:14:06,360
+ever committed and so to solve that
+
+00:14:03,749 --> 00:14:07,709
+we're going to use version stamps so
+
+00:14:06,360 --> 00:14:09,480
+we're going to remove the maxxtow kinky
+
+00:14:07,709 --> 00:14:11,519
+all together we don't need it anymore
+
+00:14:09,480 --> 00:14:13,499
+and we're just going to begin all of our
+
+00:14:11,519 --> 00:14:15,059
+index keys with the current commit for
+
+00:14:13,499 --> 00:14:16,619
+Earth equipment version using version
+
+00:14:15,059 --> 00:14:18,029
+stamp operations and we're going to
+
+00:14:16,619 --> 00:14:19,410
+depend on the two properties of version
+
+00:14:18,029 --> 00:14:21,660
+stamps that I mentioned before one
+
+00:14:19,410 --> 00:14:22,679
+they're monotonic by commit order this
+
+00:14:21,660 --> 00:14:25,290
+is how we're gonna make sure that our
+
+00:14:22,679 --> 00:14:26,279
+syncs line up correctly and the other
+
+00:14:25,290 --> 00:14:27,749
+thing we're gonna rely on is the fact
+
+00:14:26,279 --> 00:14:29,249
+that they unique this is how we're going
+
+00:14:27,749 --> 00:14:31,939
+to make sure that two clients coming at
+
+00:14:29,249 --> 00:14:34,439
+once don't write to the same place so
+
+00:14:31,939 --> 00:14:36,269
+here we have our two clients trying to
+
+00:14:34,439 --> 00:14:39,779
+insert into the database this time is
+
+00:14:36,269 --> 00:14:41,939
+going to be relatively simple client one
+
+00:14:39,779 --> 00:14:44,850
+when it tries to insert video it can do
+
+00:14:41,939 --> 00:14:46,379
+this all in just a single blind right it
+
+00:14:44,850 --> 00:14:49,110
+has no reads and it's great conflict
+
+00:14:46,379 --> 00:14:50,490
+ranges it has one mutation namely that
+
+00:14:49,110 --> 00:14:52,499
+it's setting the version stamped key
+
+00:14:50,490 --> 00:14:55,589
+beginning with the version stamp two for
+
+00:14:52,499 --> 00:14:57,269
+Java and it's right conflict side is a
+
+00:14:55,589 --> 00:15:00,360
+little bit complicated ask me afterwards
+
+00:14:57,269 --> 00:15:01,559
+if you want to know the details let's
+
+00:15:00,360 --> 00:15:03,629
+say that the foundation you be close to
+
+00:15:01,559 --> 00:15:04,649
+it gives at version 500 so when it goes
+
+00:15:03,629 --> 00:15:06,089
+to write into the database it will
+
+00:15:04,649 --> 00:15:08,459
+overwrite the places with the version
+
+00:15:06,089 --> 00:15:10,110
+stamp with 500 and boom Michelle gets
+
+00:15:08,459 --> 00:15:14,069
+added to the end of the database or to
+
+00:15:10,110 --> 00:15:16,379
+the end of our sync machine then the
+
+00:15:14,069 --> 00:15:18,089
+client to it also will submit a very
+
+00:15:16,379 --> 00:15:20,759
+similar-looking transaction but this
+
+00:15:18,089 --> 00:15:22,439
+time let's say the foundation DB
+
+00:15:20,759 --> 00:15:24,269
+database gives it a different version
+
+00:15:22,439 --> 00:15:25,139
+and it's we know it's going to give it a
+
+00:15:24,269 --> 00:15:26,670
+different version and we know it's going
+
+00:15:25,139 --> 00:15:29,279
+to give it us a higher version so let's
+
+00:15:26,670 --> 00:15:30,480
+say it gives it five twenty and fig it's
+
+00:15:29,279 --> 00:15:32,100
+added to the end of the database there
+
+00:15:30,480 --> 00:15:34,190
+and so you can have multiple clients all
+
+00:15:32,100 --> 00:15:35,810
+adding to the same
+
+00:15:34,190 --> 00:15:39,190
+machine at once all getting placed at
+
+00:15:35,810 --> 00:15:42,770
+the end happily now happily coexisting
+
+00:15:39,190 --> 00:15:45,080
+so is this a perfect solution well kind
+
+00:15:42,770 --> 00:15:47,840
+of in some sense it meets our spec
+
+00:15:45,080 --> 00:15:50,270
+exactly we have unlimited parallelism
+
+00:15:47,840 --> 00:15:53,900
+all coming in at once to the same place
+
+00:15:50,270 --> 00:15:55,190
+and we have zero conflicts no but
+
+00:15:53,900 --> 00:15:56,780
+nothing is perfect right so we have a
+
+00:15:55,190 --> 00:15:58,790
+couple of problems one is that FTB's
+
+00:15:56,780 --> 00:16:03,140
+tuple air encodes integers very
+
+00:15:58,790 --> 00:16:05,750
+compactly in particular it uses a run
+
+00:16:03,140 --> 00:16:07,700
+variable length encoding scheme so if
+
+00:16:05,750 --> 00:16:09,590
+you have less than 65,000 items in your
+
+00:16:07,700 --> 00:16:12,680
+sync index you can get by with only two
+
+00:16:09,590 --> 00:16:15,380
+bytes for your token for each individual
+
+00:16:12,680 --> 00:16:17,690
+item but virgin stamps are 12 bytes long
+
+00:16:15,380 --> 00:16:20,300
+as deployed in many of the bindings and
+
+00:16:17,690 --> 00:16:25,700
+so you're increasing your space usage
+
+00:16:20,300 --> 00:16:27,470
+usage sometimes by a lot also version
+
+00:16:25,700 --> 00:16:29,750
+stamps can make your code significantly
+
+00:16:27,470 --> 00:16:30,740
+more complex a lot of your client code
+
+00:16:29,750 --> 00:16:33,050
+is going to be written with the
+
+00:16:30,740 --> 00:16:34,940
+assumption that it can know what keys
+
+00:16:33,050 --> 00:16:36,650
+it's about to write we're version stamps
+
+00:16:34,940 --> 00:16:38,930
+just by their very nature you don't know
+
+00:16:36,650 --> 00:16:41,090
+what it's going to write until the very
+
+00:16:38,930 --> 00:16:42,820
+end until it gets committed so that can
+
+00:16:41,090 --> 00:16:45,010
+make a little bit more complicated
+
+00:16:42,820 --> 00:16:48,830
+especially if you have to do things like
+
+00:16:45,010 --> 00:16:50,570
+remove multiple updates to the same key
+
+00:16:48,830 --> 00:16:53,270
+remove something you're going to sync
+
+00:16:50,570 --> 00:16:55,310
+that's a little bit of a hard problem as
+
+00:16:53,270 --> 00:16:56,690
+mentioned before this is not night
+
+00:16:55,310 --> 00:16:58,370
+impotant operation so if you want to
+
+00:16:56,690 --> 00:17:00,320
+make it item potent you have to do a
+
+00:16:58,370 --> 00:17:02,900
+little bit of finagling where for
+
+00:17:00,320 --> 00:17:04,339
+example you might keep a map of item to
+
+00:17:02,900 --> 00:17:06,290
+version stamp and you have to check that
+
+00:17:04,339 --> 00:17:08,329
+map to see if it exists or something
+
+00:17:06,290 --> 00:17:09,680
+like that and likewise deletes and
+
+00:17:08,329 --> 00:17:11,930
+updates can make somewhat complicated
+
+00:17:09,680 --> 00:17:13,010
+that when you do a delete or an update
+
+00:17:11,930 --> 00:17:14,209
+to something that's in the version stamp
+
+00:17:13,010 --> 00:17:15,890
+thing in order to figure out the key you
+
+00:17:14,209 --> 00:17:18,040
+need a map like that in order to do it
+
+00:17:15,890 --> 00:17:18,040
+correctly
+
+00:17:18,819 --> 00:17:25,160
+so in conclusion there are a couple
+
+00:17:23,420 --> 00:17:26,780
+different strategies you might employ in
+
+00:17:25,160 --> 00:17:28,459
+order when you're analyzing your data
+
+00:17:26,780 --> 00:17:30,980
+model one is to look at your redirect
+
+00:17:28,459 --> 00:17:32,510
+modify write patterns that you have in
+
+00:17:30,980 --> 00:17:34,520
+your database things keys that you're
+
+00:17:32,510 --> 00:17:36,170
+updating within the transaction and see
+
+00:17:34,520 --> 00:17:38,690
+if any of those can be replaced with
+
+00:17:36,170 --> 00:17:40,580
+atomic operations you want to be careful
+
+00:17:38,690 --> 00:17:41,930
+be mindful of your read conflicts think
+
+00:17:40,580 --> 00:17:43,640
+about which read companies you don't
+
+00:17:41,930 --> 00:17:47,220
+really need and which ones you can
+
+00:17:43,640 --> 00:17:49,320
+remove and then a third thing is you
+
+00:17:47,220 --> 00:17:52,110
+have to be careful when you're being
+
+00:17:49,320 --> 00:17:54,240
+clever with conflict ranges etc that
+
+00:17:52,110 --> 00:17:55,679
+you're not accidentally removing
+
+00:17:54,240 --> 00:17:57,630
+something that you actually do depend on
+
+00:17:55,679 --> 00:17:59,490
+and therefore destroying the correctness
+
+00:17:57,630 --> 00:18:02,039
+of your system so it's a little bit of a
+
+00:17:59,490 --> 00:18:03,630
+balancing act but it's kind of necessary
+
+00:18:02,039 --> 00:18:06,720
+to get good throughput in good latency
+
+00:18:03,630 --> 00:18:08,970
+with FDB so thank you very much and a
+
+00:18:06,720 --> 00:18:13,190
+happy data modelling
+
+00:18:08,970 --> 00:18:13,190
+
+YouTube URL: https://www.youtube.com/watch?v=2HiIgbxtx0c
+
+

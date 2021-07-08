@@ -1,0 +1,1079 @@
+Title: A New Radix-Tree Based Memory Storage Engine - Mengran Wang, VMware
+Publication date: 2019-11-25
+Playlist: FoundationDB Summit 2019
+Description: 
+	A New Radix-Tree Based Memory Storage Engine - Mengran Wang, VMware
+
+This talk describes the development of a new FDB memory storage engine based on the radix tree data structure. The default memory storage engine is a balanced binary search tree. Because Wavefront’s use case involves a large amount of prefix-overlap in keys, we decided to adopt a different data structure, the radix tree, to make our FDB clusters more space-efficient. This trie-based KV store has two main advantages:
+(1) It is more space-efficient than the default engine when there is a large amount of key overlap (as in our time series workloads).
+(2) The height and complexity of a radix tree depend on the length of the keys, not on the number of elements
+
+Our presentation will include a brief introduction to radix tries followed by a deep dive into some of the optimizations we needed to make. Finally, we will show the performance comparison results using real-life Wavefront workloads.
+Captions: 
+	00:00:01,040 --> 00:00:06,839
+so good morning everyone
+
+00:00:04,799 --> 00:00:09,420
+my name is Ming grant and I work have we
+
+00:00:06,839 --> 00:00:10,920
+front today I'm gonna talk about new
+
+00:00:09,420 --> 00:00:12,780
+memory storage engine we have been
+
+00:00:10,920 --> 00:00:13,759
+coding and debugging over the past few
+
+00:00:12,780 --> 00:00:16,890
+months
+
+00:00:13,759 --> 00:00:19,080
+here's agenda we start with a brief
+
+00:00:16,890 --> 00:00:21,210
+introduction to the current FDB memory
+
+00:00:19,080 --> 00:00:23,550
+stringent its main component and
+
+00:00:21,210 --> 00:00:25,410
+functionality and then move to the
+
+00:00:23,550 --> 00:00:27,689
+motivation behind the registry based
+
+00:00:25,410 --> 00:00:30,179
+storage engine why would we want a new
+
+00:00:27,689 --> 00:00:32,160
+one the last thing is some of the
+
+00:00:30,179 --> 00:00:34,469
+optimization we came up with during the
+
+00:00:32,160 --> 00:00:36,210
+development process and of course the
+
+00:00:34,469 --> 00:00:39,899
+most important part the performance
+
+00:00:36,210 --> 00:00:43,290
+result let's see how storage engine fits
+
+00:00:39,899 --> 00:00:45,360
+into the big picture in foundation DP we
+
+00:00:43,290 --> 00:00:47,690
+have this suitable distributed lock
+
+00:00:45,360 --> 00:00:50,309
+system and we have a storage server ro
+
+00:00:47,690 --> 00:00:52,949
+storage engine leaves inside storage
+
+00:00:50,309 --> 00:00:56,940
+server and store server contains exactly
+
+00:00:52,949 --> 00:00:58,800
+one instance of it store server receive
+
+00:00:56,940 --> 00:01:01,230
+mutations in version order from
+
+00:00:58,800 --> 00:01:04,470
+distributed log system and constantly
+
+00:01:01,230 --> 00:01:06,810
+apply them to storage engine the main
+
+00:01:04,470 --> 00:01:09,360
+purpose of storage engine is to press
+
+00:01:06,810 --> 00:01:11,820
+this key value pairs into disk for
+
+00:01:09,360 --> 00:01:14,310
+memory storage engine specifically data
+
+00:01:11,820 --> 00:01:17,070
+is stored directly into heavy container
+
+00:01:14,310 --> 00:01:19,259
+the green box here in memory but all the
+
+00:01:17,070 --> 00:01:21,570
+operations a lot disk that's how
+
+00:01:19,259 --> 00:01:24,060
+durability is guaranteed the key
+
+00:01:21,570 --> 00:01:26,100
+container is a component inside memory
+
+00:01:24,060 --> 00:01:30,720
+storage engine the help store and
+
+00:01:26,100 --> 00:01:33,600
+retrieve data storage engine is used by
+
+00:01:30,720 --> 00:01:35,310
+a single process from one threat this
+
+00:01:33,600 --> 00:01:36,810
+makes development a lot easier right
+
+00:01:35,310 --> 00:01:39,840
+because we don't need to worry about
+
+00:01:36,810 --> 00:01:43,560
+concurrent issue all the storage engine
+
+00:01:39,840 --> 00:01:45,930
+types including SSD memory implement the
+
+00:01:43,560 --> 00:01:48,810
+abstract intercourse call a key value
+
+00:01:45,930 --> 00:01:54,079
+this interface support operations of
+
+00:01:48,810 --> 00:01:56,579
+recovery set rate rearrange and commit
+
+00:01:54,079 --> 00:01:59,189
+then we come to the lowest level and
+
+00:01:56,579 --> 00:02:02,369
+also our main focus today the key we
+
+00:01:59,189 --> 00:02:04,710
+container for current implementation is
+
+00:02:02,369 --> 00:02:06,479
+a balanced binary search tree where in
+
+00:02:04,710 --> 00:02:09,989
+each node we store the key V pairs
+
+00:02:06,479 --> 00:02:12,340
+directly he is a storing order of course
+
+00:02:09,989 --> 00:02:14,170
+both key and value pair up
+
+00:02:12,340 --> 00:02:16,450
+key and value are essentially string
+
+00:02:14,170 --> 00:02:20,440
+wrath string wrath is a data type has
+
+00:02:16,450 --> 00:02:22,510
+been why you use wiliest inside FTP you
+
+00:02:20,440 --> 00:02:25,800
+can think of it as a reference to heap
+
+00:02:22,510 --> 00:02:28,900
+space and we will get your detail later
+
+00:02:25,800 --> 00:02:30,069
+the motivation why would we want a new
+
+00:02:28,900 --> 00:02:31,810
+memory storage engine
+
+00:02:30,069 --> 00:02:34,840
+what's obvious weakness with the
+
+00:02:31,810 --> 00:02:38,440
+existent one first in first we try to be
+
+00:02:34,840 --> 00:02:40,840
+more space efficient if we can build a
+
+00:02:38,440 --> 00:02:42,400
+new type with last memory usage that
+
+00:02:40,840 --> 00:02:45,430
+will bring benefits all the clustering
+
+00:02:42,400 --> 00:02:47,560
+wavefront in order to do so we probably
+
+00:02:45,430 --> 00:02:48,459
+need to revisit the way from point
+
+00:02:47,560 --> 00:02:50,440
+structure today
+
+00:02:48,459 --> 00:02:53,190
+what's a keen format what has been
+
+00:02:50,440 --> 00:02:56,410
+really stored inside the database
+
+00:02:53,190 --> 00:02:59,260
+we're from has Haruka keys that moves a
+
+00:02:56,410 --> 00:03:01,209
+large mountain prefix overlap keys
+
+00:02:59,260 --> 00:03:02,709
+electro graphically stored over the
+
+00:03:01,209 --> 00:03:05,379
+underline petabytes
+
+00:03:02,709 --> 00:03:07,540
+for example character 0 is always story
+
+00:03:05,379 --> 00:03:09,579
+from before culture 1
+
+00:03:07,540 --> 00:03:13,079
+he's starting with the same prefix a
+
+00:03:09,579 --> 00:03:17,560
+store together this is just the key part
+
+00:03:13,079 --> 00:03:19,569
+value a tiny compared to the keys the
+
+00:03:17,560 --> 00:03:21,370
+problem is with current memory storage
+
+00:03:19,569 --> 00:03:23,799
+engine were storing the same prefix
+
+00:03:21,370 --> 00:03:25,840
+multiple times there's literally no
+
+00:03:23,799 --> 00:03:27,549
+prefix compression at all that's the
+
+00:03:25,840 --> 00:03:29,799
+reason why we decided to adopt a
+
+00:03:27,549 --> 00:03:33,220
+different kiwi container using radix
+
+00:03:29,799 --> 00:03:37,840
+tree so what is the ready tree if a
+
+00:03:33,220 --> 00:03:40,450
+familiar was try or dictionary registry
+
+00:03:37,840 --> 00:03:44,560
+is a compressed and space optimized
+
+00:03:40,450 --> 00:03:46,900
+version of it the differences we store
+
+00:03:44,560 --> 00:03:49,209
+the common registry we store the common
+
+00:03:46,900 --> 00:03:52,599
+prefix k julie as a string instead of
+
+00:03:49,209 --> 00:03:55,510
+one character there are two types node
+
+00:03:52,599 --> 00:03:57,459
+inside registry there in unknown Maps
+
+00:03:55,510 --> 00:03:59,829
+partial key to next level nodes and
+
+00:03:57,459 --> 00:04:02,859
+leave no store value corresponding to
+
+00:03:59,829 --> 00:04:06,579
+the key I have a quick demo to show you
+
+00:04:02,859 --> 00:04:08,980
+how registry works very high level let's
+
+00:04:06,579 --> 00:04:11,950
+start with an empty tree user first key
+
+00:04:08,980 --> 00:04:14,349
+value key smile and values Tim it's
+
+00:04:11,950 --> 00:04:16,720
+pretty straightforward but remember to
+
+00:04:14,349 --> 00:04:19,269
+update apparent in this case it's a root
+
+00:04:16,720 --> 00:04:22,960
+note so that parent knows it has one
+
+00:04:19,269 --> 00:04:25,070
+child with perfect starting with s then
+
+00:04:22,960 --> 00:04:27,830
+we insert the second with key Smiths
+
+00:04:25,070 --> 00:04:29,900
+and valor 20 we compare Smith who is
+
+00:04:27,830 --> 00:04:32,560
+existing key and find the common prefix
+
+00:04:29,900 --> 00:04:35,750
+here I highlighted in red in the slides
+
+00:04:32,560 --> 00:04:39,080
+next step is to split the original leaf
+
+00:04:35,750 --> 00:04:41,720
+node into one internal node the key is a
+
+00:04:39,080 --> 00:04:44,650
+common prefix then update the old leaf
+
+00:04:41,720 --> 00:04:47,570
+node and finish inserting the new key
+
+00:04:44,650 --> 00:04:50,600
+the main logic for insert operation is
+
+00:04:47,570 --> 00:04:53,300
+to find the right insertion point split
+
+00:04:50,600 --> 00:04:55,640
+if necessary and insert with a crab key
+
+00:04:53,300 --> 00:04:56,720
+but there are many corner cases and
+
+00:04:55,640 --> 00:04:59,060
+details involved
+
+00:04:56,720 --> 00:05:02,630
+let's keep inserting the key smiley with
+
+00:04:59,060 --> 00:05:04,820
+now 30 you sleep a split and end up
+
+00:05:02,630 --> 00:05:07,580
+having this leaf node with an empty key
+
+00:05:04,820 --> 00:05:10,100
+the challenge is how to deal with the
+
+00:05:07,580 --> 00:05:12,380
+edge case for my implantation I use a
+
+00:05:10,100 --> 00:05:16,610
+special number minus 1 to represent the
+
+00:05:12,380 --> 00:05:19,040
+empty key delete is relatively simple
+
+00:05:16,610 --> 00:05:21,200
+compared to the insert operation you
+
+00:05:19,040 --> 00:05:23,480
+find the leaf node and delete it
+
+00:05:21,200 --> 00:05:26,900
+but the tricky part is to merge if
+
+00:05:23,480 --> 00:05:29,270
+possible in this case the parent le has
+
+00:05:26,900 --> 00:05:34,850
+only one child left you can collapse two
+
+00:05:29,270 --> 00:05:37,250
+into one to save the space so what
+
+00:05:34,850 --> 00:05:40,910
+advantage over the comparison based
+
+00:05:37,250 --> 00:05:44,450
+binary tree for registry first one it's
+
+00:05:40,910 --> 00:05:46,430
+a space efficient it's especially true
+
+00:05:44,450 --> 00:05:49,070
+for the use case involves a large
+
+00:05:46,430 --> 00:05:51,710
+mountain prefix overlap because you
+
+00:05:49,070 --> 00:05:53,390
+store the common prefix only once the
+
+00:05:51,710 --> 00:05:55,610
+height of relative trade depends on the
+
+00:05:53,390 --> 00:05:58,670
+length of a key but in general not on
+
+00:05:55,610 --> 00:06:00,860
+the total elements the third one is the
+
+00:05:58,670 --> 00:06:03,410
+registry requires no rebalancing
+
+00:06:00,860 --> 00:06:05,630
+operation all the insertion order result
+
+00:06:03,410 --> 00:06:09,560
+in the same tree but one of the
+
+00:06:05,630 --> 00:06:10,850
+trade-offs first key inside registry a
+
+00:06:09,560 --> 00:06:14,510
+store in place Li
+
+00:06:10,850 --> 00:06:16,790
+you must reconstruct from the past when
+
+00:06:14,510 --> 00:06:19,370
+you do the rate so this could lead to
+
+00:06:16,790 --> 00:06:22,100
+increase in rail latency the second one
+
+00:06:19,370 --> 00:06:24,560
+is possible memory recommendation cost
+
+00:06:22,100 --> 00:06:28,160
+registry tend to spray the long key into
+
+00:06:24,560 --> 00:06:31,270
+smaller parts and we use FDB memory port
+
+00:06:28,160 --> 00:06:34,430
+to store the key but memory in FTP is
+
+00:06:31,270 --> 00:06:36,590
+allocating trunks with smaller size 16
+
+00:06:34,430 --> 00:06:38,900
+and growing the fashion of power of two
+
+00:06:36,590 --> 00:06:43,100
+so we start with sixteen and followed by
+
+00:06:38,900 --> 00:06:48,350
+32 and 64 leading to variable padding
+
+00:06:43,100 --> 00:06:51,320
+overhead for H key value pair in this
+
+00:06:48,350 --> 00:06:53,570
+section I will focus on the optimization
+
+00:06:51,320 --> 00:06:56,060
+we came up with after first round result
+
+00:06:53,570 --> 00:06:58,970
+and of course the latest result as a
+
+00:06:56,060 --> 00:07:02,509
+comparison one thing worth mentioning
+
+00:06:58,970 --> 00:07:05,780
+about is our test environment it has ta6
+
+00:07:02,509 --> 00:07:08,180
+DP notes in total for each storage
+
+00:07:05,780 --> 00:07:11,360
+server process the memory is said to be
+
+00:07:08,180 --> 00:07:15,289
+22 gigabytes and opera gist-based is
+
+00:07:11,360 --> 00:07:18,979
+said to be 14 gigabytes once the amazing
+
+00:07:15,289 --> 00:07:21,830
+property of our testing cluster is that
+
+00:07:18,979 --> 00:07:24,500
+it has proper configurations which means
+
+00:07:21,830 --> 00:07:26,810
+we can weigh from data to for memory
+
+00:07:24,500 --> 00:07:30,080
+shorts with murmur hash to calculate
+
+00:07:26,810 --> 00:07:32,630
+distribution this configuration gives us
+
+00:07:30,080 --> 00:07:34,820
+the ability to see how registry behave
+
+00:07:32,630 --> 00:07:38,479
+against a regular one under the same
+
+00:07:34,820 --> 00:07:40,880
+workload so memory 0 and 1 are registry
+
+00:07:38,479 --> 00:07:43,250
+storage engine and memory 2 & 3 are
+
+00:07:40,880 --> 00:07:46,780
+regular storage engine workloads are
+
+00:07:43,250 --> 00:07:49,789
+evenly distributed among 4 shards
+
+00:07:46,780 --> 00:07:51,560
+however the performance real for the
+
+00:07:49,789 --> 00:07:56,000
+first round design were not good enough
+
+00:07:51,560 --> 00:07:58,760
+we ended up using more memory operand
+
+00:07:56,000 --> 00:08:01,760
+space and total memory so what could
+
+00:07:58,760 --> 00:08:04,789
+cause the memory usage gap between
+
+00:08:01,760 --> 00:08:08,900
+theory and production let's look at our
+
+00:08:04,789 --> 00:08:11,389
+four key format again the average mass
+
+00:08:08,900 --> 00:08:14,630
+of key v site and our testing cluster is
+
+00:08:11,389 --> 00:08:17,180
+around 50 bytes so best-case scenario
+
+00:08:14,630 --> 00:08:21,349
+for each input key we can have 34 bytes
+
+00:08:17,180 --> 00:08:25,310
+in comma exclude the value part what's
+
+00:08:21,349 --> 00:08:28,820
+more for registry the ratio of total
+
+00:08:25,310 --> 00:08:30,470
+nodes to PV pair is 2.2 however for
+
+00:08:28,820 --> 00:08:33,469
+regular storage engine is always 1
+
+00:08:30,470 --> 00:08:36,650
+because this binary tree where you store
+
+00:08:33,469 --> 00:08:40,400
+the key be paired directly don't over
+
+00:08:36,650 --> 00:08:43,339
+have for both types is 72 bytes and now
+
+00:08:40,400 --> 00:08:45,440
+let's do the math together so for each
+
+00:08:43,339 --> 00:08:46,970
+key be paired inside registry storage
+
+00:08:45,440 --> 00:08:49,579
+engine were able to
+
+00:08:46,970 --> 00:08:51,560
+the 34 bytes in the key but create
+
+00:08:49,579 --> 00:08:55,850
+80-something bytes of actual note
+
+00:08:51,560 --> 00:08:57,410
+overhead the bottom line here is in
+
+00:08:55,850 --> 00:09:00,139
+order to have the same performance
+
+00:08:57,410 --> 00:09:03,800
+result as a regular tree we need to save
+
+00:09:00,139 --> 00:09:05,870
+another 52 bytes somewhere somehow based
+
+00:09:03,800 --> 00:09:09,050
+on the lasas here the solution has a
+
+00:09:05,870 --> 00:09:11,930
+simple we can try to reduce two things
+
+00:09:09,050 --> 00:09:16,279
+the first thing is note overhead the
+
+00:09:11,930 --> 00:09:17,899
+second is total number of nodes this is
+
+00:09:16,279 --> 00:09:20,120
+an initial design of the node structure
+
+00:09:17,899 --> 00:09:23,180
+there are seven member variables in
+
+00:09:20,120 --> 00:09:25,819
+total and the number inside parentheses
+
+00:09:23,180 --> 00:09:28,129
+indicate how big it is in by unit and
+
+00:09:25,819 --> 00:09:29,930
+I'll go through them one by one trying
+
+00:09:28,129 --> 00:09:33,740
+to find the potential optimization we
+
+00:09:29,930 --> 00:09:35,990
+can have the first thing is to
+
+00:09:33,740 --> 00:09:37,970
+differentiate between leaf node and in
+
+00:09:35,990 --> 00:09:42,350
+there note I can't believe I didn't do
+
+00:09:37,970 --> 00:09:44,300
+it in the first run so a both leaf node
+
+00:09:42,350 --> 00:09:46,579
+and internal node they share some of the
+
+00:09:44,300 --> 00:09:49,069
+member variables believe now don't care
+
+00:09:46,579 --> 00:09:51,980
+about children info by extracting this
+
+00:09:49,069 --> 00:09:56,089
+part out we can save 24 bytes for this
+
+00:09:51,980 --> 00:09:59,660
+specific node type the second is to
+
+00:09:56,089 --> 00:10:02,449
+change map into vector so standard map
+
+00:09:59,660 --> 00:10:05,269
+is a sorted container Julie implement as
+
+00:10:02,449 --> 00:10:07,639
+rabbitry that requires additional memory
+
+00:10:05,269 --> 00:10:09,470
+usage for maintaining structure for
+
+00:10:07,639 --> 00:10:12,230
+example when you insert element European
+
+00:10:09,470 --> 00:10:15,139
+Alice 16 bytes additional memory usage
+
+00:10:12,230 --> 00:10:17,660
+the vector is a sequence container you
+
+00:10:15,139 --> 00:10:19,699
+simply append in the end but in this
+
+00:10:17,660 --> 00:10:23,290
+case we need to keep elements in order
+
+00:10:19,699 --> 00:10:23,290
+with doing the insertion and deletion
+
+00:10:24,879 --> 00:10:34,459
+the second idea is to use P field for
+
+00:10:28,009 --> 00:10:36,980
+metadata this is not data part we have a
+
+00:10:34,459 --> 00:10:40,910
+bullying is list to indicate whether
+
+00:10:36,980 --> 00:10:43,550
+this node is live not and we have the
+
+00:10:40,910 --> 00:10:46,399
+integer M taps to keep track of the
+
+00:10:43,550 --> 00:10:48,740
+common prefix lens with the ancestor the
+
+00:10:46,399 --> 00:10:51,860
+value of cooling can either be 0 1 so 1
+
+00:10:48,740 --> 00:10:54,709
+bit is sufficient the value of of M taps
+
+00:10:51,860 --> 00:10:57,560
+will not exceed 100 K that's a hard
+
+00:10:54,709 --> 00:11:00,980
+limit for f DB so 16 bits
+
+00:10:57,560 --> 00:11:04,129
+17 bits are sufficient one plus 17
+
+00:11:00,980 --> 00:11:06,230
+equals 18 by using Bayfield the space
+
+00:11:04,129 --> 00:11:08,629
+for one integer can hold up those two
+
+00:11:06,230 --> 00:11:15,290
+variables let's reduce the size from a
+
+00:11:08,629 --> 00:11:17,899
+bytes to four bytes the third idea is to
+
+00:11:15,290 --> 00:11:22,370
+use inline data and Union type on string
+
+00:11:17,899 --> 00:11:26,360
+rafts in registry we used ringwraith to
+
+00:11:22,370 --> 00:11:29,149
+storekeeper fix it consists of two parts
+
+00:11:26,360 --> 00:11:31,279
+now a PI pointer that points to a
+
+00:11:29,149 --> 00:11:34,970
+contiguous heap space assigned by the
+
+00:11:31,279 --> 00:11:38,360
+memory pool and an integer to define the
+
+00:11:34,970 --> 00:11:41,029
+lens so total is 12 bytes one
+
+00:11:38,360 --> 00:11:42,860
+observation we have is around 80% knows
+
+00:11:41,029 --> 00:11:45,319
+in ready tree under wavefront
+
+00:11:42,860 --> 00:11:49,910
+workloads have data lines more than 200
+
+00:11:45,319 --> 00:11:52,430
+bytes hence Union plus inline data for
+
+00:11:49,910 --> 00:11:52,939
+kiss mother and 12 bytes we use inline
+
+00:11:52,430 --> 00:11:54,709
+data
+
+00:11:52,939 --> 00:11:57,740
+it's by array will store the kid
+
+00:11:54,709 --> 00:12:01,309
+directly inside for key larger natal
+
+00:11:57,740 --> 00:12:05,720
+bytes we switch to string Raths store
+
+00:12:01,309 --> 00:12:08,029
+the key inside the memory pool the next
+
+00:12:05,720 --> 00:12:11,480
+idea is inspired by paper adaptive
+
+00:12:08,029 --> 00:12:15,170
+registry instead of always using vector
+
+00:12:11,480 --> 00:12:17,149
+to store the children info we'd have two
+
+00:12:15,170 --> 00:12:20,540
+types of internode with different
+
+00:12:17,149 --> 00:12:22,910
+capacities the first one can store up to
+
+00:12:20,540 --> 00:12:26,660
+three children key and pointer pairs as
+
+00:12:22,910 --> 00:12:30,170
+my example on the right it currently has
+
+00:12:26,660 --> 00:12:32,329
+two elements with key 0 and forth using
+
+00:12:30,170 --> 00:12:35,059
+fixed length array so when the
+
+00:12:32,329 --> 00:12:37,250
+children's I exceed 3 will switch to the
+
+00:12:35,059 --> 00:12:39,800
+orange and design using vector collect
+
+00:12:37,250 --> 00:12:46,939
+theoretically vector can hold as many as
+
+00:12:39,800 --> 00:12:48,529
+many elements as possible this look the
+
+00:12:46,939 --> 00:12:51,920
+motivation behind is based on the
+
+00:12:48,529 --> 00:12:55,879
+observation that the number of in their
+
+00:12:51,920 --> 00:12:57,800
+nodes is 1.2 times of livno so a good
+
+00:12:55,879 --> 00:13:00,559
+chance here that most of them might have
+
+00:12:57,800 --> 00:13:02,929
+children size more than 3 and why choose
+
+00:13:00,559 --> 00:13:06,410
+number 3 it's also a balance between
+
+00:13:02,929 --> 00:13:08,949
+node overheads and no capacity own
+
+00:13:06,410 --> 00:13:08,949
+capacity
+
+00:13:11,079 --> 00:13:16,730
+those are the major changes to help
+
+00:13:13,699 --> 00:13:18,949
+reduce node overhead as for to reduce a
+
+00:13:16,730 --> 00:13:21,050
+number of note this party is actually
+
+00:13:18,949 --> 00:13:23,029
+interesting because I think I picked the
+
+00:13:21,050 --> 00:13:25,490
+wrong design the first place and didn't
+
+00:13:23,029 --> 00:13:28,100
+realize for a long time my oranges
+
+00:13:25,490 --> 00:13:34,839
+design did not have the concept of value
+
+00:13:28,100 --> 00:13:34,839
+I store everything i scheme
+
+00:13:35,230 --> 00:13:45,620
+[Laughter]
+
+00:13:38,660 --> 00:13:50,540
+everything s key so way is that from my
+
+00:13:45,620 --> 00:13:53,980
+computer I'm sorry is that from my
+
+00:13:50,540 --> 00:13:53,980
+computer or anywhere else
+
+00:13:57,960 --> 00:14:03,090
+[Music]
+
+00:13:59,750 --> 00:14:06,230
+okay let's listen to it for a while then
+
+00:14:03,090 --> 00:14:06,230
+we can keep continue
+
+00:14:11,720 --> 00:14:20,620
+okay let's do it again
+
+00:14:15,850 --> 00:14:23,090
+house music right right
+
+00:14:20,620 --> 00:14:25,040
+some arrangement and I did not have the
+
+00:14:23,090 --> 00:14:29,300
+concept of value I store everything as a
+
+00:14:25,040 --> 00:14:31,730
+key here's an example when you start the
+
+00:14:29,300 --> 00:14:34,490
+key smile at Val Lewton I create an
+
+00:14:31,730 --> 00:14:37,040
+internal node with key smile and the
+
+00:14:34,490 --> 00:14:38,750
+leaf node with key ten but after some
+
+00:14:37,040 --> 00:14:41,450
+experiment I finally is better to
+
+00:14:38,750 --> 00:14:43,970
+collapse 2 into 1 by adding value field
+
+00:14:41,450 --> 00:14:49,520
+inside the leaf node this is my latest
+
+00:14:43,970 --> 00:14:51,770
+design that's all the optimization we
+
+00:14:49,520 --> 00:14:54,710
+have so far and finally come to the most
+
+00:14:51,770 --> 00:14:58,100
+exciting part as summary the note
+
+00:14:54,710 --> 00:15:01,310
+overhead for ragged tree it used to be 7
+
+00:14:58,100 --> 00:15:05,210
+to 2 bytes for all the types but now for
+
+00:15:01,310 --> 00:15:10,850
+leaf node and in a note vector it's 56
+
+00:15:05,210 --> 00:15:14,600
+bytes and 4 in a node 3 is 64 bytes also
+
+00:15:10,850 --> 00:15:19,940
+the ratio of total nodes to Kiwi pair
+
+00:15:14,600 --> 00:15:21,890
+has reduced from 2.2 to 1.3 as for
+
+00:15:19,940 --> 00:15:24,710
+performance results we've used two types
+
+00:15:21,890 --> 00:15:26,900
+of data set the first one is we're from
+
+00:15:24,710 --> 00:15:30,200
+workloads and there are three metrics
+
+00:15:26,900 --> 00:15:33,350
+for paying attention to the first one is
+
+00:15:30,200 --> 00:15:36,050
+our pre space as calculated inside FDB
+
+00:15:33,350 --> 00:15:38,510
+all of them the Kiwi sites is also
+
+00:15:36,050 --> 00:15:41,870
+include node overhead and memory
+
+00:15:38,510 --> 00:15:44,180
+preparing was stabilized registry has
+
+00:15:41,870 --> 00:15:47,390
+25% more operating space than the
+
+00:15:44,180 --> 00:15:50,000
+Orangemen one the second one is total
+
+00:15:47,390 --> 00:15:52,640
+memory usage this metrics is gathered by
+
+00:15:50,000 --> 00:15:55,760
+Linux upper in space basically include
+
+00:15:52,640 --> 00:15:59,000
+everything same conclusion care registry
+
+00:15:55,760 --> 00:16:04,220
+is taking up 25% less memory for each
+
+00:15:59,000 --> 00:16:06,620
+process the third one is a histogram the
+
+00:16:04,220 --> 00:16:08,980
+third one is a relevancy a history
+
+00:16:06,620 --> 00:16:11,360
+gather by wavefront
+
+00:16:08,980 --> 00:16:13,310
+Vezina here actually makes sense to me
+
+00:16:11,360 --> 00:16:15,589
+because remember the trade-off we talked
+
+00:16:13,310 --> 00:16:17,800
+about in the previous slides
+
+00:16:15,589 --> 00:16:22,600
+registering need to reconstruct the key
+
+00:16:17,800 --> 00:16:22,600
+does tend to have higher real agency
+
+00:16:23,170 --> 00:16:29,139
+the second dataset is Wikipedia title
+
+00:16:26,739 --> 00:16:32,470
+benchmark this one is more generic and
+
+00:16:29,139 --> 00:16:34,720
+of course smaller the key is all the
+
+00:16:32,470 --> 00:16:37,509
+titles from main space of Wikipedia
+
+00:16:34,720 --> 00:16:40,059
+archive of different language the value
+
+00:16:37,509 --> 00:16:43,899
+is some random double small compared to
+
+00:16:40,059 --> 00:16:46,629
+the key total size is 300 megabytes and
+
+00:16:43,899 --> 00:16:52,209
+I do shuffle before insertion to avoid
+
+00:16:46,629 --> 00:16:54,040
+bias assorted data is set the table here
+
+00:16:52,209 --> 00:16:56,290
+is the performance results and for
+
+00:16:54,040 --> 00:16:59,559
+memory usage specifically where this
+
+00:16:56,290 --> 00:17:03,519
+tree is taking 20% less than a regular
+
+00:16:59,559 --> 00:17:06,189
+one yeah I believe that's everything I
+
+00:17:03,519 --> 00:17:08,230
+have thank you so much if you have any
+
+00:17:06,189 --> 00:17:10,119
+questions or comments come talk to me
+
+00:17:08,230 --> 00:17:13,059
+afterwards yeah thank you
+
+00:17:10,119 --> 00:17:13,059
+
+YouTube URL: https://www.youtube.com/watch?v=KbPs-Ka-SeY
+
+

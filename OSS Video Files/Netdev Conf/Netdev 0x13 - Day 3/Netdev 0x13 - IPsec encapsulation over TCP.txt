@@ -1,0 +1,1425 @@
+Title: Netdev 0x13 - IPsec encapsulation over TCP
+Publication date: 2019-05-26
+Playlist: Netdev 0x13 - Day 3
+Description: 
+	Sabrina Dubroca describes how to get the middle boxes happy with TCP by introducing encapsulation over standard TCP connections based on RFC 8229. She further
+describes the implementation approach which utilizes existing kernel infrastructure (TCP upper layer protocol mechanism (ULP) and stream parser), and finaly how it can be used by userspace IKE daemons.
+
+Why TCP?
+Many network middleboxes either muck or block all UDP traffic; this includes IKE and IPsec.
+They are, however, happy to allow TCP connections through because they appear to be web traffic.
+
+https://netdevconf.org/0x13/session.html?talk-ipsec-encap
+Captions: 
+	00:00:00,030 --> 00:00:10,679
+okay so I'm going to talk about IPSec
+
+00:00:06,450 --> 00:00:18,600
+encapsulation about CCP first I will
+
+00:00:10,679 --> 00:00:20,220
+give a small introduction some reminders
+
+00:00:18,600 --> 00:00:24,539
+in case you've not you're not completely
+
+00:00:20,220 --> 00:00:27,750
+familiar with IPSec and then I'm going
+
+00:00:24,539 --> 00:00:32,369
+to describe what this protocol looks
+
+00:00:27,750 --> 00:00:36,960
+like and then I will talk about Linux
+
+00:00:32,369 --> 00:00:38,579
+implementation I'm proposing and what it
+
+00:00:36,960 --> 00:00:40,829
+looks like from the user space point of
+
+00:00:38,579 --> 00:00:44,539
+view I don't have anything to do with
+
+00:00:40,829 --> 00:00:49,219
+the creation of this standard I'm just
+
+00:00:44,539 --> 00:00:49,219
+describing it and implementing it so
+
+00:00:49,610 --> 00:01:00,180
+first introduction IPSec is protocol
+
+00:00:56,520 --> 00:01:02,280
+suite that has three components one of
+
+00:01:00,180 --> 00:01:04,739
+which I'm not going to talk about after
+
+00:01:02,280 --> 00:01:07,020
+this introduction so there's ESP that's
+
+00:01:04,739 --> 00:01:10,530
+a encapsulating security payload that's
+
+00:01:07,020 --> 00:01:13,409
+what carries the data that you want that
+
+00:01:10,530 --> 00:01:17,040
+you're want to protect authentication
+
+00:01:13,409 --> 00:01:19,680
+had ID we're not going to talk about it
+
+00:01:17,040 --> 00:01:24,540
+that's it and H is the key exchange
+
+00:01:19,680 --> 00:01:31,320
+mechanism that sets of the like the ESP
+
+00:01:24,540 --> 00:01:33,900
+Association so the packet format for ESP
+
+00:01:31,320 --> 00:01:37,049
+is just ESP header over IP and then
+
+00:01:33,900 --> 00:01:40,920
+you've got your encrypted data and for H
+
+00:01:37,049 --> 00:01:45,689
+it goes over it goes over UDP port 500
+
+00:01:40,920 --> 00:01:50,000
+and it's an IP so IP UDP header and then
+
+00:01:45,689 --> 00:01:50,000
+you get the IP header and the IQ payload
+
+00:01:51,649 --> 00:01:58,890
+then because of not they had to come up
+
+00:01:56,549 --> 00:02:01,170
+with a UDP encapsulation because net
+
+00:01:58,890 --> 00:02:03,270
+needs the port's to need some ports to
+
+00:02:01,170 --> 00:02:08,390
+the multiplex between the internal IP
+
+00:02:03,270 --> 00:02:10,399
+addresses and the external IP address so
+
+00:02:08,390 --> 00:02:14,180
+they use
+
+00:02:10,399 --> 00:02:17,080
+UDP port 4,500 for that and it's using
+
+00:02:14,180 --> 00:02:22,040
+only one port for both ESP and I traffic
+
+00:02:17,080 --> 00:02:26,120
+everything those are our single port so
+
+00:02:22,040 --> 00:02:28,280
+you get a UDP header then comes the ESP
+
+00:02:26,120 --> 00:02:31,790
+header which is composed of the SPI and
+
+00:02:28,280 --> 00:02:35,480
+the sequence number and then there's the
+
+00:02:31,790 --> 00:02:42,230
+encrypted data like we had with Rho u
+
+00:02:35,480 --> 00:02:48,079
+Rho ESP and when I kiss transported over
+
+00:02:42,230 --> 00:02:50,900
+UDP port 4500 they add this this zero
+
+00:02:48,079 --> 00:02:52,790
+that you can see them and that's called
+
+00:02:50,900 --> 00:02:55,340
+the non ESP marker and it's used to
+
+00:02:52,790 --> 00:03:00,079
+differentiate if what comes after the
+
+00:02:55,340 --> 00:03:02,239
+UDP header is ike or ESP if the four
+
+00:03:00,079 --> 00:03:05,629
+bytes after the UDP header are zero then
+
+00:03:02,239 --> 00:03:08,599
+it's ike and it goes to the ID m'm in
+
+00:03:05,629 --> 00:03:12,519
+userspace otherwise if it's not zero
+
+00:03:08,599 --> 00:03:21,769
+then it's the SPI and that's used by the
+
+00:03:12,519 --> 00:03:25,340
+ESP implementation but that's not the
+
+00:03:21,769 --> 00:03:26,959
+end of middle box trouble unfortunately
+
+00:03:25,340 --> 00:03:30,049
+apparently there are middle boxes that
+
+00:03:26,959 --> 00:03:32,780
+don't want anything other than TCP I'm
+
+00:03:30,049 --> 00:03:38,079
+not saying it's a good thing in that we
+
+00:03:32,780 --> 00:03:42,200
+should indulge them but it's reality so
+
+00:03:38,079 --> 00:03:47,870
+that comes TCP encapsulation for for
+
+00:03:42,200 --> 00:03:52,700
+IPSec so that's a standout from a year
+
+00:03:47,870 --> 00:03:54,940
+and a half ago I think so what does the
+
+00:03:52,700 --> 00:03:58,940
+TCP stream look like when you are using
+
+00:03:54,940 --> 00:04:02,569
+this I see so you open your TCP
+
+00:03:58,940 --> 00:04:05,209
+connection to the today Ike Ike daemon
+
+00:04:02,569 --> 00:04:07,880
+and you have your TCP stream and you're
+
+00:04:05,209 --> 00:04:09,190
+going to just concatenate one message
+
+00:04:07,880 --> 00:04:12,230
+after the other
+
+00:04:09,190 --> 00:04:15,650
+so each message starts with a 2 byte
+
+00:04:12,230 --> 00:04:18,409
+length field yeah that tells you what
+
+00:04:15,650 --> 00:04:22,250
+the full length of the upcoming message
+
+00:04:18,409 --> 00:04:24,110
+is then it's pretty much the same format
+
+00:04:22,250 --> 00:04:27,080
+as for UDP encapsulation
+
+00:04:24,110 --> 00:04:30,080
+there's a ESP header that start with the
+
+00:04:27,080 --> 00:04:32,030
+SPI and then the sequence number and
+
+00:04:30,080 --> 00:04:34,940
+after that comes comes the encrypted
+
+00:04:32,030 --> 00:04:38,150
+data the message format for Ike is
+
+00:04:34,940 --> 00:04:40,250
+pretty similar as the length field then
+
+00:04:38,150 --> 00:04:43,759
+there's this non ESP marker that's used
+
+00:04:40,250 --> 00:04:52,940
+in the same way as for UDP encapsulation
+
+00:04:43,759 --> 00:04:54,259
+and then comes the IP message so in
+
+00:04:52,940 --> 00:04:57,020
+general times for the for how the
+
+00:04:54,259 --> 00:05:00,319
+protocol behaves the sender is going to
+
+00:04:57,020 --> 00:05:02,300
+take its messages with our icon is P at
+
+00:05:00,319 --> 00:05:05,750
+the length prefix which is those two
+
+00:05:02,300 --> 00:05:08,300
+bytes and for Ike messages it needs to
+
+00:05:05,750 --> 00:05:10,449
+add this non ESP marker as well just
+
+00:05:08,300 --> 00:05:13,849
+like it did for UDP encapsulation and
+
+00:05:10,449 --> 00:05:16,759
+then it pushes all these messages one
+
+00:05:13,849 --> 00:05:20,300
+after the other on the TCP sockets on
+
+00:05:16,759 --> 00:05:22,699
+the receive side the sort of receiver is
+
+00:05:20,300 --> 00:05:24,259
+to pass the TCP stream to extract all
+
+00:05:22,699 --> 00:05:26,360
+those messages from the stream and
+
+00:05:24,259 --> 00:05:29,960
+that's why we need the length field so
+
+00:05:26,360 --> 00:05:33,380
+that you can recognize each message out
+
+00:05:29,960 --> 00:05:36,219
+of the stream and once you've extracted
+
+00:05:33,380 --> 00:05:39,199
+a message from the stream are you
+
+00:05:36,219 --> 00:05:42,469
+differentiates ESP from Ike using the
+
+00:05:39,199 --> 00:05:45,110
+SPI or a non ESP marker at the beginning
+
+00:05:42,469 --> 00:05:50,029
+of the message and then handle the
+
+00:05:45,110 --> 00:05:52,279
+message if it's ESP it goes through the
+
+00:05:50,029 --> 00:05:58,880
+ESP implementation otherwise it's passed
+
+00:05:52,279 --> 00:06:01,219
+to the ID demon so the Linux
+
+00:05:58,880 --> 00:06:03,259
+implementation have been working on is
+
+00:06:01,219 --> 00:06:05,509
+based on something that how about you
+
+00:06:03,259 --> 00:06:08,599
+pass it to the net dev mailing list
+
+00:06:05,509 --> 00:06:11,389
+about a year ago it was not accepted
+
+00:06:08,599 --> 00:06:13,610
+because he was modifying the TCP
+
+00:06:11,389 --> 00:06:16,550
+implementation and adding some hogs in
+
+00:06:13,610 --> 00:06:19,550
+there which the people who care about
+
+00:06:16,550 --> 00:06:20,360
+performance were not happy with I can
+
+00:06:19,550 --> 00:06:22,699
+understand that
+
+00:06:20,360 --> 00:06:26,090
+so I'm I'm modifying it so that it
+
+00:06:22,699 --> 00:06:30,319
+doesn't do any of that and just limits
+
+00:06:26,090 --> 00:06:33,529
+itself to the TCP stack out to the sorry
+
+00:06:30,319 --> 00:06:37,400
+the ipsec implementation in the kernel
+
+00:06:33,529 --> 00:06:39,650
+and are we using some eye
+
+00:06:37,400 --> 00:06:41,330
+infrastructure that facilitates
+
+00:06:39,650 --> 00:06:44,960
+implementing this kind of protocol in
+
+00:06:41,330 --> 00:06:46,940
+the kernel so first of all we have in
+
+00:06:44,960 --> 00:06:50,539
+the Linux kernel we have XFR m which is
+
+00:06:46,940 --> 00:06:53,930
+the infrastructure that's underneath the
+
+00:06:50,539 --> 00:06:57,080
+kernels ipsec implementation and it just
+
+00:06:53,930 --> 00:06:59,660
+takes packets and can apply all kinds of
+
+00:06:57,080 --> 00:07:02,690
+transformation to it in the case of ESP
+
+00:06:59,660 --> 00:07:09,620
+add some it adds the ESP header and
+
+00:07:02,690 --> 00:07:12,919
+encrypts the packets then we have the
+
+00:07:09,620 --> 00:07:16,729
+upper layer protocol infrastructure TCP
+
+00:07:12,919 --> 00:07:19,340
+ULP and it's used to implement internal
+
+00:07:16,729 --> 00:07:21,949
+protocols on top of TC beam for example
+
+00:07:19,340 --> 00:07:25,610
+that's what the K TLS implementation
+
+00:07:21,949 --> 00:07:30,860
+uses so we have data path for TLS in the
+
+00:07:25,610 --> 00:07:35,570
+kernel and it's implemented using ULP so
+
+00:07:30,860 --> 00:07:37,490
+what you LP does is lets the user space
+
+00:07:35,570 --> 00:07:40,759
+application provide this set so corrupt
+
+00:07:37,490 --> 00:07:43,070
+the TCP ULP set circuit and that
+
+00:07:40,759 --> 00:07:47,660
+triggers an init call back inside the
+
+00:07:43,070 --> 00:07:49,970
+kernel that can be used by your internal
+
+00:07:47,660 --> 00:07:52,180
+implementation of the protocol to do
+
+00:07:49,970 --> 00:07:55,340
+whatever initialization it needs to do
+
+00:07:52,180 --> 00:07:58,210
+for example it can be used to replace
+
+00:07:55,340 --> 00:08:00,800
+some of the socket operations with
+
+00:07:58,210 --> 00:08:03,490
+whatever extensions are needed for the
+
+00:08:00,800 --> 00:08:07,699
+protocol adding some header encrypting
+
+00:08:03,490 --> 00:08:11,060
+all those kind of things so that means
+
+00:08:07,699 --> 00:08:13,340
+that when you will invoke the census
+
+00:08:11,060 --> 00:08:15,740
+code from user space for example it will
+
+00:08:13,340 --> 00:08:18,289
+instead of going through the TCP sends
+
+00:08:15,740 --> 00:08:23,780
+it will go through some protocol
+
+00:08:18,289 --> 00:08:25,280
+specific Ryans the next piece of
+
+00:08:23,780 --> 00:08:28,039
+infrastructure that the kernel provides
+
+00:08:25,280 --> 00:08:31,190
+is the stream pass on it's a framework
+
+00:08:28,039 --> 00:08:34,430
+that's used to pass messages out of a
+
+00:08:31,190 --> 00:08:39,919
+TCP stream that's also used by que
+
+00:08:34,430 --> 00:08:43,130
+quieras and what a what a module that
+
+00:08:39,919 --> 00:08:44,020
+uses stream pass so does is you have two
+
+00:08:43,130 --> 00:08:48,160
+callbacks
+
+00:08:44,020 --> 00:08:51,020
+one is the passed message callback that
+
+00:08:48,160 --> 00:08:53,600
+reads some data out of the TCP
+
+00:08:51,020 --> 00:08:56,180
+stream and returns the length of the
+
+00:08:53,600 --> 00:08:58,610
+next message and then you got the
+
+00:08:56,180 --> 00:09:01,520
+receive message callback that processes
+
+00:08:58,610 --> 00:09:06,970
+the message in whatever ways is fit for
+
+00:09:01,520 --> 00:09:09,620
+this protocol and the stream parser has
+
+00:09:06,970 --> 00:09:11,720
+the infrastructure itself has a receive
+
+00:09:09,620 --> 00:09:15,140
+function that's triggered when new data
+
+00:09:11,720 --> 00:09:16,610
+arrives on the TCP socket and that we
+
+00:09:15,140 --> 00:09:21,230
+call the passed message and receive
+
+00:09:16,610 --> 00:09:23,210
+message operations from the specific
+
+00:09:21,230 --> 00:09:28,190
+module or the specific protocol you are
+
+00:09:23,210 --> 00:09:33,050
+developing so a quick overview of the
+
+00:09:28,190 --> 00:09:34,790
+overall implementation it uses ULP to
+
+00:09:33,050 --> 00:09:38,450
+initialize the string parser that will
+
+00:09:34,790 --> 00:09:40,400
+run on the TCP socket and it also
+
+00:09:38,450 --> 00:09:42,740
+redefines a few of the circuit
+
+00:09:40,400 --> 00:09:46,370
+operations for example the send message
+
+00:09:42,740 --> 00:09:49,610
+and receive message are modified to do
+
+00:09:46,370 --> 00:09:53,390
+the encapsulation with the length header
+
+00:09:49,610 --> 00:09:57,530
+and on the receive side it uses a stream
+
+00:09:53,390 --> 00:10:00,560
+pass on to extract messages when the
+
+00:09:57,530 --> 00:10:04,160
+messages I kids we go to user space we
+
+00:10:00,560 --> 00:10:05,690
+had a receive this call and if it's ESP
+
+00:10:04,160 --> 00:10:11,960
+it will go through the ipsec
+
+00:10:05,690 --> 00:10:14,630
+implementation in the kernel so the on
+
+00:10:11,960 --> 00:10:17,660
+the receive side when data arrives on
+
+00:10:14,630 --> 00:10:19,460
+the encapsulation socket it goes through
+
+00:10:17,660 --> 00:10:22,700
+the streams for stream parcels receive
+
+00:10:19,460 --> 00:10:26,930
+function which is underscore STR P
+
+00:10:22,700 --> 00:10:29,270
+receive which we called the
+
+00:10:26,930 --> 00:10:30,530
+encapsulation the ESP encapsulation pass
+
+00:10:29,270 --> 00:10:33,140
+message and receive message
+
+00:10:30,530 --> 00:10:35,270
+implementations the passed message
+
+00:10:33,140 --> 00:10:38,240
+implementation just reads the first two
+
+00:10:35,270 --> 00:10:40,310
+bytes out out of the message out of the
+
+00:10:38,240 --> 00:10:44,570
+TCP stream at the current offset and
+
+00:10:40,310 --> 00:10:46,700
+that's the length field and then the
+
+00:10:44,570 --> 00:10:49,310
+solar stream paths are with the stream
+
+00:10:46,700 --> 00:10:51,260
+pass our core implementation will
+
+00:10:49,310 --> 00:10:53,210
+extract that many bytes out of the
+
+00:10:51,260 --> 00:10:56,600
+stream and pass it to the receive
+
+00:10:53,210 --> 00:10:59,330
+message callback and receive message
+
+00:10:56,600 --> 00:11:03,110
+will read the first four bytes if it's 0
+
+00:10:59,330 --> 00:11:06,529
+then it's a non ESP marker and it will
+
+00:11:03,110 --> 00:11:09,829
+process the messages I if it's not zero
+
+00:11:06,529 --> 00:11:13,040
+than it's an SPI and it's passes them
+
+00:11:09,829 --> 00:11:14,959
+it continues processing as ESP ESP
+
+00:11:13,040 --> 00:11:18,110
+messages who will go through a normal
+
+00:11:14,959 --> 00:11:20,449
+except around path like like for example
+
+00:11:18,110 --> 00:11:22,759
+with UDP encapsulation or with no
+
+00:11:20,449 --> 00:11:24,649
+encapsulation at all and the message
+
+00:11:22,759 --> 00:11:27,110
+will be decrypted verified and so on and
+
+00:11:24,649 --> 00:11:28,970
+then it gets passed if it's correct then
+
+00:11:27,110 --> 00:11:33,350
+it gets passed to the rest of the
+
+00:11:28,970 --> 00:11:38,059
+networking stack otherwise if it detects
+
+00:11:33,350 --> 00:11:42,529
+an H message then it's put on a separate
+
+00:11:38,059 --> 00:11:44,509
+user space queue and dozen does the
+
+00:11:42,529 --> 00:11:48,139
+receive message in kernel implementation
+
+00:11:44,509 --> 00:11:53,089
+that will pass that to the receive Cisco
+
+00:11:48,139 --> 00:11:56,059
+that's user space can invoke on the
+
+00:11:53,089 --> 00:11:58,819
+transmit side we've got two sorts of
+
+00:11:56,059 --> 00:12:02,119
+messages does the IKE daemon that will
+
+00:11:58,819 --> 00:12:05,540
+use the census call it would as it would
+
+00:12:02,119 --> 00:12:08,839
+on the on the UDP sockets that's almost
+
+00:12:05,540 --> 00:12:11,179
+entirely transparent and in the kernel
+
+00:12:08,839 --> 00:12:13,399
+when you call when you invoke the census
+
+00:12:11,179 --> 00:12:18,170
+call it will call the send message
+
+00:12:13,399 --> 00:12:20,689
+implementation which will add the length
+
+00:12:18,170 --> 00:12:24,589
+prefix and enqueue that message to the
+
+00:12:20,689 --> 00:12:26,389
+TCP sockets otherwise data packets that
+
+00:12:24,589 --> 00:12:30,949
+come from the IP stack we go through its
+
+00:12:26,389 --> 00:12:33,829
+frm get processed as transforming to ESP
+
+00:12:30,949 --> 00:12:36,410
+messages which get the length prefix
+
+00:12:33,829 --> 00:12:42,499
+added in front and then that's also an
+
+00:12:36,410 --> 00:12:45,860
+cue to the TCP sockets one interesting
+
+00:12:42,499 --> 00:12:48,439
+problem with implementing that kind of
+
+00:12:45,860 --> 00:12:51,139
+protocol of that kind of message based
+
+00:12:48,439 --> 00:12:55,429
+protocol on top of TCP is avoiding
+
+00:12:51,139 --> 00:12:58,429
+interleaving of messages which is which
+
+00:12:55,429 --> 00:13:00,889
+would actually break the TCP stream so
+
+00:12:58,429 --> 00:13:02,809
+if you start sending a message but you
+
+00:13:00,889 --> 00:13:04,910
+cannot push the entire message down the
+
+00:13:02,809 --> 00:13:08,389
+TCP socket because there's not enough
+
+00:13:04,910 --> 00:13:11,689
+space on the TCP sockets then you will
+
+00:13:08,389 --> 00:13:13,309
+have only those first n bytes of the
+
+00:13:11,689 --> 00:13:14,319
+messages that are sent on the TCP
+
+00:13:13,309 --> 00:13:17,439
+sockets
+
+00:13:14,319 --> 00:13:19,209
+if you try sending if you don't remember
+
+00:13:17,439 --> 00:13:21,419
+that and if you don't finish sending
+
+00:13:19,209 --> 00:13:24,160
+that message at this point in the stream
+
+00:13:21,419 --> 00:13:32,169
+you start sending your message to at
+
+00:13:24,160 --> 00:13:34,329
+this point then well you will expect
+
+00:13:32,169 --> 00:13:37,600
+here you will expect to have the leg
+
+00:13:34,329 --> 00:13:41,019
+the next length field because yeah
+
+00:13:37,600 --> 00:13:42,339
+that's the full length of message one so
+
+00:13:41,019 --> 00:13:44,949
+at this point the stream processor
+
+00:13:42,339 --> 00:13:47,859
+expects here does the next the next
+
+00:13:44,949 --> 00:13:50,919
+message is starting but if the next
+
+00:13:47,859 --> 00:13:52,479
+message is starting here then here does
+
+00:13:50,919 --> 00:13:55,269
+only garbage instead of having the
+
+00:13:52,479 --> 00:13:57,279
+length of a message so your stream is
+
+00:13:55,269 --> 00:14:00,339
+broken and you will not be able to
+
+00:13:57,279 --> 00:14:03,789
+recover any message anymore except if
+
+00:14:00,339 --> 00:14:05,859
+you get lucky but don't hope for that so
+
+00:14:03,789 --> 00:14:10,239
+the way to avoid interleaving of
+
+00:14:05,859 --> 00:14:12,100
+messages on the stream is if you cannot
+
+00:14:10,239 --> 00:14:16,179
+push the entire message down the TCP
+
+00:14:12,100 --> 00:14:19,329
+sockets you remember that you only sent
+
+00:14:16,179 --> 00:14:22,179
+part of it and at the next occasion when
+
+00:14:19,329 --> 00:14:24,939
+there's room the TCP sockets then you
+
+00:14:22,179 --> 00:14:27,489
+push the rest of that message from where
+
+00:14:24,939 --> 00:14:30,910
+you stopped and then you can send more
+
+00:14:27,489 --> 00:14:34,029
+messages afterwards that's exactly what
+
+00:14:30,910 --> 00:14:41,049
+TLS is doing already and I'm using the
+
+00:14:34,029 --> 00:14:44,859
+same solution here so what does ESP and
+
+00:14:41,049 --> 00:14:49,449
+TCP look like from a user space point of
+
+00:14:44,859 --> 00:14:52,149
+view there are two there are two
+
+00:14:49,449 --> 00:14:57,519
+components one is creating the X frm
+
+00:14:52,149 --> 00:15:01,299
+States I'm a criminal person so I use IP
+
+00:14:57,519 --> 00:15:03,879
+x frm user space people probably use net
+
+00:15:01,299 --> 00:15:07,989
+link directly with the NLA and cap
+
+00:15:03,879 --> 00:15:11,109
+option but essentially it's the same as
+
+00:15:07,989 --> 00:15:17,919
+UDP encapsulation with just replacement
+
+00:15:11,109 --> 00:15:22,480
+of with just just replacing UDP with
+
+00:15:17,919 --> 00:15:24,100
+ESPN TCP instead and that's pretty much
+
+00:15:22,480 --> 00:15:26,900
+it you create your rights around States
+
+00:15:24,100 --> 00:15:30,500
+with the with the
+
+00:15:26,900 --> 00:15:33,490
+yes being TCP encapsulation and it's
+
+00:15:30,500 --> 00:15:33,490
+yeah that's it
+
+00:15:33,590 --> 00:15:37,340
+the other component is a user space
+
+00:15:35,630 --> 00:15:38,960
+program that will typically be the ike
+
+00:15:37,340 --> 00:15:41,090
+demon but for testing i'm using
+
+00:15:38,960 --> 00:15:44,260
+something much smaller which is just
+
+00:15:41,090 --> 00:15:47,030
+yeah a few lines of code so you open a
+
+00:15:44,260 --> 00:15:50,690
+you need to open your TCP and
+
+00:15:47,030 --> 00:15:53,030
+capsulation socket from user space these
+
+00:15:50,690 --> 00:15:54,950
+put these extra frame policies are so
+
+00:15:53,030 --> 00:15:58,130
+that the routine you look up doesn't
+
+00:15:54,950 --> 00:16:01,040
+take your the packets from the TCP
+
+00:15:58,130 --> 00:16:02,780
+encapsulation and make them go back into
+
+00:16:01,040 --> 00:16:06,860
+XF around so that they would themselves
+
+00:16:02,780 --> 00:16:11,420
+be encrypted again and then packets
+
+00:16:06,860 --> 00:16:13,910
+don't go out so this the the tcp
+
+00:16:11,420 --> 00:16:21,770
+encapsulation socket needs to bypass
+
+00:16:13,910 --> 00:16:26,150
+yes beams itself so you need to connect
+
+00:16:21,770 --> 00:16:28,100
+your own TCP socket to the sava and then
+
+00:16:26,150 --> 00:16:33,560
+yeah one thing I didn't mention is
+
+00:16:28,100 --> 00:16:36,020
+that's the client the client for the
+
+00:16:33,560 --> 00:16:38,030
+client so get on the TCP for the TCP
+
+00:16:36,020 --> 00:16:45,350
+encapsulation needs to start its stream
+
+00:16:38,030 --> 00:16:47,890
+with the with the TCP strain to tell the
+
+00:16:45,350 --> 00:16:49,760
+server this is this is actually
+
+00:16:47,890 --> 00:16:52,880
+encapsulation it's not just a random
+
+00:16:49,760 --> 00:16:55,160
+connection coming in and then you would
+
+00:16:52,880 --> 00:17:00,890
+have just garbage coming and that
+
+00:16:55,160 --> 00:17:03,820
+sockets so with this with the string
+
+00:17:00,890 --> 00:17:07,940
+prefix you tell the I daemon I this is
+
+00:17:03,820 --> 00:17:14,090
+this is indeed TCP encapsulation of ESP
+
+00:17:07,940 --> 00:17:15,950
+and I so keep going so that's that
+
+00:17:14,090 --> 00:17:20,900
+message is being sent by user space and
+
+00:17:15,950 --> 00:17:23,290
+then you set the you enable the ESP
+
+00:17:20,900 --> 00:17:26,840
+encapsulation on that sockets with the
+
+00:17:23,290 --> 00:17:31,220
+ULP framework and then that socket is
+
+00:17:26,840 --> 00:17:32,690
+ready to be used for ESP and ike i
+
+00:17:31,220 --> 00:17:35,690
+didn't I don't have a slide with a
+
+00:17:32,690 --> 00:17:38,900
+server-side program but it's pretty
+
+00:17:35,690 --> 00:17:41,950
+similar you do accept and then you you
+
+00:17:38,900 --> 00:17:47,570
+accept the incoming socket and
+
+00:17:41,950 --> 00:17:49,430
+enabled the encapsulation as well so the
+
+00:17:47,570 --> 00:17:52,460
+circuit behavior
+
+00:17:49,430 --> 00:17:54,440
+it's a TCP socket but Indiana behaves
+
+00:17:52,460 --> 00:17:59,740
+like a UDP socket once you have enabled
+
+00:17:54,440 --> 00:18:03,290
+the encapsulation so yeah
+
+00:17:59,740 --> 00:18:05,990
+the kernel will add the length prefix
+
+00:18:03,290 --> 00:18:09,950
+for the IP messages you don't have to do
+
+00:18:05,990 --> 00:18:13,160
+that in user space but user space will
+
+00:18:09,950 --> 00:18:15,770
+take care of the non ESP marker that's
+
+00:18:13,160 --> 00:18:18,620
+what the existing UDP encapsulation is
+
+00:18:15,770 --> 00:18:21,290
+doing so for consistency I'm also
+
+00:18:18,620 --> 00:18:22,820
+letting user space do that that's
+
+00:18:21,290 --> 00:18:25,100
+something we discussed with the levels
+
+00:18:22,820 --> 00:18:28,340
+one and strong Swan developers they
+
+00:18:25,100 --> 00:18:30,650
+preferred it that way so does this IP
+
+00:18:28,340 --> 00:18:35,120
+TCP prefix that's written by user space
+
+00:18:30,650 --> 00:18:38,840
+before enabling the encapsulation and on
+
+00:18:35,120 --> 00:18:41,780
+the server side the server needs to read
+
+00:18:38,840 --> 00:18:45,830
+that just after accepting their incoming
+
+00:18:41,780 --> 00:18:47,630
+connection and if these prefix doesn't
+
+00:18:45,830 --> 00:18:49,930
+come then the server should just close
+
+00:18:47,630 --> 00:18:53,270
+the connection because it's not an
+
+00:18:49,930 --> 00:18:55,520
+incoming encapsulation request if the
+
+00:18:53,270 --> 00:18:57,830
+prefix is here then the server just
+
+00:18:55,520 --> 00:19:00,220
+takes the connection in and enables the
+
+00:18:57,830 --> 00:19:02,870
+encapsulation as well
+
+00:19:00,220 --> 00:19:06,740
+so yeah I was saying it behaves like a
+
+00:19:02,870 --> 00:19:11,660
+UDP sockets which means that for one
+
+00:19:06,740 --> 00:19:13,400
+send one message will go out and I
+
+00:19:11,660 --> 00:19:16,340
+haven't implemented message more or
+
+00:19:13,400 --> 00:19:19,310
+anything like that it's just simple if
+
+00:19:16,340 --> 00:19:22,660
+somebody needs it then maybe but I don't
+
+00:19:19,310 --> 00:19:27,110
+really see the point at the moment and
+
+00:19:22,660 --> 00:19:30,140
+on the receive sides 1 1 we see if this
+
+00:19:27,110 --> 00:19:32,840
+call will get one full ike message from
+
+00:19:30,140 --> 00:19:34,460
+the sockets if the receive buffer is too
+
+00:19:32,840 --> 00:19:37,480
+small then the rest of the message will
+
+00:19:34,460 --> 00:19:42,050
+be dropped that's also actually Peters
+
+00:19:37,480 --> 00:19:44,150
+and the message the message big flag
+
+00:19:42,050 --> 00:19:46,700
+will just return the first 10 bytes I'm
+
+00:19:44,150 --> 00:19:48,740
+not implementing peaking offset that's
+
+00:19:46,700 --> 00:19:53,639
+unnecessary complexity I think at this
+
+00:19:48,740 --> 00:19:58,759
+point and there it returns the first
+
+00:19:53,639 --> 00:20:03,239
+the first bites of the first message so
+
+00:19:58,759 --> 00:20:06,509
+she wants to finish that's a bit of
+
+00:20:03,239 --> 00:20:08,039
+remaining work at the IPSec workshop
+
+00:20:06,509 --> 00:20:11,070
+earlier this week we discussed the
+
+00:20:08,039 --> 00:20:14,009
+possible starvation issue if you have an
+
+00:20:11,070 --> 00:20:17,429
+yes issue have esp flooding the Soviet
+
+00:20:14,009 --> 00:20:21,779
+then maybe your Ike messages could get
+
+00:20:17,429 --> 00:20:24,089
+stuff I haven't tested that yet so I
+
+00:20:21,779 --> 00:20:29,159
+don't have a I don't have a solution for
+
+00:20:24,089 --> 00:20:31,789
+that if it happens and I haven't done
+
+00:20:29,159 --> 00:20:34,049
+any testing with the IDE on because
+
+00:20:31,789 --> 00:20:36,479
+implementations was not implementations
+
+00:20:34,049 --> 00:20:39,899
+we're not public yet but that's
+
+00:20:36,479 --> 00:20:44,070
+something we will do as soon as we share
+
+00:20:39,899 --> 00:20:46,499
+each other's code and if that testing
+
+00:20:44,070 --> 00:20:51,450
+goes well then I will go upstream post
+
+00:20:46,499 --> 00:21:00,779
+that on net dev that's it for me any
+
+00:20:51,450 --> 00:21:02,429
+questions impressive work I have a
+
+00:21:00,779 --> 00:21:05,999
+question about the size of the packet
+
+00:21:02,429 --> 00:21:10,709
+that are sent typically by experiment to
+
+00:21:05,999 --> 00:21:15,570
+this layer because I guess with UDP we
+
+00:21:10,709 --> 00:21:17,909
+try to send MQ size packet so that might
+
+00:21:15,570 --> 00:21:24,769
+be not very optimal if you have a TCP
+
+00:21:17,909 --> 00:21:27,929
+transport yeah so that's something I
+
+00:21:24,769 --> 00:21:31,349
+haven't dealt much with the in except
+
+00:21:27,929 --> 00:21:33,329
+I'm you have a way to say what the MTU
+
+00:21:31,349 --> 00:21:40,109
+will be for the route that goes for it
+
+00:21:33,329 --> 00:21:44,039
+so far on that yeah that could be MTU on
+
+00:21:40,109 --> 00:21:47,309
+on that route could be very big like a
+
+00:21:44,039 --> 00:21:50,789
+full a full message my second question
+
+00:21:47,309 --> 00:21:52,919
+was about zero copy because it seems
+
+00:21:50,789 --> 00:21:56,519
+that you have a queue of packet to be
+
+00:21:52,919 --> 00:21:59,359
+sent to this TCP layer because you need
+
+00:21:56,519 --> 00:22:02,009
+to eventually have a partial right and
+
+00:21:59,359 --> 00:22:03,979
+you need to be able to send the remain
+
+00:22:02,009 --> 00:22:08,249
+the remaining of the
+
+00:22:03,979 --> 00:22:11,279
+bakit so maybe zero copy could be used
+
+00:22:08,249 --> 00:22:19,589
+because you hold the packet in except
+
+00:22:11,279 --> 00:22:21,959
+forum later anyway yeah I haven't looked
+
+00:22:19,589 --> 00:22:27,049
+into zero copy for now because I think
+
+00:22:21,959 --> 00:22:27,049
+TRS might be using zero copy already
+
+00:22:27,200 --> 00:22:44,959
+double-check could be isoprene it so
+
+00:22:37,879 --> 00:22:44,959
+similar hi
+
+00:22:46,609 --> 00:22:50,909
+so I don't know thanks on now so it's
+
+00:22:49,469 --> 00:22:54,089
+actually similar to already is TCP
+
+00:22:50,909 --> 00:22:56,159
+there's some the app the user space sees
+
+00:22:54,089 --> 00:22:58,589
+a message mounted socket and then it's
+
+00:22:56,159 --> 00:23:01,739
+broken up by the TCP layer just into
+
+00:22:58,589 --> 00:23:03,450
+segments so if you wanted to use zero
+
+00:23:01,739 --> 00:23:05,579
+copy you could do what we did for RDS
+
+00:23:03,450 --> 00:23:08,249
+but you'd have to pin the message down
+
+00:23:05,579 --> 00:23:11,940
+until it was actually sent and then when
+
+00:23:08,249 --> 00:23:13,619
+TCP finds the the act coming back saying
+
+00:23:11,940 --> 00:23:16,679
+the whole message was sent you can unpin
+
+00:23:13,619 --> 00:23:19,349
+the message I'm afraid so you have a
+
+00:23:16,679 --> 00:23:21,269
+message found in socket to be visible to
+
+00:23:19,349 --> 00:23:22,950
+the application but are underneath it's
+
+00:23:21,269 --> 00:23:23,909
+actually broken into TCP segment right
+
+00:23:22,950 --> 00:23:26,789
+and decisons
+
+00:23:23,909 --> 00:23:29,940
+so the message has to be pin down if you
+
+00:23:26,789 --> 00:23:31,559
+want to use your car look right so the
+
+00:23:29,940 --> 00:23:33,839
+whole message so your message may be
+
+00:23:31,559 --> 00:23:36,419
+like say 8 K bytes and it's broken into
+
+00:23:33,839 --> 00:23:38,909
+1500 byte assignments right so you have
+
+00:23:36,419 --> 00:23:41,459
+to pin down the 8000 by message until
+
+00:23:38,909 --> 00:23:44,909
+all 1500 times 5 or whatever segments
+
+00:23:41,459 --> 00:23:48,299
+are sending that you could use your
+
+00:23:44,909 --> 00:23:55,229
+copier down the river okay I will look
+
+00:23:48,299 --> 00:23:59,879
+into it hi so the UDP uses two ports
+
+00:23:55,229 --> 00:24:02,940
+right if you use IPSec over UDP could
+
+00:23:59,879 --> 00:24:05,459
+you know know if you're using if you're
+
+00:24:02,940 --> 00:24:08,669
+using IPSec over UDP then you will have
+
+00:24:05,459 --> 00:24:11,219
+only one port for both I can DSP that's
+
+00:24:08,669 --> 00:24:13,440
+why you need this Nani Nani SP marker at
+
+00:24:11,219 --> 00:24:15,569
+the beginning of the ID message to
+
+00:24:13,440 --> 00:24:16,919
+differentiate them yeah I was gonna say
+
+00:24:15,569 --> 00:24:18,419
+the TC
+
+00:24:16,919 --> 00:24:19,770
+you know the starvation thing is because
+
+00:24:18,419 --> 00:24:21,390
+you're putting them on the same TCP
+
+00:24:19,770 --> 00:24:24,030
+stream could you know could you use to
+
+00:24:21,390 --> 00:24:26,730
+TCP streams one for hike and one for ya
+
+00:24:24,030 --> 00:24:30,630
+but in UDP you don't we have starvation
+
+00:24:26,730 --> 00:24:32,429
+right membrane because well it so could
+
+00:24:30,630 --> 00:24:34,559
+you split that tape when you do TCP
+
+00:24:32,429 --> 00:24:35,880
+though could you just use two to TCP
+
+00:24:34,559 --> 00:24:38,690
+streams and you don't have the
+
+00:24:35,880 --> 00:24:38,690
+starvation
+
+00:24:39,080 --> 00:24:44,190
+you'd have to propose a new port maybe I
+
+00:24:41,640 --> 00:25:01,890
+guess that's not what they decided in
+
+00:24:44,190 --> 00:25:03,990
+the RFC and your other question looking
+
+00:25:01,890 --> 00:25:06,150
+at the way the encapsulation is done I
+
+00:25:03,990 --> 00:25:11,909
+think it doesn't seem to be really
+
+00:25:06,150 --> 00:25:13,620
+specific I can ESP so maybe do you think
+
+00:25:11,909 --> 00:25:18,030
+about the idea if it could be
+
+00:25:13,620 --> 00:25:20,909
+generalized to encapsulate any UDP
+
+00:25:18,030 --> 00:25:25,130
+traffic into TCP to pass through
+
+00:25:20,909 --> 00:25:25,130
+networks which doesn't pass UDP
+
+00:25:32,289 --> 00:25:46,419
+okay what do you say ok say Jenny Mike
+
+00:25:46,700 --> 00:25:52,010
+oh I said Casey I'm and ID CCP already
+
+00:25:50,000 --> 00:26:03,890
+do that so the concept is not you
+
+00:25:52,010 --> 00:26:07,299
+yeah well that's yeah okay thank you
+
+00:26:03,890 --> 00:26:07,299
+
+YouTube URL: https://www.youtube.com/watch?v=F_pHapQg59s
+
+

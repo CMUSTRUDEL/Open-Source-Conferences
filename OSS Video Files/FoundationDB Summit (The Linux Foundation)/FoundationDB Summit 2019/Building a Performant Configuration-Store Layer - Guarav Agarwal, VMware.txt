@@ -1,0 +1,1340 @@
+Title: Building a Performant Configuration-Store Layer - Guarav Agarwal, VMware
+Publication date: 2019-11-25
+Playlist: FoundationDB Summit 2019
+Description: 
+	Building a Performant Configuration-Store Layer - Guarav Agarwal, VMware
+
+Frequently, one needs an “ordered-log” model that has the characteristic of appending to the End of the key-space. For example, one such use-case is to model a “change-log” table, that maintains an ordered-history of changes that are happening to some other data/state. Typically, in FDB, this model is implemented by prefixing the change-keys with VersionStamp, to provide a strong ordering between change records.
+
+However, this creates write-hotspots due to the inherent concentration of new rows to a specific shard at any given time.
+
+We would like to present a technique that can help solve this problem by avoiding this severe concentration of keys, while still preserving the desired ordering, at the cost of some overhead at read-time, and some conflicts at write time. The conflicts could possibly be solved with potential enhancement in FDB core (https://bit.ly/2M6twot).
+Captions: 
+	00:00:00,030 --> 00:00:04,859
+hi everyone I'm Gaurav I work at VMware
+
+00:00:02,639 --> 00:00:07,230
+on a data center of show ability system
+
+00:00:04,859 --> 00:00:08,700
+called networking site and in this talk
+
+00:00:07,230 --> 00:00:10,559
+I'll discuss some of the specific
+
+00:00:08,700 --> 00:00:13,769
+challenges we encountered while building
+
+00:00:10,559 --> 00:00:16,350
+a configuration liquor store layer for
+
+00:00:13,769 --> 00:00:20,279
+the system another approach to address
+
+00:00:16,350 --> 00:00:22,590
+these so just a bit of context the
+
+00:00:20,279 --> 00:00:25,830
+configuration store layer maintains time
+
+00:00:22,590 --> 00:00:27,539
+series for last number of objects each
+
+00:00:25,830 --> 00:00:30,840
+time series can be thought of as a
+
+00:00:27,539 --> 00:00:32,700
+sequence of states or nodes where each
+
+00:00:30,840 --> 00:00:36,050
+node maintains the state for that object
+
+00:00:32,700 --> 00:00:39,930
+for a particular Associated time span
+
+00:00:36,050 --> 00:00:42,329
+the exact details of this layer is not
+
+00:00:39,930 --> 00:00:44,940
+so relevant for this talk and I'll focus
+
+00:00:42,329 --> 00:00:46,620
+on three of the specific aspects of this
+
+00:00:44,940 --> 00:00:49,410
+layer that should be more generally
+
+00:00:46,620 --> 00:00:52,379
+applicable to many other layers that
+
+00:00:49,410 --> 00:00:54,030
+people are building so firstly the
+
+00:00:52,379 --> 00:00:56,879
+Slayer integrate with other subsystems
+
+00:00:54,030 --> 00:00:58,620
+by providing a change feed for every
+
+00:00:56,879 --> 00:01:01,559
+modification that is happening within
+
+00:00:58,620 --> 00:01:03,930
+the store we also want this layer to
+
+00:01:01,559 --> 00:01:06,600
+provide low latency pointer case and
+
+00:01:03,930 --> 00:01:09,090
+mutations roughly in the order of five
+
+00:01:06,600 --> 00:01:11,400
+to ten milliseconds and this is due to
+
+00:01:09,090 --> 00:01:13,490
+the nature of our existing guarantees
+
+00:01:11,400 --> 00:01:15,720
+that we provide of the Slayer and
+
+00:01:13,490 --> 00:01:18,060
+finally we should be able to read and
+
+00:01:15,720 --> 00:01:20,729
+write very large objects into the store
+
+00:01:18,060 --> 00:01:24,119
+we have seen records of up to hundred
+
+00:01:20,729 --> 00:01:26,159
+megabytes in size and in future this
+
+00:01:24,119 --> 00:01:29,369
+could go up significantly almost up to a
+
+00:01:26,159 --> 00:01:31,950
+GV or so so let's take each of these
+
+00:01:29,369 --> 00:01:34,829
+aspects that I have bolded one by one at
+
+00:01:31,950 --> 00:01:37,740
+time so first let's change Lots so
+
+00:01:34,829 --> 00:01:39,630
+typically these are used to provide an
+
+00:01:37,740 --> 00:01:43,350
+ordered feed for all the updates
+
+00:01:39,630 --> 00:01:46,409
+happening in the primary store to other
+
+00:01:43,350 --> 00:01:48,210
+subsystems and these in turn react to
+
+00:01:46,409 --> 00:01:50,820
+these changes by taking some specific
+
+00:01:48,210 --> 00:01:52,920
+actions for instance and indexing system
+
+00:01:50,820 --> 00:01:55,229
+could consume the change log for making
+
+00:01:52,920 --> 00:01:56,850
+the update searchable or a caching
+
+00:01:55,229 --> 00:01:58,829
+system could use this feed to keep
+
+00:01:56,850 --> 00:02:01,469
+itself synchronized with the ongoing
+
+00:01:58,829 --> 00:02:04,320
+modifications the structure of change
+
+00:02:01,469 --> 00:02:06,509
+lock keys in FTV roughly follows this
+
+00:02:04,320 --> 00:02:09,709
+pattern that I've shown here you have
+
+00:02:06,509 --> 00:02:12,330
+some subspace prefix to isolate these
+
+00:02:09,709 --> 00:02:15,510
+followed by a version stand to guarantee
+
+00:02:12,330 --> 00:02:17,280
+uniqueness and strong ordering and you
+
+00:02:15,510 --> 00:02:20,100
+have associated value that contains the
+
+00:02:17,280 --> 00:02:22,970
+metadata about the change itself but
+
+00:02:20,100 --> 00:02:26,100
+this design suffers both read and write
+
+00:02:22,970 --> 00:02:28,220
+hotspot by design all the logs are
+
+00:02:26,100 --> 00:02:30,930
+appended at the end of this key space
+
+00:02:28,220 --> 00:02:33,000
+and which will be hammered by all the
+
+00:02:30,930 --> 00:02:34,740
+mutations that are coming in and if you
+
+00:02:33,000 --> 00:02:36,690
+have like two or three store extra words
+
+00:02:34,740 --> 00:02:40,020
+that are holding that short they will
+
+00:02:36,690 --> 00:02:42,420
+get all the mutations in addition the
+
+00:02:40,020 --> 00:02:45,810
+these storage server have extra work of
+
+00:02:42,420 --> 00:02:50,280
+splitting these shards as they grow in
+
+00:02:45,810 --> 00:02:53,880
+size and then ship out the older splits
+
+00:02:50,280 --> 00:02:55,770
+to keep the data volume balanced even if
+
+00:02:53,880 --> 00:02:58,400
+you look at from the read point of view
+
+00:02:55,770 --> 00:03:02,280
+this is the only shot that is getting
+
+00:02:58,400 --> 00:03:06,060
+all the read request and that consumes a
+
+00:03:02,280 --> 00:03:11,010
+lot of CPU cycles from it so yeah I mean
+
+00:03:06,060 --> 00:03:13,050
+it is quite saturated design so this is
+
+00:03:11,010 --> 00:03:14,550
+a graph that we plotted from one of our
+
+00:03:13,050 --> 00:03:18,000
+production systems and we were able to
+
+00:03:14,550 --> 00:03:21,810
+get this out by using a feature called
+
+00:03:18,000 --> 00:03:24,840
+locality info or that FDB provides this
+
+00:03:21,810 --> 00:03:26,580
+gives us the range boundaries that are
+
+00:03:24,840 --> 00:03:29,310
+hosted on each storage tower so we use
+
+00:03:26,580 --> 00:03:32,070
+this information and in our layered
+
+00:03:29,310 --> 00:03:34,290
+codebase we tagged each of the right and
+
+00:03:32,070 --> 00:03:36,540
+then emit telemetry for it and that
+
+00:03:34,290 --> 00:03:39,030
+tells us where is that right key going
+
+00:03:36,540 --> 00:03:40,650
+to which server and in this case we have
+
+00:03:39,030 --> 00:03:43,290
+a replication factor of two and we can
+
+00:03:40,650 --> 00:03:45,270
+see that each each right is going to
+
+00:03:43,290 --> 00:03:46,830
+exactly two storage server and they are
+
+00:03:45,270 --> 00:03:50,010
+so precisely overlapping that you can
+
+00:03:46,830 --> 00:03:52,590
+see only one color and though for a last
+
+00:03:50,010 --> 00:03:54,060
+duration of time those are the only two
+
+00:03:52,590 --> 00:03:57,239
+storage servers that are getting all the
+
+00:03:54,060 --> 00:04:00,650
+mutations and based on some internal
+
+00:03:57,239 --> 00:04:02,850
+logic if DB cluster keeps changing these
+
+00:04:00,650 --> 00:04:05,100
+active storage server for that shot
+
+00:04:02,850 --> 00:04:07,200
+every four or five hours or something
+
+00:04:05,100 --> 00:04:09,930
+like that it's not so helpful in our
+
+00:04:07,200 --> 00:04:11,790
+case by that time the storage servers
+
+00:04:09,930 --> 00:04:18,299
+are already saturated and they are
+
+00:04:11,790 --> 00:04:21,120
+throttling back transactions so what we
+
+00:04:18,299 --> 00:04:22,919
+want to have is ability to switch the
+
+00:04:21,120 --> 00:04:24,460
+storage servers faster if we could do
+
+00:04:22,919 --> 00:04:27,190
+that much more quicker
+
+00:04:24,460 --> 00:04:28,900
+then these rights will keep on jumping
+
+00:04:27,190 --> 00:04:31,770
+from one storage server to another and
+
+00:04:28,900 --> 00:04:36,160
+storage servers have ability to
+
+00:04:31,770 --> 00:04:38,139
+accommodate a small burst of mutations
+
+00:04:36,160 --> 00:04:41,199
+because they have about one-and-a-half
+
+00:04:38,139 --> 00:04:44,380
+GB of buffer space that we can use so in
+
+00:04:41,199 --> 00:04:46,479
+order to do this as in fast switching of
+
+00:04:44,380 --> 00:04:49,780
+storage server what if we could get our
+
+00:04:46,479 --> 00:04:52,300
+some kind of prefix that we could put in
+
+00:04:49,780 --> 00:04:53,919
+front of our change lock keys these
+
+00:04:52,300 --> 00:04:55,870
+prefix need to have certain properties
+
+00:04:53,919 --> 00:04:58,210
+they need to be non contiguous otherwise
+
+00:04:55,870 --> 00:05:00,430
+if they are contiguous then we will not
+
+00:04:58,210 --> 00:05:02,320
+be solving anything and they need to be
+
+00:05:00,430 --> 00:05:04,150
+unique otherwise we will not be able to
+
+00:05:02,320 --> 00:05:07,330
+read all these change logs
+
+00:05:04,150 --> 00:05:09,639
+deterministically at the real time also
+
+00:05:07,330 --> 00:05:12,849
+whatever that logic has to be for
+
+00:05:09,639 --> 00:05:14,550
+generating these prefixes it needs to it
+
+00:05:12,849 --> 00:05:16,659
+should be repeatable at the read time
+
+00:05:14,550 --> 00:05:19,509
+otherwise we will not be able to find
+
+00:05:16,659 --> 00:05:21,909
+the data that we have written at the
+
+00:05:19,509 --> 00:05:24,880
+right so if we had such a key we could
+
+00:05:21,909 --> 00:05:27,460
+use this in place where I've called
+
+00:05:24,880 --> 00:05:29,259
+bucket and if this bucket prefix
+
+00:05:27,460 --> 00:05:33,550
+satisfies all these properties then we
+
+00:05:29,259 --> 00:05:36,159
+can achieve the desired behavior so we
+
+00:05:33,550 --> 00:05:39,639
+use a simple bucketing function with
+
+00:05:36,159 --> 00:05:41,740
+without any bookkeeping or overhead we
+
+00:05:39,639 --> 00:05:45,490
+take the read version of the transaction
+
+00:05:41,740 --> 00:05:48,909
+we mask n lower bits out of it n depends
+
+00:05:45,490 --> 00:05:51,639
+on how fast you want to switch the
+
+00:05:48,909 --> 00:05:54,009
+bucket prefix and then we reverse all
+
+00:05:51,639 --> 00:05:55,990
+the bits to give us almost a random
+
+00:05:54,009 --> 00:05:57,849
+distribution but it is deterministic and
+
+00:05:55,990 --> 00:06:00,880
+you can repeat it at the rate time as
+
+00:05:57,849 --> 00:06:04,050
+well if you use this function or any any
+
+00:06:00,880 --> 00:06:06,820
+such similar function and put it in then
+
+00:06:04,050 --> 00:06:09,039
+what you will get is a good even
+
+00:06:06,820 --> 00:06:11,560
+distribution fast distribution of fast
+
+00:06:09,039 --> 00:06:16,630
+switching of these logs among storage
+
+00:06:11,560 --> 00:06:19,960
+servers but this has an issue related to
+
+00:06:16,630 --> 00:06:22,539
+ordering I mentioned earlier that these
+
+00:06:19,960 --> 00:06:24,310
+buckets are based on the read version of
+
+00:06:22,539 --> 00:06:26,590
+the transaction whereas the changes
+
+00:06:24,310 --> 00:06:28,270
+themselves are based on the commit
+
+00:06:26,590 --> 00:06:29,590
+version of the transaction now if you
+
+00:06:28,270 --> 00:06:33,580
+consider the example that I have given
+
+00:06:29,590 --> 00:06:38,050
+here T x1 + 2 x2 TX 1 starts before TX 2
+
+00:06:33,580 --> 00:06:40,330
+and and after the h2 so like if we
+
+00:06:38,050 --> 00:06:42,849
+consider the change itself then the
+
+00:06:40,330 --> 00:06:45,699
+commit version of tx1 is higher than tx2
+
+00:06:42,849 --> 00:06:48,009
+and so it should be after tx2 but if you
+
+00:06:45,699 --> 00:06:50,770
+look at the read version of tx1 it is
+
+00:06:48,009 --> 00:06:52,960
+before TX to read version and the bucket
+
+00:06:50,770 --> 00:06:55,210
+derive out of TX once read version could
+
+00:06:52,960 --> 00:06:57,759
+be before bucket that I you out of th -
+
+00:06:55,210 --> 00:06:59,680
+and hence the change log could be in the
+
+00:06:57,759 --> 00:07:01,689
+reverse order and we don't want to do
+
+00:06:59,680 --> 00:07:03,969
+that we want the same order for the
+
+00:07:01,689 --> 00:07:07,360
+change logs as for the changes himself
+
+00:07:03,969 --> 00:07:10,870
+so we put an additional constraint in
+
+00:07:07,360 --> 00:07:13,150
+these transaction and what we want or
+
+00:07:10,870 --> 00:07:16,120
+what we ask these transactions to do is
+
+00:07:13,150 --> 00:07:17,949
+that you put an invariant that the
+
+00:07:16,120 --> 00:07:21,759
+bucket that you are writing your change
+
+00:07:17,949 --> 00:07:24,580
+lock to it is in some way clean and you
+
+00:07:21,759 --> 00:07:27,310
+also dirty the older bucket so that
+
+00:07:24,580 --> 00:07:30,729
+there are no out of order changes
+
+00:07:27,310 --> 00:07:32,770
+alright so if you see what we have done
+
+00:07:30,729 --> 00:07:34,719
+here is that for the first conduction we
+
+00:07:32,770 --> 00:07:37,389
+have dirtied the bucket zero which is
+
+00:07:34,719 --> 00:07:40,569
+like one bucket before bucket one by
+
+00:07:37,389 --> 00:07:42,909
+putting a write conflict there and we
+
+00:07:40,569 --> 00:07:45,460
+have we are expecting our own bucket to
+
+00:07:42,909 --> 00:07:47,319
+be clean by putting a read read conflict
+
+00:07:45,460 --> 00:07:49,930
+on it on bucket one and similarly turn
+
+00:07:47,319 --> 00:07:51,759
+action to those and dirties the one
+
+00:07:49,930 --> 00:07:53,979
+bucket before it which is putting the
+
+00:07:51,759 --> 00:07:55,659
+right conflict on b1 and it expects its
+
+00:07:53,979 --> 00:07:57,430
+own transaction to a bucket to be clean
+
+00:07:55,659 --> 00:07:59,409
+by putting a read conflict on b2 and
+
+00:07:57,430 --> 00:08:01,150
+this red line that I've seen this
+
+00:07:59,409 --> 00:08:03,909
+creates a conflict between them and
+
+00:08:01,150 --> 00:08:05,289
+after th stew has committed when tx1
+
+00:08:03,909 --> 00:08:07,180
+tries to come in itself there is a
+
+00:08:05,289 --> 00:08:10,719
+conflict due to the red line there and
+
+00:08:07,180 --> 00:08:12,250
+it gets retried with a later bucket a
+
+00:08:10,719 --> 00:08:16,839
+read version and therefore the bucket
+
+00:08:12,250 --> 00:08:20,949
+and things are like nice so if we had
+
+00:08:16,839 --> 00:08:22,719
+some way to apply user-defined functions
+
+00:08:20,949 --> 00:08:24,430
+on the version stamps on the server side
+
+00:08:22,719 --> 00:08:26,770
+we wouldn't need to do all of this but
+
+00:08:24,430 --> 00:08:28,419
+unfortunately at the moment if DB
+
+00:08:26,770 --> 00:08:31,659
+doesn't provide such kind of
+
+00:08:28,419 --> 00:08:33,880
+functionality so yeah I mean in practice
+
+00:08:31,659 --> 00:08:37,300
+we can expect to see some conflicts due
+
+00:08:33,880 --> 00:08:39,789
+to this but on our on our workloads that
+
+00:08:37,300 --> 00:08:41,829
+we experimented with it hardly matters
+
+00:08:39,789 --> 00:08:44,969
+it it is like very very few conflicts
+
+00:08:41,829 --> 00:08:44,969
+and almost negligible
+
+00:08:45,140 --> 00:08:51,829
+so this is I don't know if it is visible
+
+00:08:47,959 --> 00:08:53,240
+but this is after this change what the
+
+00:08:51,829 --> 00:08:54,860
+scenario look like if you recall from
+
+00:08:53,240 --> 00:08:57,079
+the earlier graph they were only two
+
+00:08:54,860 --> 00:09:00,459
+servers active for long durations and
+
+00:08:57,079 --> 00:09:03,079
+now as you see they are almost randomly
+
+00:09:00,459 --> 00:09:05,899
+getting assigned so the first graph is
+
+00:09:03,079 --> 00:09:08,329
+showing you the mutation rate for each
+
+00:09:05,899 --> 00:09:09,560
+of the servers or all put together and
+
+00:09:08,329 --> 00:09:12,620
+the remaining three graphs I have
+
+00:09:09,560 --> 00:09:14,269
+highlighted one server in each one of
+
+00:09:12,620 --> 00:09:17,000
+them and trying to see how they are
+
+00:09:14,269 --> 00:09:19,970
+switching fast and it's pretty evenly
+
+00:09:17,000 --> 00:09:23,959
+balanced out and it changes a roughly
+
+00:09:19,970 --> 00:09:25,310
+every few minutes the second problem I
+
+00:09:23,959 --> 00:09:27,320
+want to talk about which is again very
+
+00:09:25,310 --> 00:09:29,600
+generically applicable is minimizing the
+
+00:09:27,320 --> 00:09:32,899
+latency of the transactions so typically
+
+00:09:29,600 --> 00:09:35,540
+these are the four phases of transaction
+
+00:09:32,899 --> 00:09:38,510
+you have grv to get the read version
+
+00:09:35,540 --> 00:09:41,170
+reach themselves right and then commit
+
+00:09:38,510 --> 00:09:43,940
+and typically this is the range of
+
+00:09:41,170 --> 00:09:46,850
+latency that we see in our systems so
+
+00:09:43,940 --> 00:09:50,110
+out of these grv is something that is
+
+00:09:46,850 --> 00:09:54,980
+optional it can be removed at some cost
+
+00:09:50,110 --> 00:09:56,779
+so every transaction has a read version
+
+00:09:54,980 --> 00:09:58,190
+and a write was it depending on whether
+
+00:09:56,779 --> 00:10:00,019
+it is doing at least one read and
+
+00:09:58,190 --> 00:10:02,329
+whether it's doing at least one write if
+
+00:10:00,019 --> 00:10:04,459
+we could cast these versions and then
+
+00:10:02,329 --> 00:10:06,380
+reuse them then we can eliminate the gr
+
+00:10:04,459 --> 00:10:08,570
+we call and I'll go into the details
+
+00:10:06,380 --> 00:10:10,910
+into the next slide but using this we
+
+00:10:08,570 --> 00:10:13,640
+are able to save about 25% of our
+
+00:10:10,910 --> 00:10:16,459
+transaction latency at the cost of some
+
+00:10:13,640 --> 00:10:18,440
+of the transactions or read-only turn
+
+00:10:16,459 --> 00:10:21,170
+actions giving you slightly stale data
+
+00:10:18,440 --> 00:10:23,930
+but a monotonic monotonic in the sense
+
+00:10:21,170 --> 00:10:26,180
+that because we are cashing all the Reid
+
+00:10:23,930 --> 00:10:29,290
+and the committee origins in a process a
+
+00:10:26,180 --> 00:10:31,940
+transaction never gets to see a data
+
+00:10:29,290 --> 00:10:33,709
+older than the last one reaction that
+
+00:10:31,940 --> 00:10:35,959
+happened it will see at least as new the
+
+00:10:33,709 --> 00:10:38,839
+data as the last election we have to be
+
+00:10:35,959 --> 00:10:40,519
+careful here because grv is not just the
+
+00:10:38,839 --> 00:10:43,699
+mechanism to hand out the read version
+
+00:10:40,519 --> 00:10:46,370
+it is also admission control mechanism
+
+00:10:43,699 --> 00:10:49,339
+used by proxy to control incoming
+
+00:10:46,370 --> 00:10:51,380
+production and proxy slows down the
+
+00:10:49,339 --> 00:10:53,000
+response to the gr v if the cluster is
+
+00:10:51,380 --> 00:10:57,290
+under load and if we aggressively
+
+00:10:53,000 --> 00:11:00,040
+aggressively bypass the gr recall then
+
+00:10:57,290 --> 00:11:03,200
+we would defeat the transom
+
+00:11:00,040 --> 00:11:05,690
+so this is roughly the structure of the
+
+00:11:03,200 --> 00:11:07,910
+same just simplified version that we use
+
+00:11:05,690 --> 00:11:10,250
+so we're out all the transaction through
+
+00:11:07,910 --> 00:11:12,230
+this run block you can say as a pseudo
+
+00:11:10,250 --> 00:11:15,680
+code and the collars get to choose
+
+00:11:12,230 --> 00:11:16,850
+whether they want to reuse or the
+
+00:11:15,680 --> 00:11:18,920
+collars get to choose whether they want
+
+00:11:16,850 --> 00:11:20,810
+to provide a read version upfront or not
+
+00:11:18,920 --> 00:11:22,850
+so if they provide the read version then
+
+00:11:20,810 --> 00:11:25,790
+before running the transaction we set it
+
+00:11:22,850 --> 00:11:28,610
+on otherwise we refresh the read version
+
+00:11:25,790 --> 00:11:30,860
+in the green block there and after
+
+00:11:28,610 --> 00:11:32,840
+applying the mutation applying the
+
+00:11:30,860 --> 00:11:34,940
+transaction committing it we have the
+
+00:11:32,840 --> 00:11:37,490
+commit version available as well and we
+
+00:11:34,940 --> 00:11:40,370
+pull it out and use it in the cast value
+
+00:11:37,490 --> 00:11:42,440
+if you see the refresh the reversion
+
+00:11:40,370 --> 00:11:44,990
+block in addition to making the gr we
+
+00:11:42,440 --> 00:11:47,510
+call explicitly we also measured the the
+
+00:11:44,990 --> 00:11:50,870
+latency of the grv call and this latency
+
+00:11:47,510 --> 00:11:53,600
+serves as a proxy as an indicator to
+
+00:11:50,870 --> 00:11:56,780
+know whether proxy wants to throttle the
+
+00:11:53,600 --> 00:11:59,030
+incoming transaction and like a very
+
+00:11:56,780 --> 00:12:00,800
+simplified approach could be that if the
+
+00:11:59,030 --> 00:12:03,440
+latency is greater than some threshold T
+
+00:12:00,800 --> 00:12:05,990
+then you consider that the proxy is not
+
+00:12:03,440 --> 00:12:08,060
+willing to accept too many transaction
+
+00:12:05,990 --> 00:12:09,950
+and you buy and you don't use the cache
+
+00:12:08,060 --> 00:12:12,200
+cache version and go to the proxy
+
+00:12:09,950 --> 00:12:14,630
+directly and let it apply it startling
+
+00:12:12,200 --> 00:12:16,550
+so I mean T could be like 5 10 15
+
+00:12:14,630 --> 00:12:18,080
+milliseconds or so if you are under it
+
+00:12:16,550 --> 00:12:20,090
+then you're good if you are going over
+
+00:12:18,080 --> 00:12:22,160
+it then you better go and ask proxy and
+
+00:12:20,090 --> 00:12:26,690
+don't worry about these optimizations
+
+00:12:22,160 --> 00:12:29,510
+here note that both these calls GRE as
+
+00:12:26,690 --> 00:12:31,010
+well as commit version they happen all
+
+00:12:29,510 --> 00:12:33,380
+the time within the transaction
+
+00:12:31,010 --> 00:12:35,420
+implicitly so we are not adding any
+
+00:12:33,380 --> 00:12:38,120
+extra overhead other than calling it
+
+00:12:35,420 --> 00:12:40,100
+explicitly and casting these values for
+
+00:12:38,120 --> 00:12:42,380
+write only transaction GRE call does not
+
+00:12:40,100 --> 00:12:44,870
+happen and there is some other some more
+
+00:12:42,380 --> 00:12:48,290
+options that we have in our code base to
+
+00:12:44,870 --> 00:12:52,190
+avoid explicit GRE call if it's a write
+
+00:12:48,290 --> 00:12:54,050
+only transaction finally I want to talk
+
+00:12:52,190 --> 00:12:55,820
+about this third aspect of handling
+
+00:12:54,050 --> 00:12:57,800
+large values so we get these large
+
+00:12:55,820 --> 00:12:59,600
+values in our system from device
+
+00:12:57,800 --> 00:13:01,880
+configurations that we collect from the
+
+00:12:59,600 --> 00:13:04,790
+data centers they come in XML JSON
+
+00:13:01,880 --> 00:13:06,350
+protocol etcetera examples of these
+
+00:13:04,790 --> 00:13:09,800
+configuration could be large switches
+
+00:13:06,350 --> 00:13:10,520
+and firewalls that have many ports and
+
+00:13:09,800 --> 00:13:12,590
+rules
+
+00:13:10,520 --> 00:13:15,650
+and computer network topologies that
+
+00:13:12,590 --> 00:13:18,200
+have hundreds of thousands of parts in
+
+00:13:15,650 --> 00:13:20,780
+them and tend to become large
+
+00:13:18,200 --> 00:13:22,760
+now if DB has this transaction limits
+
+00:13:20,780 --> 00:13:25,310
+around both the duration as well as size
+
+00:13:22,760 --> 00:13:27,290
+it doesn't allow transactions to span
+
+00:13:25,310 --> 00:13:29,210
+more than five second and even though
+
+00:13:27,290 --> 00:13:30,830
+the documentation says 10 MB is the
+
+00:13:29,210 --> 00:13:32,870
+upper bound for transaction the
+
+00:13:30,830 --> 00:13:35,720
+recommended size if you read the forum's
+
+00:13:32,870 --> 00:13:38,900
+I saw close to 1 M megabytes but we
+
+00:13:35,720 --> 00:13:41,150
+still want to have consistent writes and
+
+00:13:38,900 --> 00:13:43,040
+atomic visibility and we want to have
+
+00:13:41,150 --> 00:13:45,140
+consistent read without any stale or
+
+00:13:43,040 --> 00:13:47,740
+partial data view we just want to write
+
+00:13:45,140 --> 00:13:50,090
+these large values as if f DB allowed
+
+00:13:47,740 --> 00:13:52,100
+such large values to be written in one
+
+00:13:50,090 --> 00:13:54,650
+transaction even though due to the
+
+00:13:52,100 --> 00:13:56,660
+limits we cannot do that so what we do
+
+00:13:54,650 --> 00:13:59,060
+is we follow a multi-step protocol to
+
+00:13:56,660 --> 00:14:01,280
+achieve it and it's pretty standard and
+
+00:13:59,060 --> 00:14:03,380
+simple and but useful so what we do is
+
+00:14:01,280 --> 00:14:06,470
+we start with writing like a temporary
+
+00:14:03,380 --> 00:14:09,740
+garbage collection row and give it an
+
+00:14:06,470 --> 00:14:11,180
+ownership of a chunk pointer versions
+
+00:14:09,740 --> 00:14:13,310
+time can again be used as a chunk
+
+00:14:11,180 --> 00:14:17,150
+pointer it could be anything a UUID or
+
+00:14:13,310 --> 00:14:18,650
+whatever you want to once there so one
+
+00:14:17,150 --> 00:14:21,140
+thing to note each of the colors
+
+00:14:18,650 --> 00:14:23,450
+represent an individual transaction so
+
+00:14:21,140 --> 00:14:25,430
+probably make more sense then once we
+
+00:14:23,450 --> 00:14:27,470
+have got the chunk pointer then we break
+
+00:14:25,430 --> 00:14:30,230
+up our data which could be megabytes or
+
+00:14:27,470 --> 00:14:32,180
+gigabytes in size and then write it
+
+00:14:30,230 --> 00:14:34,340
+against the Strand pointer in multiple
+
+00:14:32,180 --> 00:14:36,410
+transactions maybe in parallel depending
+
+00:14:34,340 --> 00:14:38,390
+on how you want to write it once this is
+
+00:14:36,410 --> 00:14:40,430
+complete we shift the ownership of chunk
+
+00:14:38,390 --> 00:14:44,390
+pointer back from the GC record to a
+
+00:14:40,430 --> 00:14:47,720
+master record which is our main lookup
+
+00:14:44,390 --> 00:14:51,350
+mechanism and delete the g0 in the same
+
+00:14:47,720 --> 00:14:54,050
+direction once this is done the the
+
+00:14:51,350 --> 00:14:56,630
+ownership is now fixed with master and
+
+00:14:54,050 --> 00:14:59,480
+the visibility is atomic in between if
+
+00:14:56,630 --> 00:15:02,150
+there was any failure before we were
+
+00:14:59,480 --> 00:15:05,150
+able to do this blue transaction all any
+
+00:15:02,150 --> 00:15:07,640
+partial data would remain under the
+
+00:15:05,150 --> 00:15:09,860
+ownership of GC row which will be
+
+00:15:07,640 --> 00:15:16,610
+eventually cleaned up by some background
+
+00:15:09,860 --> 00:15:19,340
+tasks when we go to the delete of these
+
+00:15:16,610 --> 00:15:22,010
+rows instead of deleting the data in
+
+00:15:19,340 --> 00:15:23,470
+line we shift you know the ownership of
+
+00:15:22,010 --> 00:15:26,440
+sank pointer back from the
+
+00:15:23,470 --> 00:15:31,330
+to a new g0 and clear the master row all
+
+00:15:26,440 --> 00:15:32,530
+in same transaction again what we get
+
+00:15:31,330 --> 00:15:34,720
+out of this is if there was any
+
+00:15:32,530 --> 00:15:36,730
+continent read happening for that record
+
+00:15:34,720 --> 00:15:40,180
+it will not fail because though the data
+
+00:15:36,730 --> 00:15:43,090
+is still present and it will get deleted
+
+00:15:40,180 --> 00:15:45,130
+after some time that continent read why
+
+00:15:43,090 --> 00:15:46,870
+I say that concurrent read would have
+
+00:15:45,130 --> 00:15:49,180
+otherwise fail is because it's a lot of
+
+00:15:46,870 --> 00:15:50,710
+data to read and the treat the
+
+00:15:49,180 --> 00:15:51,940
+concurrent read might not be reading
+
+00:15:50,710 --> 00:15:53,260
+this entire record in a single
+
+00:15:51,940 --> 00:15:55,980
+transaction it might be using multiple
+
+00:15:53,260 --> 00:15:59,170
+transaction so it will not get MVCC
+
+00:15:55,980 --> 00:16:01,060
+benefits so if I delete the data in line
+
+00:15:59,170 --> 00:16:04,480
+that transaction would get partial or
+
+00:16:01,060 --> 00:16:06,340
+incomplete data but with this pattern we
+
+00:16:04,480 --> 00:16:09,150
+don't run into that and if the
+
+00:16:06,340 --> 00:16:11,830
+background cleanup just periodically
+
+00:16:09,150 --> 00:16:14,530
+scans for all the garbage collector all
+
+00:16:11,830 --> 00:16:17,500
+the garbage rows for let's say anything
+
+00:16:14,530 --> 00:16:19,660
+up to now - 30 minutes and now - one
+
+00:16:17,500 --> 00:16:22,570
+hour and for each of the garbage P it
+
+00:16:19,660 --> 00:16:25,090
+clears itself and thus arranged delete
+
+00:16:22,570 --> 00:16:28,690
+for all the data under the space of it
+
+00:16:25,090 --> 00:16:30,640
+and that's about it like if you consider
+
+00:16:28,690 --> 00:16:33,040
+extensions of these like updation of
+
+00:16:30,640 --> 00:16:35,560
+Records they are pretty simple and this
+
+00:16:33,040 --> 00:16:39,970
+protocol can be easily made to do so
+
+00:16:35,560 --> 00:16:41,830
+so just to recap we have used we have
+
+00:16:39,970 --> 00:16:46,000
+discussed some of the common patterns
+
+00:16:41,830 --> 00:16:47,320
+that we find running into many times
+
+00:16:46,000 --> 00:16:49,450
+when building layers like I've been
+
+00:16:47,320 --> 00:16:51,580
+listening to many talks and since
+
+00:16:49,450 --> 00:16:54,070
+morning and I think they have a lot of
+
+00:16:51,580 --> 00:16:55,600
+mention about change feeds and latency
+
+00:16:54,070 --> 00:16:58,240
+and everything and I think these are
+
+00:16:55,600 --> 00:17:02,410
+pretty generally applicable problems we
+
+00:16:58,240 --> 00:17:04,780
+saw how we use some of the FDB
+
+00:17:02,410 --> 00:17:07,089
+constructs to address the issue issues
+
+00:17:04,780 --> 00:17:09,610
+specifically for changelog we made use
+
+00:17:07,089 --> 00:17:13,030
+of version stamps conflict ranges and
+
+00:17:09,610 --> 00:17:15,310
+locality info to first find the problem
+
+00:17:13,030 --> 00:17:17,020
+and then devise a pattern for it for
+
+00:17:15,310 --> 00:17:18,910
+reducing the latency read and Rayo
+
+00:17:17,020 --> 00:17:20,860
+commit versions were used and for
+
+00:17:18,910 --> 00:17:24,130
+handling large values versions lamp and
+
+00:17:20,860 --> 00:17:25,360
+multirow transactions so using these
+
+00:17:24,130 --> 00:17:27,730
+kind of techniques we were able to
+
+00:17:25,360 --> 00:17:30,760
+balance out our SS storage server queues
+
+00:17:27,730 --> 00:17:33,429
+pretty uniformly and we removed
+
+00:17:30,760 --> 00:17:35,620
+throttling happening due to it we were
+
+00:17:33,429 --> 00:17:36,760
+able to reduce our transaction lateen
+
+00:17:35,620 --> 00:17:39,529
+sails by about 25
+
+00:17:36,760 --> 00:17:41,720
+under certain set of conditions where it
+
+00:17:39,529 --> 00:17:44,600
+was okay to get certain staler reached
+
+00:17:41,720 --> 00:17:48,500
+by the way I think I forget the part
+
+00:17:44,600 --> 00:17:50,510
+where for for the pattern that we have
+
+00:17:48,500 --> 00:17:52,669
+used for reducing the latency it only
+
+00:17:50,510 --> 00:17:54,380
+affects the read-only transactions for
+
+00:17:52,669 --> 00:17:56,360
+right transactions they will never be
+
+00:17:54,380 --> 00:17:59,120
+run into consistency problem they will
+
+00:17:56,360 --> 00:18:01,400
+always conflict back and be retried and
+
+00:17:59,120 --> 00:18:03,350
+so they will not be we are not
+
+00:18:01,400 --> 00:18:05,390
+sacrificing any guarantees for
+
+00:18:03,350 --> 00:18:07,789
+transactions that involve right in
+
+00:18:05,390 --> 00:18:09,799
+theory they may run into slightly more
+
+00:18:07,789 --> 00:18:11,350
+conflicts but again we don't find that
+
+00:18:09,799 --> 00:18:14,539
+happening too much for our workloads and
+
+00:18:11,350 --> 00:18:17,299
+finally we have a pattern where we
+
+00:18:14,539 --> 00:18:18,980
+really do not have any limit on the size
+
+00:18:17,299 --> 00:18:20,510
+of the day or record we can write in
+
+00:18:18,980 --> 00:18:24,140
+Foundation dB
+
+00:18:20,510 --> 00:18:27,080
+so I mean we we don't have to worry what
+
+00:18:24,140 --> 00:18:29,330
+that limit is and whether we are
+
+00:18:27,080 --> 00:18:32,630
+affected by any any of such limit within
+
+00:18:29,330 --> 00:18:35,080
+foundation maybe so I think that's it
+
+00:18:32,630 --> 00:18:39,440
+yeah thank you
+
+00:18:35,080 --> 00:18:39,440
+
+YouTube URL: https://www.youtube.com/watch?v=ud7HkadJBqI
+
+

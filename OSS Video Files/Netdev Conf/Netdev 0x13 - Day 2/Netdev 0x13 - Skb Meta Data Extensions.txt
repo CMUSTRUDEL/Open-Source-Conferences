@@ -1,0 +1,1465 @@
+Title: Netdev 0x13 - Skb Meta Data Extensions
+Publication date: 2019-05-25
+Playlist: Netdev 0x13 - Day 2
+Description: 
+	Florian Westphal goes into the deep guts of the skb meta data extensions feature he added.
+
+Dynamic skb metadata extension is a refreshing new feature added upstream recently (see commit df5042f4c5b9). A net subsystem can associate metadatum to an skb through its life span without affecting the size of the sk_buff structure.
+
+More info:
+https://www.netdevconf.org/0x13/session.html?skb-meta-data-extensions
+Captions: 
+	00:00:00,030 --> 00:00:04,920
+my name is Flo and this fella I'm a
+
+00:00:02,310 --> 00:00:07,529
+kernel developer at Red Hat and doing
+
+00:00:04,920 --> 00:00:12,030
+mainly work on the networking stack and
+
+00:00:07,529 --> 00:00:14,519
+mainly netfilter I will give a talk
+
+00:00:12,030 --> 00:00:17,250
+about the recently added escapee
+
+00:00:14,519 --> 00:00:18,930
+metadata extensions and if someone would
+
+00:00:17,250 --> 00:00:29,869
+give me the device so switch to the next
+
+00:00:18,930 --> 00:00:31,890
+slide I would be very grateful thank you
+
+00:00:29,869 --> 00:00:36,480
+so first I will give a short
+
+00:00:31,890 --> 00:00:40,079
+introduction and background on what this
+
+00:00:36,480 --> 00:00:42,809
+talk will be partly about then some
+
+00:00:40,079 --> 00:00:44,190
+motivation for this work then I will
+
+00:00:42,809 --> 00:00:46,020
+explain how to implement Asian is
+
+00:00:44,190 --> 00:00:49,559
+looking like and why it was done this
+
+00:00:46,020 --> 00:00:51,930
+way and thus that will give a short
+
+00:00:49,559 --> 00:00:54,329
+overview over possible alternatives in
+
+00:00:51,930 --> 00:00:56,550
+case you have a use case where the
+
+00:00:54,329 --> 00:01:00,449
+extensions can't be used or don't really
+
+00:00:56,550 --> 00:01:02,340
+make sense so first and off all escape
+
+00:01:00,449 --> 00:01:05,129
+off is the main data structure in the
+
+00:01:02,340 --> 00:01:07,770
+news network stack and if you take a
+
+00:01:05,129 --> 00:01:09,860
+look at a networking stacking logs you
+
+00:01:07,770 --> 00:01:13,080
+will see this escape abstract everywhere
+
+00:01:09,860 --> 00:01:15,869
+its purpose is to associate the raw data
+
+00:01:13,080 --> 00:01:18,080
+that comes in from a network device so
+
+00:01:15,869 --> 00:01:21,030
+that will be sent out to the network
+
+00:01:18,080 --> 00:01:24,150
+with the data about the data for
+
+00:01:21,030 --> 00:01:27,689
+instance it contains device on which the
+
+00:01:24,150 --> 00:01:31,229
+packet arrived on it contains the socket
+
+00:01:27,689 --> 00:01:33,750
+the packet is associated with it has
+
+00:01:31,229 --> 00:01:35,430
+pointers to the network offsets the
+
+00:01:33,750 --> 00:01:37,619
+transport offset and so on that get
+
+00:01:35,430 --> 00:01:40,350
+filled in as the packet is parsed in the
+
+00:01:37,619 --> 00:01:42,829
+network stack and there's also the
+
+00:01:40,350 --> 00:01:46,049
+timestamp when the packet arrived a
+
+00:01:42,829 --> 00:01:49,259
+checksum and packet hash and so on and
+
+00:01:46,049 --> 00:01:51,360
+so on and so on and it's very very hard
+
+00:01:49,259 --> 00:01:53,579
+to make changes to the structure because
+
+00:01:51,360 --> 00:01:55,229
+as soon as you make large changes and
+
+00:01:53,579 --> 00:01:58,229
+distract even just adding a pointer
+
+00:01:55,229 --> 00:02:00,119
+somewhere it almost always has a
+
+00:01:58,229 --> 00:02:02,399
+performance implication because this
+
+00:02:00,119 --> 00:02:04,490
+structure is used everywhere and the
+
+00:02:02,399 --> 00:02:06,630
+struct size and the layout have
+
+00:02:04,490 --> 00:02:08,280
+immediate effect because of the access
+
+00:02:06,630 --> 00:02:10,679
+pattern so for instance if you have a
+
+00:02:08,280 --> 00:02:13,650
+code passed as that is executed power
+
+00:02:10,679 --> 00:02:17,069
+pack at 10 million times per second
+
+00:02:13,650 --> 00:02:17,640
+or something like that and you you your
+
+00:02:17,069 --> 00:02:20,250
+change
+
+00:02:17,640 --> 00:02:22,260
+causes some data to be split across a
+
+00:02:20,250 --> 00:02:25,349
+cache line and this can can make a huge
+
+00:02:22,260 --> 00:02:27,810
+difference the other reason is that
+
+00:02:25,349 --> 00:02:30,329
+whenever we have to allocate a structure
+
+00:02:27,810 --> 00:02:32,549
+we need to initialize most of it so
+
+00:02:30,329 --> 00:02:34,349
+every cache line and it's for cache
+
+00:02:32,549 --> 00:02:37,709
+lines in total on most architectures
+
+00:02:34,349 --> 00:02:45,299
+will be touched the structure is fairly
+
+00:02:37,709 --> 00:02:48,000
+large it's something like 224 bytes so
+
+00:02:45,299 --> 00:02:50,220
+this problem has come up before how do I
+
+00:02:48,000 --> 00:02:53,519
+associate some extra data with the SK
+
+00:02:50,220 --> 00:02:56,609
+buff without adding something to it for
+
+00:02:53,519 --> 00:03:00,780
+my special use case and if you go back
+
+00:02:56,609 --> 00:03:02,519
+in time into until 2002 the petrous that
+
+00:03:00,780 --> 00:03:04,739
+implemented the initial versions for
+
+00:03:02,519 --> 00:03:07,109
+IPSec engine and for the bridge net food
+
+00:03:04,739 --> 00:03:09,480
+have emerged and they both pretty much
+
+00:03:07,109 --> 00:03:12,180
+at the same time solve this problem in
+
+00:03:09,480 --> 00:03:15,319
+pretty much exactly the same way so they
+
+00:03:12,180 --> 00:03:18,810
+both at a private pointer to the SK buff
+
+00:03:15,319 --> 00:03:21,329
+that gets allocated for a private
+
+00:03:18,810 --> 00:03:24,329
+structure and then they place whatever
+
+00:03:21,329 --> 00:03:26,190
+information they need to store there in
+
+00:03:24,329 --> 00:03:29,430
+that extra struct that hangs of the
+
+00:03:26,190 --> 00:03:32,419
+escape of master structure and the case
+
+00:03:29,430 --> 00:03:34,799
+of IP secrets information like what the
+
+00:03:32,419 --> 00:03:36,959
+encryption algorithms are and so on and
+
+00:03:34,799 --> 00:03:39,090
+so forth and for bridge net failure it
+
+00:03:36,959 --> 00:03:41,000
+has to store on which Bridge port a
+
+00:03:39,090 --> 00:03:44,010
+packet arrived and in case there is
+
+00:03:41,000 --> 00:03:47,849
+mangling going on it's storage and MAC
+
+00:03:44,010 --> 00:03:49,949
+addresses and so on they are pretty much
+
+00:03:47,849 --> 00:03:52,230
+exactly the same they're both only
+
+00:03:49,949 --> 00:03:53,910
+allocated on demand if the packet is
+
+00:03:52,230 --> 00:03:56,370
+IPSec or if it's traveling through
+
+00:03:53,910 --> 00:03:59,370
+net filter and not at allocation time so
+
+00:03:56,370 --> 00:04:01,829
+aside from the increase in the escape of
+
+00:03:59,370 --> 00:04:03,900
+structure for the two pointers anyone
+
+00:04:01,829 --> 00:04:05,519
+who doesn't use IPSec or which net
+
+00:04:03,900 --> 00:04:10,500
+filter won't have to pay any of the
+
+00:04:05,519 --> 00:04:13,410
+extra cost both our reference count
+
+00:04:10,500 --> 00:04:15,269
+which means that if in case the escapee
+
+00:04:13,410 --> 00:04:16,739
+is cloned because it has to be kept on
+
+00:04:15,269 --> 00:04:19,680
+an additional queue for instance because
+
+00:04:16,739 --> 00:04:21,269
+I'm TCP dump is running then the data is
+
+00:04:19,680 --> 00:04:24,240
+not copied it's just a reference
+
+00:04:21,269 --> 00:04:26,820
+reference counter and there are
+
+00:04:24,240 --> 00:04:29,340
+provisions on when
+
+00:04:26,820 --> 00:04:32,300
+users can say that they need exclusive
+
+00:04:29,340 --> 00:04:35,490
+access and there is a copy-on-write
+
+00:04:32,300 --> 00:04:37,380
+to implement that properly both hook
+
+00:04:35,490 --> 00:04:39,210
+into the code paths that yield was
+
+00:04:37,380 --> 00:04:42,060
+cloning and was freeing to maintain that
+
+00:04:39,210 --> 00:04:44,220
+so in case the sk buff is freed and the
+
+00:04:42,060 --> 00:04:48,390
+last escape of goes await and the data
+
+00:04:44,220 --> 00:04:51,390
+will be freed automatically and unlike
+
+00:04:48,390 --> 00:04:53,610
+the existing other structures that hang
+
+00:04:51,390 --> 00:04:57,390
+off escape off such as the socket or the
+
+00:04:53,610 --> 00:04:59,280
+device which are pointing to data that
+
+00:04:57,390 --> 00:05:01,260
+is external the device doesn't go away
+
+00:04:59,280 --> 00:05:04,020
+just because a packet is freed and
+
+00:05:01,260 --> 00:05:04,640
+likewise to socket that's the main
+
+00:05:04,020 --> 00:05:08,760
+difference
+
+00:05:04,640 --> 00:05:11,550
+so these use cases for IPSec and return
+
+00:05:08,760 --> 00:05:14,280
+if it are basically exactly the same so
+
+00:05:11,550 --> 00:05:18,240
+now it's 2018 and we have two thing
+
+00:05:14,280 --> 00:05:21,900
+called MP TCP and MP TCP needs to store
+
+00:05:18,240 --> 00:05:23,550
+extra data in the escape of the solution
+
+00:05:21,900 --> 00:05:25,920
+that was allegedly chosen is to just
+
+00:05:23,550 --> 00:05:28,440
+increase the control buffer which is the
+
+00:05:25,920 --> 00:05:32,490
+logical place where you store such data
+
+00:05:28,440 --> 00:05:35,340
+but it had to be increased because we
+
+00:05:32,490 --> 00:05:37,260
+are already out of space and the control
+
+00:05:35,340 --> 00:05:38,670
+buffer to put any more stuff in it
+
+00:05:37,260 --> 00:05:43,200
+without increasing the total structure
+
+00:05:38,670 --> 00:05:46,470
+size so what they did was just to
+
+00:05:43,200 --> 00:05:49,110
+increase that and the main use case for
+
+00:05:46,470 --> 00:05:51,360
+that is to store the DSS or data
+
+00:05:49,110 --> 00:05:53,580
+sequence signal map which Maps the
+
+00:05:51,360 --> 00:05:56,070
+logical sequence numbers and MPT speed
+
+00:05:53,580 --> 00:05:59,280
+or the individual sequence numbers in
+
+00:05:56,070 --> 00:06:02,430
+the sub flows because you have to make
+
+00:05:59,280 --> 00:06:04,740
+an MP TCP you have multiple TCP streams
+
+00:06:02,430 --> 00:06:06,330
+that make up a logical connection so if
+
+00:06:04,740 --> 00:06:08,430
+you have packets arriving then you need
+
+00:06:06,330 --> 00:06:11,580
+to figure out which TCP packet comes in
+
+00:06:08,430 --> 00:06:13,830
+to into which order in the logical
+
+00:06:11,580 --> 00:06:18,170
+connections because the packets can go
+
+00:06:13,830 --> 00:06:21,300
+on any one of the sub TCP flows and
+
+00:06:18,170 --> 00:06:24,540
+because MB TCP would like to be up
+
+00:06:21,300 --> 00:06:28,200
+streamed so we need to find some
+
+00:06:24,540 --> 00:06:31,250
+alternative method to storage this TSS
+
+00:06:28,200 --> 00:06:33,810
+map somewhere in the SK buff without
+
+00:06:31,250 --> 00:06:37,710
+making a mess of the escape of structure
+
+00:06:33,810 --> 00:06:38,919
+so there were several alternative
+
+00:06:37,710 --> 00:06:40,930
+discussion
+
+00:06:38,919 --> 00:06:42,699
+solutions discussed so I like adding a
+
+00:06:40,930 --> 00:06:45,580
+second control buffer at the end and
+
+00:06:42,699 --> 00:06:49,349
+adding another pointer off the escape of
+
+00:06:45,580 --> 00:06:52,330
+like IPSec or which netfilter but well
+
+00:06:49,349 --> 00:06:54,069
+they are very much similar in the
+
+00:06:52,330 --> 00:06:57,539
+requirements to what we already have
+
+00:06:54,069 --> 00:07:01,000
+with IPSec and the bridge netfilter so
+
+00:06:57,539 --> 00:07:02,379
+can we just replace that with a single
+
+00:07:01,000 --> 00:07:04,210
+unifying infrastructure and that's
+
+00:07:02,379 --> 00:07:07,990
+exactly what is can be extended czar
+
+00:07:04,210 --> 00:07:10,060
+about so basically what I did is to take
+
+00:07:07,990 --> 00:07:13,180
+a look at all the two existing users and
+
+00:07:10,060 --> 00:07:14,830
+what requirements NP TCP has and then I
+
+00:07:13,180 --> 00:07:16,930
+started to come up with something that
+
+00:07:14,830 --> 00:07:20,529
+can handle all of them with a single
+
+00:07:16,930 --> 00:07:27,099
+pointer and just implement whatever all
+
+00:07:20,529 --> 00:07:30,039
+of these similar use cases need so the
+
+00:07:27,099 --> 00:07:32,889
+main assumption is that no one is going
+
+00:07:30,039 --> 00:07:35,259
+to use these extensions for the normal
+
+00:07:32,889 --> 00:07:37,689
+cases like normal TCP normal UDP
+
+00:07:35,259 --> 00:07:40,029
+workloads and that the overhead will
+
+00:07:37,689 --> 00:07:43,770
+just be paid for IPSec for internet
+
+00:07:40,029 --> 00:07:46,690
+filter and for in the future and be TCP
+
+00:07:43,770 --> 00:07:49,089
+in case MP TCP because it's not yet
+
+00:07:46,690 --> 00:07:51,669
+upstream would find another solution
+
+00:07:49,089 --> 00:07:54,339
+that doesn't need these extensions then
+
+00:07:51,669 --> 00:07:57,310
+all is good because we already were able
+
+00:07:54,339 --> 00:08:01,089
+to unify the two existing use cases we
+
+00:07:57,310 --> 00:08:03,610
+have so this is not just for MP TCP it
+
+00:08:01,089 --> 00:08:06,270
+will be fine if an participe can come up
+
+00:08:03,610 --> 00:08:06,270
+with a different solution
+
+00:08:10,050 --> 00:08:15,490
+capi extensions are a bit different
+
+00:08:12,759 --> 00:08:19,060
+because we only have one pointer instead
+
+00:08:15,490 --> 00:08:21,009
+of two for IPSec and bridge we must be
+
+00:08:19,060 --> 00:08:22,839
+able to add all the extensions at the
+
+00:08:21,009 --> 00:08:24,339
+same time like we already canvas in two
+
+00:08:22,839 --> 00:08:26,830
+different pointers but now we just have
+
+00:08:24,339 --> 00:08:28,539
+one so we need a way to identify which
+
+00:08:26,830 --> 00:08:31,300
+extensions are active and which
+
+00:08:28,539 --> 00:08:34,329
+extensions are not active or if we don't
+
+00:08:31,300 --> 00:08:37,149
+have any extensions at all and the way
+
+00:08:34,329 --> 00:08:40,060
+to do it I added an you know that has
+
+00:08:37,149 --> 00:08:43,560
+the two existing users namely bridge and
+
+00:08:40,060 --> 00:08:49,120
+and the net filters and the net further
+
+00:08:43,560 --> 00:08:50,670
+bridge infrastructure and there is a
+
+00:08:49,120 --> 00:08:53,940
+second new member
+
+00:08:50,670 --> 00:08:56,220
+escape off so we have one new pointer to
+
+00:08:53,940 --> 00:09:00,450
+store the dynamically allocated data and
+
+00:08:56,220 --> 00:09:02,880
+we have a small bite that will tell us
+
+00:09:00,450 --> 00:09:06,750
+as a bitmask which extension is active
+
+00:09:02,880 --> 00:09:08,990
+in which extend rules are cleared so at
+
+00:09:06,750 --> 00:09:12,180
+the Collister conscience just check the
+
+00:09:08,990 --> 00:09:16,220
+active extensions bite to figure out if
+
+00:09:12,180 --> 00:09:19,860
+the exchange is active or not one of the
+
+00:09:16,220 --> 00:09:21,810
+questions I had when I got asked when AB
+
+00:09:19,860 --> 00:09:23,910
+streamed it originally was why I would
+
+00:09:21,810 --> 00:09:26,460
+not store that in the extension blob
+
+00:09:23,910 --> 00:09:28,800
+itself and the reason for that is the
+
+00:09:26,460 --> 00:09:31,110
+copy-on-write scheme because we must be
+
+00:09:28,800 --> 00:09:34,350
+able to delete an extension at any given
+
+00:09:31,110 --> 00:09:35,940
+time but in case the reference count has
+
+00:09:34,350 --> 00:09:37,950
+been increased because there are several
+
+00:09:35,940 --> 00:09:40,650
+escapees that have referred to the same
+
+00:09:37,950 --> 00:09:42,840
+extension structure then we get a
+
+00:09:40,650 --> 00:09:44,610
+problem because we cannot just clear the
+
+00:09:42,840 --> 00:09:46,680
+bit and the extension me and the
+
+00:09:44,610 --> 00:09:48,510
+extension to talk because it's shared so
+
+00:09:46,680 --> 00:09:50,250
+if you would total it often one skb
+
+00:09:48,510 --> 00:09:52,950
+would toggle it also often all the
+
+00:09:50,250 --> 00:09:55,380
+clones that exist already and that would
+
+00:09:52,950 --> 00:09:57,660
+mean that we have to copy-on-write in
+
+00:09:55,380 --> 00:10:00,210
+the case of a disabling request and
+
+00:09:57,660 --> 00:10:02,760
+camallo can fail and on a resource
+
+00:10:00,210 --> 00:10:05,910
+stress and that's not a desirable
+
+00:10:02,760 --> 00:10:08,700
+behavior to have that it's not possible
+
+00:10:05,910 --> 00:10:11,930
+to disable an extension that is edits at
+
+00:10:08,700 --> 00:10:14,580
+a later time so I used an external
+
+00:10:11,930 --> 00:10:15,300
+additional additional escapee field to
+
+00:10:14,580 --> 00:10:20,300
+solve that problem
+
+00:10:15,300 --> 00:10:29,310
+I can just clear that it in case the
+
+00:10:20,300 --> 00:10:31,800
+extension is to be removed another
+
+00:10:29,310 --> 00:10:34,830
+upside is that the extension pointer can
+
+00:10:31,800 --> 00:10:38,820
+be kept initialized so it's at a lot at
+
+00:10:34,830 --> 00:10:42,270
+the last part of the skb and at that
+
+00:10:38,820 --> 00:10:44,820
+point it has an undefined state so that
+
+00:10:42,270 --> 00:10:47,310
+means that if you allocate a new sk buff
+
+00:10:44,820 --> 00:10:50,190
+and you read the extension pointer it
+
+00:10:47,310 --> 00:10:51,540
+can crash because or divert dereference
+
+00:10:50,190 --> 00:10:53,880
+that extension pointer because it's
+
+00:10:51,540 --> 00:10:55,710
+content is random so all the callers
+
+00:10:53,880 --> 00:10:58,470
+first need to check the active extension
+
+00:10:55,710 --> 00:11:01,410
+by it if there is an extension and only
+
+00:10:58,470 --> 00:11:03,260
+then is the pointer active why because
+
+00:11:01,410 --> 00:11:04,820
+that saves a bit of time
+
+00:11:03,260 --> 00:11:06,650
+a location because we don't have to
+
+00:11:04,820 --> 00:11:10,280
+clear out the last part of the Escobar's
+
+00:11:06,650 --> 00:11:12,230
+and one idea is for the future to move
+
+00:11:10,280 --> 00:11:14,000
+edition try and find out if we have
+
+00:11:12,230 --> 00:11:15,440
+additional fears and escape after that
+
+00:11:14,000 --> 00:11:17,240
+are not that important that we could
+
+00:11:15,440 --> 00:11:20,060
+move downwards whether we're it's in an
+
+00:11:17,240 --> 00:11:21,800
+undefined state one target that might be
+
+00:11:20,060 --> 00:11:28,370
+useful to look at is the is the VLAN
+
+00:11:21,800 --> 00:11:31,340
+header even if it's more the extender
+
+00:11:28,370 --> 00:11:34,460
+structure looks like this so you have a
+
+00:11:31,340 --> 00:11:37,660
+reference count like an IP second bridge
+
+00:11:34,460 --> 00:11:40,460
+net filter so it's it's exactly the same
+
+00:11:37,660 --> 00:11:43,010
+then there's a small array that contains
+
+00:11:40,460 --> 00:11:47,150
+the offset to where the extension that
+
+00:11:43,010 --> 00:11:49,760
+will be added starts then there is a
+
+00:11:47,150 --> 00:11:52,820
+counter that tells us how much of the
+
+00:11:49,760 --> 00:11:56,800
+extension space is in use and then
+
+00:11:52,820 --> 00:11:56,800
+there's the data directly behind it
+
+00:11:57,490 --> 00:12:03,020
+accessible why are the new skb
+
+00:11:59,960 --> 00:12:06,680
+extensions pointer and to fetch an
+
+00:12:03,020 --> 00:12:08,120
+individual extension you can just use
+
+00:12:06,680 --> 00:12:10,520
+one of the helpers that will essentially
+
+00:12:08,120 --> 00:12:13,130
+just take the start of the extension
+
+00:12:10,520 --> 00:12:18,320
+point and then add the offset that is in
+
+00:12:13,130 --> 00:12:20,510
+the array of the same name when the
+
+00:12:18,320 --> 00:12:23,240
+first extension gets added then we
+
+00:12:20,510 --> 00:12:27,170
+always allocate a full memory that is
+
+00:12:23,240 --> 00:12:29,690
+required for all extensions at once so
+
+00:12:27,170 --> 00:12:34,580
+the first extension that gets allocated
+
+00:12:29,690 --> 00:12:38,660
+gets placed first in memory so at the at
+
+00:12:34,580 --> 00:12:40,820
+the offset enum value there will be the
+
+00:12:38,660 --> 00:12:43,310
+number one because it's always at a at
+
+00:12:40,820 --> 00:12:45,140
+the top this is a deliberate design
+
+00:12:43,310 --> 00:12:47,660
+decision because we can use a caiman
+
+00:12:45,140 --> 00:12:51,170
+cash for the skb extensions so if you
+
+00:12:47,660 --> 00:12:53,450
+tell slab to not merge caiman caches
+
+00:12:51,170 --> 00:12:56,420
+then you will see in the proc file
+
+00:12:53,450 --> 00:13:00,980
+system oh my how much data is allocated
+
+00:12:56,420 --> 00:13:04,040
+for skp extensions and the memory
+
+00:13:00,980 --> 00:13:07,070
+contents are undefined so we so we don't
+
+00:13:04,040 --> 00:13:11,530
+pay any extra penalty for allocating a
+
+00:13:07,070 --> 00:13:15,570
+few extra bytes that doesn't matter and
+
+00:13:11,530 --> 00:13:17,490
+one other point is it's a bit easier
+
+00:13:15,570 --> 00:13:19,350
+implementation of this did use in fact
+
+00:13:17,490 --> 00:13:22,980
+dynamically allocated memory and @k
+
+00:13:19,350 --> 00:13:25,140
+realloc on demand but because the total
+
+00:13:22,980 --> 00:13:27,240
+size is currently just one and 28 bytes
+
+00:13:25,140 --> 00:13:29,750
+so it didn't make sense to add a lot of
+
+00:13:27,240 --> 00:13:33,630
+code that yields was reallocate
+
+00:13:29,750 --> 00:13:36,630
+extension or shrinking of the buffer so
+
+00:13:33,630 --> 00:13:40,860
+I removed that part and used a fixed
+
+00:13:36,630 --> 00:13:44,010
+size instead it could be later changed
+
+00:13:40,860 --> 00:13:45,870
+so if in the future just this becomes a
+
+00:13:44,010 --> 00:13:48,450
+problem because the structures get too
+
+00:13:45,870 --> 00:13:51,000
+large then we could just move back to a
+
+00:13:48,450 --> 00:13:57,210
+dynamically allocated scheme it does not
+
+00:13:51,000 --> 00:13:59,250
+need that much changing when does a new
+
+00:13:57,210 --> 00:14:00,630
+using this infrastructure make sense so
+
+00:13:59,250 --> 00:14:02,970
+there are a couple of requirements that
+
+00:14:00,630 --> 00:14:05,850
+I think should be considered before
+
+00:14:02,970 --> 00:14:07,770
+making use of this so one is the data
+
+00:14:05,850 --> 00:14:09,150
+should be related to the SKT packet
+
+00:14:07,770 --> 00:14:13,470
+aggregate otherwise it does not make any
+
+00:14:09,150 --> 00:14:15,720
+sense so for instance to you you could
+
+00:14:13,470 --> 00:14:18,390
+move the device pointer to to the next
+
+00:14:15,720 --> 00:14:23,310
+engine but it makes no sense because you
+
+00:14:18,390 --> 00:14:27,410
+just you just add one extra dereference
+
+00:14:23,310 --> 00:14:27,410
+operation it's a common case and so on
+
+00:14:28,340 --> 00:14:33,270
+technically the data should be freed
+
+00:14:30,960 --> 00:14:35,310
+when the escapees feed so any resource
+
+00:14:33,270 --> 00:14:40,040
+that exists for length for longer than
+
+00:14:35,310 --> 00:14:40,040
+the skb lifetime doesn't make sense and
+
+00:14:40,280 --> 00:14:47,250
+very important is that it should not be
+
+00:14:43,700 --> 00:14:48,870
+in the normal case so if you have a use
+
+00:14:47,250 --> 00:14:51,810
+case that is so important that it will
+
+00:14:48,870 --> 00:14:54,270
+be allocated for every packet and on
+
+00:14:51,810 --> 00:14:55,800
+every Linux box out there and using a
+
+00:14:54,270 --> 00:14:57,930
+Skippy extensions makes more sense
+
+00:14:55,800 --> 00:15:00,090
+because at as soon as that happens then
+
+00:14:57,930 --> 00:15:03,860
+everyone will pay the pager and next our
+
+00:15:00,090 --> 00:15:03,860
+location penalty and we don't want that
+
+00:15:04,250 --> 00:15:11,130
+if you use case requires fancy actions
+
+00:15:08,580 --> 00:15:13,350
+on destruction like calling into kernel
+
+00:15:11,130 --> 00:15:15,210
+modules then it's probably also not a
+
+00:15:13,350 --> 00:15:17,190
+good idea to use this because I would
+
+00:15:15,210 --> 00:15:20,220
+prefer to keep this very simple and not
+
+00:15:17,190 --> 00:15:23,390
+add any infrastructure for dynamic
+
+00:15:20,220 --> 00:15:23,390
+destructors and whatnot
+
+00:15:25,499 --> 00:15:30,759
+there are a couple of alternatives so
+
+00:15:28,089 --> 00:15:35,229
+what was discussed basically doing the
+
+00:15:30,759 --> 00:15:39,429
+EMP TCP how do we solve our problem to
+
+00:15:35,229 --> 00:15:41,859
+store the sequence map so one idea was
+
+00:15:39,429 --> 00:15:44,859
+to store the extra data in the indy
+
+00:15:41,859 --> 00:15:49,569
+shared info block which hangs at the end
+
+00:15:44,859 --> 00:15:51,909
+of the data buffer and that's one way
+
+00:15:49,569 --> 00:15:54,399
+but the problem is that it it's
+
+00:15:51,909 --> 00:15:56,319
+unchanged on a on a clones or to share
+
+00:15:54,399 --> 00:15:57,759
+the plight in the name it's a shared
+
+00:15:56,319 --> 00:16:02,289
+information so whenever you clone
+
+00:15:57,759 --> 00:16:04,149
+something and one entity would make a
+
+00:16:02,289 --> 00:16:06,549
+changed and it becomes effective for
+
+00:16:04,149 --> 00:16:08,199
+every escape of structure that
+
+00:16:06,549 --> 00:16:11,919
+references the same data and that's
+
+00:16:08,199 --> 00:16:13,839
+that's for example impossible to use for
+
+00:16:11,919 --> 00:16:16,179
+both IPSec and for the bridge net filter
+
+00:16:13,839 --> 00:16:18,669
+because when since the bridge book will
+
+00:16:16,179 --> 00:16:21,729
+clone escapees when it has to flood a
+
+00:16:18,669 --> 00:16:25,049
+packet out on several bridge ports so as
+
+00:16:21,729 --> 00:16:28,629
+soon as that as that happens you always
+
+00:16:25,049 --> 00:16:30,609
+need extra storage for every SK buff and
+
+00:16:28,629 --> 00:16:33,819
+that's impossible with the mr. share
+
+00:16:30,609 --> 00:16:36,699
+info blog so that's of the question and
+
+00:16:33,819 --> 00:16:41,799
+the same applies to two possible other
+
+00:16:36,699 --> 00:16:43,599
+entities another idea was to okay if we
+
+00:16:41,799 --> 00:16:46,389
+should use the control buffer because
+
+00:16:43,599 --> 00:16:49,239
+that's what it was designed for protocol
+
+00:16:46,389 --> 00:16:51,309
+specific data but we can't increase it
+
+00:16:49,239 --> 00:16:53,049
+and we have large data why not add a
+
+00:16:51,309 --> 00:16:56,049
+second control buffer at the end of the
+
+00:16:53,049 --> 00:16:58,719
+sk buff that increases the structure
+
+00:16:56,049 --> 00:17:02,109
+size but it would not be initialized by
+
+00:16:58,719 --> 00:17:03,969
+default that is another possibility the
+
+00:17:02,109 --> 00:17:07,209
+only downside is the structure size
+
+00:17:03,969 --> 00:17:10,569
+increase but if you have a good use case
+
+00:17:07,209 --> 00:17:13,659
+that requires more data and a control
+
+00:17:10,569 --> 00:17:15,789
+buffer then that could be a possible
+
+00:17:13,659 --> 00:17:18,220
+solution to propose upstream to add a
+
+00:17:15,789 --> 00:17:20,919
+second control buffer at the end that is
+
+00:17:18,220 --> 00:17:25,179
+never initialized by default question
+
+00:17:20,919 --> 00:17:28,419
+Florine yeah it's not from amrita she's
+
+00:17:25,179 --> 00:17:32,220
+asking if when you say if you not be
+
+00:17:28,419 --> 00:17:34,629
+used for normal use case of TCP UDP
+
+00:17:32,220 --> 00:17:39,130
+that's I think nor a few slides earlier
+
+00:17:34,629 --> 00:17:42,460
+use it for TCP UDP
+
+00:17:39,130 --> 00:17:44,740
+how about tunnels here's a use case
+
+00:17:42,460 --> 00:17:49,200
+where she wants to store metadata it's
+
+00:17:44,740 --> 00:17:53,620
+used in tunnels might make sense yes it
+
+00:17:49,200 --> 00:17:56,110
+was 40 second I think every second of
+
+00:17:53,620 --> 00:18:00,190
+time so yeah I think that it could be
+
+00:17:56,110 --> 00:18:03,100
+could be done another thing that should
+
+00:18:00,190 --> 00:18:04,960
+probably be avoided is to add ludicrous
+
+00:18:03,100 --> 00:18:06,760
+data size to the skb extending
+
+00:18:04,960 --> 00:18:09,190
+structures of the current structure
+
+00:18:06,760 --> 00:18:11,919
+would theoretically support up to about
+
+00:18:09,190 --> 00:18:15,220
+two kilobytes of metadata but I would
+
+00:18:11,919 --> 00:18:17,049
+prefer if we don't go crazy and start
+
+00:18:15,220 --> 00:18:20,380
+abusing this to store what not
+
+00:18:17,049 --> 00:18:34,630
+immediately so please keep the size
+
+00:18:20,380 --> 00:18:36,280
+reasonable and I think a second control
+
+00:18:34,630 --> 00:18:38,770
+Bavarian at the end would also not
+
+00:18:36,280 --> 00:18:40,240
+impact any of the other structure
+
+00:18:38,770 --> 00:18:42,909
+members that come before so you don't
+
+00:18:40,240 --> 00:18:45,669
+have the problem that suddenly a hot
+
+00:18:42,909 --> 00:18:50,320
+path has to access fields on different
+
+00:18:45,669 --> 00:18:52,090
+cache lines and the idea was to add a
+
+00:18:50,320 --> 00:18:55,330
+control block at the end of the struct
+
+00:18:52,090 --> 00:19:00,039
+escape of F clones this is a very nice
+
+00:18:55,330 --> 00:19:01,750
+idea that Eric Dumas they had the clever
+
+00:19:00,039 --> 00:19:03,880
+thing is that you don't even increase
+
+00:19:01,750 --> 00:19:07,840
+the escape of size for incoming packets
+
+00:19:03,880 --> 00:19:09,789
+it's because the F clones are only used
+
+00:19:07,840 --> 00:19:12,370
+by TCP and other protocols for outgoing
+
+00:19:09,789 --> 00:19:15,789
+packets the trick here is that basically
+
+00:19:12,370 --> 00:19:19,870
+as escape of F clone is a structure that
+
+00:19:15,789 --> 00:19:22,390
+wraps to escape of structures in it for
+
+00:19:19,870 --> 00:19:25,659
+TCP and other protocols that always have
+
+00:19:22,390 --> 00:19:27,429
+to clone SK buffs on outgoing packets so
+
+00:19:25,659 --> 00:19:30,610
+for instance than TCP sends a sent a
+
+00:19:27,429 --> 00:19:32,049
+packet then it can't read a packet if it
+
+00:19:30,610 --> 00:19:34,990
+has been transmitted he has to hold on
+
+00:19:32,049 --> 00:19:36,610
+to the packet until the acknowledgement
+
+00:19:34,990 --> 00:19:40,830
+comes back from the other peer so it has
+
+00:19:36,610 --> 00:19:43,630
+to store the sk puff on retransmit q and
+
+00:19:40,830 --> 00:19:46,120
+that solved by cloning the sk path
+
+00:19:43,630 --> 00:19:48,700
+because an sk p clone is expensive
+
+00:19:46,120 --> 00:19:50,320
+because we would have to K Malik it uses
+
+00:19:48,700 --> 00:19:51,440
+this F clone structure so we basically
+
+00:19:50,320 --> 00:19:54,980
+always alakay
+
+00:19:51,440 --> 00:19:56,810
+to SK buffs at once and then when the
+
+00:19:54,980 --> 00:19:59,210
+cloning requests comes we notice and
+
+00:19:56,810 --> 00:20:02,600
+this we just pretend we didn't
+
+00:19:59,210 --> 00:20:07,040
+allocation and switch to the second SK
+
+00:20:02,600 --> 00:20:08,900
+buff that is inside this buff clone and
+
+00:20:07,040 --> 00:20:11,600
+adding another control buffer there for
+
+00:20:08,900 --> 00:20:14,210
+outgoing packets would would avoid a lot
+
+00:20:11,600 --> 00:20:16,220
+of problems but as I mentioned it's only
+
+00:20:14,210 --> 00:20:20,120
+available for outgoing packets because
+
+00:20:16,220 --> 00:20:28,360
+incoming packets use normal short SK SK
+
+00:20:20,120 --> 00:20:38,030
+puffs at a moment any questions so far
+
+00:20:28,360 --> 00:20:40,670
+yes I'm not sure I understood you
+
+00:20:38,030 --> 00:20:43,130
+correctly but if I understood you
+
+00:20:40,670 --> 00:20:48,460
+correctly you are allocating the space
+
+00:20:43,130 --> 00:20:51,230
+for all possible extensions and yet you
+
+00:20:48,460 --> 00:20:53,000
+allocate the space inside it dynamically
+
+00:20:51,230 --> 00:20:58,190
+according to which extensions are
+
+00:20:53,000 --> 00:21:01,280
+actually added to that yes that's
+
+00:20:58,190 --> 00:21:03,170
+partially correct yes so a simpler
+
+00:21:01,280 --> 00:21:06,350
+implementation would be to not have
+
+00:21:03,170 --> 00:21:07,820
+these offsets and to just open code the
+
+00:21:06,350 --> 00:21:11,630
+structures inside the extension
+
+00:21:07,820 --> 00:21:14,200
+structure instead of this opaque data to
+
+00:21:11,630 --> 00:21:16,910
+do what I will do to us yes
+
+00:21:14,200 --> 00:21:19,760
+the idea behind this is that right now
+
+00:21:16,910 --> 00:21:21,710
+if you'd finds its only use IPSec then
+
+00:21:19,760 --> 00:21:24,350
+the memory layout and the memory costs
+
+00:21:21,710 --> 00:21:27,080
+of the of the sec paths that's the
+
+00:21:24,350 --> 00:21:30,950
+structure used by visa are exactly the
+
+00:21:27,080 --> 00:21:32,990
+same as with the old escape of because
+
+00:21:30,950 --> 00:21:35,750
+of alignment and because of the
+
+00:21:32,990 --> 00:21:37,520
+extension headers is very small so the
+
+00:21:35,750 --> 00:21:38,840
+reference count and the first parts of
+
+00:21:37,520 --> 00:21:40,400
+the exact path structure if it's
+
+00:21:38,840 --> 00:21:43,390
+allocated as the only thing in the first
+
+00:21:40,400 --> 00:21:45,980
+one when will always be at the front
+
+00:21:43,390 --> 00:21:49,820
+because of this obstetric and not at the
+
+00:21:45,980 --> 00:21:51,590
+end or and same is for the net feed a
+
+00:21:49,820 --> 00:21:54,110
+ infrastructure if you only use net
+
+00:21:51,590 --> 00:21:58,370
+field which infrastructure then that
+
+00:21:54,110 --> 00:22:03,290
+data will also live at the top does that
+
+00:21:58,370 --> 00:22:04,200
+make sense so it's to memory locality
+
+00:22:03,290 --> 00:22:06,769
+yes
+
+00:22:04,200 --> 00:22:06,769
+locality
+
+00:22:15,110 --> 00:22:21,000
+anyone else you finished oh yes I'm
+
+00:22:18,330 --> 00:22:23,009
+finished if anyone else has questions
+
+00:22:21,000 --> 00:22:26,340
+just finding the home okay no no I I
+
+00:22:23,009 --> 00:22:28,049
+have a question am I getting my 2 bits
+
+00:22:26,340 --> 00:22:32,220
+that you stole for me of course
+
+00:22:28,049 --> 00:22:34,740
+okay he stole two bits on the escapee
+
+00:22:32,220 --> 00:22:37,860
+from it removes them so you put in the
+
+00:22:34,740 --> 00:22:41,759
+back or I am put in the back what do we
+
+00:22:37,860 --> 00:22:44,279
+want to put back that you took out on
+
+00:22:41,759 --> 00:22:48,470
+the skb MOTC 40
+
+00:22:44,279 --> 00:22:48,470
+oh yeah I think there's still some space
+
+00:22:49,309 --> 00:22:55,830
+if if not if not I have I have a
+
+00:22:53,730 --> 00:22:58,169
+collection of Petrus that that move even
+
+00:22:55,830 --> 00:22:59,610
+more stuff around but they are quite
+
+00:22:58,169 --> 00:23:01,110
+horrid and they don't help at all
+
+00:22:59,610 --> 00:23:04,679
+because it's just a few bits here and
+
+00:23:01,110 --> 00:23:06,779
+there so maybe if maybe we can squeeze
+
+00:23:04,679 --> 00:23:09,840
+out a couple of bits here and there if
+
+00:23:06,779 --> 00:23:15,780
+you need them you know that's no gift
+
+00:23:09,840 --> 00:23:19,660
+for just exactly that Thanks
+
+00:23:15,780 --> 00:23:19,660
+
+YouTube URL: https://www.youtube.com/watch?v=3xelUe_mTko
+
+
