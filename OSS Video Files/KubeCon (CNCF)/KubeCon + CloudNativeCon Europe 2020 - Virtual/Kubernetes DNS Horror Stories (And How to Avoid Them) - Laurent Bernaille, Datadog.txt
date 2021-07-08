@@ -1,0 +1,2885 @@
+Title: Kubernetes DNS Horror Stories (And How to Avoid Them) - Laurent Bernaille, Datadog
+Publication date: 2020-08-28
+Playlist: KubeCon + CloudNativeCon Europe 2020 - Virtual
+Description: 
+	Don’t miss out! Join us at our upcoming events: EnvoyCon Virtual on October 15 and KubeCon + CloudNativeCon North America 2020 Virtual from November 17-20. Learn more at https://kubecon.io. The conferences feature presentations from developers and end users of Kubernetes, Prometheus, Envoy, and all of the other CNCF-hosted projects.  
+
+Kubernetes DNS Horror Stories (And How to Avoid Them) - Laurent Bernaille, Datadog 
+
+DNS is one of the Kubernetes core systems and can quickly become a source of issues when you’re running clusters at scale. For over a year at Datadog, we’ve run Kubernetes clusters with thousands of nodes that host workloads generating tens of thousands of DNS queries per second. It wasn’t easy to build an architecture able to handle this load, and we’ve had our share of problems along the way.  This talk starts with a presentation of how Kubernetes DNS works. It then dives into the challenges we’ve faced, which span a variety of topics related to load, connection tracking, upstream servers, rolling updates, resolver implementations, and performance. We then show how our DNS architecture evolved over time to address or mitigate these problems. Finally, we share our solutions for detecting these problems before they happen—and identifying misbehaving clients.
+
+https://sched.co/Zepr
+Captions: 
+	00:00:00,080 --> 00:00:03,439
+hello everyone um my name is lauren
+
+00:00:02,720 --> 00:00:06,640
+vernae
+
+00:00:03,439 --> 00:00:07,200
+and i'm very happy to to be here today
+
+00:00:06,640 --> 00:00:10,480
+and to
+
+00:00:07,200 --> 00:00:13,519
+virtually present this talk about
+
+00:00:10,480 --> 00:00:13,519
+kubernetes dns
+
+00:00:15,040 --> 00:00:19,600
+so a quick introduction if you don't
+
+00:00:16,960 --> 00:00:22,240
+know datadog we're a sas based
+
+00:00:19,600 --> 00:00:24,080
+monitoring company
+
+00:00:22,240 --> 00:00:26,160
+and we're not going to talk about the
+
+00:00:24,080 --> 00:00:26,640
+product today we're going to talk about
+
+00:00:26,160 --> 00:00:29,279
+the
+
+00:00:26,640 --> 00:00:30,160
+infrastructure behind the products and
+
+00:00:29,279 --> 00:00:32,160
+especially
+
+00:00:30,160 --> 00:00:35,440
+the the part of this infrastructure that
+
+00:00:32,160 --> 00:00:37,200
+is running in kubernetes
+
+00:00:35,440 --> 00:00:38,640
+and today we're talking about tens of
+
+00:00:37,200 --> 00:00:41,680
+thousands of hosts
+
+00:00:38,640 --> 00:00:45,039
+and dozens of communities clusters
+
+00:00:41,680 --> 00:00:47,280
+that can reach up to 4 000 nodes
+
+00:00:45,039 --> 00:00:48,879
+and one of the challenges we face is we
+
+00:00:47,280 --> 00:00:53,600
+run a multiple cloud provider
+
+00:00:48,879 --> 00:00:53,600
+which makes things even more interesting
+
+00:00:54,320 --> 00:00:59,760
+we faced many challenges by when we
+
+00:00:57,920 --> 00:01:01,680
+moved to kubernetes and operating our
+
+00:00:59,760 --> 00:01:02,480
+communities clusters and we talked about
+
+00:01:01,680 --> 00:01:06,799
+these challenges
+
+00:01:02,480 --> 00:01:08,479
+in several um conferences in the past
+
+00:01:06,799 --> 00:01:11,040
+uh however today we're not going to talk
+
+00:01:08,479 --> 00:01:14,960
+about this we're going to focus on
+
+00:01:11,040 --> 00:01:17,759
+a on a subject which is dns
+
+00:01:14,960 --> 00:01:19,439
+and what we didn't expect when we
+
+00:01:17,759 --> 00:01:22,560
+started working on the current
+
+00:01:19,439 --> 00:01:23,920
+platform at datadog was that dns
+
+00:01:22,560 --> 00:01:26,240
+would end up being one of the most
+
+00:01:23,920 --> 00:01:28,159
+critical services we operate
+
+00:01:26,240 --> 00:01:30,079
+and as you can see on this graph which
+
+00:01:28,159 --> 00:01:33,200
+shows the number of dns queries
+
+00:01:30,079 --> 00:01:35,360
+um we get in production on each cluster
+
+00:01:33,200 --> 00:01:36,880
+we're currently serving 200 000 dna
+
+00:01:35,360 --> 00:01:40,799
+squares per second which is which is
+
+00:01:36,880 --> 00:01:43,439
+quite loud and challenging to do well
+
+00:01:40,799 --> 00:01:44,880
+here is a quick outline of what we're
+
+00:01:43,439 --> 00:01:46,560
+going to discuss today
+
+00:01:44,880 --> 00:01:49,119
+first we're going to discuss about how
+
+00:01:46,560 --> 00:01:52,320
+dns works in currencies in general
+
+00:01:49,119 --> 00:01:55,439
+then about global challenges people face
+
+00:01:52,320 --> 00:01:58,159
+usually when they run dns and kubernetes
+
+00:01:55,439 --> 00:02:00,479
+then i'll share some fun stories
+
+00:01:58,159 --> 00:02:03,439
+depending on your definition of fun
+
+00:02:00,479 --> 00:02:06,000
+about dns and finally i'd end with what
+
+00:02:03,439 --> 00:02:06,000
+we do now
+
+00:02:06,399 --> 00:02:10,560
+so the genetic in kubernetes so here is
+
+00:02:09,280 --> 00:02:14,239
+how it works
+
+00:02:10,560 --> 00:02:15,520
+um so when you start a bird the cubette
+
+00:02:14,239 --> 00:02:17,120
+is going to inject
+
+00:02:15,520 --> 00:02:19,040
+the dns configuration inside the
+
+00:02:17,120 --> 00:02:21,200
+containers and the way the
+
+00:02:19,040 --> 00:02:22,239
+bit will do that will do this is based
+
+00:02:21,200 --> 00:02:25,280
+on its
+
+00:02:22,239 --> 00:02:29,120
+configuration where you give it the gns
+
+00:02:25,280 --> 00:02:31,760
+service to to use to to to give
+
+00:02:29,120 --> 00:02:32,959
+containers dns access and this will
+
+00:02:31,760 --> 00:02:35,920
+translate into
+
+00:02:32,959 --> 00:02:36,480
+a resolve.com file inside containers
+
+00:02:35,920 --> 00:02:38,400
+with
+
+00:02:36,480 --> 00:02:40,160
+a list of search domain which makes
+
+00:02:38,400 --> 00:02:41,760
+discovering services in the cluster and
+
+00:02:40,160 --> 00:02:45,519
+outside easy
+
+00:02:41,760 --> 00:02:45,519
+and of course the name server to use
+
+00:02:46,720 --> 00:02:50,800
+when the container wants to access dns
+
+00:02:48,959 --> 00:02:53,599
+it's going to send a query to the
+
+00:02:50,800 --> 00:02:54,319
+dns service in the cluster and the proxy
+
+00:02:53,599 --> 00:02:57,360
+you use
+
+00:02:54,319 --> 00:02:58,319
+whether it's iptables on ipvs is going
+
+00:02:57,360 --> 00:03:01,120
+to load balance
+
+00:02:58,319 --> 00:03:01,760
+these queries to dns pods which can
+
+00:03:01,120 --> 00:03:04,959
+either run
+
+00:03:01,760 --> 00:03:07,360
+cube dns or called dns
+
+00:03:04,959 --> 00:03:08,080
+and these dns servers are going to do
+
+00:03:07,360 --> 00:03:10,239
+two things
+
+00:03:08,080 --> 00:03:12,159
+the first one is they're going to be
+
+00:03:10,239 --> 00:03:15,200
+authority for the clusters or
+
+00:03:12,159 --> 00:03:17,680
+for the cluster domain and also they're
+
+00:03:15,200 --> 00:03:19,840
+going to forward queries for
+
+00:03:17,680 --> 00:03:22,640
+to a nutrition provider for any domain
+
+00:03:19,840 --> 00:03:22,640
+they don't know about
+
+00:03:23,360 --> 00:03:28,080
+so in theory here is how it works so
+
+00:03:26,319 --> 00:03:30,159
+imagine a bird named space matrix
+
+00:03:28,080 --> 00:03:32,879
+requesting the service points that is
+
+00:03:30,159 --> 00:03:36,959
+also running in namespace metrics
+
+00:03:32,879 --> 00:03:38,400
+so if you just look at points um
+
+00:03:36,959 --> 00:03:40,560
+your resolver is going to see that
+
+00:03:38,400 --> 00:03:42,560
+points are less than five dots
+
+00:03:40,560 --> 00:03:44,720
+so it's going to use you the first
+
+00:03:42,560 --> 00:03:46,720
+search domain and query four points of
+
+00:03:44,720 --> 00:03:50,319
+matrix
+
+00:03:46,720 --> 00:03:54,319
+and get an answer back from the dns pod
+
+00:03:50,319 --> 00:03:54,319
+so simple and efficient right
+
+00:03:54,879 --> 00:03:59,040
+in theory also if you're a part in the
+
+00:03:57,280 --> 00:04:00,879
+log logs namespace this time
+
+00:03:59,040 --> 00:04:02,879
+accessing service points in another
+
+00:04:00,879 --> 00:04:04,239
+namespace metrics
+
+00:04:02,879 --> 00:04:06,080
+then of course you need to specify the
+
+00:04:04,239 --> 00:04:07,280
+namespace your the service you're
+
+00:04:06,080 --> 00:04:10,400
+looking for is
+
+00:04:07,280 --> 00:04:11,920
+located in in here you're looking for
+
+00:04:10,400 --> 00:04:14,400
+points.metrics
+
+00:04:11,920 --> 00:04:15,439
+so once again points.matrix as less than
+
+00:04:14,400 --> 00:04:16,880
+five dots
+
+00:04:15,439 --> 00:04:18,639
+and we're going to try with the first
+
+00:04:16,880 --> 00:04:20,160
+search domain and as you can see
+
+00:04:18,639 --> 00:04:22,400
+it doesn't really make sense because
+
+00:04:20,160 --> 00:04:23,360
+it's going to start with points.metrics
+
+00:04:22,400 --> 00:04:25,680
+at logs
+
+00:04:23,360 --> 00:04:26,639
+which doesn't exist so the first answer
+
+00:04:25,680 --> 00:04:28,560
+from
+
+00:04:26,639 --> 00:04:30,560
+the dns code is going to be nx domain
+
+00:04:28,560 --> 00:04:32,479
+because it doesn't exist
+
+00:04:30,560 --> 00:04:34,000
+the resolver is going to continue and
+
+00:04:32,479 --> 00:04:35,360
+this time queries for
+
+00:04:34,000 --> 00:04:36,960
+points that metrics that serve is that
+
+00:04:35,360 --> 00:04:37,759
+personal local by using the second
+
+00:04:36,960 --> 00:04:40,080
+search domain
+
+00:04:37,759 --> 00:04:42,000
+and get an answer so less efficient this
+
+00:04:40,080 --> 00:04:42,639
+time because we did two queries but so
+
+00:04:42,000 --> 00:04:45,600
+it's
+
+00:04:42,639 --> 00:04:45,600
+pretty straightforward
+
+00:04:46,160 --> 00:04:50,160
+let's talk about challenges now so you
+
+00:04:49,199 --> 00:04:52,960
+remember what i
+
+00:04:50,160 --> 00:04:54,320
+showed for the series before let's see
+
+00:04:52,960 --> 00:04:56,160
+what it looks like in practice by
+
+00:04:54,320 --> 00:05:00,320
+capturing traffic from a dns
+
+00:04:56,160 --> 00:05:04,080
+query so this example is taken from a
+
+00:05:00,320 --> 00:05:06,520
+gke instance and in that case i'm in the
+
+00:05:04,080 --> 00:05:07,919
+default namespace and i'm looking for
+
+00:05:06,520 --> 00:05:09,680
+www.google.com
+
+00:05:07,919 --> 00:05:11,360
+and as you can see here we're not seeing
+
+00:05:09,680 --> 00:05:14,240
+two queries we're actually
+
+00:05:11,360 --> 00:05:15,360
+we're actually seeing 12 queries and the
+
+00:05:14,240 --> 00:05:18,800
+reason for this is
+
+00:05:15,360 --> 00:05:21,039
+well where we have five search domains
+
+00:05:18,800 --> 00:05:22,720
+three for the clusters and two inherited
+
+00:05:21,039 --> 00:05:24,320
+from google
+
+00:05:22,720 --> 00:05:26,479
+and also something that's a bit
+
+00:05:24,320 --> 00:05:27,360
+surprising that that wasn't in my theory
+
+00:05:26,479 --> 00:05:29,840
+examples
+
+00:05:27,360 --> 00:05:32,880
+is ipv6 queries so we get twice the
+
+00:05:29,840 --> 00:05:34,320
+number of queries because of ipx6
+
+00:05:32,880 --> 00:05:36,160
+this leads to several problems the first
+
+00:05:34,320 --> 00:05:37,680
+one is latency of course because if
+
+00:05:36,160 --> 00:05:39,280
+you're acquiring this you're going to
+
+00:05:37,680 --> 00:05:40,160
+make 12 queries which is going to take
+
+00:05:39,280 --> 00:05:44,400
+longer
+
+00:05:40,160 --> 00:05:46,240
+and also if any of this packet is lost
+
+00:05:44,400 --> 00:05:47,840
+your resolver is going to retry but it's
+
+00:05:46,240 --> 00:05:49,840
+going to wait for 5 seconds because the
+
+00:05:47,840 --> 00:05:53,440
+default dns timeout is 5 seconds
+
+00:05:49,840 --> 00:05:55,199
+in index and finally of course i mean
+
+00:05:53,440 --> 00:05:56,400
+we're imagining the dns emperor and we
+
+00:05:55,199 --> 00:05:59,840
+care about
+
+00:05:56,400 --> 00:06:06,160
+uh having as few query as we can because
+
+00:05:59,840 --> 00:06:07,039
+it loads it stresses the dns in front so
+
+00:06:06,160 --> 00:06:09,919
+let's talk about
+
+00:06:07,039 --> 00:06:09,919
+resolvers now
+
+00:06:10,800 --> 00:06:16,880
+why do we get ipv6 queries um so
+
+00:06:14,240 --> 00:06:17,440
+the default uh posix method to query for
+
+00:06:16,880 --> 00:06:20,639
+dns
+
+00:06:17,440 --> 00:06:22,240
+is get addr info and it should do ipv4
+
+00:06:20,639 --> 00:06:23,520
+and ipv6 by default
+
+00:06:22,240 --> 00:06:26,000
+so the good thing is you're ready for
+
+00:06:23,520 --> 00:06:27,919
+mpd6 the bad is well
+
+00:06:26,000 --> 00:06:29,520
+not great because you're getting twice
+
+00:06:27,919 --> 00:06:32,560
+the traffic right
+
+00:06:29,520 --> 00:06:34,400
+but there's also the ugly part which is
+
+00:06:32,560 --> 00:06:35,199
+something that most of you may have
+
+00:06:34,400 --> 00:06:38,479
+heard about
+
+00:06:35,199 --> 00:06:40,319
+uh in the past which is that uh there's
+
+00:06:38,479 --> 00:06:42,639
+a race condition in that filter
+
+00:06:40,319 --> 00:06:45,120
+with which will trigger packet losses if
+
+00:06:42,639 --> 00:06:48,639
+you do an ipv4 and an fpg six
+
+00:06:45,120 --> 00:06:50,639
+in a very short time
+
+00:06:48,639 --> 00:06:51,840
+and this was patched but this issue has
+
+00:06:50,639 --> 00:06:53,520
+been there for quite a while and has
+
+00:06:51,840 --> 00:06:54,240
+been painful for many uses because of
+
+00:06:53,520 --> 00:06:56,720
+course
+
+00:06:54,240 --> 00:06:58,240
+if one of the two packets is lost the
+
+00:06:56,720 --> 00:07:01,039
+resolver is gonna wait for five seconds
+
+00:06:58,240 --> 00:07:01,039
+before it's drying
+
+00:07:01,360 --> 00:07:05,520
+depending on the proxy you use it's
+
+00:07:03,919 --> 00:07:06,479
+going to be it's going to be impactful
+
+00:07:05,520 --> 00:07:08,319
+than the difference
+
+00:07:06,479 --> 00:07:11,039
+it's slightly better with ipvs but it's
+
+00:07:08,319 --> 00:07:11,039
+still not perfect
+
+00:07:11,520 --> 00:07:15,280
+so we had this very nice idea at the
+
+00:07:13,599 --> 00:07:17,520
+time which is well let's disable
+
+00:07:15,280 --> 00:07:18,479
+ipv6 right so we disable ip6 in the
+
+00:07:17,520 --> 00:07:21,120
+channel
+
+00:07:18,479 --> 00:07:22,560
+and we just uh did a very simple
+
+00:07:21,120 --> 00:07:24,880
+resolution for google.com
+
+00:07:22,560 --> 00:07:27,039
+and you can see that in in this example
+
+00:07:24,880 --> 00:07:30,240
+we do five queries and we're not doing
+
+00:07:27,039 --> 00:07:32,960
+any ipv6 so that's pretty good right
+
+00:07:30,240 --> 00:07:33,919
+we wanted to celebrate at that time but
+
+00:07:32,960 --> 00:07:36,000
+look
+
+00:07:33,919 --> 00:07:37,919
+after every interactive v6 has been
+
+00:07:36,000 --> 00:07:39,680
+disabled on every host
+
+00:07:37,919 --> 00:07:42,720
+we're still getting a lot of fpg6
+
+00:07:39,680 --> 00:07:45,759
+queries so we're a bit sad and we're
+
+00:07:42,720 --> 00:07:49,039
+trying to understand what was happening
+
+00:07:45,759 --> 00:07:49,599
+so what triggers igd6 so as i was saying
+
+00:07:49,039 --> 00:07:52,639
+before
+
+00:07:49,599 --> 00:07:54,479
+according to posix you should be getting
+
+00:07:52,639 --> 00:07:58,800
+ipv4 native six queries
+
+00:07:54,479 --> 00:08:01,120
+however the gdp implementation in linux
+
+00:07:58,800 --> 00:08:02,960
+is using hints that are notes that it's
+
+00:08:01,120 --> 00:08:04,879
+not supposed to use in the posix
+
+00:08:02,960 --> 00:08:06,160
+uh in the project but it's doing it
+
+00:08:04,879 --> 00:08:09,280
+because it's helpful
+
+00:08:06,160 --> 00:08:13,120
+and one of the hints used by tbc is
+
+00:08:09,280 --> 00:08:16,160
+is ai addr info which is only
+
+00:08:13,120 --> 00:08:17,280
+making ipv6 queries if it finds an ipv6
+
+00:08:16,160 --> 00:08:19,520
+address
+
+00:08:17,280 --> 00:08:20,639
+so well of course since we disabled that
+
+00:08:19,520 --> 00:08:23,039
+m6 in the kernel
+
+00:08:20,639 --> 00:08:24,800
+we shouldn't have any ipv6 addresses so
+
+00:08:23,039 --> 00:08:25,680
+designing that uses in the kernel should
+
+00:08:24,800 --> 00:08:28,000
+just work
+
+00:08:25,680 --> 00:08:29,759
+but as we sew it doesn't so that's
+
+00:08:28,000 --> 00:08:33,440
+that's weird
+
+00:08:29,759 --> 00:08:35,200
+so we we continued digging and and the
+
+00:08:33,440 --> 00:08:37,599
+thing we found is that well
+
+00:08:35,200 --> 00:08:38,880
+we're not only running ubuntu and gbc
+
+00:08:37,599 --> 00:08:40,000
+we're also running some alpine
+
+00:08:38,880 --> 00:08:44,240
+containers that are using
+
+00:08:40,000 --> 00:08:45,760
+bezel as your lipstick provider and well
+
+00:08:44,240 --> 00:08:47,920
+look at this when you do this very
+
+00:08:45,760 --> 00:08:48,480
+simple query on an ubuntu based image
+
+00:08:47,920 --> 00:08:51,040
+and an
+
+00:08:48,480 --> 00:08:53,200
+alpine based image in one case you get
+
+00:08:51,040 --> 00:08:55,440
+on the ipv4 and in the second case you
+
+00:08:53,200 --> 00:08:57,440
+get ipd for an ipv6
+
+00:08:55,440 --> 00:08:58,959
+and the reason is well mother actually
+
+00:08:57,440 --> 00:08:59,839
+implements the project specification
+
+00:08:58,959 --> 00:09:01,600
+exactly
+
+00:08:59,839 --> 00:09:03,600
+and not the helpful hint that gbt
+
+00:09:01,600 --> 00:09:06,240
+provides
+
+00:09:03,600 --> 00:09:08,000
+so that explains part of it however we
+
+00:09:06,240 --> 00:09:09,519
+don't use alpine that much so
+
+00:09:08,000 --> 00:09:13,360
+that can't explain why sort of our
+
+00:09:09,519 --> 00:09:13,360
+traffic is ipv6 right
+
+00:09:13,760 --> 00:09:18,800
+we use go a lot and so at one point
+
+00:09:16,880 --> 00:09:20,480
+we looked at go applications and to see
+
+00:09:18,800 --> 00:09:22,320
+how they were behaving
+
+00:09:20,480 --> 00:09:24,080
+and if you use this very simple uh
+
+00:09:22,320 --> 00:09:27,040
+resolution command go
+
+00:09:24,080 --> 00:09:28,320
+well you can see that we're getting ipv6
+
+00:09:27,040 --> 00:09:30,959
+queries again
+
+00:09:28,320 --> 00:09:32,320
+and even on ubuntu uh so that's that's
+
+00:09:30,959 --> 00:09:35,519
+really right because
+
+00:09:32,320 --> 00:09:38,320
+it's but not to do that
+
+00:09:35,519 --> 00:09:39,200
+so as you may know uh go implements two
+
+00:09:38,320 --> 00:09:41,519
+uh
+
+00:09:39,200 --> 00:09:42,640
+two ways to do tns you can have either
+
+00:09:41,519 --> 00:09:44,800
+navy go
+
+00:09:42,640 --> 00:09:45,839
+or you see go so so we figured well
+
+00:09:44,800 --> 00:09:49,279
+let's use c go
+
+00:09:45,839 --> 00:09:51,279
+so in in which case we will false go uh
+
+00:09:49,279 --> 00:09:52,480
+to use gbmc and then it's native
+
+00:09:51,279 --> 00:09:54,880
+implementation
+
+00:09:52,480 --> 00:09:57,920
+and as you can see here even when we use
+
+00:09:54,880 --> 00:10:01,600
+seago we're also getting an ipv6 query
+
+00:09:57,920 --> 00:10:01,600
+things are getting very weird right
+
+00:10:02,079 --> 00:10:05,839
+so one of the first things we believed
+
+00:10:03,680 --> 00:10:08,399
+was that um
+
+00:10:05,839 --> 00:10:09,920
+our environment variable had been
+
+00:10:08,399 --> 00:10:12,320
+ignored
+
+00:10:09,920 --> 00:10:14,079
+but if you look at the at the very small
+
+00:10:12,320 --> 00:10:17,360
+details and these two lines
+
+00:10:14,079 --> 00:10:18,720
+in these two examples you'll see that
+
+00:10:17,360 --> 00:10:20,480
+it's actually different and that the
+
+00:10:18,720 --> 00:10:22,160
+results are behaving differently
+
+00:10:20,480 --> 00:10:25,279
+because one is using a different source
+
+00:10:22,160 --> 00:10:27,120
+port for the ipv4 and ipv6 query
+
+00:10:25,279 --> 00:10:28,800
+so it's actually doing something but
+
+00:10:27,120 --> 00:10:29,920
+it's not behaving as we expect because
+
+00:10:28,800 --> 00:10:33,200
+we'd expect
+
+00:10:29,920 --> 00:10:36,720
+gdbc based queries not to do ipv6
+
+00:10:33,200 --> 00:10:40,079
+so we looked into the go
+
+00:10:36,720 --> 00:10:43,360
+source code and look at what we found
+
+00:10:40,079 --> 00:10:46,079
+we found that when you use c go
+
+00:10:43,360 --> 00:10:47,920
+go is actually specifying hints and the
+
+00:10:46,079 --> 00:10:48,959
+hints it specifies are different from
+
+00:10:47,920 --> 00:10:52,399
+the default
+
+00:10:48,959 --> 00:10:53,640
+tlipc ones and what is very important
+
+00:10:52,399 --> 00:10:56,160
+here is
+
+00:10:53,640 --> 00:10:58,079
+addrconfig which will not do at the b6
+
+00:10:56,160 --> 00:11:01,120
+resolution if there's no physics address
+
+00:10:58,079 --> 00:11:02,640
+it's not in these hints so it's very sad
+
+00:11:01,120 --> 00:11:05,839
+because in go it means
+
+00:11:02,640 --> 00:11:07,519
+you can't easily remove hp6 query
+
+00:11:05,839 --> 00:11:10,079
+and the only way i've found to do that
+
+00:11:07,519 --> 00:11:12,800
+is actually to false go to only query
+
+00:11:10,079 --> 00:11:14,959
+ipv4 by choosing tcp 4 in the example at
+
+00:11:12,800 --> 00:11:17,519
+the bottom so that works
+
+00:11:14,959 --> 00:11:18,720
+bad because it would be too simple if it
+
+00:11:17,519 --> 00:11:20,800
+would just work
+
+00:11:18,720 --> 00:11:22,480
+it only works when you're using sigo it
+
+00:11:20,800 --> 00:11:23,920
+doesn't work with the media computation
+
+00:11:22,480 --> 00:11:28,720
+where you will get both
+
+00:11:23,920 --> 00:11:31,120
+ipv4 analytics queries
+
+00:11:28,720 --> 00:11:32,399
+so we tried uh to re to reduce the
+
+00:11:31,120 --> 00:11:35,519
+number of queries
+
+00:11:32,399 --> 00:11:36,800
+by removing ipv6 queries um and it's
+
+00:11:35,519 --> 00:11:37,440
+something that everybody tried to
+
+00:11:36,800 --> 00:11:39,279
+achieve
+
+00:11:37,440 --> 00:11:40,720
+uh in the comments community like trying
+
+00:11:39,279 --> 00:11:43,279
+to reduce the number of queries
+
+00:11:40,720 --> 00:11:46,320
+and made by applications and let's look
+
+00:11:43,279 --> 00:11:49,279
+at other solutions
+
+00:11:46,320 --> 00:11:50,399
+so the first one is a coordinate plugin
+
+00:11:49,279 --> 00:11:54,560
+which is called
+
+00:11:50,399 --> 00:11:57,600
+autopass with this option called dns
+
+00:11:54,560 --> 00:11:59,120
+knows the search domain and it's going
+
+00:11:57,600 --> 00:11:59,680
+to remove the search domain from the
+
+00:11:59,120 --> 00:12:01,120
+query
+
+00:11:59,680 --> 00:12:03,360
+and try and be clever based on
+
+00:12:01,120 --> 00:12:06,320
+everything it knows about the cluster
+
+00:12:03,360 --> 00:12:07,600
+and even route the query upstream if
+
+00:12:06,320 --> 00:12:10,399
+what you're crying for
+
+00:12:07,600 --> 00:12:11,120
+it is not local and as you can see in
+
+00:12:10,399 --> 00:12:13,360
+this example
+
+00:12:11,120 --> 00:12:15,600
+you have a query for google.com that the
+
+00:12:13,360 --> 00:12:18,079
+search domain for the cluster
+
+00:12:15,600 --> 00:12:18,720
+and autopass is answering with a cname
+
+00:12:18,079 --> 00:12:20,800
+saying well
+
+00:12:18,720 --> 00:12:22,000
+you're actually looking for google.com
+
+00:12:20,800 --> 00:12:25,360
+and here is
+
+00:12:22,000 --> 00:12:27,519
+the ipv4 and the ipv6 addresses
+
+00:12:25,360 --> 00:12:29,040
+so that's very clever right because
+
+00:12:27,519 --> 00:12:30,959
+you're only doing two queries now
+
+00:12:29,040 --> 00:12:34,480
+instead of 10.
+
+00:12:30,959 --> 00:12:36,000
+but sadly it's it's it's not magical
+
+00:12:34,480 --> 00:12:38,399
+because to do that
+
+00:12:36,000 --> 00:12:40,160
+um the codiness uh autobus
+
+00:12:38,399 --> 00:12:42,560
+implementations needs to know
+
+00:12:40,160 --> 00:12:43,760
+in which the namespace the bodies just
+
+00:12:42,560 --> 00:12:46,160
+to be able to remove
+
+00:12:43,760 --> 00:12:47,600
+the first full search domain and to do
+
+00:12:46,160 --> 00:12:48,959
+that it needs to know about all the
+
+00:12:47,600 --> 00:12:52,800
+parts in the cluster
+
+00:12:48,959 --> 00:12:54,560
+to match the query ip with namespace
+
+00:12:52,800 --> 00:12:56,720
+and the problem is if you do that it
+
+00:12:54,560 --> 00:12:58,560
+means that coordinates will have a full
+
+00:12:56,720 --> 00:13:00,720
+view of the pods in the cluster which is
+
+00:12:58,560 --> 00:13:02,880
+going to consume a lot of memory
+
+00:13:00,720 --> 00:13:04,480
+and as your cluster grow the memory
+
+00:13:02,880 --> 00:13:05,279
+requirements for codiness is going to
+
+00:13:04,480 --> 00:13:06,880
+grow
+
+00:13:05,279 --> 00:13:08,959
+and it's been a bit painful for us
+
+00:13:06,880 --> 00:13:10,160
+because it's very difficult to know when
+
+00:13:08,959 --> 00:13:14,639
+you need to increase
+
+00:13:10,160 --> 00:13:14,639
+the memory request of your dns funds
+
+00:13:15,200 --> 00:13:20,160
+another option that people are starting
+
+00:13:17,920 --> 00:13:22,800
+to to look into seriously and that's
+
+00:13:20,160 --> 00:13:23,839
+available upstream is to use not local
+
+00:13:22,800 --> 00:13:27,200
+dns
+
+00:13:23,839 --> 00:13:30,240
+so it's actually a very simple idea
+
+00:13:27,200 --> 00:13:33,120
+where you run a local dns cache and
+
+00:13:30,240 --> 00:13:35,360
+on every node as a demon set and have
+
+00:13:33,120 --> 00:13:38,720
+all your containers queries
+
+00:13:35,360 --> 00:13:40,480
+this local dns and the good thing is
+
+00:13:38,720 --> 00:13:42,639
+well you have a local cache
+
+00:13:40,480 --> 00:13:45,519
+and queries are then forwarded upstream
+
+00:13:42,639 --> 00:13:48,480
+to the dns pods
+
+00:13:45,519 --> 00:13:50,320
+so it's it's very efficient uh because
+
+00:13:48,480 --> 00:13:53,920
+um
+
+00:13:50,320 --> 00:13:56,079
+you're not doing any udp queries and you
+
+00:13:53,920 --> 00:13:56,800
+remember from before that udp queries
+
+00:13:56,079 --> 00:13:58,399
+were
+
+00:13:56,800 --> 00:14:00,880
+triggering this contract issue that
+
+00:13:58,399 --> 00:14:04,800
+wasn't great and also what you can do
+
+00:14:00,880 --> 00:14:07,680
+is you can bypass the dns service for
+
+00:14:04,800 --> 00:14:08,160
+any non-communities domain which means
+
+00:14:07,680 --> 00:14:10,720
+you
+
+00:14:08,160 --> 00:14:11,839
+reduce the load very a lot on your
+
+00:14:10,720 --> 00:14:16,240
+online assembly
+
+00:14:11,839 --> 00:14:19,839
+which is which is good news
+
+00:14:16,240 --> 00:14:21,440
+another challenges we we found and
+
+00:14:19,839 --> 00:14:23,440
+i mean of course sometimes you need to
+
+00:14:21,440 --> 00:14:24,720
+update your dns spots right because you
+
+00:14:23,440 --> 00:14:27,519
+change the configuration
+
+00:14:24,720 --> 00:14:29,680
+or you change the version of the of the
+
+00:14:27,519 --> 00:14:32,720
+image so you need to do that
+
+00:14:29,680 --> 00:14:35,120
+and it wasn't as easy as we believed it
+
+00:14:32,720 --> 00:14:35,120
+would be
+
+00:14:35,760 --> 00:14:40,000
+so imagine this initial state where a
+
+00:14:38,160 --> 00:14:42,079
+container is trying to access
+
+00:14:40,000 --> 00:14:44,079
+a dns pod and in this example i'm going
+
+00:14:42,079 --> 00:14:45,279
+to use ipvs because this is what we want
+
+00:14:44,079 --> 00:14:48,639
+and what we know
+
+00:14:45,279 --> 00:14:50,399
+about the most so when the police the
+
+00:14:48,639 --> 00:14:52,320
+container is going to make this query is
+
+00:14:50,399 --> 00:14:54,959
+going to create the service ip
+
+00:14:52,320 --> 00:14:56,399
+vp in my example and ipvs is going to
+
+00:14:54,959 --> 00:14:58,720
+translate this ip
+
+00:14:56,399 --> 00:15:00,160
+to a pod ip and of course to make sure
+
+00:14:58,720 --> 00:15:01,360
+that next the following packets are
+
+00:15:00,160 --> 00:15:03,600
+going to use the same connections
+
+00:15:01,360 --> 00:15:05,839
+it's going to create an ipvs contract
+
+00:15:03,600 --> 00:15:09,360
+entry which i displayed at the bottom
+
+00:15:05,839 --> 00:15:11,360
+there so imagine now that
+
+00:15:09,360 --> 00:15:13,199
+part a is deleted because you're
+
+00:15:11,360 --> 00:15:14,959
+starting a running update for instance
+
+00:15:13,199 --> 00:15:16,480
+or you're just reducing the size of your
+
+00:15:14,959 --> 00:15:18,560
+deployments well
+
+00:15:16,480 --> 00:15:20,240
+any new query is now going to be routed
+
+00:15:18,560 --> 00:15:21,519
+to a new board right so this is my
+
+00:15:20,240 --> 00:15:24,000
+second example here
+
+00:15:21,519 --> 00:15:26,800
+where the second query is sent to part b
+
+00:15:24,000 --> 00:15:30,160
+so everything looks good right
+
+00:15:26,800 --> 00:15:32,959
+however what happens if a new query
+
+00:15:30,160 --> 00:15:34,160
+is using the same source port well
+
+00:15:32,959 --> 00:15:36,639
+what's going to happen is
+
+00:15:34,160 --> 00:15:37,360
+the entry still exists in the ipgs
+
+00:15:36,639 --> 00:15:39,680
+contract
+
+00:15:37,360 --> 00:15:41,360
+and so it could be routed to the backend
+
+00:15:39,680 --> 00:15:43,120
+that has been deleted
+
+00:15:41,360 --> 00:15:45,040
+and since the kernel knows that this
+
+00:15:43,120 --> 00:15:46,399
+backend doesn't exist it's going to drop
+
+00:15:45,040 --> 00:15:49,920
+it
+
+00:15:46,399 --> 00:15:50,639
+silently and it's not a problem for most
+
+00:15:49,920 --> 00:15:52,639
+applications
+
+00:15:50,639 --> 00:15:54,880
+except when you do a lot of queries
+
+00:15:52,639 --> 00:15:57,360
+which would happen sometimes
+
+00:15:54,880 --> 00:15:58,720
+so we worked with the cubeproxy team to
+
+00:15:57,360 --> 00:15:59,920
+make to make this better and the first
+
+00:15:58,720 --> 00:16:03,199
+thing we did
+
+00:15:59,920 --> 00:16:04,959
+was uh set the system tunable which is
+
+00:16:03,199 --> 00:16:07,440
+expired noddexcon
+
+00:16:04,959 --> 00:16:08,399
+which will expire entries in the
+
+00:16:07,440 --> 00:16:10,480
+contract
+
+00:16:08,399 --> 00:16:13,120
+when a new packet is sent to a packet
+
+00:16:10,480 --> 00:16:15,360
+that has been edited
+
+00:16:13,120 --> 00:16:17,279
+so what happens from the query or
+
+00:16:15,360 --> 00:16:19,680
+perspective is you send a query
+
+00:16:17,279 --> 00:16:20,720
+and since the packet doesn't exist the
+
+00:16:19,680 --> 00:16:22,639
+contract will be
+
+00:16:20,720 --> 00:16:24,160
+garbage collected which is good and
+
+00:16:22,639 --> 00:16:26,399
+you're going to be notified by getting
+
+00:16:24,160 --> 00:16:28,639
+an icmp error message
+
+00:16:26,399 --> 00:16:30,320
+so it's better because entries are going
+
+00:16:28,639 --> 00:16:32,560
+to be expired much faster
+
+00:16:30,320 --> 00:16:34,000
+but also you're still getting errors so
+
+00:16:32,560 --> 00:16:37,839
+not great because under load
+
+00:16:34,000 --> 00:16:37,839
+this can trigger a lot of errors
+
+00:16:38,639 --> 00:16:45,120
+so what you can also do is reduce
+
+00:16:41,759 --> 00:16:46,880
+the udp timeout for the ipvs contract
+
+00:16:45,120 --> 00:16:49,120
+by default it's set to five minutes
+
+00:16:46,880 --> 00:16:51,440
+which is a very long time
+
+00:16:49,120 --> 00:16:54,000
+and this is you can now configure this
+
+00:16:51,440 --> 00:16:57,040
+in keep starting with your proxy 118 and
+
+00:16:54,000 --> 00:16:58,560
+plus uh and in our case we now set it to
+
+00:16:57,040 --> 00:17:00,079
+30 seconds which is which is
+
+00:16:58,560 --> 00:17:01,759
+better because your entry is going to
+
+00:17:00,079 --> 00:17:03,519
+expire much faster
+
+00:17:01,759 --> 00:17:04,959
+and this means that the likelihood of
+
+00:17:03,519 --> 00:17:07,520
+getting a port collision
+
+00:17:04,959 --> 00:17:09,600
+is going to be much lower so of course
+
+00:17:07,520 --> 00:17:13,120
+we still get some errors that
+
+00:17:09,600 --> 00:17:16,319
+are less and there's also very good news
+
+00:17:13,120 --> 00:17:18,959
+in the way um andrew who is
+
+00:17:16,319 --> 00:17:20,079
+another proxy maintainer actually did a
+
+00:17:18,959 --> 00:17:23,120
+kernel patch
+
+00:17:20,079 --> 00:17:24,799
+to expire entry uh in the contract when
+
+00:17:23,120 --> 00:17:26,559
+the backend is deleted directly
+
+00:17:24,799 --> 00:17:28,559
+to avoid waiting for the next packet and
+
+00:17:26,559 --> 00:17:29,039
+avoid getting an error so that's very
+
+00:17:28,559 --> 00:17:32,880
+good news
+
+00:17:29,039 --> 00:17:36,320
+thanks andrew
+
+00:17:32,880 --> 00:17:37,360
+so i know uh you came here for all the
+
+00:17:36,320 --> 00:17:39,600
+fun stories
+
+00:17:37,360 --> 00:17:41,440
+uh and i mean honestly it depends on
+
+00:17:39,600 --> 00:17:43,440
+your definition of fun but
+
+00:17:41,440 --> 00:17:45,039
+now that i can talk about them it's it's
+
+00:17:43,440 --> 00:17:46,799
+it's better so let's let's talk about
+
+00:17:45,039 --> 00:17:49,360
+that
+
+00:17:46,799 --> 00:17:50,160
+so sometimes well we have dns issue
+
+00:17:49,360 --> 00:17:53,200
+because well
+
+00:17:50,160 --> 00:17:56,400
+your geneticism stable
+
+00:17:53,200 --> 00:17:58,400
+and a typical example is
+
+00:17:56,400 --> 00:17:59,600
+godliness but getting getting killed
+
+00:17:58,400 --> 00:18:00,080
+because they're consuming too much
+
+00:17:59,600 --> 00:18:01,200
+memory
+
+00:18:00,080 --> 00:18:03,520
+and of course it's not great for
+
+00:18:01,200 --> 00:18:06,480
+applications because well
+
+00:18:03,520 --> 00:18:08,240
+your dns spots are getting killed and
+
+00:18:06,480 --> 00:18:08,799
+you can see the pattern on the graph
+
+00:18:08,240 --> 00:18:10,000
+it's it's
+
+00:18:08,799 --> 00:18:12,240
+it's kind of weird right because things
+
+00:18:10,000 --> 00:18:15,039
+were stable and it suddenly like
+
+00:18:12,240 --> 00:18:15,760
+went up pretty fast so what actually
+
+00:18:15,039 --> 00:18:18,240
+happened here
+
+00:18:15,760 --> 00:18:20,559
+is an api server was restarted and all
+
+00:18:18,240 --> 00:18:22,720
+the coordinate spots had to reconnect
+
+00:18:20,559 --> 00:18:23,600
+and they had to build a view a full view
+
+00:18:22,720 --> 00:18:26,640
+of the cluster
+
+00:18:23,600 --> 00:18:28,400
+in their indexing the clients and to do
+
+00:18:26,640 --> 00:18:29,919
+that they had to process all the codes
+
+00:18:28,400 --> 00:18:32,640
+and all the services because at that
+
+00:18:29,919 --> 00:18:35,120
+time we were using photopass
+
+00:18:32,640 --> 00:18:36,960
+and at startup it turned out to require
+
+00:18:35,120 --> 00:18:37,840
+a lot more memory to do this because you
+
+00:18:36,960 --> 00:18:41,280
+have to process
+
+00:18:37,840 --> 00:18:42,000
+everything in a few seconds and so that
+
+00:18:41,280 --> 00:18:45,200
+was uh
+
+00:18:42,000 --> 00:18:45,200
+all right that was that was hard
+
+00:18:46,480 --> 00:18:50,480
+sometimes your dns implies completely
+
+00:18:49,520 --> 00:18:53,679
+stable
+
+00:18:50,480 --> 00:18:54,720
+but you're using auto scaling and
+
+00:18:53,679 --> 00:18:58,400
+sometimes you'll see
+
+00:18:54,720 --> 00:19:00,960
+it works too well so we use
+
+00:18:58,400 --> 00:19:02,320
+proportional autoscaler to to decide on
+
+00:19:00,960 --> 00:19:03,120
+the number of coding exports we're
+
+00:19:02,320 --> 00:19:05,360
+running
+
+00:19:03,120 --> 00:19:08,000
+and so we the number of bud is actually
+
+00:19:05,360 --> 00:19:10,559
+proportional to the size of the cluster
+
+00:19:08,000 --> 00:19:11,039
+and so it worked completely fine uh
+
+00:19:10,559 --> 00:19:14,000
+while
+
+00:19:11,039 --> 00:19:14,559
+the cluster was only growing in size
+
+00:19:14,000 --> 00:19:17,360
+okay
+
+00:19:14,559 --> 00:19:19,120
+but at one point well uh some
+
+00:19:17,360 --> 00:19:19,840
+applications were tr was starting to do
+
+00:19:19,120 --> 00:19:22,640
+autoscale
+
+00:19:19,840 --> 00:19:24,480
+well and we're also scaling down and so
+
+00:19:22,640 --> 00:19:26,720
+nodes were disappearing and so-called in
+
+00:19:24,480 --> 00:19:28,000
+the spots were removed and that was new
+
+00:19:26,720 --> 00:19:30,080
+and this triggered an interesting
+
+00:19:28,000 --> 00:19:32,000
+behavior which is well
+
+00:19:30,080 --> 00:19:34,000
+some applications started getting dns
+
+00:19:32,000 --> 00:19:35,440
+failures when this was happening
+
+00:19:34,000 --> 00:19:37,200
+and the reason this was happening was
+
+00:19:35,440 --> 00:19:37,679
+because of the portraiture was
+
+00:19:37,200 --> 00:19:39,440
+mentioning
+
+00:19:37,679 --> 00:19:41,280
+before for application doing a lot of
+
+00:19:39,440 --> 00:19:43,440
+queries
+
+00:19:41,280 --> 00:19:46,480
+so auto scaling is great but sometimes
+
+00:19:43,440 --> 00:19:46,480
+you will get surprises
+
+00:19:46,880 --> 00:19:50,160
+i mean sometimes you have dns issues but
+
+00:19:49,200 --> 00:19:53,200
+honestly
+
+00:19:50,160 --> 00:19:56,000
+it's not really your fault
+
+00:19:53,200 --> 00:19:56,559
+so this one was very fright frightening
+
+00:19:56,000 --> 00:19:59,200
+for us
+
+00:19:56,559 --> 00:20:00,559
+um but luckily it only happened in
+
+00:19:59,200 --> 00:20:02,720
+staging
+
+00:20:00,559 --> 00:20:04,480
+so this is when we started to enable
+
+00:20:02,720 --> 00:20:06,240
+autopilot from the first time
+
+00:20:04,480 --> 00:20:07,600
+and what we did is we moved from the
+
+00:20:06,240 --> 00:20:09,280
+configuration on the left
+
+00:20:07,600 --> 00:20:11,039
+to the configuration on the right so
+
+00:20:09,280 --> 00:20:13,919
+configuration on the left has
+
+00:20:11,039 --> 00:20:15,760
+two zones one for which coordinates is
+
+00:20:13,919 --> 00:20:17,679
+authoritative which is close to zero
+
+00:20:15,760 --> 00:20:18,799
+and the second one which is the default
+
+00:20:17,679 --> 00:20:22,159
+zone where you're
+
+00:20:18,799 --> 00:20:24,080
+forwarding queries to the cloud resolver
+
+00:20:22,159 --> 00:20:26,480
+and when you enable autopass what you do
+
+00:20:24,080 --> 00:20:29,200
+is everything is in the default zone
+
+00:20:26,480 --> 00:20:31,200
+and you first try the community zone and
+
+00:20:29,200 --> 00:20:32,640
+you use other paths to do all the magic
+
+00:20:31,200 --> 00:20:34,559
+so this seems like simple and
+
+00:20:32,640 --> 00:20:37,039
+straightforward right but
+
+00:20:34,559 --> 00:20:39,280
+this completely broke a staging cluster
+
+00:20:37,039 --> 00:20:43,280
+and well can you spot what broke it
+
+00:20:39,280 --> 00:20:45,919
+it it's actually a very small challenge
+
+00:20:43,280 --> 00:20:46,720
+in the in the before we did the
+
+00:20:45,919 --> 00:20:49,679
+challenge
+
+00:20:46,720 --> 00:20:50,640
+we were caching queries sent to the
+
+00:20:49,679 --> 00:20:52,720
+action provider
+
+00:20:50,640 --> 00:20:54,159
+and we didn't do it for the community
+
+00:20:52,720 --> 00:20:55,520
+zone because of course everything was
+
+00:20:54,159 --> 00:20:57,360
+already in memory so it doesn't it
+
+00:20:55,520 --> 00:21:00,559
+didn't really matter
+
+00:20:57,360 --> 00:21:02,080
+however when we moved to other paths by
+
+00:21:00,559 --> 00:21:04,240
+doing this configuration we actually
+
+00:21:02,080 --> 00:21:07,360
+removed caching for
+
+00:21:04,240 --> 00:21:07,679
+the upstream cloud provider dns which
+
+00:21:07,360 --> 00:21:09,919
+means
+
+00:21:07,679 --> 00:21:12,080
+all the queries were now sent to the
+
+00:21:09,919 --> 00:21:15,200
+cloud dns resolver
+
+00:21:12,080 --> 00:21:17,360
+and well it turns out
+
+00:21:15,200 --> 00:21:18,720
+if you've been doing dns on adwords you
+
+00:21:17,360 --> 00:21:20,720
+probably know that but there's actually
+
+00:21:18,720 --> 00:21:24,400
+a strict limit in the number of
+
+00:21:20,720 --> 00:21:25,520
+dns queries you can do for any given
+
+00:21:24,400 --> 00:21:28,480
+network interface
+
+00:21:25,520 --> 00:21:29,039
+and the straight limit is 1000 packets
+
+00:21:28,480 --> 00:21:31,440
+per second
+
+00:21:29,039 --> 00:21:32,720
+if you go above this aws will just drop
+
+00:21:31,440 --> 00:21:34,559
+your query
+
+00:21:32,720 --> 00:21:36,000
+so of course when reading room kept the
+
+00:21:34,559 --> 00:21:38,559
+cache the number of queries
+
+00:21:36,000 --> 00:21:39,919
+exploded and we hit that issue and
+
+00:21:38,559 --> 00:21:42,240
+applications didn't like it
+
+00:21:39,919 --> 00:21:42,240
+at all
+
+00:21:43,520 --> 00:21:46,720
+another thing we tried to do that
+
+00:21:44,960 --> 00:21:47,520
+sounded like a great idea at the time
+
+00:21:46,720 --> 00:21:49,679
+was well
+
+00:21:47,520 --> 00:21:51,039
+we had issues with udp and so we decided
+
+00:21:49,679 --> 00:21:53,120
+to move to tcp
+
+00:21:51,039 --> 00:21:55,360
+so in this very simple example we'll say
+
+00:21:53,120 --> 00:21:57,360
+well when we do it when we send
+
+00:21:55,360 --> 00:21:59,200
+and forward any query upstream with that
+
+00:21:57,360 --> 00:22:00,720
+provider let's use tcp
+
+00:21:59,200 --> 00:22:02,880
+it's more reliable it's going to be
+
+00:22:00,720 --> 00:22:06,080
+better right well
+
+00:22:02,880 --> 00:22:06,960
+except remember the strict limit of
+
+00:22:06,080 --> 00:22:09,440
+packets well
+
+00:22:06,960 --> 00:22:10,480
+when you do tcp the single query is
+
+00:22:09,440 --> 00:22:12,400
+actually going to use
+
+00:22:10,480 --> 00:22:14,799
+many more packets and so you will
+
+00:22:12,400 --> 00:22:15,360
+trigger uh advance rate limits much
+
+00:22:14,799 --> 00:22:18,320
+faster
+
+00:22:15,360 --> 00:22:19,200
+so really really avoid using tcp when
+
+00:22:18,320 --> 00:22:21,760
+querying adobe
+
+00:22:19,200 --> 00:22:21,760
+results
+
+00:22:22,480 --> 00:22:25,679
+and sometimes i mean it's really not
+
+00:22:24,480 --> 00:22:28,159
+your fault right
+
+00:22:25,679 --> 00:22:28,799
+because for the example before it was
+
+00:22:28,159 --> 00:22:31,760
+actually
+
+00:22:28,799 --> 00:22:33,520
+not our fault but with proper testing
+
+00:22:31,760 --> 00:22:34,960
+and proper configuration we can work
+
+00:22:33,520 --> 00:22:37,280
+around it but sometimes
+
+00:22:34,960 --> 00:22:39,440
+well there is there really isn't much
+
+00:22:37,280 --> 00:22:42,799
+you can do
+
+00:22:39,440 --> 00:22:43,840
+so we had this issue where well an
+
+00:22:42,799 --> 00:22:46,240
+application has seen
+
+00:22:43,840 --> 00:22:48,000
+resolution errors that was like a
+
+00:22:46,240 --> 00:22:50,080
+typical typical problem right
+
+00:22:48,000 --> 00:22:51,360
+and when we look at this we saw that it
+
+00:22:50,080 --> 00:22:53,200
+was only happening
+
+00:22:51,360 --> 00:22:55,280
+for a single zone which is the default
+
+00:22:53,200 --> 00:22:56,880
+zone so the zone sending traffic to the
+
+00:22:55,280 --> 00:22:58,640
+option provider
+
+00:22:56,880 --> 00:23:00,000
+which was the cloud resolver in that
+
+00:22:58,640 --> 00:23:03,039
+case well
+
+00:23:00,000 --> 00:23:05,679
+and it turns out when you graph the
+
+00:23:03,039 --> 00:23:07,120
+l-check values for the elephant provider
+
+00:23:05,679 --> 00:23:10,480
+and latency of queries
+
+00:23:07,120 --> 00:23:13,840
+for provider and you group this by zone
+
+00:23:10,480 --> 00:23:15,919
+you actually see that a single zone was
+
+00:23:13,840 --> 00:23:17,200
+impacted and we had then confirmation by
+
+00:23:15,919 --> 00:23:19,919
+the cloud provider that they had
+
+00:23:17,200 --> 00:23:21,360
+issues in a specific zone where they
+
+00:23:19,919 --> 00:23:23,919
+were dropping dns queries
+
+00:23:21,360 --> 00:23:26,240
+so well not much we could do in in that
+
+00:23:23,919 --> 00:23:26,240
+case
+
+00:23:27,200 --> 00:23:30,799
+and you know i mean i've been talking
+
+00:23:29,039 --> 00:23:31,600
+about coordinates containers and coding
+
+00:23:30,799 --> 00:23:33,760
+experts
+
+00:23:31,600 --> 00:23:35,600
+and sometimes well it's the magic of
+
+00:23:33,760 --> 00:23:37,360
+kubernetes right and you tend to forget
+
+00:23:35,600 --> 00:23:38,720
+that you actually run on nodes and that
+
+00:23:37,360 --> 00:23:41,280
+these nodes have constraints
+
+00:23:38,720 --> 00:23:41,280
+of their own
+
+00:23:42,720 --> 00:23:47,520
+so families in term right application
+
+00:23:45,760 --> 00:23:49,760
+saving errors
+
+00:23:47,520 --> 00:23:50,960
+and it took us some time to see that
+
+00:23:49,760 --> 00:23:53,360
+actually what was happening
+
+00:23:50,960 --> 00:23:54,720
+is that we had contract errors in the
+
+00:23:53,360 --> 00:23:56,320
+kernel logs
+
+00:23:54,720 --> 00:23:57,520
+and if you look at the graph at the
+
+00:23:56,320 --> 00:23:58,799
+bottom you can see the number of
+
+00:23:57,520 --> 00:24:01,760
+contract entries
+
+00:23:58,799 --> 00:24:04,159
+has been slowly increasing and it's now
+
+00:24:01,760 --> 00:24:06,640
+at a plateau at 130
+
+00:24:04,159 --> 00:24:08,240
+000 entries and it's weird because it's
+
+00:24:06,640 --> 00:24:12,000
+very flat right
+
+00:24:08,240 --> 00:24:14,640
+well it turned out to proxy by default
+
+00:24:12,000 --> 00:24:16,000
+will complete the contract to have 170
+
+00:24:14,640 --> 00:24:18,320
+000 entries exactly
+
+00:24:16,000 --> 00:24:19,440
+which is exactly the limit we're getting
+
+00:24:18,320 --> 00:24:21,279
+at
+
+00:24:19,440 --> 00:24:22,640
+and when it goes down is because we
+
+00:24:21,279 --> 00:24:23,600
+fixed it by increasing the number of
+
+00:24:22,640 --> 00:24:26,240
+buds and nodes
+
+00:24:23,600 --> 00:24:28,240
+and so connections were distributed much
+
+00:24:26,240 --> 00:24:31,520
+more evenly and it was
+
+00:24:28,240 --> 00:24:34,000
+a lot better if you
+
+00:24:31,520 --> 00:24:35,600
+look at the graph i just i just showed
+
+00:24:34,000 --> 00:24:37,200
+about contract entries
+
+00:24:35,600 --> 00:24:39,039
+you can see that there's actually two
+
+00:24:37,200 --> 00:24:39,679
+different group of nodes and all these
+
+00:24:39,039 --> 00:24:42,720
+nodes were
+
+00:24:39,679 --> 00:24:43,440
+running coordinates uh pods so it's kind
+
+00:24:42,720 --> 00:24:46,480
+of weird that
+
+00:24:43,440 --> 00:24:48,000
+these nodes are so different because dns
+
+00:24:46,480 --> 00:24:49,200
+queries were perfectly load balanced
+
+00:24:48,000 --> 00:24:51,200
+across all the cards
+
+00:24:49,200 --> 00:24:52,799
+and so we would expect to see this be
+
+00:24:51,200 --> 00:24:55,120
+very balanced
+
+00:24:52,799 --> 00:24:56,159
+well it turned out the hosts were a bit
+
+00:24:55,120 --> 00:24:58,720
+different
+
+00:24:56,159 --> 00:25:01,039
+some were running a kind of 415 and some
+
+00:24:58,720 --> 00:25:03,200
+were running kind of 5.0
+
+00:25:01,039 --> 00:25:05,200
+and there's actually a few candle
+
+00:25:03,200 --> 00:25:06,880
+patches in 5.0
+
+00:25:05,200 --> 00:25:08,480
+that improve the contract behavior with
+
+00:25:06,880 --> 00:25:11,679
+udp exactly for
+
+00:25:08,480 --> 00:25:14,320
+dns queries actually and what it changes
+
+00:25:11,679 --> 00:25:16,320
+is that country contract entries for dns
+
+00:25:14,320 --> 00:25:18,400
+only get a service against gta by
+
+00:25:16,320 --> 00:25:20,640
+default instead of three minutes
+
+00:25:18,400 --> 00:25:22,880
+which means they expire much faster and
+
+00:25:20,640 --> 00:25:24,080
+so the number of entries in the contract
+
+00:25:22,880 --> 00:25:25,679
+is much lower
+
+00:25:24,080 --> 00:25:30,400
+and if you want details about the
+
+00:25:25,679 --> 00:25:30,400
+patches i gave the references on time
+
+00:25:30,960 --> 00:25:34,960
+and what's nice with dns is that
+
+00:25:33,679 --> 00:25:38,159
+sometimes well it's
+
+00:25:34,960 --> 00:25:40,640
+just plainly plain weird
+
+00:25:38,159 --> 00:25:42,159
+so we did what happened that time is we
+
+00:25:40,640 --> 00:25:44,000
+did an update
+
+00:25:42,159 --> 00:25:46,320
+of core dns on the cluster and
+
+00:25:44,000 --> 00:25:48,640
+everything was working completely fine
+
+00:25:46,320 --> 00:25:50,720
+except for a single application and this
+
+00:25:48,640 --> 00:25:51,120
+application was speedy bouncer which is
+
+00:25:50,720 --> 00:25:54,159
+a
+
+00:25:51,120 --> 00:25:56,159
+postgrad proxy and pt bouncer wasn't
+
+00:25:54,159 --> 00:25:57,760
+able to connect to postgres and
+
+00:25:56,159 --> 00:25:58,640
+everything else was working perfectly
+
+00:25:57,760 --> 00:26:01,440
+fine
+
+00:25:58,640 --> 00:26:02,880
+so well what we had to do is captured in
+
+00:26:01,440 --> 00:26:04,480
+a strategy to try and understand what
+
+00:26:02,880 --> 00:26:06,400
+was happening
+
+00:26:04,480 --> 00:26:08,559
+and here is an extract of the capture
+
+00:26:06,400 --> 00:26:11,760
+with important flags
+
+00:26:08,559 --> 00:26:14,000
+passed and explaining on the slide so
+
+00:26:11,760 --> 00:26:15,200
+a few things uh i wanted i want you to
+
+00:26:14,000 --> 00:26:17,200
+notice is well
+
+00:26:15,200 --> 00:26:18,400
+first of all all the queries are using
+
+00:26:17,200 --> 00:26:20,000
+the same source board
+
+00:26:18,400 --> 00:26:22,240
+which is a very different behavior than
+
+00:26:20,000 --> 00:26:23,039
+the ones we were seeing with gbc or go
+
+00:26:22,240 --> 00:26:25,360
+for instance
+
+00:26:23,039 --> 00:26:28,080
+that's weird and also what's even
+
+00:26:25,360 --> 00:26:30,400
+weirder is about on the right hand side
+
+00:26:28,080 --> 00:26:31,760
+where you can see this dns query names
+
+00:26:30,400 --> 00:26:34,159
+with random case
+
+00:26:31,760 --> 00:26:35,840
+that's weird i mean it felt very
+
+00:26:34,159 --> 00:26:39,279
+surprising to us
+
+00:26:35,840 --> 00:26:42,320
+and it's actually based on a draft
+
+00:26:39,279 --> 00:26:45,120
+from ietf to increase dns security by
+
+00:26:42,320 --> 00:26:45,919
+encoding additional identity for the
+
+00:26:45,120 --> 00:26:49,440
+query
+
+00:26:45,919 --> 00:26:51,679
+using using random case
+
+00:26:49,440 --> 00:26:53,600
+so what i wanted to show here is that
+
+00:26:51,679 --> 00:26:55,679
+well this dns resolver
+
+00:26:53,600 --> 00:26:57,440
+is really no one we know about it's very
+
+00:26:55,679 --> 00:27:00,400
+different from all the ones
+
+00:26:57,440 --> 00:27:00,400
+we've been working with
+
+00:27:00,880 --> 00:27:04,240
+and the content i didn't talk about
+
+00:27:02,559 --> 00:27:06,240
+before is this one
+
+00:27:04,240 --> 00:27:08,080
+so as you can see uh as resolution
+
+00:27:06,240 --> 00:27:11,039
+happen is well you're getting
+
+00:27:08,080 --> 00:27:12,880
+uh threes which is nx domains and then a
+
+00:27:11,039 --> 00:27:13,840
+zero which is no error on the false
+
+00:27:12,880 --> 00:27:16,080
+column
+
+00:27:13,840 --> 00:27:17,039
+and on the fifth column you can see
+
+00:27:16,080 --> 00:27:19,679
+always zero
+
+00:27:17,039 --> 00:27:20,640
+and then a one and this is the truncated
+
+00:27:19,679 --> 00:27:22,799
+bit flag
+
+00:27:20,640 --> 00:27:24,799
+and this flag is set when your answer is
+
+00:27:22,799 --> 00:27:26,159
+bigger than the maximum size you you
+
+00:27:24,799 --> 00:27:28,399
+allow
+
+00:27:26,159 --> 00:27:29,200
+so in that case the query was giving
+
+00:27:28,399 --> 00:27:31,360
+more
+
+00:27:29,200 --> 00:27:33,120
+than the size of the udp packet and of
+
+00:27:31,360 --> 00:27:34,799
+course codiness was saying
+
+00:27:33,120 --> 00:27:36,720
+well it's truncated and you should go to
+
+00:27:34,799 --> 00:27:38,799
+tcp to get the full answer
+
+00:27:36,720 --> 00:27:41,520
+it turned out our pg bouncers in this
+
+00:27:38,799 --> 00:27:43,440
+cluster were compiled with a resolver
+
+00:27:41,520 --> 00:27:45,679
+that isn't supporting tcp upgrade and
+
+00:27:43,440 --> 00:27:47,039
+was just ignoring packets when truncated
+
+00:27:45,679 --> 00:27:48,720
+bit was said and not doing anything
+
+00:27:47,039 --> 00:27:51,600
+about it
+
+00:27:48,720 --> 00:27:53,279
+and what so wait it was working before
+
+00:27:51,600 --> 00:27:55,600
+we did the continuous update right
+
+00:27:53,279 --> 00:27:56,799
+well it turned out there was a bug in
+
+00:27:55,600 --> 00:27:57,360
+the version of coding that we were
+
+00:27:56,799 --> 00:27:59,279
+running
+
+00:27:57,360 --> 00:28:00,880
+where truncate it wasn't set when it
+
+00:27:59,279 --> 00:28:02,080
+should have been so things were working
+
+00:28:00,880 --> 00:28:05,279
+fine because we had two
+
+00:28:02,080 --> 00:28:07,679
+issues one encoding has one big answer
+
+00:28:05,279 --> 00:28:09,279
+so we just had to recompile the answer
+
+00:28:07,679 --> 00:28:12,000
+with another resolver and it
+
+00:28:09,279 --> 00:28:12,000
+fixed the problem
+
+00:28:12,720 --> 00:28:19,840
+and well sometimes you know it's not dns
+
+00:28:16,480 --> 00:28:19,840
+well to be honest really
+
+00:28:20,640 --> 00:28:24,640
+so the reason i'm mentioning this slide
+
+00:28:22,799 --> 00:28:26,559
+is because quite often teams will come
+
+00:28:24,640 --> 00:28:28,240
+to you because they have dns issues and
+
+00:28:26,559 --> 00:28:29,200
+most of the time they're right it's a
+
+00:28:28,240 --> 00:28:31,200
+dns issue
+
+00:28:29,200 --> 00:28:33,120
+and in that case well look we're full of
+
+00:28:31,200 --> 00:28:33,520
+dns errors so they came to us and said
+
+00:28:33,120 --> 00:28:36,720
+well
+
+00:28:33,520 --> 00:28:39,919
+we have a dns problem and it turned out
+
+00:28:36,720 --> 00:28:42,000
+everything was fine on the dns infra but
+
+00:28:39,919 --> 00:28:43,520
+we looked at the overall deal in the
+
+00:28:42,000 --> 00:28:44,000
+cluster and we saw that the number of
+
+00:28:43,520 --> 00:28:46,480
+packets
+
+00:28:44,000 --> 00:28:47,840
+received on all the nodes had dropped
+
+00:28:46,480 --> 00:28:49,600
+significantly
+
+00:28:47,840 --> 00:28:51,440
+and i mean this is not related to enough
+
+00:28:49,600 --> 00:28:54,480
+right
+
+00:28:51,440 --> 00:28:55,039
+so we looked at network monitoring and
+
+00:28:54,480 --> 00:28:57,919
+of course
+
+00:28:55,039 --> 00:28:58,480
+you can't measure udp packet drops by
+
+00:28:57,919 --> 00:29:02,480
+using
+
+00:28:58,480 --> 00:29:04,240
+uh by e easily however what you can do
+
+00:29:02,480 --> 00:29:06,480
+is look at the tcp connections on your
+
+00:29:04,240 --> 00:29:07,039
+network and if you see retransmits it
+
+00:29:06,480 --> 00:29:09,840
+means
+
+00:29:07,039 --> 00:29:12,080
+it means packets are getting lost and in
+
+00:29:09,840 --> 00:29:14,159
+this graph you can see that there are a
+
+00:29:12,080 --> 00:29:15,440
+lot of retransmits happening exactly at
+
+00:29:14,159 --> 00:29:17,200
+the time of the error
+
+00:29:15,440 --> 00:29:19,679
+and if you look at the detail and when
+
+00:29:17,200 --> 00:29:22,320
+we look at the detail we saw that
+
+00:29:19,679 --> 00:29:23,840
+for any of this bar there say the same
+
+00:29:22,320 --> 00:29:25,840
+as it was involved
+
+00:29:23,840 --> 00:29:27,919
+and so we figured out that there was an
+
+00:29:25,840 --> 00:29:29,919
+issue with networking in this ac
+
+00:29:27,919 --> 00:29:31,120
+and it was confirmed by the cloud
+
+00:29:29,919 --> 00:29:34,399
+provider
+
+00:29:31,120 --> 00:29:37,039
+so it was really in the dns that time
+
+00:29:34,399 --> 00:29:38,840
+but well this was the first impact and
+
+00:29:37,039 --> 00:29:41,440
+what users
+
+00:29:38,840 --> 00:29:44,240
+so
+
+00:29:41,440 --> 00:29:45,039
+so let's see what we run now uh to to be
+
+00:29:44,240 --> 00:29:48,080
+safe
+
+00:29:45,039 --> 00:29:50,480
+at the level so what what we do
+
+00:29:48,080 --> 00:29:52,080
+is we run the local dns which i was
+
+00:29:50,480 --> 00:29:55,760
+talking about before
+
+00:29:52,080 --> 00:29:59,440
+and either ipvs for older cluster or
+
+00:29:55,760 --> 00:30:01,840
+celia for more recent clusters and
+
+00:29:59,440 --> 00:30:03,919
+we use tcp for any connection to the dns
+
+00:30:01,840 --> 00:30:06,080
+service because it's a lot better
+
+00:30:03,919 --> 00:30:07,840
+however we use udp to connect to the
+
+00:30:06,080 --> 00:30:08,320
+cloud resolver because of the limitation
+
+00:30:07,840 --> 00:30:11,120
+i was
+
+00:30:08,320 --> 00:30:11,120
+mentioning before
+
+00:30:11,840 --> 00:30:15,120
+and if you look at the configuration of
+
+00:30:13,360 --> 00:30:16,880
+the containers themselves well it's
+
+00:30:15,120 --> 00:30:20,159
+exactly the same as before
+
+00:30:16,880 --> 00:30:23,440
+except the nameserver we use is the ipg
+
+00:30:20,159 --> 00:30:24,000
+bound by the local resolver and of
+
+00:30:23,440 --> 00:30:25,440
+course
+
+00:30:24,000 --> 00:30:27,120
+we did something else which is we
+
+00:30:25,440 --> 00:30:28,880
+decrease the timeout because the default
+
+00:30:27,120 --> 00:30:29,520
+is five seconds and so we decreased it
+
+00:30:28,880 --> 00:30:32,320
+to
+
+00:30:29,520 --> 00:30:32,720
+one second so if ever we do the packet
+
+00:30:32,320 --> 00:30:34,320
+then
+
+00:30:32,720 --> 00:30:36,799
+we are going to get a restrive to one
+
+00:30:34,320 --> 00:30:40,399
+second step five which is not great but
+
+00:30:36,799 --> 00:30:44,880
+better what we also did
+
+00:30:40,399 --> 00:30:47,039
+is we gave applications the options to
+
+00:30:44,880 --> 00:30:48,559
+to use another nade result.com and
+
+00:30:47,039 --> 00:30:50,320
+opt-in using annotation
+
+00:30:48,559 --> 00:30:52,399
+and what happens when is when we see
+
+00:30:50,320 --> 00:30:53,440
+segmentation we have a mutating web hook
+
+00:30:52,399 --> 00:30:54,720
+that is going to change the
+
+00:30:53,440 --> 00:30:57,919
+configuration of
+
+00:30:54,720 --> 00:30:59,679
+um of your birds and
+
+00:30:57,919 --> 00:31:01,679
+the this alternate configuration is
+
+00:30:59,679 --> 00:31:04,799
+using a single search domain
+
+00:31:01,679 --> 00:31:07,919
+which is sbc the first of the focal and
+
+00:31:04,799 --> 00:31:10,880
+moving end dots back to two on me
+
+00:31:07,919 --> 00:31:11,760
+um and this means most queries uh will
+
+00:31:10,880 --> 00:31:14,080
+get an answer
+
+00:31:11,760 --> 00:31:14,880
+in a single query which is much more
+
+00:31:14,080 --> 00:31:18,159
+efficient
+
+00:31:14,880 --> 00:31:20,080
+and the only cost is you can't
+
+00:31:18,159 --> 00:31:22,320
+you can't resolve a series in the same
+
+00:31:20,080 --> 00:31:24,320
+name space by just using its name you
+
+00:31:22,320 --> 00:31:25,679
+need to also provide the namespace
+
+00:31:24,320 --> 00:31:27,519
+that is much more efficient and we've
+
+00:31:25,679 --> 00:31:30,080
+seen applications being very happy about
+
+00:31:27,519 --> 00:31:30,080
+this design
+
+00:31:31,760 --> 00:31:35,840
+and we're we're almost done um in
+
+00:31:35,120 --> 00:31:39,200
+conclusion
+
+00:31:35,840 --> 00:31:39,679
+um a few messages i wanted to share with
+
+00:31:39,200 --> 00:31:41,519
+you
+
+00:31:39,679 --> 00:31:42,960
+so one thing you need to remember is
+
+00:31:41,519 --> 00:31:44,080
+running kubernetes means you're going to
+
+00:31:42,960 --> 00:31:46,799
+be running dns
+
+00:31:44,080 --> 00:31:48,480
+and running finish is hard and i'm sure
+
+00:31:46,799 --> 00:31:51,039
+most of you know that
+
+00:31:48,480 --> 00:31:52,960
+a few recommendations uh try and use
+
+00:31:51,039 --> 00:31:56,720
+another called dinesh and cash as much
+
+00:31:52,960 --> 00:31:58,559
+as you can also test your dns infrared
+
+00:31:56,720 --> 00:32:00,640
+do load testing you do running updates
+
+00:31:58,559 --> 00:32:03,279
+because it's much better to discover
+
+00:32:00,640 --> 00:32:04,880
+the small issues i mentioned before
+
+00:32:03,279 --> 00:32:06,000
+during testing that in production of
+
+00:32:04,880 --> 00:32:07,840
+course
+
+00:32:06,000 --> 00:32:09,760
+and also understand the upstream dns you
+
+00:32:07,840 --> 00:32:11,279
+depend on because even if what you do is
+
+00:32:09,760 --> 00:32:15,360
+great you're going to depend on other
+
+00:32:11,279 --> 00:32:17,039
+services which can also fail of course
+
+00:32:15,360 --> 00:32:19,840
+and i think the most important thing i
+
+00:32:17,039 --> 00:32:22,640
+wanted to share is for your applications
+
+00:32:19,840 --> 00:32:23,279
+um because well dns will fail right i
+
+00:32:22,640 --> 00:32:25,279
+mean
+
+00:32:23,279 --> 00:32:26,399
+even if you do a very good job with dns
+
+00:32:25,279 --> 00:32:28,240
+and your infra
+
+00:32:26,399 --> 00:32:29,440
+you're gonna have issues sometimes and
+
+00:32:28,240 --> 00:32:31,760
+you want your application to
+
+00:32:29,440 --> 00:32:32,880
+to react uh as well as possible to these
+
+00:32:31,760 --> 00:32:34,480
+issues
+
+00:32:32,880 --> 00:32:36,799
+so try and standardize on a few
+
+00:32:34,480 --> 00:32:38,000
+resolvers only because as as you've seen
+
+00:32:36,799 --> 00:32:40,000
+in my examples
+
+00:32:38,000 --> 00:32:42,080
+uh we talked about four different
+
+00:32:40,000 --> 00:32:44,159
+resolvers and there are a lot more
+
+00:32:42,080 --> 00:32:45,919
+out there it's very difficult to
+
+00:32:44,159 --> 00:32:48,960
+understand their exact behavior
+
+00:32:45,919 --> 00:32:50,399
+and to optimize for all of them so try
+
+00:32:48,960 --> 00:32:50,720
+to limit the number of results that you
+
+00:32:50,399 --> 00:32:52,399
+use
+
+00:32:50,720 --> 00:32:54,840
+you will have i mean it will make
+
+00:32:52,399 --> 00:32:58,399
+debugging much simpler
+
+00:32:54,840 --> 00:33:02,159
+also try and try and avoid doing
+
+00:32:58,399 --> 00:33:04,559
+um resolution for each encoding request
+
+00:33:02,159 --> 00:33:05,760
+and reconnecting to back ends by either
+
+00:33:04,559 --> 00:33:06,399
+using long-leaf connection to your
+
+00:33:05,760 --> 00:33:09,440
+backhands
+
+00:33:06,399 --> 00:33:12,240
+or to asking dns resolution to avoid
+
+00:33:09,440 --> 00:33:12,720
+depending on dns resolution working
+
+00:33:12,240 --> 00:33:16,320
+great
+
+00:33:12,720 --> 00:33:17,840
+to serve synchronous queries and finally
+
+00:33:16,320 --> 00:33:20,880
+and i think this is the most important
+
+00:33:17,840 --> 00:33:23,120
+thing is include tns failure tests
+
+00:33:20,880 --> 00:33:24,880
+in your application tests so if you do
+
+00:33:23,120 --> 00:33:26,240
+cause testing include tns because you
+
+00:33:24,880 --> 00:33:27,440
+want to see how your application is
+
+00:33:26,240 --> 00:33:31,200
+going to behave
+
+00:33:27,440 --> 00:33:31,200
+when you lose a few packets
+
+00:33:32,000 --> 00:33:36,880
+and we're done thank you very much
+
+00:33:35,279 --> 00:33:38,559
+i'm going to be around for the next few
+
+00:33:36,880 --> 00:33:39,039
+minutes for questions if you if you have
+
+00:33:38,559 --> 00:33:42,720
+any
+
+00:33:39,039 --> 00:33:42,720
+
+YouTube URL: https://www.youtube.com/watch?v=Yq-SVNa_W5E
+
+

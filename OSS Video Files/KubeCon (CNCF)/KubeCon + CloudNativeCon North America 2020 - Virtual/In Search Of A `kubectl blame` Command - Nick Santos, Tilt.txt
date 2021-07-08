@@ -1,0 +1,1994 @@
+Title: In Search Of A `kubectl blame` Command - Nick Santos, Tilt
+Publication date: 2020-11-23
+Playlist: KubeCon + CloudNativeCon North America 2020 - Virtual
+Description: 
+	Don’t miss out! Join us at our upcoming event: KubeCon + CloudNativeCon Europe 2021 Virtual from May 4–7, 2021. Learn more at https://kubecon.io. The conference features presentations from developers and end users of Kubernetes, Prometheus, Envoy, and all of the other CNCF-hosted projects. 
+
+In Search Of A `kubectl blame` Command - Nick Santos, Tilt 
+
+Developers want understandable tools. Their tools should tell them, “This change here broke that pod there.” But control loops drive the Kubernetes worldview. In a control loop, Kubernetes updates the cluster to make the actual state match desired state. Control loops do not track why the state changed. Nick Santos and the Tilt team tried to build a tool that traced the effects of each apply. He’ll tell stories about several attempts to propagate and assign blame across state changes. Most of them failed! Or broke Kubernetes updates in frustrating ways! Along the way, they learned about labels, informers, UIDs, owner refs, events, and how kubectl apply works internally. If you plan to write a tool that interprets Kubernetes API objects for humans, this talk is for you. 
+
+https://sched.co/ekAv
+Captions: 
+	00:00:02,800 --> 00:00:07,279
+hi
+
+00:00:04,319 --> 00:00:10,719
+my name is nick this talk is called in
+
+00:00:07,279 --> 00:00:13,120
+search of a cube cuddle blend command
+
+00:00:10,719 --> 00:00:14,559
+no there's no cube cuddle blame command
+
+00:00:13,120 --> 00:00:16,640
+right now
+
+00:00:14,559 --> 00:00:17,840
+this talk is about why there should be
+
+00:00:16,640 --> 00:00:20,880
+one
+
+00:00:17,840 --> 00:00:24,240
+what it would do why it's hard to build
+
+00:00:20,880 --> 00:00:28,400
+and why you should care about it
+
+00:00:24,240 --> 00:00:31,279
+let me start with why i care about it
+
+00:00:28,400 --> 00:00:33,200
+i work on tiltdown we want to make
+
+00:00:31,279 --> 00:00:35,040
+developing on kubernetes a pleasant
+
+00:00:33,200 --> 00:00:37,520
+experience
+
+00:00:35,040 --> 00:00:38,960
+you edit your source code tilt updates
+
+00:00:37,520 --> 00:00:41,680
+your cluster
+
+00:00:38,960 --> 00:00:43,440
+we wanted you to help you understand the
+
+00:00:41,680 --> 00:00:45,760
+progress it's making and how that change
+
+00:00:43,440 --> 00:00:48,559
+is affecting your app
+
+00:00:45,760 --> 00:00:52,079
+lots of tools have this problem and they
+
+00:00:48,559 --> 00:00:52,079
+all solve it in a different way
+
+00:00:52,480 --> 00:00:57,280
+what does this mean exactly let me give
+
+00:00:55,280 --> 00:00:59,840
+you an example
+
+00:00:57,280 --> 00:01:01,280
+you apply a deployment you want to check
+
+00:00:59,840 --> 00:01:03,280
+if it worked
+
+00:01:01,280 --> 00:01:04,960
+one approach to a cube cuddle blind
+
+00:01:03,280 --> 00:01:07,840
+command would trace
+
+00:01:04,960 --> 00:01:12,240
+each cause to its effect and tell you
+
+00:01:07,840 --> 00:01:15,360
+how far along the deployment is
+
+00:01:12,240 --> 00:01:18,000
+developers often want this tracking in
+
+00:01:15,360 --> 00:01:20,479
+the reverse direction as well
+
+00:01:18,000 --> 00:01:23,040
+you know a pod is crashing is that pod
+
+00:01:20,479 --> 00:01:25,200
+from the deployment you just created
+
+00:01:23,040 --> 00:01:26,720
+or is it from an older revision of that
+
+00:01:25,200 --> 00:01:28,159
+deployment
+
+00:01:26,720 --> 00:01:31,759
+where did the different containers and
+
+00:01:28,159 --> 00:01:31,759
+sidecars of the pod come from
+
+00:01:32,079 --> 00:01:38,400
+when we tilt team started down this path
+
+00:01:35,840 --> 00:01:40,479
+we thought this would be easy it turned
+
+00:01:38,400 --> 00:01:43,040
+out not to be so easy
+
+00:01:40,479 --> 00:01:44,159
+we tried a lot of approaches many of
+
+00:01:43,040 --> 00:01:47,200
+them failed
+
+00:01:44,159 --> 00:01:49,520
+it was pretty frustrating i don't want
+
+00:01:47,200 --> 00:01:51,920
+to put you through that
+
+00:01:49,520 --> 00:01:53,600
+i want to explain the problem to you in
+
+00:01:51,920 --> 00:01:54,079
+the way that i wish someone had
+
+00:01:53,600 --> 00:01:57,280
+explained
+
+00:01:54,079 --> 00:01:57,680
+the problem to us because this problem
+
+00:01:57,280 --> 00:02:00,560
+has
+
+00:01:57,680 --> 00:02:01,200
+old theoretical roots we're going to
+
+00:02:00,560 --> 00:02:03,600
+talk about
+
+00:02:01,200 --> 00:02:05,439
+those roots we're going to take a tour
+
+00:02:03,600 --> 00:02:06,479
+of some of the tools that try to solve
+
+00:02:05,439 --> 00:02:09,520
+this problem
+
+00:02:06,479 --> 00:02:10,160
+and how they solve it and i'm going to
+
+00:02:09,520 --> 00:02:12,160
+talk about
+
+00:02:10,160 --> 00:02:13,360
+some ways future dev tools might make
+
+00:02:12,160 --> 00:02:17,680
+this easier
+
+00:02:13,360 --> 00:02:17,680
+if anyone here works on kubernetes
+
+00:02:18,319 --> 00:02:23,280
+now i don't want this to be just a talk
+
+00:02:21,920 --> 00:02:26,319
+about
+
+00:02:23,280 --> 00:02:27,920
+how to write tube cuddle blame if i
+
+00:02:26,319 --> 00:02:29,520
+wanted cube cuddle blame i
+
+00:02:27,920 --> 00:02:32,160
+wouldn't have given this talk i would
+
+00:02:29,520 --> 00:02:35,200
+have used that time to build my own
+
+00:02:32,160 --> 00:02:35,200
+cube cuddle plugin
+
+00:02:35,519 --> 00:02:38,640
+i'm more interested in the abstract
+
+00:02:37,599 --> 00:02:40,720
+problem
+
+00:02:38,640 --> 00:02:42,080
+and its history because if you
+
+00:02:40,720 --> 00:02:43,519
+understand the history
+
+00:02:42,080 --> 00:02:46,480
+you can make sense of the different
+
+00:02:43,519 --> 00:02:49,760
+approaches you can reach for
+
+00:02:46,480 --> 00:02:52,400
+non-kubernetes tools even non-computers
+
+00:02:49,760 --> 00:02:53,200
+for inspiration on solutions and we
+
+00:02:52,400 --> 00:02:55,840
+might to see
+
+00:02:53,200 --> 00:02:58,239
+better kubernetes debugging tools in the
+
+00:02:55,840 --> 00:02:58,239
+future
+
+00:02:58,560 --> 00:03:03,440
+so let's talk about why this is hard
+
+00:03:03,519 --> 00:03:07,840
+the fundamental kubernetes architecture
+
+00:03:06,000 --> 00:03:11,040
+is a control loop
+
+00:03:07,840 --> 00:03:13,200
+the system runs in a loop you declare a
+
+00:03:11,040 --> 00:03:15,680
+desired state
+
+00:03:13,200 --> 00:03:16,239
+what the loop does next is a function of
+
+00:03:15,680 --> 00:03:18,720
+the diff
+
+00:03:16,239 --> 00:03:21,360
+between the desired state and the
+
+00:03:18,720 --> 00:03:21,360
+current state
+
+00:03:21,920 --> 00:03:25,680
+i tried to describe kubernetes to a
+
+00:03:23,920 --> 00:03:29,040
+friend she
+
+00:03:25,680 --> 00:03:29,680
+researches history of science she says
+
+00:03:29,040 --> 00:03:32,000
+oh nick
+
+00:03:29,680 --> 00:03:33,920
+i i know what you're talking about we've
+
+00:03:32,000 --> 00:03:37,280
+been talking about that for decades
+
+00:03:33,920 --> 00:03:38,080
+let me send you a paper she sent me this
+
+00:03:37,280 --> 00:03:40,640
+paper
+
+00:03:38,080 --> 00:03:41,920
+uh origins of feedback control by auto
+
+00:03:40,640 --> 00:03:44,959
+mare
+
+00:03:41,920 --> 00:03:46,959
+great paper old control loop papers
+
+00:03:44,959 --> 00:03:48,480
+typically have a ton of calculus because
+
+00:03:46,959 --> 00:03:49,840
+they're really about functions on
+
+00:03:48,480 --> 00:03:52,319
+differences
+
+00:03:49,840 --> 00:03:53,760
+this paper is about history it's tons of
+
+00:03:52,319 --> 00:03:57,120
+fun very readable
+
+00:03:53,760 --> 00:03:59,360
+not much math you probably don't
+
+00:03:57,120 --> 00:04:01,040
+interact with water clocks and windmills
+
+00:03:59,360 --> 00:04:02,640
+day to day
+
+00:04:01,040 --> 00:04:04,879
+but you do probably interact with
+
+00:04:02,640 --> 00:04:06,319
+thermostats and they have this property
+
+00:04:04,879 --> 00:04:07,120
+that demonstrates the cyclic
+
+00:04:06,319 --> 00:04:08,640
+relationship
+
+00:04:07,120 --> 00:04:10,319
+between cause and effect that we're
+
+00:04:08,640 --> 00:04:12,159
+describing
+
+00:04:10,319 --> 00:04:14,480
+let's say the current temperature is 60
+
+00:04:12,159 --> 00:04:17,440
+degrees fahrenheit you turn the
+
+00:04:14,480 --> 00:04:20,079
+thermostat to 70 degrees fahrenheit
+
+00:04:17,440 --> 00:04:21,840
+you wait a bit then turn it to 90
+
+00:04:20,079 --> 00:04:24,320
+degrees fahrenheit
+
+00:04:21,840 --> 00:04:26,000
+the heat is on did the first setting
+
+00:04:24,320 --> 00:04:27,919
+make the heat turn on
+
+00:04:26,000 --> 00:04:29,040
+or did the second setting make it turn
+
+00:04:27,919 --> 00:04:31,360
+on
+
+00:04:29,040 --> 00:04:34,720
+what does it even mean for one change to
+
+00:04:31,360 --> 00:04:34,720
+cause the heat to turn on
+
+00:04:34,960 --> 00:04:38,080
+the other important part of a control
+
+00:04:36,560 --> 00:04:41,120
+loop is that it's
+
+00:04:38,080 --> 00:04:42,720
+a declarative system it inherits a lot
+
+00:04:41,120 --> 00:04:45,120
+of the same problems as
+
+00:04:42,720 --> 00:04:46,880
+other declarative systems you might be
+
+00:04:45,120 --> 00:04:50,320
+familiar with
+
+00:04:46,880 --> 00:04:51,199
+uh css is pretty widespread you may be
+
+00:04:50,320 --> 00:04:55,360
+scared of
+
+00:04:51,199 --> 00:04:57,759
+css i was a ui engineer for many years
+
+00:04:55,360 --> 00:04:59,680
+and i think css is great i think it is
+
+00:04:57,759 --> 00:05:00,479
+one of the great declarative programming
+
+00:04:59,680 --> 00:05:03,840
+languages
+
+00:05:00,479 --> 00:05:04,400
+of all time uh when you look at the
+
+00:05:03,840 --> 00:05:07,840
+initial
+
+00:05:04,400 --> 00:05:10,880
+css proposal the inventories of css
+
+00:05:07,840 --> 00:05:11,440
+noted that hey it has this nice property
+
+00:05:10,880 --> 00:05:14,240
+it makes
+
+00:05:11,440 --> 00:05:16,160
+styles very pluggable it gives you a lot
+
+00:05:14,240 --> 00:05:17,759
+of room to change the implementation
+
+00:05:16,160 --> 00:05:19,600
+and for different contributors to
+
+00:05:17,759 --> 00:05:23,520
+contribute to the style and
+
+00:05:19,600 --> 00:05:23,520
+to optimize the implementation later
+
+00:05:23,600 --> 00:05:28,479
+the trade-off is is that css like other
+
+00:05:26,560 --> 00:05:29,280
+declarative systems can be very hard to
+
+00:05:28,479 --> 00:05:30,880
+debug
+
+00:05:29,280 --> 00:05:32,800
+unless you have a good mental model
+
+00:05:30,880 --> 00:05:34,080
+about what the underlying system is
+
+00:05:32,800 --> 00:05:36,560
+doing
+
+00:05:34,080 --> 00:05:38,320
+i remember an old story from the gmail
+
+00:05:36,560 --> 00:05:40,320
+ui team where
+
+00:05:38,320 --> 00:05:41,759
+someone added a bad selector that looked
+
+00:05:40,320 --> 00:05:43,840
+innocent
+
+00:05:41,759 --> 00:05:45,440
+and that selector killed the performance
+
+00:05:43,840 --> 00:05:48,400
+of the entire page
+
+00:05:45,440 --> 00:05:50,400
+it took them weeks to figure out why
+
+00:05:48,400 --> 00:05:52,880
+even to figure out which selector caused
+
+00:05:50,400 --> 00:05:55,120
+the problem
+
+00:05:52,880 --> 00:05:57,280
+modern css debuggers have come a long
+
+00:05:55,120 --> 00:05:58,639
+way displaying calls and effect
+
+00:05:57,280 --> 00:06:00,240
+you can see the order the rules are
+
+00:05:58,639 --> 00:06:01,039
+applied in and where they're declared
+
+00:06:00,240 --> 00:06:03,440
+you can see
+
+00:06:01,039 --> 00:06:05,680
+rules cancelling each other out and you
+
+00:06:03,440 --> 00:06:08,479
+can edit them in place
+
+00:06:05,680 --> 00:06:08,720
+this is frankly what we should aspire to
+
+00:06:08,479 --> 00:06:12,080
+in
+
+00:06:08,720 --> 00:06:14,400
+kubernetes land but
+
+00:06:12,080 --> 00:06:15,520
+now we're going to take a look at what
+
+00:06:14,400 --> 00:06:18,800
+exists today
+
+00:06:15,520 --> 00:06:20,960
+in the kubernetes ecosystem
+
+00:06:18,800 --> 00:06:24,000
+the sample app we're going to look at is
+
+00:06:20,960 --> 00:06:27,280
+a stripped-down version of tilt
+
+00:06:24,000 --> 00:06:28,560
+we build and push an image we apply a
+
+00:06:27,280 --> 00:06:30,479
+deployment
+
+00:06:28,560 --> 00:06:33,520
+we track the deployment's progress and
+
+00:06:30,479 --> 00:06:35,840
+wait for the first pod to become ready
+
+00:06:33,520 --> 00:06:37,600
+quick review of the life cycle of a
+
+00:06:35,840 --> 00:06:39,759
+deployment so you understand what's
+
+00:06:37,600 --> 00:06:42,639
+going on in these examples
+
+00:06:39,759 --> 00:06:43,600
+a deployment creates a replica set and
+
+00:06:42,639 --> 00:06:47,199
+the replica set
+
+00:06:43,600 --> 00:06:49,120
+creates a pod then the pod is the bit
+
+00:06:47,199 --> 00:06:51,440
+that runs your containers that runs your
+
+00:06:49,120 --> 00:06:51,440
+code
+
+00:06:52,319 --> 00:06:56,319
+we're going to look at how these tools
+
+00:06:54,240 --> 00:06:59,120
+differ the pros and cons
+
+00:06:56,319 --> 00:07:00,720
+and where they fall down if you want to
+
+00:06:59,120 --> 00:07:03,199
+follow along there's a repo
+
+00:07:00,720 --> 00:07:06,000
+where you can run these examples it's at
+
+00:07:03,199 --> 00:07:08,240
+the bottom of your screen there
+
+00:07:06,000 --> 00:07:09,919
+the first example i'm going to show you
+
+00:07:08,240 --> 00:07:13,680
+is what the tilt team did
+
+00:07:09,919 --> 00:07:15,680
+first again we thought this would be
+
+00:07:13,680 --> 00:07:18,720
+easy
+
+00:07:15,680 --> 00:07:21,199
+deployment would get a label for example
+
+00:07:18,720 --> 00:07:21,759
+we might apply the label deployed at 10
+
+00:07:21,199 --> 00:07:25,280
+am
+
+00:07:21,759 --> 00:07:26,000
+january 10th if you see a pod with that
+
+00:07:25,280 --> 00:07:30,880
+label
+
+00:07:26,000 --> 00:07:34,240
+you know it belongs to this deployment
+
+00:07:30,880 --> 00:07:37,120
+here's what the code look like
+
+00:07:34,240 --> 00:07:38,000
+this is the kubernetes go client library
+
+00:07:37,120 --> 00:07:40,960
+client go
+
+00:07:38,000 --> 00:07:42,319
+a client go gives you an object called
+
+00:07:40,960 --> 00:07:44,080
+an informer
+
+00:07:42,319 --> 00:07:45,599
+an informer handles watching for
+
+00:07:44,080 --> 00:07:47,680
+kubernetes objects
+
+00:07:45,599 --> 00:07:50,879
+retrying when there's an error and
+
+00:07:47,680 --> 00:07:53,680
+notifying your code about every change
+
+00:07:50,879 --> 00:07:55,280
+we can configure it to only watch pods
+
+00:07:53,680 --> 00:07:59,840
+with the label we care about
+
+00:07:55,280 --> 00:07:59,840
+which is what you see in bold here
+
+00:08:00,000 --> 00:08:04,160
+let's watch what this looks like this is
+
+00:08:02,240 --> 00:08:06,879
+an ascii cinema
+
+00:08:04,160 --> 00:08:08,639
+video of the tool running our code is
+
+00:08:06,879 --> 00:08:12,479
+going to print an update every time the
+
+00:08:08,639 --> 00:08:16,560
+pod status changes
+
+00:08:12,479 --> 00:08:16,560
+and we see the deployment was a success
+
+00:08:16,720 --> 00:08:21,199
+all of our examples have a crash flag
+
+00:08:19,199 --> 00:08:24,400
+that lets us see how it behaves
+
+00:08:21,199 --> 00:08:26,879
+when the pod crashes dash dash crash
+
+00:08:24,400 --> 00:08:28,400
+so we can watch this deployment come out
+
+00:08:26,879 --> 00:08:30,800
+and eventually we're going to see it hit
+
+00:08:28,400 --> 00:08:30,800
+an error
+
+00:08:31,759 --> 00:08:37,039
+great perfect we saw it so at this point
+
+00:08:35,599 --> 00:08:38,959
+we thought we had solved the problem we
+
+00:08:37,039 --> 00:08:41,599
+were pretty happy
+
+00:08:38,959 --> 00:08:43,839
+now this is very efficient it only
+
+00:08:41,599 --> 00:08:46,000
+watches the pods that matter
+
+00:08:43,839 --> 00:08:47,680
+we need to inject labels but that's okay
+
+00:08:46,000 --> 00:08:49,680
+we can do that for the kind of tool
+
+00:08:47,680 --> 00:08:52,480
+we're building
+
+00:08:49,680 --> 00:08:52,880
+then we launched it and everybody hated
+
+00:08:52,480 --> 00:08:56,720
+this
+
+00:08:52,880 --> 00:09:00,480
+and they complained all the time
+
+00:08:56,720 --> 00:09:02,720
+because we had made a mistake we assumed
+
+00:09:00,480 --> 00:09:05,760
+that kubernetes would see
+
+00:09:02,720 --> 00:09:07,120
+the label on the pod template and would
+
+00:09:05,760 --> 00:09:08,399
+see that that was the only thing that
+
+00:09:07,120 --> 00:09:11,200
+had changed
+
+00:09:08,399 --> 00:09:13,120
+so it would update the existing pod with
+
+00:09:11,200 --> 00:09:16,160
+the new label
+
+00:09:13,120 --> 00:09:18,080
+that is not what happens the
+
+00:09:16,160 --> 00:09:20,000
+what happens and the way it's specified
+
+00:09:18,080 --> 00:09:22,399
+to happen is that the deployment
+
+00:09:20,000 --> 00:09:24,959
+controller will notice that the
+
+00:09:22,399 --> 00:09:28,080
+pod template spec has changed and
+
+00:09:24,959 --> 00:09:30,160
+replaced the pod entirely
+
+00:09:28,080 --> 00:09:31,519
+it was very important to people we
+
+00:09:30,160 --> 00:09:34,399
+learned that
+
+00:09:31,519 --> 00:09:37,760
+if nothing changes the pod should stay
+
+00:09:34,399 --> 00:09:39,839
+as is it shouldn't restart it
+
+00:09:37,760 --> 00:09:42,880
+and people hated the behavior where it
+
+00:09:39,839 --> 00:09:42,880
+started every time
+
+00:09:42,959 --> 00:09:46,800
+so we looked for alternatives the first
+
+00:09:45,839 --> 00:09:50,240
+alternative
+
+00:09:46,800 --> 00:09:53,760
+we will look at is cube cuddle rollout
+
+00:09:50,240 --> 00:09:53,760
+it ships with cube cuddle
+
+00:09:54,080 --> 00:09:58,320
+the example code that we're going to
+
+00:09:55,760 --> 00:10:00,240
+look at uses cube cuddle roll out as a
+
+00:09:58,320 --> 00:10:03,680
+library
+
+00:10:00,240 --> 00:10:04,320
+let's watch so it's going to wait for
+
+00:10:03,680 --> 00:10:07,360
+the deployment
+
+00:10:04,320 --> 00:10:08,720
+rollout to finish and it's a little bit
+
+00:10:07,360 --> 00:10:10,640
+repetitive but
+
+00:10:08,720 --> 00:10:13,120
+good success deployment successfully
+
+00:10:10,640 --> 00:10:13,120
+rolled out
+
+00:10:13,519 --> 00:10:17,600
+now let's look at what happens when the
+
+00:10:15,760 --> 00:10:19,440
+pod crashes we start the command with
+
+00:10:17,600 --> 00:10:21,440
+dash dash crash
+
+00:10:19,440 --> 00:10:22,560
+we build and push the image deploy the
+
+00:10:21,440 --> 00:10:25,839
+deployment
+
+00:10:22,560 --> 00:10:25,839
+wait for the deployment to finish
+
+00:10:26,000 --> 00:10:28,640
+and waiting
+
+00:10:29,279 --> 00:10:35,760
+and it times out okay
+
+00:10:32,399 --> 00:10:38,800
+what happens when you dig into how
+
+00:10:35,760 --> 00:10:40,480
+cube cuddle raw is implemented it's very
+
+00:10:38,800 --> 00:10:43,120
+simple
+
+00:10:40,480 --> 00:10:43,839
+it watches for changes the deployment it
+
+00:10:43,120 --> 00:10:46,160
+checks the
+
+00:10:43,839 --> 00:10:47,760
+spec field on the deployment against the
+
+00:10:46,160 --> 00:10:50,800
+status field on the deployment
+
+00:10:47,760 --> 00:10:50,800
+to see if it's finished
+
+00:10:52,160 --> 00:10:58,959
+here is the code the full function
+
+00:10:55,760 --> 00:11:00,880
+has a few more if branches
+
+00:10:58,959 --> 00:11:02,959
+but it's not substantially more
+
+00:11:00,880 --> 00:11:03,519
+complicated than the checks that you see
+
+00:11:02,959 --> 00:11:06,959
+here
+
+00:11:03,519 --> 00:11:08,720
+the checks in bolt they check that the
+
+00:11:06,959 --> 00:11:15,120
+number of updated pods is
+
+00:11:08,720 --> 00:11:17,440
+what we expected it to be
+
+00:11:15,120 --> 00:11:20,000
+what cube cuddle roll is really good at
+
+00:11:17,440 --> 00:11:22,079
+is understanding the plants
+
+00:11:20,000 --> 00:11:24,000
+any information about a pod that's
+
+00:11:22,079 --> 00:11:26,959
+propagated up to the deployment
+
+00:11:24,000 --> 00:11:28,880
+it can find that out but because of the
+
+00:11:26,959 --> 00:11:31,680
+information we care about
+
+00:11:28,880 --> 00:11:35,279
+isn't in the deployment status it can't
+
+00:11:31,680 --> 00:11:35,279
+tell us why things are failing
+
+00:11:36,480 --> 00:11:39,920
+let's look at a different tool let's
+
+00:11:38,160 --> 00:11:41,680
+look at helm uh
+
+00:11:39,920 --> 00:11:43,760
+helm also has the ability to track
+
+00:11:41,680 --> 00:11:45,920
+progress it has two flags dash dash
+
+00:11:43,760 --> 00:11:47,519
+above and dash dash watch
+
+00:11:45,920 --> 00:11:49,839
+that let you track the progress of a
+
+00:11:47,519 --> 00:11:52,880
+helm upgrade
+
+00:11:49,839 --> 00:11:56,000
+just as an aside helm is pretty awesome
+
+00:11:52,880 --> 00:11:58,000
+if you want tips on how to use the go
+
+00:11:56,000 --> 00:11:59,920
+client for kubernetes i highly recommend
+
+00:11:58,000 --> 00:12:01,760
+you look at how helm uses it
+
+00:11:59,920 --> 00:12:04,160
+the code is very readable the code is
+
+00:12:01,760 --> 00:12:06,000
+very well organized
+
+00:12:04,160 --> 00:12:08,160
+of the examples that i wrote for this
+
+00:12:06,000 --> 00:12:11,200
+talk this was the easiest
+
+00:12:08,160 --> 00:12:12,800
+to write it uses helm as a library to
+
+00:12:11,200 --> 00:12:15,120
+watch progress and it's a couple of
+
+00:12:12,800 --> 00:12:15,120
+lines
+
+00:12:15,920 --> 00:12:20,880
+let's watch a video of what it does
+
+00:12:19,200 --> 00:12:22,880
+again we're going to build and push an
+
+00:12:20,880 --> 00:12:25,760
+image deploy a deployment
+
+00:12:22,880 --> 00:12:27,519
+and wait on the deployment to come up
+
+00:12:25,760 --> 00:12:30,079
+deployment is not ready
+
+00:12:27,519 --> 00:12:32,079
+deployed successfully great that is
+
+00:12:30,079 --> 00:12:36,959
+exactly what we wanted
+
+00:12:32,079 --> 00:12:39,760
+uh let's try again with a crashing pod
+
+00:12:36,959 --> 00:12:41,680
+we're going to apply the new deployment
+
+00:12:39,760 --> 00:12:44,240
+with the crashing pod
+
+00:12:41,680 --> 00:12:46,480
+deployment is not ready deployment is
+
+00:12:44,240 --> 00:12:53,120
+not ready
+
+00:12:46,480 --> 00:12:55,920
+the pod is still not ready
+
+00:12:53,120 --> 00:12:55,920
+and it times out
+
+00:12:58,560 --> 00:13:02,399
+okay let's let's try to figure out
+
+00:13:00,399 --> 00:13:03,600
+what's happening when you unpack the
+
+00:13:02,399 --> 00:13:06,800
+helm code
+
+00:13:03,600 --> 00:13:09,279
+what does it do the helm code
+
+00:13:06,800 --> 00:13:10,079
+pulls the status of the resource it just
+
+00:13:09,279 --> 00:13:12,320
+deploys
+
+00:13:10,079 --> 00:13:14,880
+it has a big switch statement of all the
+
+00:13:12,320 --> 00:13:16,639
+different resource types it knows about
+
+00:13:14,880 --> 00:13:18,079
+it checks their status and it checks
+
+00:13:16,639 --> 00:13:19,920
+their children's status
+
+00:13:18,079 --> 00:13:22,720
+and it does a type specific check to see
+
+00:13:19,920 --> 00:13:22,720
+if it succeeded
+
+00:13:23,680 --> 00:13:28,560
+here's what the code looks like uh it's
+
+00:13:26,800 --> 00:13:30,160
+a bit more sophisticated than the cube
+
+00:13:28,560 --> 00:13:32,560
+color rollout command
+
+00:13:30,160 --> 00:13:34,560
+the important bit is the get new replica
+
+00:13:32,560 --> 00:13:35,519
+set called in bold
+
+00:13:34,560 --> 00:13:37,519
+we're not going to show the
+
+00:13:35,519 --> 00:13:39,360
+implementation but what it does is it
+
+00:13:37,519 --> 00:13:41,760
+makes a best guess
+
+00:13:39,360 --> 00:13:43,199
+of what the current replica set is based
+
+00:13:41,760 --> 00:13:44,880
+on the creation timestamp
+
+00:13:43,199 --> 00:13:46,639
+and whether the fields match the
+
+00:13:44,880 --> 00:13:48,240
+deployment
+
+00:13:46,639 --> 00:13:50,320
+then it does a similar check to what
+
+00:13:48,240 --> 00:13:52,000
+cute cuddle rod does to see if the
+
+00:13:50,320 --> 00:13:54,399
+deployment and the replica set are
+
+00:13:52,000 --> 00:13:54,399
+finished
+
+00:13:54,880 --> 00:14:00,000
+this is a fine approach it's easy to
+
+00:13:57,360 --> 00:14:02,160
+understand and easy to reason about
+
+00:14:00,000 --> 00:14:04,399
+the downside is that there is no
+
+00:14:02,160 --> 00:14:06,320
+universal definition of done
+
+00:14:04,399 --> 00:14:08,639
+each new resource type has its own
+
+00:14:06,320 --> 00:14:10,639
+definition in that big switch block that
+
+00:14:08,639 --> 00:14:12,480
+helm team maintains
+
+00:14:10,639 --> 00:14:16,639
+those definitions are easy to add but
+
+00:14:12,480 --> 00:14:18,160
+still you have to add them
+
+00:14:16,639 --> 00:14:21,120
+the third alternative we're going to
+
+00:14:18,160 --> 00:14:22,720
+look at is cube spy trace
+
+00:14:21,120 --> 00:14:24,320
+now we're not going to look at too much
+
+00:14:22,720 --> 00:14:27,360
+of the code i will warn you
+
+00:14:24,320 --> 00:14:29,600
+the code is very dense it does a lot
+
+00:14:27,360 --> 00:14:32,720
+but it's very comprehensive and you can
+
+00:14:29,600 --> 00:14:32,720
+learn a lot by reading it
+
+00:14:33,519 --> 00:14:36,639
+let's take a look at a video of it in
+
+00:14:35,199 --> 00:14:38,959
+action uh
+
+00:14:36,639 --> 00:14:40,320
+unlike the other ones we're gonna pause
+
+00:14:38,959 --> 00:14:41,920
+in the middle of this video just
+
+00:14:40,320 --> 00:14:44,399
+uh just to understand it a little bit
+
+00:14:41,920 --> 00:14:47,279
+better because there's a lot
+
+00:14:44,399 --> 00:14:49,279
+q spice trays starts to hint that blame
+
+00:14:47,279 --> 00:14:51,279
+isn't a straight line
+
+00:14:49,279 --> 00:14:52,480
+it doesn't go straight from deployment
+
+00:14:51,279 --> 00:14:55,360
+to running pod
+
+00:14:52,480 --> 00:14:58,560
+we can see the current pod and we can
+
+00:14:55,360 --> 00:15:00,639
+also see the pod it's replacing
+
+00:14:58,560 --> 00:15:01,839
+let's unpause the video and watch it
+
+00:15:00,639 --> 00:15:04,399
+roll out
+
+00:15:01,839 --> 00:15:05,040
+now what's going to happen is that we
+
+00:15:04,399 --> 00:15:08,079
+can see
+
+00:15:05,040 --> 00:15:10,839
+the new pond has become ready and it has
+
+00:15:08,079 --> 00:15:13,839
+replaced the old pod
+
+00:15:10,839 --> 00:15:15,440
+great now let's look at what it means to
+
+00:15:13,839 --> 00:15:18,079
+crash
+
+00:15:15,440 --> 00:15:20,000
+again we're going to watch it roll out
+
+00:15:18,079 --> 00:15:24,399
+and we're going to pause
+
+00:15:20,000 --> 00:15:24,399
+at opportune time right here
+
+00:15:24,720 --> 00:15:28,320
+now you can see that the current rollout
+
+00:15:26,880 --> 00:15:29,920
+is crashing and it's crashing with the
+
+00:15:28,320 --> 00:15:31,440
+error message container completed with
+
+00:15:29,920 --> 00:15:32,959
+exit code one
+
+00:15:31,440 --> 00:15:34,560
+and you can see that because the current
+
+00:15:32,959 --> 00:15:37,199
+raw is crashing
+
+00:15:34,560 --> 00:15:39,199
+the previous rollout is still up
+
+00:15:37,199 --> 00:15:42,079
+revision 10 has not yet replaced
+
+00:15:39,199 --> 00:15:44,240
+revision 9.
+
+00:15:42,079 --> 00:15:45,360
+this is awesome this is this is what we
+
+00:15:44,240 --> 00:15:48,959
+wanted
+
+00:15:45,360 --> 00:15:50,800
+let's dig into how cube spy trace works
+
+00:15:48,959 --> 00:15:52,639
+now the other tools we looked at tracked
+
+00:15:50,800 --> 00:15:53,600
+resources top down they started with a
+
+00:15:52,639 --> 00:15:56,160
+deployment
+
+00:15:53,600 --> 00:15:58,399
+and looked to its children cube spy
+
+00:15:56,160 --> 00:16:01,040
+trace doesn't do that
+
+00:15:58,399 --> 00:16:01,839
+if you look at the bold above it's
+
+00:16:01,040 --> 00:16:06,800
+watching
+
+00:16:01,839 --> 00:16:10,240
+every pod in the name space why
+
+00:16:06,800 --> 00:16:14,000
+so cute spy trace does both a top-down
+
+00:16:10,240 --> 00:16:14,880
+and bottom-up analysis first it creates
+
+00:16:14,000 --> 00:16:18,160
+tables
+
+00:16:14,880 --> 00:16:20,399
+of every type it knows about
+
+00:16:18,160 --> 00:16:21,279
+it looks at an annotation deployment to
+
+00:16:20,399 --> 00:16:24,320
+find
+
+00:16:21,279 --> 00:16:26,639
+the current replica set
+
+00:16:24,320 --> 00:16:27,759
+then it looks at all the pods in the
+
+00:16:26,639 --> 00:16:30,480
+namespace
+
+00:16:27,759 --> 00:16:31,680
+and at the owner ref at each pod to
+
+00:16:30,480 --> 00:16:36,880
+figure out which
+
+00:16:31,680 --> 00:16:40,160
+pods belong to that replica set
+
+00:16:36,880 --> 00:16:42,639
+this seems like a lot of work but
+
+00:16:40,160 --> 00:16:44,160
+cube spy's insight is that you need to
+
+00:16:42,639 --> 00:16:45,920
+do both
+
+00:16:44,160 --> 00:16:47,360
+the owner references tell you
+
+00:16:45,920 --> 00:16:51,440
+definitively
+
+00:16:47,360 --> 00:16:54,160
+these pods come from this replica set
+
+00:16:51,440 --> 00:16:56,480
+but deployment is mutable it has
+
+00:16:54,160 --> 00:16:58,720
+revisions and the owner references
+
+00:16:56,480 --> 00:16:59,680
+can't tell you which revision of the
+
+00:16:58,720 --> 00:17:02,079
+deployment
+
+00:16:59,680 --> 00:17:04,000
+created which pod they simply don't have
+
+00:17:02,079 --> 00:17:05,760
+that information
+
+00:17:04,000 --> 00:17:07,039
+to find out which deployment created
+
+00:17:05,760 --> 00:17:08,640
+which pod
+
+00:17:07,039 --> 00:17:10,880
+we need the deployment controller to
+
+00:17:08,640 --> 00:17:11,679
+pass some information down the object
+
+00:17:10,880 --> 00:17:13,439
+graph
+
+00:17:11,679 --> 00:17:16,000
+and we need to check that that info has
+
+00:17:13,439 --> 00:17:16,000
+propagated
+
+00:17:16,559 --> 00:17:21,439
+so this is great uh we have to build
+
+00:17:19,520 --> 00:17:23,120
+tables of resources up front
+
+00:17:21,439 --> 00:17:25,520
+we still have to do a lot of custom
+
+00:17:23,120 --> 00:17:27,679
+analysis for each resource type
+
+00:17:25,520 --> 00:17:32,160
+this approach isn't easily portable to
+
+00:17:27,679 --> 00:17:35,039
+other types or to custom resources
+
+00:17:32,160 --> 00:17:36,480
+i want to briefly talk about what tilt
+
+00:17:35,039 --> 00:17:38,240
+does today
+
+00:17:36,480 --> 00:17:39,600
+and it's not that much different than
+
+00:17:38,240 --> 00:17:42,080
+what cuba spy does
+
+00:17:39,600 --> 00:17:45,120
+it's less comprehensive than cube spy
+
+00:17:42,080 --> 00:17:48,320
+which does a lot of different checks
+
+00:17:45,120 --> 00:17:50,559
+tilt does use owner references heavily
+
+00:17:48,320 --> 00:17:51,919
+every time tilt deploys a resource it
+
+00:17:50,559 --> 00:17:55,200
+grabs the uid
+
+00:17:51,919 --> 00:17:57,679
+that cube cuddle apply returns
+
+00:17:55,200 --> 00:17:58,799
+it watches all pods and every time tilt
+
+00:17:57,679 --> 00:18:01,039
+sees a pod
+
+00:17:58,799 --> 00:18:02,000
+it climbs the owner references to see if
+
+00:18:01,039 --> 00:18:03,600
+that pod
+
+00:18:02,000 --> 00:18:05,919
+belongs to the thing that we just
+
+00:18:03,600 --> 00:18:08,160
+deployed
+
+00:18:05,919 --> 00:18:09,039
+now we still need to do the top down
+
+00:18:08,160 --> 00:18:11,520
+matching
+
+00:18:09,039 --> 00:18:13,679
+but we wanted this to work for any type
+
+00:18:11,520 --> 00:18:16,880
+not just for deployments
+
+00:18:13,679 --> 00:18:17,840
+so we use a label approach it's a little
+
+00:18:16,880 --> 00:18:20,640
+bit technical
+
+00:18:17,840 --> 00:18:20,960
+uh but i'll try to walk you through it
+
+00:18:20,640 --> 00:18:22,960
+we
+
+00:18:20,960 --> 00:18:24,240
+inject a label into the pod template
+
+00:18:22,960 --> 00:18:26,799
+spec they are not
+
+00:18:24,240 --> 00:18:28,720
+random labels they're and they're also
+
+00:18:26,799 --> 00:18:30,720
+not auto-incrementing revision labels
+
+00:18:28,720 --> 00:18:33,440
+like deployment controller ads
+
+00:18:30,720 --> 00:18:35,919
+they're content-based labels they're a
+
+00:18:33,440 --> 00:18:38,000
+hash of the pod template spec
+
+00:18:35,919 --> 00:18:39,679
+this ensures that the label changes if
+
+00:18:38,000 --> 00:18:40,720
+and only if the contents of the pod
+
+00:18:39,679 --> 00:18:42,799
+change
+
+00:18:40,720 --> 00:18:45,039
+and this gives us the semantics we want
+
+00:18:42,799 --> 00:18:48,080
+where kubernetes will restart the pod
+
+00:18:45,039 --> 00:18:50,400
+only if the contents change
+
+00:18:48,080 --> 00:18:52,320
+now deployments are special in that they
+
+00:18:50,400 --> 00:18:54,640
+can guarantee that this label will make
+
+00:18:52,320 --> 00:18:58,000
+it down to all the pods
+
+00:18:54,640 --> 00:19:00,240
+this isn't true for all resource types
+
+00:18:58,000 --> 00:19:01,679
+so till we'll check if the label made it
+
+00:19:00,240 --> 00:19:04,480
+down to the pod
+
+00:19:01,679 --> 00:19:06,799
+and if it did we will only pay attention
+
+00:19:04,480 --> 00:19:11,840
+to pods that match the current
+
+00:19:06,799 --> 00:19:11,840
+uh template hash label
+
+00:19:11,919 --> 00:19:15,280
+here's what it looks like uh we're going
+
+00:19:14,160 --> 00:19:16,640
+to watch the video
+
+00:19:15,280 --> 00:19:18,000
+and again we're going to wait till the
+
+00:19:16,640 --> 00:19:20,960
+deployment comes out and we're going to
+
+00:19:18,000 --> 00:19:20,960
+pause briefly
+
+00:19:21,039 --> 00:19:26,720
+now when we applied the deployment we
+
+00:19:23,760 --> 00:19:28,880
+got the uid of that deployment
+
+00:19:26,720 --> 00:19:30,240
+and we also looked at the content based
+
+00:19:28,880 --> 00:19:32,640
+label
+
+00:19:30,240 --> 00:19:34,160
+on each pod that we're watching and we
+
+00:19:32,640 --> 00:19:38,160
+saw that we actually saw
+
+00:19:34,160 --> 00:19:41,600
+three pods two of the pods had
+
+00:19:38,160 --> 00:19:42,320
+a content label from a previous revision
+
+00:19:41,600 --> 00:19:44,480
+of the deployment
+
+00:19:42,320 --> 00:19:48,080
+so we're going to ignore those but we
+
+00:19:44,480 --> 00:19:48,080
+are going to keep track of the new pod
+
+00:19:49,280 --> 00:19:53,039
+let's wait for it to succeed and we're
+
+00:19:51,200 --> 00:19:55,520
+good
+
+00:19:53,039 --> 00:19:58,160
+now for completeness let's look at what
+
+00:19:55,520 --> 00:19:59,760
+this looks like when it's crashing
+
+00:19:58,160 --> 00:20:02,159
+again we're going to build the image
+
+00:19:59,760 --> 00:20:04,159
+push the image apply the deployment
+
+00:20:02,159 --> 00:20:05,280
+ignore the pause that don't match the
+
+00:20:04,159 --> 00:20:09,280
+current revision
+
+00:20:05,280 --> 00:20:13,760
+and we can see the error of the pod
+
+00:20:09,280 --> 00:20:13,760
+that corresponded to this revision
+
+00:20:14,320 --> 00:20:18,960
+so this gives us what we need i am not
+
+00:20:17,200 --> 00:20:20,640
+super happy with this solution and i'll
+
+00:20:18,960 --> 00:20:23,280
+tell you why
+
+00:20:20,640 --> 00:20:24,000
+all the indexing and owner of traversing
+
+00:20:23,280 --> 00:20:26,720
+means
+
+00:20:24,000 --> 00:20:28,880
+this is very complicated and it's hard
+
+00:20:26,720 --> 00:20:31,600
+to make this perform well
+
+00:20:28,880 --> 00:20:32,000
+uh the the upside is that it does work
+
+00:20:31,600 --> 00:20:35,120
+well
+
+00:20:32,000 --> 00:20:37,600
+with any resource types it
+
+00:20:35,120 --> 00:20:40,159
+allows us to track the process of custom
+
+00:20:37,600 --> 00:20:42,240
+track the progress of custom resources
+
+00:20:40,159 --> 00:20:44,000
+it allows us to properly display events
+
+00:20:42,240 --> 00:20:46,480
+and events are super helpful for
+
+00:20:44,000 --> 00:20:46,480
+debugging
+
+00:20:46,960 --> 00:20:50,480
+so i want to close this talk with a
+
+00:20:49,280 --> 00:20:54,000
+small rant
+
+00:20:50,480 --> 00:20:55,679
+if you'll indulge me i don't want you to
+
+00:20:54,000 --> 00:20:58,320
+come away from this talk saying
+
+00:20:55,679 --> 00:21:01,120
+oh cute cuddle rod is bad cubispide
+
+00:20:58,320 --> 00:21:02,720
+trace is better tilt is the best
+
+00:21:01,120 --> 00:21:04,880
+uh all of these approaches have
+
+00:21:02,720 --> 00:21:06,080
+trade-offs some are simple and fast and
+
+00:21:04,880 --> 00:21:08,480
+efficient
+
+00:21:06,080 --> 00:21:09,200
+some are more complex and give you more
+
+00:21:08,480 --> 00:21:12,880
+information
+
+00:21:09,200 --> 00:21:15,120
+but are slower when i was looking at
+
+00:21:12,880 --> 00:21:17,919
+examples for this talk i looked at
+
+00:21:15,120 --> 00:21:18,640
+cube cuddle tree a cube cuddle plugin
+
+00:21:17,919 --> 00:21:22,480
+that
+
+00:21:18,640 --> 00:21:24,080
+visualizes the owner reference graph
+
+00:21:22,480 --> 00:21:26,640
+i laughed out loud when i read this
+
+00:21:24,080 --> 00:21:28,960
+comment directly from the code
+
+00:21:26,640 --> 00:21:30,960
+uh cute cuddle tree just grabs all the
+
+00:21:28,960 --> 00:21:33,039
+resources in the namespace it sets the
+
+00:21:30,960 --> 00:21:34,880
+qps to a thousand so that it doesn't get
+
+00:21:33,039 --> 00:21:37,440
+throttled
+
+00:21:34,880 --> 00:21:38,480
+and this is not me shaming cube cuddle
+
+00:21:37,440 --> 00:21:42,480
+tree
+
+00:21:38,480 --> 00:21:42,480
+because this is what it needs to do
+
+00:21:42,960 --> 00:21:49,120
+and i hope you see how much that stinks
+
+00:21:46,240 --> 00:21:50,159
+and it's not because anyone did a bad
+
+00:21:49,120 --> 00:21:52,320
+job
+
+00:21:50,159 --> 00:21:54,240
+it's because these are inherently hard
+
+00:21:52,320 --> 00:21:55,280
+problems to solve in a declarative
+
+00:21:54,240 --> 00:21:57,360
+system
+
+00:21:55,280 --> 00:21:59,039
+and to solve it we need to do some more
+
+00:21:57,360 --> 00:22:02,000
+work
+
+00:21:59,039 --> 00:22:03,840
+but if the underlying infrastructure
+
+00:22:02,000 --> 00:22:06,320
+gave us a little bit of help
+
+00:22:03,840 --> 00:22:09,679
+and did some things automatically for us
+
+00:22:06,320 --> 00:22:09,679
+that would make it a lot easier
+
+00:22:09,760 --> 00:22:14,480
+so what might that look like let's start
+
+00:22:12,720 --> 00:22:16,320
+with the bottom up analysis
+
+00:22:14,480 --> 00:22:17,840
+what can you figure out when you look at
+
+00:22:16,320 --> 00:22:19,600
+a pod
+
+00:22:17,840 --> 00:22:22,240
+right now kubernetes gives you owner
+
+00:22:19,600 --> 00:22:24,640
+references which are good
+
+00:22:22,240 --> 00:22:25,600
+but there is no api to easily traverse
+
+00:22:24,640 --> 00:22:28,559
+them uh
+
+00:22:25,600 --> 00:22:30,720
+the kubernetes api is very much
+
+00:22:28,559 --> 00:22:33,200
+optimized for querying types
+
+00:22:30,720 --> 00:22:34,640
+not procuring graphs objects which is
+
+00:22:33,200 --> 00:22:36,240
+good if you're trying to build
+
+00:22:34,640 --> 00:22:38,240
+a controller like a deployment
+
+00:22:36,240 --> 00:22:41,280
+controller but not so good
+
+00:22:38,240 --> 00:22:42,240
+if you're trying to attribute blame uh
+
+00:22:41,280 --> 00:22:42,880
+the other thing about the owner
+
+00:22:42,240 --> 00:22:45,039
+references
+
+00:22:42,880 --> 00:22:47,360
+is they don't really tell you which
+
+00:22:45,039 --> 00:22:50,720
+revision did what
+
+00:22:47,360 --> 00:22:54,080
+uh they only tell you which
+
+00:22:50,720 --> 00:22:56,720
+resource it came from
+
+00:22:54,080 --> 00:22:57,360
+then there's the other side what can you
+
+00:22:56,720 --> 00:23:00,320
+figure out
+
+00:22:57,360 --> 00:23:02,000
+if you're just looking at a deployment
+
+00:23:00,320 --> 00:23:05,039
+what's weird is that
+
+00:23:02,000 --> 00:23:07,280
+there are a lot of common patterns
+
+00:23:05,039 --> 00:23:08,720
+uh that you see in different resource
+
+00:23:07,280 --> 00:23:11,039
+types
+
+00:23:08,720 --> 00:23:13,760
+most controllers have a way to propagate
+
+00:23:11,039 --> 00:23:16,320
+information from the parent to the child
+
+00:23:13,760 --> 00:23:17,679
+to see which revision caused which child
+
+00:23:16,320 --> 00:23:19,520
+change
+
+00:23:17,679 --> 00:23:21,600
+and lots of controllers have ways to
+
+00:23:19,520 --> 00:23:23,360
+propagate status from the child to the
+
+00:23:21,600 --> 00:23:26,080
+parent
+
+00:23:23,360 --> 00:23:26,400
+but they all do it inconsistently they
+
+00:23:26,080 --> 00:23:28,880
+all
+
+00:23:26,400 --> 00:23:30,320
+reinvent the wheel every time even
+
+00:23:28,880 --> 00:23:32,480
+though we've kind of established the
+
+00:23:30,320 --> 00:23:34,960
+patterns by this point
+
+00:23:32,480 --> 00:23:36,320
+uh and we're getting to the point where
+
+00:23:34,960 --> 00:23:39,039
+it might be worth thinking about
+
+00:23:36,320 --> 00:23:40,559
+what would a generic api look like what
+
+00:23:39,039 --> 00:23:44,240
+are the common idioms that all
+
+00:23:40,559 --> 00:23:44,240
+controllers should be using for this
+
+00:23:44,799 --> 00:23:50,320
+lastly i want to tease you a bit
+
+00:23:48,080 --> 00:23:52,080
+the kubernetes ecosystem is only going
+
+00:23:50,320 --> 00:23:55,440
+to get more complicated
+
+00:23:52,080 --> 00:23:57,520
+uh we're seeing more custom resources
+
+00:23:55,440 --> 00:23:59,760
+we're starting to see mutated mission
+
+00:23:57,520 --> 00:24:02,400
+controllers which are really cool
+
+00:23:59,760 --> 00:24:04,480
+uh but they modify pause and add
+
+00:24:02,400 --> 00:24:06,400
+sidecars and add volumes and other
+
+00:24:04,480 --> 00:24:09,120
+things
+
+00:24:06,400 --> 00:24:11,600
+but we can't tell they came from those
+
+00:24:09,120 --> 00:24:13,200
+mutated mission controllers
+
+00:24:11,600 --> 00:24:15,440
+what would a debugging experience look
+
+00:24:13,200 --> 00:24:16,720
+like that was as nice as the css
+
+00:24:15,440 --> 00:24:18,559
+debuggers of today
+
+00:24:16,720 --> 00:24:20,480
+that lets you see a hierarchy of rules
+
+00:24:18,559 --> 00:24:21,440
+that let you see what change each one
+
+00:24:20,480 --> 00:24:26,960
+made
+
+00:24:21,440 --> 00:24:26,960
+and that lets you attribute blame
+
+00:24:27,840 --> 00:24:31,760
+so thank you very much for listening to
+
+00:24:30,240 --> 00:24:34,000
+my talk
+
+00:24:31,760 --> 00:24:37,120
+again my name is nick i want to give a
+
+00:24:34,000 --> 00:24:38,480
+big shout out to ellen korbs and sasha
+
+00:24:37,120 --> 00:24:40,400
+mumbartz who
+
+00:24:38,480 --> 00:24:42,240
+helped me put together this deck and
+
+00:24:40,400 --> 00:24:43,919
+gave a lot of feedback on this talk that
+
+00:24:42,240 --> 00:24:46,720
+helped make it a lot better than
+
+00:24:43,919 --> 00:24:48,159
+what it was at the beginning i also want
+
+00:24:46,720 --> 00:24:49,039
+to thank all the projects i featured in
+
+00:24:48,159 --> 00:24:53,039
+this talk
+
+00:24:49,039 --> 00:24:54,240
+client go cube cuddle helm and cube spy
+
+00:24:53,039 --> 00:24:57,120
+i hope none of them think i was
+
+00:24:54,240 --> 00:25:00,720
+criticizing them because i'm not i
+
+00:24:57,120 --> 00:25:03,840
+think these are all awesome projects
+
+00:25:00,720 --> 00:25:07,840
+and now we have some time for questions
+
+00:25:03,840 --> 00:25:07,840
+
+YouTube URL: https://www.youtube.com/watch?v=gBZ7M3g3uF4
+
+

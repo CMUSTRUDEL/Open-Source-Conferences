@@ -1,0 +1,2612 @@
+Title: vscsi(4) and iscsid - iSCSI initiator the OpenBSD way - Claudio Jeker
+Publication date: 2019-10-14
+Playlist: EuroBSDcon 2014, Bulgaria
+Description: 
+	Abstract:
+
+In the beginning large storage networks had to be built with Fibre Channel. Since Fibre Channel is expensive an alternative way to attach block-level devices to servers was searched. A protocol using Ethernet or TCP/IP would be a good cost-effective alternative since there is already an extensive Ethernet infrastructure available in data centers. iSCSI is a protocol that transport SCSI commands and data over TCP. It combines two very popular protocols — SCSI for block level I/O and TCP/IP for remote communication. While many iSCSI implementations are inside the kernel the one implemented in OpenBSD is written in userland similar to the NetBSD initiator. But unlike NetBSD’s, OpenBSD’s version does not use a userland filesystem to hook the iSCSI disks into the kernel. Instead access is performed via vscsi(4) — a virtual scsibus — which allows userland to talk directly to the kernel SCSI midlayer. Vscsi is implemented in roughly 600 lines of code exporting the scsibus to userland via 6 ioctl(2) plus the possibility to use poll(2) or kqueue(2) to allow simple I/O multiplexing. The vscsi device uses these ioctls to issue commands and send or receive data from the kernel. The use of this interface it is fairly simple and makes it possible to write an iSCSI initiator in userland. The userland process can offload all the complex SCSI protocol handling to vscsi and the kernel and “only” needs to implement the session establishment and error recovery. The presentation will give a quick introduction to the iSCSI protocol, the vscsi(4) interface is explained including sample code and the design and implementation of iscsid is illustrated. It will also cover the chicken and egg issues having to rely on a userland process for accessing disks and their file systems and how OpenBSD solved the startup and shutdown handling.
+
+Speaker biography:
+
+Claudio Jeker is a long time OpenBSD developer doing mostly crazy networking stuff. After writing various privilege separated daemons I was “forced” by David Gwynne to write iscsid. The initial proof of concept was all hacked up during f2k9 — the filesystem hackathon — in Stockholm.
+Captions: 
+	00:00:02,540 --> 00:00:08,790
+our next speaker is claudio bc hacker
+
+00:00:06,960 --> 00:00:11,940
+has been all over a network stack and
+
+00:00:08,790 --> 00:00:15,089
+now attacking storage with ice ice
+
+00:00:11,940 --> 00:00:18,080
+custody means to open be stay away so
+
+00:00:15,089 --> 00:00:18,080
+take it away Claudio
+
+00:00:18,260 --> 00:00:36,300
+so um good day everybody I'm gonna talk
+
+00:00:24,630 --> 00:00:43,710
+about icy OCD and be scuzzy or okay
+
+00:00:36,300 --> 00:00:44,910
+moving over here and this guy see the
+
+00:00:43,710 --> 00:00:46,829
+device that actually makes it possible
+
+00:00:44,910 --> 00:00:50,280
+to actually build this ice Kazi
+
+00:00:46,829 --> 00:00:53,219
+initiator all of this more or less
+
+00:00:50,280 --> 00:00:58,770
+started in 2009 so it's actually quite a
+
+00:00:53,219 --> 00:01:01,680
+long time ago and I decided to actually
+
+00:00:58,770 --> 00:01:05,189
+do a talk about this now because I
+
+00:01:01,680 --> 00:01:07,680
+finally think I scuzzy the year is is in
+
+00:01:05,189 --> 00:01:09,810
+my opinion production-ready yes I'm
+
+00:01:07,680 --> 00:01:14,850
+running it now on my privative server
+
+00:01:09,810 --> 00:01:19,170
+and I have no issue with it so this is
+
+00:01:14,850 --> 00:01:22,470
+what I'm talking about it now so what
+
+00:01:19,170 --> 00:01:23,850
+will we cover or what will I cover first
+
+00:01:22,470 --> 00:01:26,960
+of all I will give a little bit of an
+
+00:01:23,850 --> 00:01:29,610
+introduction about ice casts he is I
+
+00:01:26,960 --> 00:01:33,930
+will talk about viscosity our virtual
+
+00:01:29,610 --> 00:01:36,409
+skocy controller and how that one is
+
+00:01:33,930 --> 00:01:39,780
+used to actually build up I scuzzy D
+
+00:01:36,409 --> 00:01:44,240
+which is the initiator implementation
+
+00:01:39,780 --> 00:01:47,759
+that we had now have in in OpenBSD and
+
+00:01:44,240 --> 00:01:50,159
+the last point is actually the magic
+
+00:01:47,759 --> 00:01:54,600
+needed to actually be able to boot and
+
+00:01:50,159 --> 00:02:01,020
+shutdown with ice Guzzi in in the whole
+
+00:01:54,600 --> 00:02:03,780
+set so what is ice gauzy it's short it's
+
+00:02:01,020 --> 00:02:06,479
+Guzzi over the internet there are two
+
+00:02:03,780 --> 00:02:10,259
+rfcs that more or less covered the base
+
+00:02:06,479 --> 00:02:13,740
+protocol it was mainly designed as a
+
+00:02:10,259 --> 00:02:15,630
+cheap solution for for sands because
+
+00:02:13,740 --> 00:02:20,310
+everything that was fiber channel was
+
+00:02:15,630 --> 00:02:21,990
+extremely expensive it also was the idea
+
+00:02:20,310 --> 00:02:25,050
+that you actually could reuse it already
+
+00:02:21,990 --> 00:02:27,560
+available network infrastructure so if
+
+00:02:25,050 --> 00:02:30,810
+you already have a lot of Ethernet ports
+
+00:02:27,560 --> 00:02:33,720
+and and all the technology around you
+
+00:02:30,810 --> 00:02:35,850
+can actually use I am I Scalzi much
+
+00:02:33,720 --> 00:02:40,710
+easier than you can do the same thing
+
+00:02:35,850 --> 00:02:44,190
+with fibre channel its network disk
+
+00:02:40,710 --> 00:02:47,310
+storage so it's block access it's not a
+
+00:02:44,190 --> 00:02:52,970
+network file system for that we have NFS
+
+00:02:47,310 --> 00:02:52,970
+and SMB and some other things like AFS
+
+00:02:53,210 --> 00:02:58,680
+what is scuzzy so scuzzy it's the small
+
+00:02:56,970 --> 00:03:04,140
+computer systems interface it's really
+
+00:02:58,680 --> 00:03:06,930
+old it is a protocol to access whatever
+
+00:03:04,140 --> 00:03:10,530
+IO devices there are so it started with
+
+00:03:06,930 --> 00:03:14,910
+disks then cd-rom cd-rom tape drives
+
+00:03:10,530 --> 00:03:17,400
+scanners there was even a possibility to
+
+00:03:14,910 --> 00:03:20,340
+you actually have Ethernet over Scaasi
+
+00:03:17,400 --> 00:03:22,610
+so you could actually start doing
+
+00:03:20,340 --> 00:03:24,620
+everything over it
+
+00:03:22,610 --> 00:03:26,880
+there is also various physical
+
+00:03:24,620 --> 00:03:29,820
+implementations of scuzzy so at the
+
+00:03:26,880 --> 00:03:32,580
+beginning it was parallel scuzzy in
+
+00:03:29,820 --> 00:03:35,910
+various forms then there was saws
+
+00:03:32,580 --> 00:03:41,150
+introduced this serial Attached scuzzy
+
+00:03:35,910 --> 00:03:47,610
+fibre channel I Triple E 1394 firewire
+
+00:03:41,150 --> 00:03:51,500
+the USB mass-storage is normally using
+
+00:03:47,610 --> 00:03:55,320
+scuzzy as a transport encapsulation
+
+00:03:51,500 --> 00:04:02,850
+there is even software emulations as in
+
+00:03:55,320 --> 00:04:05,760
+open BSD our sada and raid controllers
+
+00:04:02,850 --> 00:04:08,310
+are actually showing up as scuzzy disks
+
+00:04:05,760 --> 00:04:10,110
+even so they're probably not so the the
+
+00:04:08,310 --> 00:04:12,180
+driver itself is then actually
+
+00:04:10,110 --> 00:04:16,920
+translating these scuzzy commands into
+
+00:04:12,180 --> 00:04:18,960
+the native either a serial ata commands
+
+00:04:16,920 --> 00:04:23,940
+or for the rate controllers in there
+
+00:04:18,960 --> 00:04:26,520
+whatever kind of messages they need to
+
+00:04:23,940 --> 00:04:29,090
+actually talk to the actual block
+
+00:04:26,520 --> 00:04:34,650
+devices behind
+
+00:04:29,090 --> 00:04:41,550
+so that's a scuzzy device and that's a
+
+00:04:34,650 --> 00:04:45,360
+scuzzy device skocy itself is a request
+
+00:04:41,550 --> 00:04:47,280
+response protocol there is multiple
+
+00:04:45,360 --> 00:04:50,070
+targets normally a target is either like
+
+00:04:47,280 --> 00:04:53,250
+a disk or or can be like a chassis or
+
+00:04:50,070 --> 00:04:54,690
+whatever there are normally or it's
+
+00:04:53,250 --> 00:04:57,870
+possible to have actually multiple
+
+00:04:54,690 --> 00:05:00,450
+logical units those are than the so
+
+00:04:57,870 --> 00:05:02,370
+called there is normally an identifier
+
+00:05:00,450 --> 00:05:09,210
+for them the lawn the logical unit
+
+00:05:02,370 --> 00:05:11,160
+number these are and the initiator is
+
+00:05:09,210 --> 00:05:13,500
+more or less at the beginning trying to
+
+00:05:11,160 --> 00:05:15,570
+discover all these lumps and then is
+
+00:05:13,500 --> 00:05:20,070
+able to address them by these logical
+
+00:05:15,570 --> 00:05:23,310
+unit numbers the initiator sends these
+
+00:05:20,070 --> 00:05:25,020
+command structures to the target people
+
+00:05:23,310 --> 00:05:27,900
+normally comdata call them the command
+
+00:05:25,020 --> 00:05:29,490
+descriptor blocks they have the the
+
+00:05:27,900 --> 00:05:31,470
+information in it it's like this is a
+
+00:05:29,490 --> 00:05:34,770
+read this is a write this is a discovery
+
+00:05:31,470 --> 00:05:36,180
+and on all these information the
+
+00:05:34,770 --> 00:05:38,880
+communication this is important I think
+
+00:05:36,180 --> 00:05:40,650
+is always initiated by the initiator
+
+00:05:38,880 --> 00:05:46,920
+this is why it's called initiator it's
+
+00:05:40,650 --> 00:05:49,260
+quite logical the this is a little bit
+
+00:05:46,920 --> 00:05:53,370
+different to some other protocols and I
+
+00:05:49,260 --> 00:05:55,290
+think it's it it simplifies things but
+
+00:05:53,370 --> 00:05:57,030
+it also makes other stuff harder because
+
+00:05:55,290 --> 00:06:01,110
+it's not really easy for a target to
+
+00:05:57,030 --> 00:06:03,270
+like send something to the to the to the
+
+00:06:01,110 --> 00:06:08,100
+initiator to to indicate an error or
+
+00:06:03,270 --> 00:06:09,810
+something I scuzzy what eyes cuz he's
+
+00:06:08,100 --> 00:06:11,490
+doing it more or less like packs all
+
+00:06:09,810 --> 00:06:13,650
+these scuzzy transfers and everything
+
+00:06:11,490 --> 00:06:16,200
+that's normally on on either the the
+
+00:06:13,650 --> 00:06:19,230
+serial line or the parallel lines of of
+
+00:06:16,200 --> 00:06:23,960
+a scuzzy chain it packs it into TCP
+
+00:06:19,230 --> 00:06:28,740
+streams there is more or less a
+
+00:06:23,960 --> 00:06:30,870
+one-to-one mapping of a TCP session to a
+
+00:06:28,740 --> 00:06:36,140
+logical unit number or actually a nice
+
+00:06:30,870 --> 00:06:40,530
+cozy session to a logical unit number so
+
+00:06:36,140 --> 00:06:41,400
+every this that you export through I
+
+00:06:40,530 --> 00:06:44,310
+scuzzy
+
+00:06:41,400 --> 00:06:47,400
+has its own session it's possible to
+
+00:06:44,310 --> 00:06:50,699
+actually have multiple sessions multiple
+
+00:06:47,400 --> 00:06:53,370
+connections per session I have not
+
+00:06:50,699 --> 00:06:54,750
+really found all that many systems that
+
+00:06:53,370 --> 00:06:56,789
+actually provide that but it's actually
+
+00:06:54,750 --> 00:06:59,220
+possible and it would actually give you
+
+00:06:56,789 --> 00:07:02,370
+more performance and an error in silence
+
+00:06:59,220 --> 00:07:05,000
+because you would be able to actually
+
+00:07:02,370 --> 00:07:11,039
+issue multiple commands at the same time
+
+00:07:05,000 --> 00:07:13,050
+there is a important part is also the
+
+00:07:11,039 --> 00:07:16,500
+authentication and capability
+
+00:07:13,050 --> 00:07:19,169
+negotiation so when the ostendo session
+
+00:07:16,500 --> 00:07:22,530
+is established there is a handshake
+
+00:07:19,169 --> 00:07:28,949
+going on figuring out who can provide
+
+00:07:22,530 --> 00:07:33,260
+what kind of features this is the ice
+
+00:07:28,949 --> 00:07:36,330
+CAHSEE connection state machine by
+
+00:07:33,260 --> 00:07:40,410
+default you're either in free as in
+
+00:07:36,330 --> 00:07:42,090
+session is unused or you logged in all
+
+00:07:40,410 --> 00:07:46,050
+the other states are just there to
+
+00:07:42,090 --> 00:07:49,919
+actually handle the connection setup
+
+00:07:46,050 --> 00:07:52,199
+which is going through here or actually
+
+00:07:49,919 --> 00:07:53,580
+error recovery which is all these
+
+00:07:52,199 --> 00:07:59,970
+various states over there
+
+00:07:53,580 --> 00:08:03,659
+so a lot of the complexity of ice gas is
+
+00:07:59,970 --> 00:08:05,729
+actually coming from handling error
+
+00:08:03,659 --> 00:08:08,760
+conditions so what happens if the TCP
+
+00:08:05,729 --> 00:08:11,010
+connection is turned on because there is
+
+00:08:08,760 --> 00:08:15,780
+like a problem with with the ethernet or
+
+00:08:11,010 --> 00:08:18,650
+whatever so what how do you recover from
+
+00:08:15,780 --> 00:08:21,060
+these things how can you still be
+
+00:08:18,650 --> 00:08:24,570
+guaranteeing the reliability that skocy
+
+00:08:21,060 --> 00:08:27,780
+has that that like a a command is issued
+
+00:08:24,570 --> 00:08:30,840
+and actually it's finished and there is
+
+00:08:27,780 --> 00:08:35,060
+various ways of actually handling these
+
+00:08:30,840 --> 00:08:38,190
+error cases and interestingly most
+
+00:08:35,060 --> 00:08:41,219
+systems that I know are implementing
+
+00:08:38,190 --> 00:08:43,440
+very simple error recoveries as in
+
+00:08:41,219 --> 00:08:46,770
+normally they just abort all the
+
+00:08:43,440 --> 00:08:48,360
+transactions say this didn't work out
+
+00:08:46,770 --> 00:08:53,120
+and hope that the kernel then actually
+
+00:08:48,360 --> 00:08:53,120
+reduced the command as a second time
+
+00:08:55,140 --> 00:09:05,220
+so I scuzzy goes over TCP it normally
+
+00:08:58,560 --> 00:09:09,149
+uses port 30 to 60 there are 18 message
+
+00:09:05,220 --> 00:09:10,829
+types defined of these 18 message types
+
+00:09:09,149 --> 00:09:14,220
+there are five that are actually Skye's
+
+00:09:10,829 --> 00:09:16,950
+is Scotty specific there are eight
+
+00:09:14,220 --> 00:09:19,529
+messages for session and task
+
+00:09:16,950 --> 00:09:23,250
+configuration and then there is a little
+
+00:09:19,529 --> 00:09:24,779
+bit of special messages that are also
+
+00:09:23,250 --> 00:09:27,990
+going a little bit in these in this
+
+00:09:24,779 --> 00:09:29,700
+session handling two of them are not
+
+00:09:27,990 --> 00:09:32,310
+messages more or less that you can like
+
+00:09:29,700 --> 00:09:33,120
+ping pong and see if the session is
+
+00:09:32,310 --> 00:09:36,209
+still alive
+
+00:09:33,120 --> 00:09:40,290
+and and the a synchronous messages are
+
+00:09:36,209 --> 00:09:42,300
+for for error handling so the bulk of
+
+00:09:40,290 --> 00:09:44,690
+the messages are actually not about
+
+00:09:42,300 --> 00:09:46,860
+transporting data they're actually about
+
+00:09:44,690 --> 00:09:48,540
+bringing sessions or bringing sessions
+
+00:09:46,860 --> 00:09:52,380
+down extending sessions and all these
+
+00:09:48,540 --> 00:09:55,980
+things there is also funny that the the
+
+00:09:52,380 --> 00:09:57,990
+base RFC already defines 22 various
+
+00:09:55,980 --> 00:10:00,930
+buttons that you can push in and twiddle
+
+00:09:57,990 --> 00:10:03,000
+and and and tune and hope that actually
+
+00:10:00,930 --> 00:10:05,010
+you get better performance or worse
+
+00:10:03,000 --> 00:10:07,079
+performance or that you can interrupt
+
+00:10:05,010 --> 00:10:11,310
+with the device and things like this so
+
+00:10:07,079 --> 00:10:14,459
+it's it's there is a lot of various code
+
+00:10:11,310 --> 00:10:17,310
+passes that you need to try out and that
+
+00:10:14,459 --> 00:10:23,339
+was a issue for a long time in the
+
+00:10:17,310 --> 00:10:26,550
+beginning is that if you actually had if
+
+00:10:23,339 --> 00:10:29,000
+the the the at the beginning I had an
+
+00:10:26,550 --> 00:10:31,199
+issue in in the in the in this in this
+
+00:10:29,000 --> 00:10:33,930
+negotiation of these of these options
+
+00:10:31,199 --> 00:10:36,149
+and it can happen that you're actually
+
+00:10:33,930 --> 00:10:37,800
+talking to another side and it actually
+
+00:10:36,149 --> 00:10:39,720
+seems to work but then suddenly you're
+
+00:10:37,800 --> 00:10:41,550
+sending a message that was a little bit
+
+00:10:39,720 --> 00:10:44,160
+too big or something like that and and
+
+00:10:41,550 --> 00:10:47,790
+suddenly nothing worked anymore so it's
+
+00:10:44,160 --> 00:10:51,390
+it's it didn't make it easy to actually
+
+00:10:47,790 --> 00:10:54,630
+have all these these these options to to
+
+00:10:51,390 --> 00:10:57,360
+tune and it sometimes would be easier to
+
+00:10:54,630 --> 00:10:59,850
+actually simplify have a simpler base
+
+00:10:57,360 --> 00:11:04,450
+version that that you can implement
+
+00:10:59,850 --> 00:11:08,470
+easier so
+
+00:11:04,450 --> 00:11:13,090
+now let's talk about viscosity viscosity
+
+00:11:08,470 --> 00:11:15,070
+is our virtual skocy controller it more
+
+00:11:13,090 --> 00:11:18,630
+or less exposes this Cassie bus or
+
+00:11:15,070 --> 00:11:21,040
+discussing subsystem to the userland
+
+00:11:18,630 --> 00:11:23,320
+this means the user land actually then
+
+00:11:21,040 --> 00:11:26,140
+has to implement what would be a sketchy
+
+00:11:23,320 --> 00:11:28,330
+controller in our case this is the ask
+
+00:11:26,140 --> 00:11:30,550
+as the initiator which is then
+
+00:11:28,330 --> 00:11:33,130
+transporting these these Cassie messages
+
+00:11:30,550 --> 00:11:35,490
+to the other side where then the actual
+
+00:11:33,130 --> 00:11:42,130
+controller is sitting and and it's then
+
+00:11:35,490 --> 00:11:43,990
+doing all the work so it's it's for us
+
+00:11:42,130 --> 00:11:46,180
+it's actually for ice custody this is
+
+00:11:43,990 --> 00:11:48,760
+just a handing handling stuff like
+
+00:11:46,180 --> 00:11:51,600
+moving information in and out but it
+
+00:11:48,760 --> 00:11:55,540
+would also be possible to to create a
+
+00:11:51,600 --> 00:11:58,690
+usual and scuzzy controller that talks
+
+00:11:55,540 --> 00:12:03,880
+to a a local file as an example if you
+
+00:11:58,690 --> 00:12:05,470
+want to do like some crazy encrypted
+
+00:12:03,880 --> 00:12:10,780
+disk storage or something I did this
+
+00:12:05,470 --> 00:12:14,560
+would would be a possibility the the
+
+00:12:10,780 --> 00:12:17,770
+kernel passes in in in in passes
+
+00:12:14,560 --> 00:12:19,300
+disguisey commands from the mid layer to
+
+00:12:17,770 --> 00:12:21,000
+the user land through this viscosity
+
+00:12:19,300 --> 00:12:25,720
+interface
+
+00:12:21,000 --> 00:12:27,460
+this means the the the discus a disk
+
+00:12:25,720 --> 00:12:29,560
+from the kernel is creating a scuzzy
+
+00:12:27,460 --> 00:12:32,650
+command issues it into the mid layer and
+
+00:12:29,560 --> 00:12:35,170
+then the mid layer delivers it to
+
+00:12:32,650 --> 00:12:37,720
+viscosity which then queues it and and
+
+00:12:35,170 --> 00:12:45,070
+and transports it up to the to userland
+
+00:12:37,720 --> 00:12:49,390
+by by a fairly simple interface so it is
+
+00:12:45,070 --> 00:12:50,770
+all ioctl based it doesn't have any read
+
+00:12:49,390 --> 00:12:53,440
+or write function which is a little bit
+
+00:12:50,770 --> 00:12:58,000
+funky but it makes sense for through
+
+00:12:53,440 --> 00:13:02,760
+this device there is six i/o CTLs and
+
+00:12:58,000 --> 00:13:07,620
+they're mostly there to first of all DQ
+
+00:13:02,760 --> 00:13:11,740
+discussing command then there is is one
+
+00:13:07,620 --> 00:13:14,410
+ioctl to actually send back the response
+
+00:13:11,740 --> 00:13:17,620
+message of this discussing command there
+
+00:13:14,410 --> 00:13:21,730
+is two IOC TLS that are there too
+
+00:13:17,620 --> 00:13:23,770
+read and write data and then there is
+
+00:13:21,730 --> 00:13:27,000
+the the two last commands which are
+
+00:13:23,770 --> 00:13:30,280
+necessary to to probe and detach
+
+00:13:27,000 --> 00:13:33,490
+Scalzi's devices from from viscosity and
+
+00:13:30,280 --> 00:13:39,240
+from the the scuzzy boss of the kernel
+
+00:13:33,490 --> 00:13:42,580
+so that we can actually if you if you if
+
+00:13:39,240 --> 00:13:45,550
+you remove a session in ice Cassidy it
+
+00:13:42,580 --> 00:13:47,160
+actually then would detach it from the
+
+00:13:45,550 --> 00:13:52,110
+kernel and by that this would actually
+
+00:13:47,160 --> 00:13:52,110
+disappear and no longer be available
+
+00:13:52,260 --> 00:13:58,420
+it's also interesting that the the the
+
+00:13:56,320 --> 00:14:04,900
+viscosity data read and write commands
+
+00:13:58,420 --> 00:14:07,150
+need to be looked at from the view of
+
+00:14:04,900 --> 00:14:08,650
+the device or after of the the disk
+
+00:14:07,150 --> 00:14:12,280
+device or the disk device driver
+
+00:14:08,650 --> 00:14:16,690
+actually so if I'm writing to the disk
+
+00:14:12,280 --> 00:14:18,160
+this is a viscous II data right and if
+
+00:14:16,690 --> 00:14:21,370
+I'm reading from the disk it's the
+
+00:14:18,160 --> 00:14:22,930
+viscosity data read so it's it's it's a
+
+00:14:21,370 --> 00:14:28,420
+little bit reverse from what you would
+
+00:14:22,930 --> 00:14:33,430
+expect from the user landside because
+
+00:14:28,420 --> 00:14:36,700
+I'm actually I'm calling read but I'm I
+
+00:14:33,430 --> 00:14:41,500
+have to pass in data on the rate so it's
+
+00:14:36,700 --> 00:14:45,310
+it's the naming is a bit funky here is
+
+00:14:41,500 --> 00:14:48,460
+an example how you would talk to
+
+00:14:45,310 --> 00:14:51,370
+viscosity in a very simple driver first
+
+00:14:48,460 --> 00:14:58,120
+of all you need to to create all these
+
+00:14:51,370 --> 00:15:01,420
+various ioctl structures you then do
+
+00:14:58,120 --> 00:15:04,210
+weigh a a probe request which more or
+
+00:15:01,420 --> 00:15:06,760
+less you you specify the target you're
+
+00:15:04,210 --> 00:15:10,840
+normally using glumly zero because this
+
+00:15:06,760 --> 00:15:13,480
+is the first ID per target and and you
+
+00:15:10,840 --> 00:15:16,480
+you tell the colonel like probe in this
+
+00:15:13,480 --> 00:15:19,480
+device the colonel will and started
+
+00:15:16,480 --> 00:15:23,290
+actually issuing viscosity i to t
+
+00:15:19,480 --> 00:15:24,630
+commands to do the discovery so this is
+
+00:15:23,290 --> 00:15:27,400
+then the next thing that actually
+
+00:15:24,630 --> 00:15:30,750
+actually happens here you're getting the
+
+00:15:27,400 --> 00:15:30,750
+viscosity i2t command
+
+00:15:30,950 --> 00:15:36,410
+and then you're actually looking at
+
+00:15:34,490 --> 00:15:37,910
+these these command structure and and by
+
+00:15:36,410 --> 00:15:39,410
+looking at it you actually start to know
+
+00:15:37,910 --> 00:15:42,860
+what it is if it's if it's a right
+
+00:15:39,410 --> 00:15:48,170
+command or if it's a read command and
+
+00:15:42,860 --> 00:15:50,570
+then based on that you can then do
+
+00:15:48,170 --> 00:15:53,180
+various things so here this is a this is
+
+00:15:50,570 --> 00:15:54,110
+the right case so we're seeing that it's
+
+00:15:53,180 --> 00:15:56,720
+a right command
+
+00:15:54,110 --> 00:15:58,430
+we're actually allocating the memory
+
+00:15:56,720 --> 00:16:03,200
+that we need to actually fulfill this
+
+00:15:58,430 --> 00:16:06,080
+right command we then do the ioctl
+
+00:16:03,200 --> 00:16:09,770
+to get all these data because the right
+
+00:16:06,080 --> 00:16:11,510
+data is already available from the
+
+00:16:09,770 --> 00:16:14,210
+kernel so we're getting all this data
+
+00:16:11,510 --> 00:16:17,960
+out and and then would send it to our
+
+00:16:14,210 --> 00:16:20,830
+our write function and and clean up in
+
+00:16:17,960 --> 00:16:23,330
+the case of a read it's it's actually a
+
+00:16:20,830 --> 00:16:24,830
+little bit different because here we
+
+00:16:23,330 --> 00:16:28,580
+know oh okay actually I want to read
+
+00:16:24,830 --> 00:16:30,950
+something so I first actually get the
+
+00:16:28,580 --> 00:16:33,980
+data I'm reading the data I'm filling
+
+00:16:30,950 --> 00:16:37,910
+out the the the tag information and so
+
+00:16:33,980 --> 00:16:42,290
+that we actually can still the the tag
+
+00:16:37,910 --> 00:16:45,290
+is important to to to bind all these
+
+00:16:42,290 --> 00:16:48,080
+various commands together so the I to T
+
+00:16:45,290 --> 00:16:50,600
+at the beginning gives me a tag and I
+
+00:16:48,080 --> 00:16:52,700
+need to tag all my messages that is part
+
+00:16:50,600 --> 00:16:55,250
+of this command with the same tag so
+
+00:16:52,700 --> 00:16:57,020
+that the kernel can then build stuff
+
+00:16:55,250 --> 00:17:02,540
+together because it's actually possible
+
+00:16:57,020 --> 00:17:04,270
+to do multiple reads to finish a one
+
+00:17:02,540 --> 00:17:10,600
+command and once it's finished and I'm
+
+00:17:04,270 --> 00:17:10,600
+then as a loss step I'm doing the tty
+
+00:17:10,780 --> 00:17:18,050
+ioctl to tell it now the command is
+
+00:17:13,730 --> 00:17:20,540
+finished and and and let's go on so this
+
+00:17:18,050 --> 00:17:22,790
+is this is the read case we're reading
+
+00:17:20,540 --> 00:17:25,040
+the data in we're filling out the the
+
+00:17:22,790 --> 00:17:27,290
+buffers that we then pass in in the
+
+00:17:25,040 --> 00:17:31,040
+ioctl and and by that the kernel gets
+
+00:17:27,290 --> 00:17:33,530
+the information at the end we're
+
+00:17:31,040 --> 00:17:37,100
+finishing the ioctl we're finishing the
+
+00:17:33,530 --> 00:17:42,010
+command by the t2i ioctl there it is
+
+00:17:37,100 --> 00:17:43,910
+again similar we have to tell it the tag
+
+00:17:42,010 --> 00:17:47,330
+what was
+
+00:17:43,910 --> 00:17:49,940
+which command it was and we need to be
+
+00:17:47,330 --> 00:17:51,560
+give him that the status if it was if
+
+00:17:49,940 --> 00:17:54,980
+the transaction was successful or if
+
+00:17:51,560 --> 00:17:59,000
+there was an error condition and by that
+
+00:17:54,980 --> 00:18:03,260
+we more or less give to Colonel the the
+
+00:17:59,000 --> 00:18:04,850
+feedback what what goes on and the last
+
+00:18:03,260 --> 00:18:07,220
+example is more or less like how you'd
+
+00:18:04,850 --> 00:18:08,600
+attach a disk it's very similar to to
+
+00:18:07,220 --> 00:18:10,490
+actually attaching to it
+
+00:18:08,600 --> 00:18:12,560
+you tell the target you tell the the
+
+00:18:10,490 --> 00:18:18,050
+logical unit number and you call the
+
+00:18:12,560 --> 00:18:19,820
+viscosity detach function and with this
+
+00:18:18,050 --> 00:18:21,320
+you're actually able to more or less do
+
+00:18:19,820 --> 00:18:27,440
+everything that you need to do with this
+
+00:18:21,320 --> 00:18:30,050
+discuss a device so where are we there
+
+00:18:27,440 --> 00:18:32,330
+and what is needed these guys is
+
+00:18:30,050 --> 00:18:35,420
+actually pretty much finished there is
+
+00:18:32,330 --> 00:18:38,270
+there is it's actually funny when I was
+
+00:18:35,420 --> 00:18:41,420
+doing this slide two days later there
+
+00:18:38,270 --> 00:18:43,520
+were two commits to viscosity so the no
+
+00:18:41,420 --> 00:18:45,650
+recent changes where is a little bit of
+
+00:18:43,520 --> 00:18:49,280
+a lie but it actually works and it does
+
+00:18:45,650 --> 00:18:51,020
+the job well sometimes it would be nice
+
+00:18:49,280 --> 00:18:53,000
+to actually support multiple viscosity
+
+00:18:51,020 --> 00:18:56,930
+consumers it would be nice to actually
+
+00:18:53,000 --> 00:19:00,140
+be able to to run maybe like two ice
+
+00:18:56,930 --> 00:19:01,670
+cassidy's at the same time one on the
+
+00:19:00,140 --> 00:19:04,160
+viscosity zero device and one on the
+
+00:19:01,670 --> 00:19:06,380
+viscous one device so that you could
+
+00:19:04,160 --> 00:19:08,810
+restart one while the other one is still
+
+00:19:06,380 --> 00:19:10,880
+keeping up a second connection to your
+
+00:19:08,810 --> 00:19:14,620
+same disk and and then using the multi
+
+00:19:10,880 --> 00:19:18,020
+pass features of our kernel to actually
+
+00:19:14,620 --> 00:19:19,970
+being able to restart daemons and things
+
+00:19:18,020 --> 00:19:23,660
+like that not losing losing connection
+
+00:19:19,970 --> 00:19:24,650
+in the meantime sometimes I had the
+
+00:19:23,660 --> 00:19:28,310
+feeling that it would be nice to
+
+00:19:24,650 --> 00:19:29,930
+actually have proper blocking i/o molds
+
+00:19:28,310 --> 00:19:33,980
+and and use like reading Brides and
+
+00:19:29,930 --> 00:19:35,690
+things but I came more or less to the
+
+00:19:33,980 --> 00:19:38,960
+conclusions that the i/o controls were
+
+00:19:35,690 --> 00:19:41,510
+actually work very well we're we're
+
+00:19:38,960 --> 00:19:44,690
+using in a CCD we're using the label
+
+00:19:41,510 --> 00:19:48,040
+vent anyway so so everybody is palling
+
+00:19:44,690 --> 00:19:51,020
+our cake queuing and and that makes it
+
+00:19:48,040 --> 00:19:54,850
+not necessary to actually do any kind of
+
+00:19:51,020 --> 00:19:54,850
+blocking blocking i/o mode
+
+00:19:55,220 --> 00:20:02,370
+the trade idea here is more or less that
+
+00:19:58,200 --> 00:20:03,990
+you pull until you get an I to T command
+
+00:20:02,370 --> 00:20:07,740
+from from the colonel that more or less
+
+00:20:03,990 --> 00:20:15,240
+starts the whole initiation of getting
+
+00:20:07,740 --> 00:20:18,960
+some data or writing some data so why
+
+00:20:15,240 --> 00:20:21,059
+did we start with ICD we're definitely
+
+00:20:18,960 --> 00:20:24,179
+not the first ones doing in ask as the
+
+00:20:21,059 --> 00:20:28,740
+initiator I know what a freebsd has an
+
+00:20:24,179 --> 00:20:32,190
+internal initiator the time I started at
+
+00:20:28,740 --> 00:20:34,529
+that time that BSD was working on a
+
+00:20:32,190 --> 00:20:38,850
+userland initiator using refuse or a
+
+00:20:34,529 --> 00:20:42,539
+generic ice gauzy implementation using
+
+00:20:38,850 --> 00:20:44,370
+using fuse and refuse but as far as I
+
+00:20:42,539 --> 00:20:51,330
+know they actually now also have an
+
+00:20:44,370 --> 00:20:54,840
+internal initiator we think we can do
+
+00:20:51,330 --> 00:20:57,269
+better or as I would normally say we are
+
+00:20:54,840 --> 00:21:01,679
+trying to do a simpler meditation
+
+00:20:57,269 --> 00:21:08,130
+we wanted to have less kernel code so
+
+00:21:01,679 --> 00:21:11,460
+less parsing of messages or anything in
+
+00:21:08,130 --> 00:21:13,440
+the kernel privilege dropping like not
+
+00:21:11,460 --> 00:21:16,559
+not having to use Super User for
+
+00:21:13,440 --> 00:21:20,340
+anything all these things about what
+
+00:21:16,559 --> 00:21:24,269
+open B is normally about and yeah we are
+
+00:21:20,340 --> 00:21:25,769
+also having I'm saying here mild forum
+
+00:21:24,269 --> 00:21:33,870
+but sometimes it's not really mild form
+
+00:21:25,769 --> 00:21:38,639
+of not invented here syndrome now what
+
+00:21:33,870 --> 00:21:41,880
+it is not it is not yet another OSPF for
+
+00:21:38,639 --> 00:21:44,340
+Beach PD clone that uses multiple
+
+00:21:41,880 --> 00:21:48,179
+processes and sends I messages back and
+
+00:21:44,340 --> 00:21:49,860
+forth and all these math these fancy
+
+00:21:48,179 --> 00:21:54,389
+things that we have copied in many
+
+00:21:49,860 --> 00:21:56,429
+demons now but it uses some parts of it
+
+00:21:54,389 --> 00:22:00,600
+so we have a control socket we have a
+
+00:21:56,429 --> 00:22:03,059
+nice cozy CTL command but we're not
+
+00:22:00,600 --> 00:22:04,440
+really using iMessages where it's it's
+
+00:22:03,059 --> 00:22:07,679
+done a little bit easier and a little
+
+00:22:04,440 --> 00:22:08,910
+bit different it's also not necessary to
+
+00:22:07,679 --> 00:22:10,200
+have multiple
+
+00:22:08,910 --> 00:22:12,780
+processes because we can't just change
+
+00:22:10,200 --> 00:22:15,390
+route and privilege drop and and
+
+00:22:12,780 --> 00:22:19,320
+everything is fine so you only need
+
+00:22:15,390 --> 00:22:22,290
+super user rights to actually open the
+
+00:22:19,320 --> 00:22:24,390
+the viscosity device and and after you
+
+00:22:22,290 --> 00:22:25,980
+after you've done that it's it's done
+
+00:22:24,390 --> 00:22:29,100
+you can you you don't have to do
+
+00:22:25,980 --> 00:22:32,120
+anything many more we can change route
+
+00:22:29,100 --> 00:22:35,160
+away we can drop the privileges and and
+
+00:22:32,120 --> 00:22:37,710
+that's it there is no no need to do
+
+00:22:35,160 --> 00:22:41,910
+stuff like DNS resolving or anything
+
+00:22:37,710 --> 00:22:44,040
+other that's that's that would need to
+
+00:22:41,910 --> 00:22:47,550
+actually be outside of the of the change
+
+00:22:44,040 --> 00:22:49,770
+route and one of the tricks that we did
+
+00:22:47,550 --> 00:22:52,290
+is actually the the whole config parsing
+
+00:22:49,770 --> 00:22:55,410
+is done by the ice ice Cassie control
+
+00:22:52,290 --> 00:22:57,510
+program and then passed through the the
+
+00:22:55,410 --> 00:22:59,790
+control socket to the daemon so the
+
+00:22:57,510 --> 00:23:03,450
+demon doesn't need to reload the config
+
+00:22:59,790 --> 00:23:08,100
+and actually keep keep a way to actually
+
+00:23:03,450 --> 00:23:10,580
+read that file open so the change would
+
+00:23:08,100 --> 00:23:10,580
+actually works
+
+00:23:16,340 --> 00:23:26,250
+yeah the reconnect is he was asking how
+
+00:23:23,730 --> 00:23:30,090
+we are handling the reconnects so
+
+00:23:26,250 --> 00:23:33,510
+reconnect are in a way simple because we
+
+00:23:30,090 --> 00:23:34,980
+actually don't do DNS lookup so the the
+
+00:23:33,510 --> 00:23:37,890
+conflict that we're getting from ask us
+
+00:23:34,980 --> 00:23:40,560
+is CTL only has IP addresses so on the
+
+00:23:37,890 --> 00:23:44,790
+reconnect we just we just open a socket
+
+00:23:40,560 --> 00:23:55,980
+bind a binding connect and and get a new
+
+00:23:44,790 --> 00:23:57,600
+session no no we don't do that this may
+
+00:23:55,980 --> 00:23:59,520
+be something to think about but at the
+
+00:23:57,600 --> 00:24:04,200
+moment it's it's not done it's also a
+
+00:23:59,520 --> 00:24:07,950
+little bit the it doesn't make sense to
+
+00:24:04,200 --> 00:24:09,330
+drop the limits to to a minimum because
+
+00:24:07,950 --> 00:24:11,010
+you actually don't know if there is more
+
+00:24:09,330 --> 00:24:12,980
+sessions coming in like if you
+
+00:24:11,010 --> 00:24:16,530
+afterwards reconfigure your ice classic
+
+00:24:12,980 --> 00:24:18,780
+command if you change your eyes can see
+
+00:24:16,530 --> 00:24:21,660
+config to actually open up more sessions
+
+00:24:18,780 --> 00:24:24,780
+you would not be able to do that so at
+
+00:24:21,660 --> 00:24:28,800
+the moment we just allow it to to have
+
+00:24:24,780 --> 00:24:31,380
+as many of these open as it wants or at
+
+00:24:28,800 --> 00:24:37,350
+least what's the hard limit off the
+
+00:24:31,380 --> 00:24:40,020
+system is at the moment the good thing
+
+00:24:37,350 --> 00:24:42,420
+is and and and this is why we have
+
+00:24:40,020 --> 00:24:46,470
+viscosity is it actually reduces our sed
+
+00:24:42,420 --> 00:24:50,700
+to very simple tasks so for Isaac Ozzie
+
+00:24:46,470 --> 00:24:52,650
+it means that the message is coming from
+
+00:24:50,700 --> 00:24:55,680
+the kernel are completely black boxes
+
+00:24:52,650 --> 00:24:57,300
+I'm never looking at at what actually
+
+00:24:55,680 --> 00:24:59,310
+the kernel sends me I'm just taking it
+
+00:24:57,300 --> 00:25:03,720
+packing it into TCP and sending it off
+
+00:24:59,310 --> 00:25:05,730
+so the the impact on the kernel is is
+
+00:25:03,720 --> 00:25:07,740
+extremely minimal so the viscosity code
+
+00:25:05,730 --> 00:25:12,390
+itself is about 600 lines of code and
+
+00:25:07,740 --> 00:25:15,650
+and and is extremely simple and I scuzzy
+
+00:25:12,390 --> 00:25:18,450
+itself is also fairly simple because
+
+00:25:15,650 --> 00:25:20,340
+it's only responsible for four very
+
+00:25:18,450 --> 00:25:22,170
+simple tasks so it needs to have the
+
+00:25:20,340 --> 00:25:24,420
+session and the connection finite state
+
+00:25:22,170 --> 00:25:27,030
+machines it needs to make sure that it
+
+00:25:24,420 --> 00:25:28,650
+can open the connections it packs and
+
+00:25:27,030 --> 00:25:31,020
+unpacks discuss a message
+
+00:25:28,650 --> 00:25:36,290
+and and that's it it's its it tries to
+
+00:25:31,020 --> 00:25:38,430
+be as simple as possible it also
+
+00:25:36,290 --> 00:25:40,140
+probably is the reason why I'm actually
+
+00:25:38,430 --> 00:25:43,110
+was able to write this thing because I
+
+00:25:40,140 --> 00:25:46,080
+have no idea how scary itself as a
+
+00:25:43,110 --> 00:25:49,310
+protocol works I have now after after
+
+00:25:46,080 --> 00:25:51,630
+years of working a bit around with it I
+
+00:25:49,310 --> 00:25:55,100
+have a bit of a better feeling but I'm
+
+00:25:51,630 --> 00:25:58,260
+definitely not a scuzzy expert that's
+
+00:25:55,100 --> 00:26:00,030
+that's for David who also wrote
+
+00:25:58,260 --> 00:26:03,890
+viscosity implementation he probably
+
+00:26:00,030 --> 00:26:03,890
+knows way more about Scaasi than I do
+
+00:26:04,370 --> 00:26:09,450
+the important thing here is is ice
+
+00:26:07,350 --> 00:26:13,050
+Cassidy actually has to handle a lot
+
+00:26:09,450 --> 00:26:15,020
+data copying in out and and and so the
+
+00:26:13,050 --> 00:26:20,160
+buffer management is somewhat important
+
+00:26:15,020 --> 00:26:22,290
+the idea was that the the ice can see
+
+00:26:20,160 --> 00:26:25,110
+messages are very very well structured
+
+00:26:22,290 --> 00:26:27,060
+also because of the idea of being able
+
+00:26:25,110 --> 00:26:30,620
+to use our DMA and and and other
+
+00:26:27,060 --> 00:26:34,020
+techniques so they normally have
+
+00:26:30,620 --> 00:26:35,760
+well-defined sizes and stuff so the
+
+00:26:34,020 --> 00:26:41,870
+buffer management in Ice Cassidy is
+
+00:26:35,760 --> 00:26:45,120
+based on the idea how a PDU is build up
+
+00:26:41,870 --> 00:26:50,550
+the goal is that we don't copy data more
+
+00:26:45,120 --> 00:26:53,160
+around that we actually need this is
+
+00:26:50,550 --> 00:26:55,460
+we're already copying a lot of data from
+
+00:26:53,160 --> 00:26:58,830
+the kernel to user land and back and and
+
+00:26:55,460 --> 00:27:05,250
+so we want to try to not copy it in user
+
+00:26:58,830 --> 00:27:07,980
+land around just for fun and in the end
+
+00:27:05,250 --> 00:27:10,860
+it the idea was that we actually also
+
+00:27:07,980 --> 00:27:16,740
+have an easier data management but I
+
+00:27:10,860 --> 00:27:20,370
+think that's normally always ago on the
+
+00:27:16,740 --> 00:27:23,040
+right we have the more or less disguisey
+
+00:27:20,370 --> 00:27:24,750
+message format on on the buyer so we
+
+00:27:23,040 --> 00:27:27,240
+have at the top we have like the basic
+
+00:27:24,750 --> 00:27:29,730
+the basic header which is always present
+
+00:27:27,240 --> 00:27:32,280
+this is this 40 I ate biting that's
+
+00:27:29,730 --> 00:27:34,770
+always there then there is a possible
+
+00:27:32,280 --> 00:27:37,110
+optional additional header segment which
+
+00:27:34,770 --> 00:27:42,259
+has additional stuff in it
+
+00:27:37,110 --> 00:27:44,700
+this is especially used during
+
+00:27:42,259 --> 00:27:48,240
+capability negotiation and similar
+
+00:27:44,700 --> 00:27:51,480
+things then there are is a header digest
+
+00:27:48,240 --> 00:27:53,909
+that is more or less a checksum over the
+
+00:27:51,480 --> 00:27:56,580
+basic header and additional header then
+
+00:27:53,909 --> 00:27:58,259
+a data segment that can be around if you
+
+00:27:56,580 --> 00:28:02,100
+if you're actually passing data in and
+
+00:27:58,259 --> 00:28:05,789
+out if you're if you're if and and the
+
+00:28:02,100 --> 00:28:13,049
+data by digest there is a lot of things
+
+00:28:05,789 --> 00:28:15,749
+that are optional and and for ICD we're
+
+00:28:13,049 --> 00:28:19,049
+actually not using the the digest fields
+
+00:28:15,749 --> 00:28:23,009
+as an example there are there the plan
+
+00:28:19,049 --> 00:28:27,509
+is there they're defined but we're we're
+
+00:28:23,009 --> 00:28:29,820
+not using them at all so the idea what I
+
+00:28:27,509 --> 00:28:35,399
+came up is I I looked a little bit at
+
+00:28:29,820 --> 00:28:39,570
+how the vectorized io commands work and
+
+00:28:35,399 --> 00:28:43,200
+and I was trying to use them heavily for
+
+00:28:39,570 --> 00:28:45,679
+this so and and this is why I struck PDO
+
+00:28:43,200 --> 00:28:51,509
+was also built similar to it so it it
+
+00:28:45,679 --> 00:28:54,720
+consists of 5 segments of data that then
+
+00:28:51,509 --> 00:28:57,779
+more or less combined give you the the I
+
+00:28:54,720 --> 00:29:00,659
+scuzzy message and by that I can use one
+
+00:28:57,779 --> 00:29:08,669
+write command or one read command to do
+
+00:29:00,659 --> 00:29:12,690
+to send one packet at a time as I
+
+00:29:08,669 --> 00:29:15,629
+already said most transfer are initiated
+
+00:29:12,690 --> 00:29:19,289
+by the initiator so especially once
+
+00:29:15,629 --> 00:29:21,360
+everything is up and running it's it's
+
+00:29:19,289 --> 00:29:25,710
+just the initiator sending or actually
+
+00:29:21,360 --> 00:29:28,320
+our kernel giving commands and and
+
+00:29:25,710 --> 00:29:33,210
+passing them all the way over and and
+
+00:29:28,320 --> 00:29:40,830
+and and waiting until like a command is
+
+00:29:33,210 --> 00:29:45,019
+finished so I scuzzy D always all it
+
+00:29:40,830 --> 00:29:47,220
+always starts with the ITT message the
+
+00:29:45,019 --> 00:29:50,429
+this is the first thing that comes in
+
+00:29:47,220 --> 00:29:53,190
+and based on that I scuzzy deed and then
+
+00:29:50,429 --> 00:29:56,250
+starts to transfer it allocates the PDU
+
+00:29:53,190 --> 00:29:59,970
+buffers that are necessary it ate it
+
+00:29:56,250 --> 00:30:03,480
+the scheduling of the task it assigns it
+
+00:29:59,970 --> 00:30:06,930
+assigns the the the command to a certain
+
+00:30:03,480 --> 00:30:11,850
+session or connection and and then
+
+00:30:06,930 --> 00:30:14,610
+starts running it this is more or less
+
+00:30:11,850 --> 00:30:16,880
+how it it roughly looks like so at the
+
+00:30:14,610 --> 00:30:22,530
+beginning we have desire event coming in
+
+00:30:16,880 --> 00:30:26,280
+and then ice Cassidy does these viscous
+
+00:30:22,530 --> 00:30:29,640
+the i2t command in this case this is a
+
+00:30:26,280 --> 00:30:32,970
+read operation so it's it's a it tells
+
+00:30:29,640 --> 00:30:35,820
+me Direction read I'm creating the ice
+
+00:30:32,970 --> 00:30:38,570
+Cassidy creates and the PDO assigns it
+
+00:30:35,820 --> 00:30:43,050
+to it to a task queues ik Don the task
+
+00:30:38,570 --> 00:30:45,600
+which is is part of the session then the
+
+00:30:43,050 --> 00:30:48,480
+the scheduler more or less decides which
+
+00:30:45,600 --> 00:30:51,420
+connection actually is available puts it
+
+00:30:48,480 --> 00:30:53,250
+onto this connection and then it
+
+00:30:51,420 --> 00:30:55,140
+actually starts sending the schedule
+
+00:30:53,250 --> 00:31:00,510
+requests over the wire to the target and
+
+00:30:55,140 --> 00:31:03,000
+the target then prepares everything and
+
+00:31:00,510 --> 00:31:07,010
+start sending than this Gazi data in
+
+00:31:03,000 --> 00:31:10,260
+commands over back which then are
+
+00:31:07,010 --> 00:31:13,230
+translated by by as Cassidy in the
+
+00:31:10,260 --> 00:31:14,430
+viscosity data rate ioctl so this is
+
+00:31:13,230 --> 00:31:17,460
+more or less where the data is actually
+
+00:31:14,430 --> 00:31:22,170
+then moving moving back and then at the
+
+00:31:17,460 --> 00:31:24,270
+end the status is coming back and first
+
+00:31:22,170 --> 00:31:27,450
+of all we are we're closing we're
+
+00:31:24,270 --> 00:31:28,950
+closing the command for viscosity and
+
+00:31:27,450 --> 00:31:30,810
+and discuss its op system so we're
+
+00:31:28,950 --> 00:31:34,710
+sending the viscosity to I command and
+
+00:31:30,810 --> 00:31:40,980
+we're cleaning up the task inside is
+
+00:31:34,710 --> 00:31:44,640
+Cassidy for right this is similar but a
+
+00:31:40,980 --> 00:31:46,770
+little is a bit different so it starts
+
+00:31:44,640 --> 00:31:52,620
+more or less the same way it's a right
+
+00:31:46,770 --> 00:31:55,620
+but then we're sending the the request
+
+00:31:52,620 --> 00:31:59,250
+this is this is now a a non immediate
+
+00:31:55,620 --> 00:32:00,360
+right operation so in this case we're
+
+00:31:59,250 --> 00:32:02,370
+actually sending this guy's you reach
+
+00:32:00,360 --> 00:32:05,730
+for s and saying we're gonna write to
+
+00:32:02,370 --> 00:32:07,590
+you now and then the the server more or
+
+00:32:05,730 --> 00:32:09,750
+less sends back like yes I'm ready you
+
+00:32:07,590 --> 00:32:12,060
+can start writing and then I'm
+
+00:32:09,750 --> 00:32:17,390
+fetching the data sending the data to
+
+00:32:12,060 --> 00:32:19,800
+the to the other end and getting getting
+
+00:32:17,390 --> 00:32:21,780
+normally like you can send more data now
+
+00:32:19,800 --> 00:32:24,150
+more data now until all the data has
+
+00:32:21,780 --> 00:32:29,730
+been sent over if it was a very large
+
+00:32:24,150 --> 00:32:31,700
+buffer and at the end again if
+
+00:32:29,730 --> 00:32:34,590
+everything is finished we get the status
+
+00:32:31,700 --> 00:32:39,420
+we do the viscosity to I and we close
+
+00:32:34,590 --> 00:32:40,920
+the task there is there is also a few
+
+00:32:39,420 --> 00:32:43,380
+shortcuts because as you see there is a
+
+00:32:40,920 --> 00:32:45,630
+lot of round trips going on here
+
+00:32:43,380 --> 00:32:48,030
+by by using some of the buttons that in
+
+00:32:45,630 --> 00:32:49,650
+the in the configuration options you
+
+00:32:48,030 --> 00:32:53,400
+actually can do an immediate right that
+
+00:32:49,650 --> 00:32:55,650
+means once you get the the viscosity i2t
+
+00:32:53,400 --> 00:33:02,670
+that that it is right you can
+
+00:32:55,650 --> 00:33:05,340
+immediately do a data right part of of
+
+00:33:02,670 --> 00:33:10,640
+the the initial scan request you can
+
+00:33:05,340 --> 00:33:13,620
+include already a bunch of data that
+
+00:33:10,640 --> 00:33:16,170
+that you can can send with it over the
+
+00:33:13,620 --> 00:33:17,430
+wire so in in the end if the buffer is
+
+00:33:16,170 --> 00:33:18,750
+small enough you can actually do just
+
+00:33:17,430 --> 00:33:20,910
+one roundtrip
+
+00:33:18,750 --> 00:33:23,310
+so you would you would just send it over
+
+00:33:20,910 --> 00:33:25,800
+to the to to the to the target with the
+
+00:33:23,310 --> 00:33:27,480
+data already in it and then more or less
+
+00:33:25,800 --> 00:33:36,390
+it you just got to status back so it's
+
+00:33:27,480 --> 00:33:38,250
+it's much much less work to do but as I
+
+00:33:36,390 --> 00:33:39,990
+said because there is multiple ways of
+
+00:33:38,250 --> 00:33:43,430
+doing it you also need to more or less
+
+00:33:39,990 --> 00:33:43,430
+implement all the ways of doing it
+
+00:33:44,330 --> 00:33:51,840
+so where are the problems with the
+
+00:33:47,520 --> 00:33:53,370
+startup at the moment ice Cassidy can
+
+00:33:51,840 --> 00:33:57,060
+only provide non boot disks this is
+
+00:33:53,370 --> 00:33:59,670
+important this is necessary because it
+
+00:33:57,060 --> 00:34:03,900
+actually needs needs running network and
+
+00:33:59,670 --> 00:34:05,370
+it needs to have a running userland
+
+00:34:03,900 --> 00:34:11,550
+because it's actually you use your land
+
+00:34:05,370 --> 00:34:15,780
+demon this means you need to have at
+
+00:34:11,550 --> 00:34:17,310
+least in it and RC already running so
+
+00:34:15,780 --> 00:34:19,260
+you're somewhere between single user
+
+00:34:17,310 --> 00:34:22,800
+mode and and being completely fully
+
+00:34:19,260 --> 00:34:25,169
+multi-user you need to have in
+
+00:34:22,800 --> 00:34:27,540
+in in our case at the moment root and
+
+00:34:25,169 --> 00:34:29,220
+user need to be mounted because ice
+
+00:34:27,540 --> 00:34:30,780
+cassidy's and user has been at the
+
+00:34:29,220 --> 00:34:36,210
+moment but it would be possible to
+
+00:34:30,780 --> 00:34:38,340
+actually make it static a static binary
+
+00:34:36,210 --> 00:34:41,909
+and move it to the root partition so you
+
+00:34:38,340 --> 00:34:46,679
+will actually could be mounting user off
+
+00:34:41,909 --> 00:34:54,480
+of ice cozy in my opinion it's not
+
+00:34:46,679 --> 00:34:58,410
+really the biggest issue because you can
+
+00:34:54,480 --> 00:35:02,250
+easily boot off local disks normally off
+
+00:34:58,410 --> 00:35:04,890
+on servers or you using NFS to do a
+
+00:35:02,250 --> 00:35:09,260
+network file boot to at least get the
+
+00:35:04,890 --> 00:35:09,260
+root filesystem with with root and user
+
+00:35:09,710 --> 00:35:17,520
+the the actual tricky bits are that even
+
+00:35:15,420 --> 00:35:19,650
+so you're actually starting to mount
+
+00:35:17,520 --> 00:35:20,490
+additional stuff very late in in in the
+
+00:35:19,650 --> 00:35:22,560
+boot up process
+
+00:35:20,490 --> 00:35:27,300
+you still need to make sure that you're
+
+00:35:22,560 --> 00:35:33,180
+reliably checking and mounting the the
+
+00:35:27,300 --> 00:35:34,950
+ice caste we exported file systems so if
+
+00:35:33,180 --> 00:35:37,170
+there was an unclean shutdown what needs
+
+00:35:34,950 --> 00:35:38,820
+to be happening is that the file system
+
+00:35:37,170 --> 00:35:40,650
+check is running and while the file
+
+00:35:38,820 --> 00:35:41,910
+system jack is running no other demons
+
+00:35:40,650 --> 00:35:44,880
+are starting up because they may
+
+00:35:41,910 --> 00:35:47,340
+actually depend on the file systems that
+
+00:35:44,880 --> 00:35:54,410
+ice CAHSEE provides to be to be already
+
+00:35:47,340 --> 00:35:56,490
+mounted so this was a little bit of a
+
+00:35:54,410 --> 00:35:59,940
+something we had to figure out how we
+
+00:35:56,490 --> 00:36:04,140
+gonna do this we came up with a somewhat
+
+00:35:59,940 --> 00:36:10,410
+easy way of doing it we already had a
+
+00:36:04,140 --> 00:36:13,910
+point because of of how NFS works it was
+
+00:36:10,410 --> 00:36:16,910
+fairly similar you you normally mount
+
+00:36:13,910 --> 00:36:19,980
+the local disks first and then do a
+
+00:36:16,910 --> 00:36:22,380
+afterwards actually remount everything
+
+00:36:19,980 --> 00:36:25,680
+even the network devices once the
+
+00:36:22,380 --> 00:36:28,610
+network was up and running so we just
+
+00:36:25,680 --> 00:36:31,800
+modified there a little bit around -
+
+00:36:28,610 --> 00:36:36,070
+before we doing the second mount of all
+
+00:36:31,800 --> 00:36:39,100
+the disks the mount mine is a we
+
+00:36:36,070 --> 00:36:40,990
+we added another file system check run
+
+00:36:39,100 --> 00:36:52,870
+that actually checks the ice case he
+
+00:36:40,990 --> 00:36:56,290
+provided disks then we we extend that FS
+
+00:36:52,870 --> 00:36:58,510
+tap mount and file system check so that
+
+00:36:56,290 --> 00:37:00,670
+they they more or less have a better
+
+00:36:58,510 --> 00:37:05,170
+understanding what file systems are
+
+00:37:00,670 --> 00:37:07,690
+provided by old are only available if if
+
+00:37:05,170 --> 00:37:10,090
+we actually have network running so FS
+
+00:37:07,690 --> 00:37:12,130
+tab now has a NAT option simulator to
+
+00:37:10,090 --> 00:37:13,840
+know how to option to more or less
+
+00:37:12,130 --> 00:37:16,720
+indicate this file system is only
+
+00:37:13,840 --> 00:37:20,260
+available if we have network and mount
+
+00:37:16,720 --> 00:37:23,380
+and file system check then have now a an
+
+00:37:20,260 --> 00:37:27,910
+additional - n argument that tells them
+
+00:37:23,380 --> 00:37:33,970
+to only if they're if they're run with
+
+00:37:27,910 --> 00:37:36,130
+big - capital n they're only then they
+
+00:37:33,970 --> 00:37:40,510
+will only exclusively check the net file
+
+00:37:36,130 --> 00:37:46,780
+system so everything that has a net in
+
+00:37:40,510 --> 00:37:49,480
+it if they are not run what miss with
+
+00:37:46,780 --> 00:37:53,470
+capital n they actually ignore all the
+
+00:37:49,480 --> 00:37:55,480
+net lines this is not completely perfect
+
+00:37:53,470 --> 00:37:57,310
+at the moment especially when fat file
+
+00:37:55,480 --> 00:37:59,890
+system Jack needs manual intervention
+
+00:37:57,310 --> 00:38:06,280
+but it works good enough to actually be
+
+00:37:59,890 --> 00:38:07,990
+be reliable on shutdown the stuff was a
+
+00:38:06,280 --> 00:38:11,650
+little bit more tricky at at least I
+
+00:38:07,990 --> 00:38:13,990
+thought so at the beginning so in it
+
+00:38:11,650 --> 00:38:17,530
+kills all userland processes before
+
+00:38:13,990 --> 00:38:19,570
+before it sings disks that means we're
+
+00:38:17,530 --> 00:38:22,120
+killing issge a CD before we actually
+
+00:38:19,570 --> 00:38:23,800
+flush the file system so we were never
+
+00:38:22,120 --> 00:38:28,720
+able to actually shut down the machine
+
+00:38:23,800 --> 00:38:32,470
+or reboot that's not good and especially
+
+00:38:28,720 --> 00:38:35,080
+then with with our multi pass
+
+00:38:32,470 --> 00:38:36,880
+support what actually happened was the
+
+00:38:35,080 --> 00:38:39,610
+file system disappeared but the colonel
+
+00:38:36,880 --> 00:38:42,190
+was still having dirty buffers and then
+
+00:38:39,610 --> 00:38:46,410
+it was just waiting and hoping that the
+
+00:38:42,190 --> 00:38:48,760
+disc move with reappear again and this
+
+00:38:46,410 --> 00:38:49,780
+never happened because I was Cassidy was
+
+00:38:48,760 --> 00:38:52,330
+gone
+
+00:38:49,780 --> 00:38:54,640
+so there were two options of how we
+
+00:38:52,330 --> 00:38:58,300
+could handle it we could try to unmount
+
+00:38:54,640 --> 00:39:00,880
+the disk before ice Cassidy is killed or
+
+00:38:58,300 --> 00:39:07,690
+we keep ice Cassidy running until the
+
+00:39:00,880 --> 00:39:09,190
+disks are synced then at the beginning I
+
+00:39:07,690 --> 00:39:12,130
+was like yeah this the second option
+
+00:39:09,190 --> 00:39:16,390
+will never work but I did a quick test I
+
+00:39:12,130 --> 00:39:18,730
+went into our kill code and more or less
+
+00:39:16,390 --> 00:39:20,830
+had a magic thing in it that's just said
+
+00:39:18,730 --> 00:39:21,310
+if the command is ice Cassidy just don't
+
+00:39:20,830 --> 00:39:24,580
+send it
+
+00:39:21,310 --> 00:39:27,180
+kill signals so you you had unkillable
+
+00:39:24,580 --> 00:39:29,470
+ice Cassidy and did it shut down and
+
+00:39:27,180 --> 00:39:31,660
+funnily enough the file system was clean
+
+00:39:29,470 --> 00:39:34,080
+when I'm booted up the system again so
+
+00:39:31,660 --> 00:39:37,720
+this seems to work
+
+00:39:34,080 --> 00:39:42,220
+so it's good enough to actually just
+
+00:39:37,720 --> 00:39:47,290
+keep ice Cassidy running on shut down
+
+00:39:42,220 --> 00:39:49,540
+and then on reboot everything is fine so
+
+00:39:47,290 --> 00:39:53,200
+what we what I did done is I added a
+
+00:39:49,540 --> 00:39:56,400
+process flag to indicate that process
+
+00:39:53,200 --> 00:40:00,720
+should not be killed by Killman -1 which
+
+00:39:56,400 --> 00:40:02,890
+in it is using to kill everything and
+
+00:40:00,720 --> 00:40:04,480
+all right Cassidy more or less sets
+
+00:40:02,890 --> 00:40:07,720
+there's no broadcast kill flag on
+
+00:40:04,480 --> 00:40:11,350
+startup and by that everything is is is
+
+00:40:07,720 --> 00:40:14,710
+fine the funny thing is this this this
+
+00:40:11,350 --> 00:40:17,230
+idea of of having processes that that
+
+00:40:14,710 --> 00:40:20,170
+keep alive even during the shutdown
+
+00:40:17,230 --> 00:40:22,930
+phase could help to keep some other
+
+00:40:20,170 --> 00:40:24,250
+processes even running for longer so it
+
+00:40:22,930 --> 00:40:29,230
+would be possible to have like Caesar
+
+00:40:24,250 --> 00:40:31,540
+lagdi more or less being running in the
+
+00:40:29,230 --> 00:40:35,220
+system until to the end like to the
+
+00:40:31,540 --> 00:40:39,670
+dying gasp off the machine so this this
+
+00:40:35,220 --> 00:40:47,590
+may be something that we will do in
+
+00:40:39,670 --> 00:40:49,360
+OpenBSD yeah it's the thing is the
+
+00:40:47,590 --> 00:40:52,450
+kernel actually forces the on mound at
+
+00:40:49,360 --> 00:40:54,670
+the end so so he just goes and and and
+
+00:40:52,450 --> 00:40:56,620
+uses the big hammer to just close all
+
+00:40:54,670 --> 00:40:58,720
+the father scriptures so it actually
+
+00:40:56,620 --> 00:41:01,120
+works it you may know you not may not
+
+00:40:58,720 --> 00:41:03,430
+get all the messages but you will get
+
+00:41:01,120 --> 00:41:06,160
+more messages because
+
+00:41:03,430 --> 00:41:08,230
+you will be killed lost so you will get
+
+00:41:06,160 --> 00:41:11,970
+all the kill messages from all the other
+
+00:41:08,230 --> 00:41:11,970
+demons that that you killed before hands
+
+00:41:21,200 --> 00:41:27,840
+we don't really have like what we can do
+
+00:41:24,780 --> 00:41:31,170
+is we can we can kill - Wow
+
+00:41:27,840 --> 00:41:33,750
+like you can kill you can go to single
+
+00:41:31,170 --> 00:41:37,380
+user mode but it will also kill all the
+
+00:41:33,750 --> 00:41:38,460
+user land processes we don't really have
+
+00:41:37,380 --> 00:41:41,100
+a system where you can go and
+
+00:41:38,460 --> 00:41:42,780
+selectively say kill everything that
+
+00:41:41,100 --> 00:41:50,790
+uses this in this file system we don't
+
+00:41:42,780 --> 00:41:53,760
+we don't have support for that Indian
+
+00:41:50,790 --> 00:41:57,510
+what is what still needs to be done I
+
+00:41:53,760 --> 00:42:01,620
+think there is still need to actually
+
+00:41:57,510 --> 00:42:03,450
+clean up the code a bit more the file
+
+00:42:01,620 --> 00:42:06,360
+system machine a finite state machine
+
+00:42:03,450 --> 00:42:08,160
+that I was using is a bit funky I wrote
+
+00:42:06,360 --> 00:42:11,250
+most of the code in about 4 days or
+
+00:42:08,160 --> 00:42:14,730
+something during a hackathon and and it
+
+00:42:11,250 --> 00:42:17,810
+has some some strange ways of how
+
+00:42:14,730 --> 00:42:20,220
+messages are being passed back and forth
+
+00:42:17,810 --> 00:42:23,430
+there is still a few extensions that we
+
+00:42:20,220 --> 00:42:25,650
+don't really support I would really like
+
+00:42:23,430 --> 00:42:28,380
+to test multi connection support
+
+00:42:25,650 --> 00:42:30,660
+I think our initiator actually supports
+
+00:42:28,380 --> 00:42:32,130
+it but I haven't found any target that
+
+00:42:30,660 --> 00:42:35,250
+actually does more than one connection
+
+00:42:32,130 --> 00:42:37,110
+per per session so that's that's a bit
+
+00:42:35,250 --> 00:42:39,420
+sad maybe maybe I need to find some
+
+00:42:37,110 --> 00:42:45,510
+really expensive gear that actually
+
+00:42:39,420 --> 00:42:47,460
+supports it and then long term there is
+
+00:42:45,510 --> 00:42:50,970
+definitely the idea to actually not have
+
+00:42:47,460 --> 00:42:53,970
+to copy in data copy the data in and out
+
+00:42:50,970 --> 00:42:55,740
+of the kernel all the time so passing
+
+00:42:53,970 --> 00:42:58,350
+passing the messages in the kernel keep
+
+00:42:55,740 --> 00:43:04,880
+them in the kernel and and maybe even do
+
+00:42:58,350 --> 00:43:08,610
+or DM a funnily enough on my laptop
+
+00:43:04,880 --> 00:43:11,760
+using local using the loopback I'm
+
+00:43:08,610 --> 00:43:14,580
+actually able to do about 160 megabytes
+
+00:43:11,760 --> 00:43:16,380
+per second through Isaac a CD so the
+
+00:43:14,580 --> 00:43:19,140
+speed is actually there even so we're
+
+00:43:16,380 --> 00:43:22,130
+actually copying and copying all the
+
+00:43:19,140 --> 00:43:22,130
+data through userland
+
+00:43:22,160 --> 00:43:27,420
+that's more or less the last slide I
+
+00:43:24,180 --> 00:43:30,180
+want to thank David for actually pushing
+
+00:43:27,420 --> 00:43:31,410
+me to write I scuzzy D and and providing
+
+00:43:30,180 --> 00:43:34,110
+me this gauzy that actually made it
+
+00:43:31,410 --> 00:43:34,650
+possible and I also want to thank Theo
+
+00:43:34,110 --> 00:43:37,079
+and
+
+00:43:34,650 --> 00:43:43,559
+for helping me figuring out how to do
+
+00:43:37,079 --> 00:43:54,359
+the startup and shutdown dance yep any
+
+00:43:43,559 --> 00:43:56,749
+questions viscous and I scuzzy do our
+
+00:43:54,359 --> 00:44:01,470
+remote target to communicate with the
+
+00:43:56,749 --> 00:44:03,299
+scuzzy subsystem in the kernel yeah what
+
+00:44:01,470 --> 00:44:09,380
+measures are there to prevent the remote
+
+00:44:03,299 --> 00:44:13,109
+target from exporting booking the kernel
+
+00:44:09,380 --> 00:44:16,529
+so you want to know what what prevents
+
+00:44:13,109 --> 00:44:19,049
+us that somebody is abusing these gauzy
+
+00:44:16,529 --> 00:44:23,849
+and ice cassadee to actually inject stop
+
+00:44:19,049 --> 00:44:28,049
+something into into the kernel yes there
+
+00:44:23,849 --> 00:44:33,869
+is not all that much extra checking
+
+00:44:28,049 --> 00:44:36,480
+around so we we or I rely on a working
+
+00:44:33,869 --> 00:44:39,779
+kernel that tcp/ip is safe so if I'm
+
+00:44:36,480 --> 00:44:42,450
+opening a connection to a target that
+
+00:44:39,779 --> 00:44:44,420
+that connection is not intercepted by
+
+00:44:42,450 --> 00:44:50,579
+somebody else
+
+00:44:44,420 --> 00:44:52,999
+the the the idea is also normally you
+
+00:44:50,579 --> 00:44:56,549
+don't run ice custody over the Internet
+
+00:44:52,999 --> 00:44:59,279
+and if you want to do that you may or
+
+00:44:56,549 --> 00:45:01,200
+you should use something like IPSec to
+
+00:44:59,279 --> 00:45:03,839
+actually make sure that nobody is is
+
+00:45:01,200 --> 00:45:06,660
+injecting traffic into into your data
+
+00:45:03,839 --> 00:45:08,970
+stream for these gauzy
+
+00:45:06,660 --> 00:45:11,819
+the the thing is you need superuser
+
+00:45:08,970 --> 00:45:13,529
+privileges to open open that device and
+
+00:45:11,819 --> 00:45:16,470
+if you have super user privileges you
+
+00:45:13,529 --> 00:45:18,390
+already can read all the the devices you
+
+00:45:16,470 --> 00:45:20,910
+have on the disk and and and fiddle with
+
+00:45:18,390 --> 00:45:24,559
+the kernel and do whatever you want so I
+
+00:45:20,910 --> 00:45:24,559
+think there we are actually safe
+
+00:45:26,780 --> 00:45:29,950
+any other question
+
+00:45:34,990 --> 00:45:42,349
+what kind of targets did you test
+
+00:45:38,000 --> 00:45:44,900
+against the initiator I did a lot of
+
+00:45:42,349 --> 00:45:49,400
+work against the net bsdi Scaasi target
+
+00:45:44,900 --> 00:45:52,819
+code that was mostly doing like being
+
+00:45:49,400 --> 00:45:55,339
+able to work on it on the on my laptop
+
+00:45:52,819 --> 00:46:00,859
+there were people playing around with
+
+00:45:55,339 --> 00:46:04,869
+the FreeNAS implementation I myself now
+
+00:46:00,859 --> 00:46:10,730
+have a trans tech I scuzzy disk shelf
+
+00:46:04,869 --> 00:46:12,500
+that I'm using also - - that more or
+
+00:46:10,730 --> 00:46:16,099
+less provides a lot of disk space for my
+
+00:46:12,500 --> 00:46:19,390
+server and this is where I'm actually
+
+00:46:16,099 --> 00:46:24,619
+doing most of the the traffic now on it
+
+00:46:19,390 --> 00:46:27,049
+apart from that I have and I know that
+
+00:46:24,619 --> 00:46:32,200
+some people were also using the Solaris
+
+00:46:27,049 --> 00:46:35,650
+I scuzzy target implementation but not
+
+00:46:32,200 --> 00:46:35,650
+much more I think
+
+00:46:40,080 --> 00:46:52,050
+any other questions good
+
+00:46:48,260 --> 00:46:54,899
+right let's thank our speaker
+
+00:46:52,050 --> 00:46:54,899
+
+YouTube URL: https://www.youtube.com/watch?v=EkTpDCqkop4
+
+

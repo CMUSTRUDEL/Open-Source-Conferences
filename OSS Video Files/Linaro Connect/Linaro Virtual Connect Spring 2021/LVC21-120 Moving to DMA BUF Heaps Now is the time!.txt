@@ -1,0 +1,2281 @@
+Title: LVC21-120 Moving to DMA BUF Heaps Now is the time!
+Publication date: 2021-04-15
+Playlist: Linaro Virtual Connect Spring 2021
+Description: 
+	With ION officially dropped from the Linux staging tree, its time to move forward to using the DMA BUF Heaps interface for userland-guided buffer type allocation.
+
+We will cover brief overview of DMA BUF Heaps, and differences from ION. The recent work done to migrate AOSP logic that depended on ION to support DMA BUF Heaps, an overview of helper libraries that have recently been developed, status of what is upstream and what is in the Android Common Kernel. I'll cover some of the difficulties we may have upstreaming code and make a call for more active participation. Finally, I hope to be able to answer a few questions folk have about the transition.
+Captions: 
+	00:00:06,560 --> 00:00:09,599
+all righty
+
+00:00:07,839 --> 00:00:12,080
+well hello from portland oregon uh my
+
+00:00:09,599 --> 00:00:13,759
+name is john stoltz i work at lenaro
+
+00:00:12,080 --> 00:00:15,519
+for the one hour consumer group and this
+
+00:00:13,759 --> 00:00:19,520
+is my talk on why now is the time
+
+00:00:15,519 --> 00:00:20,960
+to move from ion to dma buff heaps
+
+00:00:19,520 --> 00:00:22,560
+so just backing up so everyone's on the
+
+00:00:20,960 --> 00:00:24,800
+same page
+
+00:00:22,560 --> 00:00:25,840
+what is the dma buff so dma buff is a
+
+00:00:24,800 --> 00:00:27,279
+file descriptor
+
+00:00:25,840 --> 00:00:29,359
+basically kind of a handle that's
+
+00:00:27,279 --> 00:00:30,720
+connected to an abstract buffer
+
+00:00:29,359 --> 00:00:32,640
+which can easily be passed and shared
+
+00:00:30,720 --> 00:00:33,920
+between user lan the kernel and devices
+
+00:00:32,640 --> 00:00:35,600
+it basically allows the buffer to be
+
+00:00:33,920 --> 00:00:37,280
+mapped for dma by the device it can be
+
+00:00:35,600 --> 00:00:39,440
+mapped for access by the kernel and also
+
+00:00:37,280 --> 00:00:41,040
+m-mapped into userland so this is a very
+
+00:00:39,440 --> 00:00:42,719
+useful abstraction for sharing buffers
+
+00:00:41,040 --> 00:00:44,559
+between multiple devices and avoiding
+
+00:00:42,719 --> 00:00:47,120
+avoiding copies which is critical for
+
+00:00:44,559 --> 00:00:47,120
+performance
+
+00:00:47,280 --> 00:00:50,559
+now i'm going to go through a uh example
+
+00:00:49,440 --> 00:00:51,840
+uh pipeline
+
+00:00:50,559 --> 00:00:53,600
+but there's a bunch of characters
+
+00:00:51,840 --> 00:00:54,000
+involved here so i'm kind of stretching
+
+00:00:53,600 --> 00:00:56,000
+the
+
+00:00:54,000 --> 00:00:57,600
+material design icon set as far as it
+
+00:00:56,000 --> 00:00:59,199
+can go so apologies
+
+00:00:57,600 --> 00:01:01,440
+we have a camera sensor an image
+
+00:00:59,199 --> 00:01:04,159
+processor a neural net accelerator
+
+00:01:01,440 --> 00:01:05,040
+a display compositor a gpu a jpeg
+
+00:01:04,159 --> 00:01:08,320
+generator
+
+00:01:05,040 --> 00:01:11,200
+and the display panel now here is the
+
+00:01:08,320 --> 00:01:12,000
+example pipeline we have the camera
+
+00:01:11,200 --> 00:01:14,479
+sensor that basically
+
+00:01:12,000 --> 00:01:16,000
+will capture an image and write it into
+
+00:01:14,479 --> 00:01:16,880
+the screen buffer we have at the top
+
+00:01:16,000 --> 00:01:19,360
+right
+
+00:01:16,880 --> 00:01:20,159
+um that buffer is kind of you know
+
+00:01:19,360 --> 00:01:22,960
+unprocessed
+
+00:01:20,159 --> 00:01:24,400
+raw capture and so uh the image
+
+00:01:22,960 --> 00:01:25,040
+processor we can then pass that buffer
+
+00:01:24,400 --> 00:01:26,799
+to
+
+00:01:25,040 --> 00:01:28,320
+we'll do some analysis on the buffer
+
+00:01:26,799 --> 00:01:30,479
+figure out things like white balance
+
+00:01:28,320 --> 00:01:32,400
+sharpening brightness that sort of thing
+
+00:01:30,479 --> 00:01:34,400
+and create some metadata that metadata
+
+00:01:32,400 --> 00:01:37,119
+and the buffer can be passed then to
+
+00:01:34,400 --> 00:01:38,079
+the jpeg generator which will basically
+
+00:01:37,119 --> 00:01:40,320
+scan through the image
+
+00:01:38,079 --> 00:01:41,520
+create a jpeg which can then be written
+
+00:01:40,320 --> 00:01:43,280
+out to disk
+
+00:01:41,520 --> 00:01:45,840
+um at the same time that's going on we
+
+00:01:43,280 --> 00:01:47,520
+can also have the neural net engine
+
+00:01:45,840 --> 00:01:49,200
+looking at the image trying to find
+
+00:01:47,520 --> 00:01:51,280
+faces and eyes
+
+00:01:49,200 --> 00:01:53,040
+that information can be fed back into
+
+00:01:51,280 --> 00:01:55,280
+the camera subsystem for things like
+
+00:01:53,040 --> 00:01:56,719
+uh focusing for the next frame but we
+
+00:01:55,280 --> 00:02:00,240
+can also use it to have
+
+00:01:56,719 --> 00:02:01,360
+the gpu draw some rectangles onto the ui
+
+00:02:00,240 --> 00:02:03,280
+overlay
+
+00:02:01,360 --> 00:02:05,520
+now um which we see here in this red
+
+00:02:03,280 --> 00:02:06,880
+buffer now uh both the red buffer and
+
+00:02:05,520 --> 00:02:08,000
+the green buffer are passed to the
+
+00:02:06,880 --> 00:02:09,840
+display compositor
+
+00:02:08,000 --> 00:02:11,680
+the display compositor can also take in
+
+00:02:09,840 --> 00:02:13,360
+some of the
+
+00:02:11,680 --> 00:02:14,720
+metadata from the image processor to
+
+00:02:13,360 --> 00:02:16,319
+figure out that white balance and
+
+00:02:14,720 --> 00:02:18,000
+brightness etc
+
+00:02:16,319 --> 00:02:19,760
+and apply those changes as it does its
+
+00:02:18,000 --> 00:02:21,440
+compositing and
+
+00:02:19,760 --> 00:02:22,959
+the net result was basically this blue
+
+00:02:21,440 --> 00:02:26,720
+buffer we study
+
+00:02:22,959 --> 00:02:28,800
+on the screen on the display
+
+00:02:26,720 --> 00:02:30,959
+now it's fairly complicated but it gets
+
+00:02:28,800 --> 00:02:32,480
+a little more complex because
+
+00:02:30,959 --> 00:02:34,480
+we have these constraints to deal with
+
+00:02:32,480 --> 00:02:36,160
+now not all devices can always access
+
+00:02:34,480 --> 00:02:38,080
+all types of memory
+
+00:02:36,160 --> 00:02:40,319
+for example some devices can only access
+
+00:02:38,080 --> 00:02:42,400
+physically contiguous pages
+
+00:02:40,319 --> 00:02:43,680
+some devices can only dma to the first
+
+00:02:42,400 --> 00:02:46,160
+four gigs of
+
+00:02:43,680 --> 00:02:46,879
+memory so it's critical that we allocate
+
+00:02:46,160 --> 00:02:49,280
+buffers
+
+00:02:46,879 --> 00:02:51,599
+in locations where all the devices that
+
+00:02:49,280 --> 00:02:53,440
+are going to use the buffer can access
+
+00:02:51,599 --> 00:02:54,720
+um in addition to this there's also
+
+00:02:53,440 --> 00:02:55,920
+performance constraints that we have to
+
+00:02:54,720 --> 00:02:57,519
+think about
+
+00:02:55,920 --> 00:02:59,840
+so for example every time we map a
+
+00:02:57,519 --> 00:03:01,440
+buffer to a non-coherent device it's
+
+00:02:59,840 --> 00:03:02,800
+important that we flush or invalidate
+
+00:03:01,440 --> 00:03:05,200
+the cpu cache
+
+00:03:02,800 --> 00:03:07,360
+because we don't want the buffer to get
+
+00:03:05,200 --> 00:03:10,000
+corrupted
+
+00:03:07,360 --> 00:03:11,760
+that said if a buffer isn't touched very
+
+00:03:10,000 --> 00:03:14,720
+frequently by the cpu or
+
+00:03:11,760 --> 00:03:15,440
+at all doing all of these cache
+
+00:03:14,720 --> 00:03:18,239
+operations
+
+00:03:15,440 --> 00:03:21,040
+can can be costly and so it's beneficial
+
+00:03:18,239 --> 00:03:23,280
+to be able to set a buffer as uncachable
+
+00:03:21,040 --> 00:03:24,959
+if we're just going to be sharing it
+
+00:03:23,280 --> 00:03:26,959
+amongst devices
+
+00:03:24,959 --> 00:03:28,480
+that said if the cpu is going to touch
+
+00:03:26,959 --> 00:03:30,159
+the buffer frequently
+
+00:03:28,480 --> 00:03:32,080
+it's very critical to have the cache
+
+00:03:30,159 --> 00:03:34,720
+enabled for that the buffer
+
+00:03:32,080 --> 00:03:35,760
+um so it's it's really an issue of kind
+
+00:03:34,720 --> 00:03:37,440
+of depending on
+
+00:03:35,760 --> 00:03:39,200
+the set of devices that are going to be
+
+00:03:37,440 --> 00:03:41,200
+used as well as kind of the path whether
+
+00:03:39,200 --> 00:03:42,799
+or not the cpu is going to be involved
+
+00:03:41,200 --> 00:03:44,239
+we really have to kind of put some
+
+00:03:42,799 --> 00:03:47,440
+thought into
+
+00:03:44,239 --> 00:03:48,000
+how we allocate these buffers um so in
+
+00:03:47,440 --> 00:03:50,159
+the
+
+00:03:48,000 --> 00:03:51,599
+example uh you know basically the green
+
+00:03:50,159 --> 00:03:53,840
+buffer was shared with all of the
+
+00:03:51,599 --> 00:03:57,680
+devices here i have circled in green
+
+00:03:53,840 --> 00:03:59,280
+um now if say the jpeg engine
+
+00:03:57,680 --> 00:04:01,439
+or the jpeg generator at the very end
+
+00:03:59,280 --> 00:04:02,480
+there if it has the constraint that it
+
+00:04:01,439 --> 00:04:05,280
+can only access
+
+00:04:02,480 --> 00:04:07,360
+uh physically contiguous pages that
+
+00:04:05,280 --> 00:04:09,120
+means that we need to make sure that the
+
+00:04:07,360 --> 00:04:11,920
+buffer that the camera's writing into
+
+00:04:09,120 --> 00:04:13,200
+is in physically contiguous memory
+
+00:04:11,920 --> 00:04:16,239
+similarly if the
+
+00:04:13,200 --> 00:04:17,919
+you know neural net engine is uh only
+
+00:04:16,239 --> 00:04:18,639
+able to access the first four gigs of
+
+00:04:17,919 --> 00:04:20,720
+memory
+
+00:04:18,639 --> 00:04:22,560
+um we need to make sure that that buffer
+
+00:04:20,720 --> 00:04:25,120
+is both physically contiguous
+
+00:04:22,560 --> 00:04:26,479
+and in the first four gigs of memory um
+
+00:04:25,120 --> 00:04:27,919
+additionally since the cpu isn't
+
+00:04:26,479 --> 00:04:28,720
+touching this buffer anywhere in this
+
+00:04:27,919 --> 00:04:30,720
+path
+
+00:04:28,720 --> 00:04:32,639
+you know it might be beneficial if we
+
+00:04:30,720 --> 00:04:35,600
+have non-current devices to set this
+
+00:04:32,639 --> 00:04:36,479
+buffer as uncashable now for the red
+
+00:04:35,600 --> 00:04:38,160
+buffer
+
+00:04:36,479 --> 00:04:40,160
+you know we're only dealing with the gpu
+
+00:04:38,160 --> 00:04:41,919
+and the display compositor
+
+00:04:40,160 --> 00:04:43,280
+so these may not have the same types of
+
+00:04:41,919 --> 00:04:44,160
+constraints so they may be able to
+
+00:04:43,280 --> 00:04:45,680
+handle uh
+
+00:04:44,160 --> 00:04:47,040
+the full address space and handle
+
+00:04:45,680 --> 00:04:49,120
+scatter gather lists so we could just
+
+00:04:47,040 --> 00:04:51,759
+allocate just regular system pages
+
+00:04:49,120 --> 00:04:53,120
+um and and you know if the devices are
+
+00:04:51,759 --> 00:04:54,639
+coherent with the cpu cache
+
+00:04:53,120 --> 00:04:56,240
+there's no real benefit to setting it as
+
+00:04:54,639 --> 00:04:57,600
+uncashable um
+
+00:04:56,240 --> 00:04:59,520
+so really this kind of shows that
+
+00:04:57,600 --> 00:05:01,600
+depending on kind of the path and
+
+00:04:59,520 --> 00:05:02,560
+and how the buffers are going to be used
+
+00:05:01,600 --> 00:05:04,800
+um we need to
+
+00:05:02,560 --> 00:05:05,840
+put some thought into where we're
+
+00:05:04,800 --> 00:05:08,800
+allocating it
+
+00:05:05,840 --> 00:05:10,080
+um now dma buff heaps and really ion
+
+00:05:08,800 --> 00:05:11,680
+before it
+
+00:05:10,080 --> 00:05:14,000
+were designed to kind of solve this
+
+00:05:11,680 --> 00:05:14,960
+problem basically they provide a user
+
+00:05:14,000 --> 00:05:18,000
+land interface
+
+00:05:14,960 --> 00:05:18,240
+so that user line can allocate dma buffs
+
+00:05:18,000 --> 00:05:20,720
+of
+
+00:05:18,240 --> 00:05:21,919
+certain types of memory and in that way
+
+00:05:20,720 --> 00:05:24,160
+it's able to allocate memory that
+
+00:05:21,919 --> 00:05:26,560
+satisfies the constraints of whatever
+
+00:05:24,160 --> 00:05:28,800
+pipeline it's dealing with
+
+00:05:26,560 --> 00:05:30,479
+now some might wonder why doesn't the
+
+00:05:28,800 --> 00:05:31,759
+kernel just kind of do this for us but
+
+00:05:30,479 --> 00:05:33,280
+the issue there is that the kernel
+
+00:05:31,759 --> 00:05:33,600
+doesn't really know where a buffer might
+
+00:05:33,280 --> 00:05:35,600
+go
+
+00:05:33,600 --> 00:05:37,759
+userland's the one that's directing what
+
+00:05:35,600 --> 00:05:39,199
+the path is between the various devices
+
+00:05:37,759 --> 00:05:40,720
+that a buffer will take
+
+00:05:39,199 --> 00:05:42,800
+um and so this becomes basically a
+
+00:05:40,720 --> 00:05:44,560
+policy decision and in android this
+
+00:05:42,800 --> 00:05:47,199
+kind of policy is done by the grallock
+
+00:05:44,560 --> 00:05:50,639
+library and it basically provides a
+
+00:05:47,199 --> 00:05:53,520
+basically a static mapping basically for
+
+00:05:50,639 --> 00:05:55,199
+a given pipeline or usage um you know
+
+00:05:53,520 --> 00:05:56,160
+what memory type should be used on this
+
+00:05:55,199 --> 00:05:57,840
+device
+
+00:05:56,160 --> 00:05:59,520
+um now i know people kind of cringe a
+
+00:05:57,840 --> 00:06:00,960
+little bit you know
+
+00:05:59,520 --> 00:06:02,319
+how did how do you create a generic
+
+00:06:00,960 --> 00:06:03,680
+solution this way that works on all
+
+00:06:02,319 --> 00:06:05,680
+sorts of devices
+
+00:06:03,680 --> 00:06:07,919
+but this isn't very different from fs
+
+00:06:05,680 --> 00:06:09,759
+tab we have a lot of generic distros
+
+00:06:07,919 --> 00:06:12,960
+that work on all sorts of devices
+
+00:06:09,759 --> 00:06:16,000
+um that all have you know different uh
+
+00:06:12,960 --> 00:06:16,800
+disk and partition layouts um and so we
+
+00:06:16,000 --> 00:06:18,800
+just need kind of
+
+00:06:16,800 --> 00:06:20,639
+a little file that provides this simple
+
+00:06:18,800 --> 00:06:22,000
+mapping of you know this partition goes
+
+00:06:20,639 --> 00:06:22,800
+to this mount point and that's how it's
+
+00:06:22,000 --> 00:06:24,639
+solved
+
+00:06:22,800 --> 00:06:27,919
+um and so this is very similar in that
+
+00:06:24,639 --> 00:06:29,759
+way uh now the dma buff heaps framework
+
+00:06:27,919 --> 00:06:31,520
+it really is a fairly thin layer it just
+
+00:06:29,759 --> 00:06:33,120
+provides a consistent way for exposing
+
+00:06:31,520 --> 00:06:35,440
+those heaps to user land and allowing
+
+00:06:33,120 --> 00:06:38,240
+user land to allocate these dma buffs
+
+00:06:35,440 --> 00:06:40,080
+um the heap drivers that utilize this
+
+00:06:38,240 --> 00:06:41,280
+infrastructure are just simple dma buff
+
+00:06:40,080 --> 00:06:43,759
+exporters
+
+00:06:41,280 --> 00:06:46,319
+so it's it's it's fairly simple
+
+00:06:43,759 --> 00:06:46,319
+straightforward
+
+00:06:46,479 --> 00:06:52,400
+now dma buff heaps is very much uh
+
+00:06:49,919 --> 00:06:53,759
+descended from ion and influenced by it
+
+00:06:52,400 --> 00:06:54,800
+but there are some key differences to
+
+00:06:53,759 --> 00:06:58,240
+keep in mind
+
+00:06:54,800 --> 00:06:59,039
+um with ion we had the uh dev ion device
+
+00:06:58,240 --> 00:07:00,479
+that you'd open
+
+00:06:59,039 --> 00:07:02,560
+and then basically uh with the
+
+00:07:00,479 --> 00:07:04,160
+allocation eye octal specify a heap id
+
+00:07:02,560 --> 00:07:06,000
+to tell it kind of what heap you wanted
+
+00:07:04,160 --> 00:07:08,240
+to allocate memory from
+
+00:07:06,000 --> 00:07:09,520
+um with dma buff heaps we have per
+
+00:07:08,240 --> 00:07:11,599
+device or per heap
+
+00:07:09,520 --> 00:07:13,199
+character of devices so you can
+
+00:07:11,599 --> 00:07:13,919
+basically reference the heaps by file
+
+00:07:13,199 --> 00:07:15,759
+name
+
+00:07:13,919 --> 00:07:18,000
+this is beneficial because it allows us
+
+00:07:15,759 --> 00:07:19,680
+to enumerate the heaps very simply
+
+00:07:18,000 --> 00:07:21,440
+you can just look at the directory and
+
+00:07:19,680 --> 00:07:22,400
+then also it allows for finer grain
+
+00:07:21,440 --> 00:07:23,680
+permissions
+
+00:07:22,400 --> 00:07:25,680
+so that different heaps can have
+
+00:07:23,680 --> 00:07:27,520
+different access permissions
+
+00:07:25,680 --> 00:07:29,120
+another difference from ion is that we
+
+00:07:27,520 --> 00:07:32,639
+do not support any sort of
+
+00:07:29,120 --> 00:07:34,319
+heat private flags with ion
+
+00:07:32,639 --> 00:07:35,759
+some of the heat flags were able to have
+
+00:07:34,319 --> 00:07:36,639
+different meanings depending on which
+
+00:07:35,759 --> 00:07:38,800
+heaps you were
+
+00:07:36,639 --> 00:07:40,479
+using them with and so this was just
+
+00:07:38,800 --> 00:07:42,240
+poorly specified and
+
+00:07:40,479 --> 00:07:43,680
+not something that we could really push
+
+00:07:42,240 --> 00:07:47,039
+upstream
+
+00:07:43,680 --> 00:07:49,280
+and so in the dma buff heap
+
+00:07:47,039 --> 00:07:50,479
+allocation iactyl we do have some
+
+00:07:49,280 --> 00:07:53,360
+reserved
+
+00:07:50,479 --> 00:07:54,960
+flag fields that we may extend in the
+
+00:07:53,360 --> 00:07:56,160
+future but we want to make sure that any
+
+00:07:54,960 --> 00:07:59,039
+flags we add
+
+00:07:56,160 --> 00:08:00,080
+to the interface are well specified and
+
+00:07:59,039 --> 00:08:02,800
+also generic
+
+00:08:00,080 --> 00:08:04,000
+enough to apply to most if not all heaps
+
+00:08:02,800 --> 00:08:05,599
+[Music]
+
+00:08:04,000 --> 00:08:07,599
+an additional difference is that with
+
+00:08:05,599 --> 00:08:09,199
+dma buff heaps you have full control
+
+00:08:07,599 --> 00:08:10,720
+over your dma buff exporter
+
+00:08:09,199 --> 00:08:12,240
+whereas with ion there was a lot of
+
+00:08:10,720 --> 00:08:12,960
+mid-layer logic that would handle that
+
+00:08:12,240 --> 00:08:15,599
+for you
+
+00:08:12,960 --> 00:08:16,800
+um the benefit here is that with ion
+
+00:08:15,599 --> 00:08:18,560
+there's a lot of cases where
+
+00:08:16,800 --> 00:08:20,080
+vendors if they had a kind of quirky
+
+00:08:18,560 --> 00:08:21,360
+heap they some
+
+00:08:20,080 --> 00:08:23,599
+extra functionality that was needed
+
+00:08:21,360 --> 00:08:26,000
+they'd end up packing up the common code
+
+00:08:23,599 --> 00:08:27,120
+for that and that would cause the net
+
+00:08:26,000 --> 00:08:28,800
+result was that basically
+
+00:08:27,120 --> 00:08:30,160
+multiple heaps from different vendors
+
+00:08:28,800 --> 00:08:30,800
+couldn't really coexist with the same
+
+00:08:30,160 --> 00:08:32,959
+kernel
+
+00:08:30,800 --> 00:08:33,839
+this was addressed at the very end uh
+
+00:08:32,959 --> 00:08:36,959
+with the
+
+00:08:33,839 --> 00:08:38,159
+android 1154 kernel um the last version
+
+00:08:36,959 --> 00:08:40,479
+of ion
+
+00:08:38,159 --> 00:08:42,479
+but we've just kind of taken that
+
+00:08:40,479 --> 00:08:44,480
+approach from the start with dma buffets
+
+00:08:42,479 --> 00:08:45,839
+uh the downside to this however is that
+
+00:08:44,480 --> 00:08:47,360
+you may have to maintain a little more
+
+00:08:45,839 --> 00:08:49,040
+logic because we don't have kind of a
+
+00:08:47,360 --> 00:08:51,760
+lot of this mid-layer
+
+00:08:49,040 --> 00:08:53,279
+code we are open to creating kind of
+
+00:08:51,760 --> 00:08:54,959
+shareable helper logic
+
+00:08:53,279 --> 00:08:56,720
+but we want to see kind of more heaps
+
+00:08:54,959 --> 00:09:00,080
+upstream before we figure out what
+
+00:08:56,720 --> 00:09:02,000
+components are or make sense to share um
+
+00:09:00,080 --> 00:09:03,760
+and really the most important difference
+
+00:09:02,000 --> 00:09:06,480
+between dma buff and
+
+00:09:03,760 --> 00:09:08,000
+d my best heaps and ion is that dma
+
+00:09:06,480 --> 00:09:11,839
+above heaps are supported in android
+
+00:09:08,000 --> 00:09:14,240
+12510 in newark kernels um ion has been
+
+00:09:11,839 --> 00:09:16,000
+removed from the staging directory in
+
+00:09:14,240 --> 00:09:18,399
+the 511 kernel
+
+00:09:16,000 --> 00:09:22,000
+and in the android 12 510 kernel it's
+
+00:09:18,399 --> 00:09:23,920
+been disabled for the gki kernel
+
+00:09:22,000 --> 00:09:26,000
+so uh just looking really quickly at the
+
+00:09:23,920 --> 00:09:27,920
+dma buff kernel interface uh
+
+00:09:26,000 --> 00:09:29,440
+it's pretty straightforward there's to
+
+00:09:27,920 --> 00:09:32,399
+get a list of heaps you can do
+
+00:09:29,440 --> 00:09:33,600
+simple ls on the dma heap directory um
+
+00:09:32,399 --> 00:09:35,600
+you can open one of those
+
+00:09:33,600 --> 00:09:37,680
+character devices for read and then call
+
+00:09:35,600 --> 00:09:39,760
+this allocation aactal with the
+
+00:09:37,680 --> 00:09:41,600
+argument structure listed here i'm again
+
+00:09:39,760 --> 00:09:43,279
+an example of that over on the right uh
+
+00:09:41,600 --> 00:09:45,920
+allocating basically one meg
+
+00:09:43,279 --> 00:09:47,360
+uh from the system heap and calling the
+
+00:09:45,920 --> 00:09:48,800
+iactal uh and then
+
+00:09:47,360 --> 00:09:50,800
+basically returning the dma buff that
+
+00:09:48,800 --> 00:09:52,720
+comes back it's all fairly
+
+00:09:50,800 --> 00:09:55,360
+straightforward but a little low level
+
+00:09:52,720 --> 00:09:56,480
+um if you want something nicer google
+
+00:09:55,360 --> 00:09:58,800
+has implemented
+
+00:09:56,480 --> 00:10:00,640
+the lib dma buff helper library uh which
+
+00:09:58,800 --> 00:10:02,079
+basically wraps this allocation in octal
+
+00:10:00,640 --> 00:10:03,600
+but i think also more importantly
+
+00:10:02,079 --> 00:10:05,360
+provide some backward compatibility with
+
+00:10:03,600 --> 00:10:08,720
+ion um here's kind of a
+
+00:10:05,360 --> 00:10:11,040
+really brief uh class description there
+
+00:10:08,720 --> 00:10:12,959
+and then here's a kind of example usage
+
+00:10:11,040 --> 00:10:15,279
+you instantiate your allocator
+
+00:10:12,959 --> 00:10:16,240
+and then call allocate on it with
+
+00:10:15,279 --> 00:10:17,760
+passing it the
+
+00:10:16,240 --> 00:10:20,640
+heap name and the size that you want to
+
+00:10:17,760 --> 00:10:24,160
+allocate and that'll provide a dma buff
+
+00:10:20,640 --> 00:10:26,079
+result because
+
+00:10:24,160 --> 00:10:27,680
+doing the dura stats to get the
+
+00:10:26,079 --> 00:10:28,240
+directory listing can be a little fussy
+
+00:10:27,680 --> 00:10:29,600
+um
+
+00:10:28,240 --> 00:10:31,680
+you know there's also a helper for
+
+00:10:29,600 --> 00:10:34,240
+getting the list of available heaps
+
+00:10:31,680 --> 00:10:36,160
+wrapped as well there
+
+00:10:34,240 --> 00:10:38,240
+now i think what the most important
+
+00:10:36,160 --> 00:10:40,399
+component of this library is is this ion
+
+00:10:38,240 --> 00:10:42,560
+backward compatibility support
+
+00:10:40,399 --> 00:10:44,240
+there is a method called map name to ion
+
+00:10:42,560 --> 00:10:47,680
+heap which basically allows us to
+
+00:10:44,240 --> 00:10:49,279
+pair a heap name to an ion heap id and
+
+00:10:47,680 --> 00:10:51,279
+flags tuple
+
+00:10:49,279 --> 00:10:53,200
+now it's a little more complex because
+
+00:10:51,279 --> 00:10:54,720
+there are multiple versions of ion we
+
+00:10:53,200 --> 00:10:57,279
+had an avi break
+
+00:10:54,720 --> 00:11:00,079
+at 412 and so we have to support both
+
+00:10:57,279 --> 00:11:01,360
+the legacy ion and the modern ion iron
+
+00:11:00,079 --> 00:11:02,959
+so basically this argument's a little
+
+00:11:01,360 --> 00:11:03,360
+more complicated you have to say okay so
+
+00:11:02,959 --> 00:11:05,600
+for
+
+00:11:03,360 --> 00:11:06,959
+um the example here we say map name to
+
+00:11:05,600 --> 00:11:08,959
+ion heap for system
+
+00:11:06,959 --> 00:11:10,800
+and we pass the ion system name and the
+
+00:11:08,959 --> 00:11:12,399
+ion flag cached and then we also pass
+
+00:11:10,800 --> 00:11:14,000
+the ion heap type
+
+00:11:12,399 --> 00:11:15,440
+system and ion flight cache for the
+
+00:11:14,000 --> 00:11:16,959
+legacy on interface
+
+00:11:15,440 --> 00:11:19,200
+um but the benefit of doing this you do
+
+00:11:16,959 --> 00:11:21,839
+this once and then anytime you call aloc
+
+00:11:19,200 --> 00:11:23,120
+on system um it'll do the right thing
+
+00:11:21,839 --> 00:11:25,120
+regardless of which kind of kernel
+
+00:11:23,120 --> 00:11:28,399
+you're on so if you're on a dma buff
+
+00:11:25,120 --> 00:11:29,279
+keep system it'll open the dma heap
+
+00:11:28,399 --> 00:11:31,839
+system uh
+
+00:11:29,279 --> 00:11:33,920
+device and and allocate from that um
+
+00:11:31,839 --> 00:11:36,959
+otherwise it will allocate from ion
+
+00:11:33,920 --> 00:11:39,519
+um either the legacy or modern so it's a
+
+00:11:36,959 --> 00:11:41,600
+real nice wrapper there
+
+00:11:39,519 --> 00:11:43,440
+all right so if you have an ion heap
+
+00:11:41,600 --> 00:11:46,880
+that you are planning on converting
+
+00:11:43,440 --> 00:11:48,640
+a couple key items to keep in mind
+
+00:11:46,880 --> 00:11:50,000
+the big issue is since we don't have any
+
+00:11:48,640 --> 00:11:51,839
+heat flags
+
+00:11:50,000 --> 00:11:54,160
+you can't multiplex different types of
+
+00:11:51,839 --> 00:11:56,399
+memory out of the same heap
+
+00:11:54,160 --> 00:11:58,639
+so we need to have one heap per type now
+
+00:11:56,399 --> 00:12:00,959
+you can have one driver that exposes
+
+00:11:58,639 --> 00:12:02,959
+multiple heaps um and so you can just
+
+00:12:00,959 --> 00:12:04,800
+export you know different heat names and
+
+00:12:02,959 --> 00:12:06,720
+be able to do that um but it's really
+
+00:12:04,800 --> 00:12:07,680
+critical that for you know each variant
+
+00:12:06,720 --> 00:12:11,120
+of memory that you
+
+00:12:07,680 --> 00:12:12,000
+uh want to expose you have a unique heap
+
+00:12:11,120 --> 00:12:15,440
+name
+
+00:12:12,000 --> 00:12:17,279
+um additionally uh you know
+
+00:12:15,440 --> 00:12:19,040
+because we don't have that eye on mid
+
+00:12:17,279 --> 00:12:20,720
+layer logic uh you may need to
+
+00:12:19,040 --> 00:12:21,440
+incorporate some of that into your heap
+
+00:12:20,720 --> 00:12:23,279
+driver
+
+00:12:21,440 --> 00:12:24,480
+um you know basically this can often
+
+00:12:23,279 --> 00:12:27,200
+just be pulling the ion
+
+00:12:24,480 --> 00:12:28,880
+code into your heat driver itself or um
+
+00:12:27,200 --> 00:12:30,639
+you know basically looking at the
+
+00:12:28,880 --> 00:12:32,240
+system or cma heaps that are already
+
+00:12:30,639 --> 00:12:35,120
+upstream as a guide
+
+00:12:32,240 --> 00:12:36,880
+um and then finally uh when naming your
+
+00:12:35,120 --> 00:12:39,120
+heap i'm asking everyone please
+
+00:12:36,880 --> 00:12:40,399
+uh for any vendor heaps please use a
+
+00:12:39,120 --> 00:12:43,440
+vendor prefix
+
+00:12:40,399 --> 00:12:44,240
+um so have a vendor comma heap name is
+
+00:12:43,440 --> 00:12:46,079
+the heat name
+
+00:12:44,240 --> 00:12:47,600
+um so for example if linaro had some
+
+00:12:46,079 --> 00:12:49,200
+amazing magic heap we could call it the
+
+00:12:47,600 --> 00:12:52,000
+lenaro comma magic heap
+
+00:12:49,200 --> 00:12:53,360
+while it was out of tree once we do push
+
+00:12:52,000 --> 00:12:54,720
+something upstream we can drop that
+
+00:12:53,360 --> 00:12:56,240
+vendor prefix but what
+
+00:12:54,720 --> 00:12:58,240
+the idea with this is basically we want
+
+00:12:56,240 --> 00:13:00,079
+to avoid having a whole bunch of vendors
+
+00:12:58,240 --> 00:13:01,360
+having out of tree you know chunk heaps
+
+00:13:00,079 --> 00:13:02,720
+or something like that that all are
+
+00:13:01,360 --> 00:13:04,639
+named the same
+
+00:13:02,720 --> 00:13:06,160
+and then when something does go upstream
+
+00:13:04,639 --> 00:13:08,000
+it's called the chunk keep
+
+00:13:06,160 --> 00:13:09,839
+there's no way to discern between
+
+00:13:08,000 --> 00:13:10,399
+whether you know the user space wanted
+
+00:13:09,839 --> 00:13:12,480
+the
+
+00:13:10,399 --> 00:13:13,600
+the old legacy vendor version or the
+
+00:13:12,480 --> 00:13:15,120
+upstream version
+
+00:13:13,600 --> 00:13:16,399
+um so as long as there's a vendor prefix
+
+00:13:15,120 --> 00:13:17,120
+we're able to discern that and that
+
+00:13:16,399 --> 00:13:20,800
+would
+
+00:13:17,120 --> 00:13:22,480
+save some pain hopefully in the future
+
+00:13:20,800 --> 00:13:24,560
+now there may be some edge cases i know
+
+00:13:22,480 --> 00:13:26,720
+some folks really really really
+
+00:13:24,560 --> 00:13:28,160
+want private heat flags and they just
+
+00:13:26,720 --> 00:13:31,760
+can't do without them
+
+00:13:28,160 --> 00:13:33,440
+um if that's the case uh you know
+
+00:13:31,760 --> 00:13:35,360
+maybe dma buff heaps isn't the right
+
+00:13:33,440 --> 00:13:37,200
+thing for for that solution um you don't
+
+00:13:35,360 --> 00:13:38,720
+have to use it you can always uh
+
+00:13:37,200 --> 00:13:40,800
+in your own driver if you have a dma
+
+00:13:38,720 --> 00:13:42,560
+buff exporter you can always create your
+
+00:13:40,800 --> 00:13:44,959
+own character device and your own iota
+
+00:13:42,560 --> 00:13:48,320
+interface that provides whatever
+
+00:13:44,959 --> 00:13:49,839
+arguments you need uh you know obviously
+
+00:13:48,320 --> 00:13:50,720
+we would like to be able to support as
+
+00:13:49,839 --> 00:13:52,560
+much as we can
+
+00:13:50,720 --> 00:13:54,079
+um but we also have to make sure that
+
+00:13:52,560 --> 00:13:55,839
+the things that we support upstream
+
+00:13:54,079 --> 00:13:57,120
+uh makes sense for the upstream kernel
+
+00:13:55,839 --> 00:13:58,800
+so we you know
+
+00:13:57,120 --> 00:14:00,079
+um do do reach out to me if there's
+
+00:13:58,800 --> 00:14:02,399
+anything that you think that would be
+
+00:14:00,079 --> 00:14:05,040
+beneficial to extend the interface with
+
+00:14:02,399 --> 00:14:05,760
+but you know for now this is where we
+
+00:14:05,040 --> 00:14:09,279
+are
+
+00:14:05,760 --> 00:14:12,320
+um now as for the upstream status
+
+00:14:09,279 --> 00:14:14,639
+we know with ion there's been the ion
+
+00:14:12,320 --> 00:14:16,399
+abi breaks have been painful and so
+
+00:14:14,639 --> 00:14:19,440
+going through yet another uh
+
+00:14:16,399 --> 00:14:20,880
+abi change basically um is again painful
+
+00:14:19,440 --> 00:14:22,480
+but we do want to do this for to have an
+
+00:14:20,880 --> 00:14:23,360
+upstream solution so we don't have to go
+
+00:14:22,480 --> 00:14:26,399
+through this
+
+00:14:23,360 --> 00:14:28,160
+again um you know the status right now
+
+00:14:26,399 --> 00:14:29,920
+is we've completed up streaming the
+
+00:14:28,160 --> 00:14:31,440
+core framework and the interface
+
+00:14:29,920 --> 00:14:33,519
+upstream
+
+00:14:31,440 --> 00:14:35,040
+both the system and cma heaps are have
+
+00:14:33,519 --> 00:14:37,600
+landed and then also
+
+00:14:35,040 --> 00:14:39,600
+uh we've added some recent optimizations
+
+00:14:37,600 --> 00:14:41,040
+to the mainline kernel
+
+00:14:39,600 --> 00:14:43,360
+we still have a handful of patches in
+
+00:14:41,040 --> 00:14:44,880
+android common and some work in progress
+
+00:14:43,360 --> 00:14:46,639
+the shareable page full and deferred
+
+00:14:44,880 --> 00:14:49,040
+free helpers those
+
+00:14:46,639 --> 00:14:51,440
+basically provide performance parity
+
+00:14:49,040 --> 00:14:54,959
+between the dma buff heap system
+
+00:14:51,440 --> 00:14:57,680
+heap as well as the ion system heap
+
+00:14:54,959 --> 00:14:59,040
+and that work is in progress uh as we
+
+00:14:57,680 --> 00:15:00,720
+submitted upstream there's been some
+
+00:14:59,040 --> 00:15:02,800
+desire to kind of unify
+
+00:15:00,720 --> 00:15:05,279
+uh the page pool that we wanted upstream
+
+00:15:02,800 --> 00:15:07,519
+with uh other existing ph pools in the
+
+00:15:05,279 --> 00:15:08,720
+drm subsystem and so we're working on
+
+00:15:07,519 --> 00:15:11,920
+that at the moment
+
+00:15:08,720 --> 00:15:13,519
+um also uh rija and kalesh and
+
+00:15:11,920 --> 00:15:16,320
+google have been working on statistics
+
+00:15:13,519 --> 00:15:18,399
+and accounting efforts for dma buffs
+
+00:15:16,320 --> 00:15:19,839
+um some of these are moving forward and
+
+00:15:18,399 --> 00:15:22,639
+heading upstream
+
+00:15:19,839 --> 00:15:23,040
+others are a little kind of held up on
+
+00:15:22,639 --> 00:15:24,240
+some
+
+00:15:23,040 --> 00:15:26,480
+changes that have been proposed by
+
+00:15:24,240 --> 00:15:29,600
+daniel vetter and others to
+
+00:15:26,480 --> 00:15:30,000
+basically support gpu memory accounting
+
+00:15:29,600 --> 00:15:31,360
+and c
+
+00:15:30,000 --> 00:15:33,920
+groups and so we're trying to figure out
+
+00:15:31,360 --> 00:15:35,199
+how you know the dma buff accounting
+
+00:15:33,920 --> 00:15:38,800
+would fit in with
+
+00:15:35,199 --> 00:15:38,800
+that cgroup accounting
+
+00:15:39,360 --> 00:15:42,959
+additionally there's been a couple of
+
+00:15:40,560 --> 00:15:44,000
+passes at uh trying to expose multiple
+
+00:15:42,959 --> 00:15:48,079
+cma heaps
+
+00:15:44,000 --> 00:15:49,680
+um to uh userland um
+
+00:15:48,079 --> 00:15:51,360
+the one problem with this is we actually
+
+00:15:49,680 --> 00:15:52,560
+don't have any upstream devices that
+
+00:15:51,360 --> 00:15:54,399
+could use this
+
+00:15:52,560 --> 00:15:56,959
+um and so we need to make sure that we
+
+00:15:54,399 --> 00:15:58,399
+have uh upstream users for any support
+
+00:15:56,959 --> 00:16:00,480
+we try to push upstream
+
+00:15:58,399 --> 00:16:02,240
+um and so if you have a device that
+
+00:16:00,480 --> 00:16:02,800
+would benefit from being able to explore
+
+00:16:02,240 --> 00:16:06,000
+export
+
+00:16:02,800 --> 00:16:07,920
+multiple cma heaps uh to uh user user
+
+00:16:06,000 --> 00:16:09,440
+space via the dma buff heaps interface
+
+00:16:07,920 --> 00:16:10,480
+um please reach out and let me know i
+
+00:16:09,440 --> 00:16:14,560
+would love to get that
+
+00:16:10,480 --> 00:16:16,160
+enabled um next is the uncached system
+
+00:16:14,560 --> 00:16:17,759
+and cma heaps
+
+00:16:16,160 --> 00:16:20,000
+this one's a little more complicated
+
+00:16:17,759 --> 00:16:22,160
+basically these are heaps that provide
+
+00:16:20,000 --> 00:16:23,920
+really nice performance benefits on some
+
+00:16:22,160 --> 00:16:25,920
+boards um
+
+00:16:23,920 --> 00:16:27,839
+we do have uh open source scrallock
+
+00:16:25,920 --> 00:16:31,120
+implementations that make use of it
+
+00:16:27,839 --> 00:16:32,240
+but right now the boards that utilize
+
+00:16:31,120 --> 00:16:34,240
+this that would really show the most
+
+00:16:32,240 --> 00:16:36,320
+benefits are using proprietary graphics
+
+00:16:34,240 --> 00:16:38,240
+and the upstream maintainers have kind
+
+00:16:36,320 --> 00:16:41,360
+of pushed for uh
+
+00:16:38,240 --> 00:16:42,959
+uh making sure that we're
+
+00:16:41,360 --> 00:16:44,240
+showing benefit to open graphics and
+
+00:16:42,959 --> 00:16:45,279
+base implementations and i'll talk a
+
+00:16:44,240 --> 00:16:47,600
+little bit more on that
+
+00:16:45,279 --> 00:16:49,279
+later um i'll actually skipped one so
+
+00:16:47,600 --> 00:16:50,240
+heaps modules this is a collection of
+
+00:16:49,279 --> 00:16:53,680
+symbol exports
+
+00:16:50,240 --> 00:16:54,240
+um and uh the maintainers in this case
+
+00:16:53,680 --> 00:16:56,240
+basically
+
+00:16:54,240 --> 00:16:57,360
+uh wanted to make sure that we aren't
+
+00:16:56,240 --> 00:17:00,079
+enabling just
+
+00:16:57,360 --> 00:17:01,600
+out of tree vendor uh drivers and so as
+
+00:17:00,079 --> 00:17:03,040
+we start seeing more heaps kind of go
+
+00:17:01,600 --> 00:17:03,519
+upstream i think it'll be easier to add
+
+00:17:03,040 --> 00:17:06,319
+those
+
+00:17:03,519 --> 00:17:08,400
+exports um and then finally uh the
+
+00:17:06,319 --> 00:17:10,640
+internal allocation accessors um
+
+00:17:08,400 --> 00:17:11,760
+this one i'm actually skeptical about um
+
+00:17:10,640 --> 00:17:14,480
+i think it kind of goes against the
+
+00:17:11,760 --> 00:17:16,880
+philosophy of the dma buffets
+
+00:17:14,480 --> 00:17:17,520
+solution but some vendors really needed
+
+00:17:16,880 --> 00:17:19,280
+it uh
+
+00:17:17,520 --> 00:17:21,439
+in order to make the transition from ion
+
+00:17:19,280 --> 00:17:22,799
+so we kind of added that to the android
+
+00:17:21,439 --> 00:17:25,199
+commentary to
+
+00:17:22,799 --> 00:17:26,480
+help facilitate the transition um i
+
+00:17:25,199 --> 00:17:27,839
+think we'll be working with
+
+00:17:26,480 --> 00:17:29,280
+those vendors trying to figure out kind
+
+00:17:27,839 --> 00:17:30,960
+of what alternative solutions could be
+
+00:17:29,280 --> 00:17:33,200
+used instead and
+
+00:17:30,960 --> 00:17:34,080
+try to figure out a better solution
+
+00:17:33,200 --> 00:17:35,840
+there
+
+00:17:34,080 --> 00:17:37,440
+um now there as i mentioned kind of
+
+00:17:35,840 --> 00:17:38,400
+there's been these uh pain points with
+
+00:17:37,440 --> 00:17:41,919
+upstreaming
+
+00:17:38,400 --> 00:17:43,440
+um we have uh you know basically
+
+00:17:41,919 --> 00:17:45,360
+we need to make sure that anything we
+
+00:17:43,440 --> 00:17:47,120
+push upstream we have
+
+00:17:45,360 --> 00:17:49,039
+upstream users for we don't want to be
+
+00:17:47,120 --> 00:17:49,679
+just adding helper code that only out of
+
+00:17:49,039 --> 00:17:52,880
+tree
+
+00:17:49,679 --> 00:17:54,000
+code uses um and and so this is just an
+
+00:17:52,880 --> 00:17:56,799
+important thing
+
+00:17:54,000 --> 00:17:57,120
+um also another complexity is that you
+
+00:17:56,799 --> 00:18:00,559
+know
+
+00:17:57,120 --> 00:18:01,360
+while uh the you know drm subsystem and
+
+00:18:00,559 --> 00:18:03,520
+the
+
+00:18:01,360 --> 00:18:04,640
+linux graphics subsystems have long had
+
+00:18:03,520 --> 00:18:06,799
+the requirement
+
+00:18:04,640 --> 00:18:08,240
+that any interface that gets added uh
+
+00:18:06,799 --> 00:18:09,440
+needs to make sure that it has open
+
+00:18:08,240 --> 00:18:12,320
+source users
+
+00:18:09,440 --> 00:18:14,080
+in user space um and this basically is
+
+00:18:12,320 --> 00:18:16,640
+just to make sure that we're not adding
+
+00:18:14,080 --> 00:18:17,280
+interfaces for proprietary blob drivers
+
+00:18:16,640 --> 00:18:20,480
+um
+
+00:18:17,280 --> 00:18:22,320
+and while with things like this uncached
+
+00:18:20,480 --> 00:18:24,400
+system heap and cma heap we do have
+
+00:18:22,320 --> 00:18:26,960
+uh open source grollock implementation
+
+00:18:24,400 --> 00:18:30,160
+since these still are on boards that use
+
+00:18:26,960 --> 00:18:32,080
+proprietary graphic blobs you know we
+
+00:18:30,160 --> 00:18:33,520
+need to find a way to show the benefit
+
+00:18:32,080 --> 00:18:36,160
+of adding these heaps
+
+00:18:33,520 --> 00:18:36,960
+to open implementations or devices that
+
+00:18:36,160 --> 00:18:39,520
+use open
+
+00:18:36,960 --> 00:18:41,360
+implementations and so i'm going to talk
+
+00:18:39,520 --> 00:18:42,960
+about that a little bit more in the next
+
+00:18:41,360 --> 00:18:45,360
+slide um
+
+00:18:42,960 --> 00:18:47,679
+so strategy for trying to deal with this
+
+00:18:45,360 --> 00:18:49,440
+um you know my approach is uh
+
+00:18:47,679 --> 00:18:51,200
+you know at least for uh trying to make
+
+00:18:49,440 --> 00:18:52,880
+sure we have upstream users is i'm going
+
+00:18:51,200 --> 00:18:53,919
+to pester and nag vendors as much as i
+
+00:18:52,880 --> 00:18:55,840
+can
+
+00:18:53,919 --> 00:18:58,000
+to try to get those board supports
+
+00:18:55,840 --> 00:18:58,480
+loaded upstream and any heat drivers as
+
+00:18:58,000 --> 00:18:59,919
+well
+
+00:18:58,480 --> 00:19:01,679
+we'll try to kind of dig through vendor
+
+00:18:59,919 --> 00:19:04,480
+trees to try to motivate that
+
+00:19:01,679 --> 00:19:06,320
+uh and help it along where we can um i
+
+00:19:04,480 --> 00:19:08,000
+know some folks see this as naive and
+
+00:19:06,320 --> 00:19:09,360
+vendors will do vendor things and keep
+
+00:19:08,000 --> 00:19:11,440
+their stuff out of tree
+
+00:19:09,360 --> 00:19:13,200
+um but i'm you know a bit of a naive
+
+00:19:11,440 --> 00:19:15,679
+optimist so i'll just kind of
+
+00:19:13,200 --> 00:19:16,880
+keep on pushing on that um but at a kind
+
+00:19:15,679 --> 00:19:19,360
+of more
+
+00:19:16,880 --> 00:19:21,200
+you know deeper level i think that it's
+
+00:19:19,360 --> 00:19:22,960
+important that we find a way to pull the
+
+00:19:21,200 --> 00:19:24,640
+vendors into the community these are
+
+00:19:22,960 --> 00:19:26,160
+you know folks who are you know maybe if
+
+00:19:24,640 --> 00:19:26,480
+they're more product focused or working
+
+00:19:26,160 --> 00:19:28,400
+on
+
+00:19:26,480 --> 00:19:30,320
+stacks that include proprietary graphics
+
+00:19:28,400 --> 00:19:31,280
+they are still you know domain experts
+
+00:19:30,320 --> 00:19:32,799
+that are working
+
+00:19:31,280 --> 00:19:34,480
+on linux and i think that you know our
+
+00:19:32,799 --> 00:19:35,280
+community would be better to be able to
+
+00:19:34,480 --> 00:19:38,400
+pull them
+
+00:19:35,280 --> 00:19:41,120
+uh within um and so i i want to find
+
+00:19:38,400 --> 00:19:42,559
+ways to kind of keep on engaging even if
+
+00:19:41,120 --> 00:19:44,240
+we can't engage on everything but at
+
+00:19:42,559 --> 00:19:46,240
+least on some parts it's still important
+
+00:19:44,240 --> 00:19:48,320
+that we keep the rules and that we keep
+
+00:19:46,240 --> 00:19:49,280
+only supporting upstream open source
+
+00:19:48,320 --> 00:19:51,440
+solutions
+
+00:19:49,280 --> 00:19:53,520
+um but i think there's ways that we can
+
+00:19:51,440 --> 00:19:55,360
+still collaborate
+
+00:19:53,520 --> 00:19:57,520
+and then finally for this ways to
+
+00:19:55,360 --> 00:20:00,640
+demonstrate benefit for these new heaps
+
+00:19:57,520 --> 00:20:02,400
+with open graphics and mesa devices this
+
+00:20:00,640 --> 00:20:04,240
+is a little more difficult because it is
+
+00:20:02,400 --> 00:20:06,640
+a bit of a chicken and egg issue
+
+00:20:04,240 --> 00:20:08,240
+you know with mesa focusing mostly on
+
+00:20:06,640 --> 00:20:11,520
+just gpu and display
+
+00:20:08,240 --> 00:20:13,120
+um the allocation uh methods that it has
+
+00:20:11,520 --> 00:20:14,159
+don't really expect very complicated
+
+00:20:13,120 --> 00:20:16,080
+constraints it can handle some
+
+00:20:14,159 --> 00:20:19,120
+situations but uh
+
+00:20:16,080 --> 00:20:20,880
+you know not not as many um and so just
+
+00:20:19,120 --> 00:20:21,840
+kind of by definition devices that are
+
+00:20:20,880 --> 00:20:24,400
+supported by
+
+00:20:21,840 --> 00:20:25,280
+mesa don't really have very complicated
+
+00:20:24,400 --> 00:20:28,799
+constraints
+
+00:20:25,280 --> 00:20:29,520
+um and so we need to find uh some way to
+
+00:20:28,799 --> 00:20:31,200
+to
+
+00:20:29,520 --> 00:20:32,559
+show benefit and so one of the things
+
+00:20:31,200 --> 00:20:33,520
+i'm thinking about is trying to find
+
+00:20:32,559 --> 00:20:35,919
+ways to kind of
+
+00:20:33,520 --> 00:20:37,760
+look at a more holistic view um not just
+
+00:20:35,919 --> 00:20:39,280
+the gpu display but also pulling in kind
+
+00:20:37,760 --> 00:20:41,600
+of the v4l2
+
+00:20:39,280 --> 00:20:42,799
+camera video and codec support and
+
+00:20:41,600 --> 00:20:44,640
+figuring out kind of as
+
+00:20:42,799 --> 00:20:46,480
+those get integrated we might run into
+
+00:20:44,640 --> 00:20:48,159
+more complicated situations where this
+
+00:20:46,480 --> 00:20:51,280
+would be beneficial and so
+
+00:20:48,159 --> 00:20:53,440
+um following that basically uh
+
+00:20:51,280 --> 00:20:54,320
+we're working on trying to get the v4l2
+
+00:20:53,440 --> 00:20:57,280
+uh support
+
+00:20:54,320 --> 00:20:59,120
+in aosp working on the dragonboard 845
+
+00:20:57,280 --> 00:20:59,600
+which has both open graphics as well as
+
+00:20:59,120 --> 00:21:02,480
+open
+
+00:20:59,600 --> 00:21:04,000
+codec support and try to see if there's
+
+00:21:02,480 --> 00:21:05,200
+ways that we can utilize the dna buff
+
+00:21:04,000 --> 00:21:06,799
+heaps to
+
+00:21:05,200 --> 00:21:08,240
+help kind of that allocation logic and
+
+00:21:06,799 --> 00:21:11,679
+smooth it out
+
+00:21:08,240 --> 00:21:13,840
+um so that is it for me i will uh
+
+00:21:11,679 --> 00:21:16,559
+try to take some questions now if you
+
+00:21:13,840 --> 00:21:18,320
+have any questions feel free to email me
+
+00:21:16,559 --> 00:21:19,679
+and i would be happy to try to answer
+
+00:21:18,320 --> 00:21:22,159
+and discuss with you
+
+00:21:19,679 --> 00:21:24,000
+but while we have i guess the remaining
+
+00:21:22,159 --> 00:21:25,120
+couple of minutes i'll try to answer
+
+00:21:24,000 --> 00:21:28,080
+some of the questions here
+
+00:21:25,120 --> 00:21:30,000
+um so we've got one uh so the users of
+
+00:21:28,080 --> 00:21:32,720
+dma buffs in user space
+
+00:21:30,000 --> 00:21:34,320
+you couldn't have a buffer heap that say
+
+00:21:32,720 --> 00:21:35,200
+for example could direct where the
+
+00:21:34,320 --> 00:21:38,240
+kernel block
+
+00:21:35,200 --> 00:21:40,799
+cache might live i'm not sure i
+
+00:21:38,240 --> 00:21:42,480
+totally understand this question i guess
+
+00:21:40,799 --> 00:21:44,320
+owners might be a better term is the
+
+00:21:42,480 --> 00:21:46,640
+clarification there um
+
+00:21:44,320 --> 00:21:49,520
+so the users of dma buff are in user
+
+00:21:46,640 --> 00:21:50,159
+space but dma buffs can also be used in
+
+00:21:49,520 --> 00:21:52,559
+the kernel
+
+00:21:50,159 --> 00:21:54,159
+by uh drivers um so it's kind of
+
+00:21:52,559 --> 00:21:56,640
+something that's really flexible and
+
+00:21:54,159 --> 00:21:59,760
+able to be shared
+
+00:21:56,640 --> 00:22:01,360
+you know from uh both sides as well as a
+
+00:21:59,760 --> 00:22:03,760
+method for kind of uh
+
+00:22:01,360 --> 00:22:05,360
+doing device dma kernel access as well
+
+00:22:03,760 --> 00:22:08,720
+as user space access
+
+00:22:05,360 --> 00:22:10,640
+um as far as owners the
+
+00:22:08,720 --> 00:22:12,080
+owner of the dma buff since the buffer
+
+00:22:10,640 --> 00:22:13,840
+is somewhat abstract
+
+00:22:12,080 --> 00:22:16,559
+the dmi buff exporter is the one that
+
+00:22:13,840 --> 00:22:19,679
+basically uh kind of controls it and so
+
+00:22:16,559 --> 00:22:22,640
+uh in the case of dma buff heaps
+
+00:22:19,679 --> 00:22:24,559
+the heaps are the dma buff exporter and
+
+00:22:22,640 --> 00:22:26,799
+so they basically handle things like the
+
+00:22:24,559 --> 00:22:29,120
+cash synchronization operations um
+
+00:22:26,799 --> 00:22:29,840
+and the uh mapping operations for that
+
+00:22:29,120 --> 00:22:33,039
+buffer
+
+00:22:29,840 --> 00:22:34,880
+um but as far as the owner of it it's
+
+00:22:33,039 --> 00:22:36,400
+uh similar to a file descriptor has a
+
+00:22:34,880 --> 00:22:38,559
+file descriptor lifetime so
+
+00:22:36,400 --> 00:22:40,159
+you know it's one of those things where
+
+00:22:38,559 --> 00:22:41,039
+once all of them are closed the buffers
+
+00:22:40,159 --> 00:22:43,200
+are free
+
+00:22:41,039 --> 00:22:45,280
+um hopefully that answered the question
+
+00:22:43,200 --> 00:22:48,400
+i'm not sure
+
+00:22:45,280 --> 00:22:54,480
+anything else got
+
+00:22:48,400 --> 00:22:59,120
+maybe about two minutes left
+
+00:22:54,480 --> 00:22:59,120
+try to scan through the chat list here
+
+00:23:03,360 --> 00:23:09,039
+so the clarification that uh in the last
+
+00:23:06,559 --> 00:23:10,799
+question the use case is limited to
+
+00:23:09,039 --> 00:23:12,400
+memory sharing between a vm and a
+
+00:23:10,799 --> 00:23:15,360
+service vm
+
+00:23:12,400 --> 00:23:17,280
+um instead of the service vm seeing all
+
+00:23:15,360 --> 00:23:18,720
+of the other vm's address space
+
+00:23:17,280 --> 00:23:20,720
+um so that's an interesting one i know
+
+00:23:18,720 --> 00:23:23,679
+there has been some
+
+00:23:20,720 --> 00:23:25,039
+uh uh stewing on how we might be able to
+
+00:23:23,679 --> 00:23:29,840
+use dma buffs
+
+00:23:25,039 --> 00:23:32,400
+to pass uh buffers across
+
+00:23:29,840 --> 00:23:34,000
+vm domains and so basically as a
+
+00:23:32,400 --> 00:23:37,520
+virtualization
+
+00:23:34,000 --> 00:23:39,039
+concept um i'm not sure
+
+00:23:37,520 --> 00:23:41,279
+where we are at the moment with that i
+
+00:23:39,039 --> 00:23:45,520
+think uh right now it still is a
+
+00:23:41,279 --> 00:23:46,799
+uh you know internal uh structure um
+
+00:23:45,520 --> 00:23:48,480
+so i don't think we have a way to send
+
+00:23:46,799 --> 00:23:49,360
+it uh through the hypervisor at this
+
+00:23:48,480 --> 00:23:51,039
+point
+
+00:23:49,360 --> 00:23:53,360
+but i i do know folks are looking at
+
+00:23:51,039 --> 00:23:56,000
+that there's another question here
+
+00:23:53,360 --> 00:23:57,600
+on does dma buff have a mechanism for
+
+00:23:56,000 --> 00:23:59,440
+sending a buffer to another os
+
+00:23:57,600 --> 00:24:01,200
+so at this point i don't believe so but
+
+00:23:59,440 --> 00:24:05,840
+it's something that i think folks are
+
+00:24:01,200 --> 00:24:05,840
+looking at
+
+00:24:06,480 --> 00:24:10,320
+alrighty so we're down to less than a
+
+00:24:08,000 --> 00:24:12,400
+minute um i'll see if there's anything
+
+00:24:10,320 --> 00:24:16,480
+else that pops up here
+
+00:24:12,400 --> 00:24:19,120
+um but otherwise uh thanks so much for
+
+00:24:16,480 --> 00:24:20,720
+joining and listening and i hope
+
+00:24:19,120 --> 00:24:22,480
+everybody's doing well and
+
+00:24:20,720 --> 00:24:26,240
+can't wait till we can all finally get
+
+00:24:22,480 --> 00:24:26,240
+together and have these things in person
+
+00:24:27,520 --> 00:24:33,840
+alrighty thanks so much
+
+00:24:40,799 --> 00:24:42,880
+
+YouTube URL: https://www.youtube.com/watch?v=xjBeq__7n6U
+
+

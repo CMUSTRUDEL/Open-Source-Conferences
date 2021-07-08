@@ -1,0 +1,2306 @@
+Title: Kernel TLS and TLS hardware offload
+Publication date: 2019-10-27
+Playlist: EuroBSDCon 2019, Norway
+Description: 
+	Kernel TLS and TLS hardware offload
+TLS (Transport Layer Security) is a widely-deployed network protocol used for providing cryptographically proven security and authentication of TCP sessions. A kernel implementation of TLS will provide access to TLS hardware offload, ability to access unencrypted bytes of data in the kernel, and a reduction in copies to and from userspace by allowing the use of the sendfile(9) system call for TLS encrypted data.
+
+This talk will start from explaining the basics of TLS protocol, using OpenSSL as an example, cover the advantages and motivation for kernel TLS (KTLS) and later will dive in to the implementation.
+
+One of the major advantages of KTLS is the ability to offload TLS symmetric crypto processing to the network device. This talk will cover TLS hardware offload approaches, like TOE and inline TLS acceleration.
+
+We will close with some performance numbers comparing OpenSSL, KTLS and hardware offloaded TLS with data taken from Netflix servers.
+
+
+Drew Gallatin
+
+Drew started working on FreeBSD at Duke in the 90s, and was one of the people behind the FreeBSD/alpha port. He worked on zero-copy TCP optimizations for FreeBSD and was sending data at over 1Gb/s before gigabit Ethernet was generally available. He spent a decade at Myricom, optimizing their drivers. After a brief hiatus at Google, he landed at Netflix, where he works on optimizing the FreeBSD kernel and network stack for content delivery. He worked on the optimizations to serve unencrypted Netflix traffic at 100Gb/s, and then on more optimizations to send encrypted traffic at 100Gb/s.
+Captions: 
+	00:00:03,560 --> 00:00:11,450
+No so I'm here to talk about Karl Tillis
+
+00:00:08,720 --> 00:00:15,440
+and hardware to restore float in FreeBSD
+
+00:00:11,450 --> 00:00:18,380
+13 this has been a long time effort it
+
+00:00:15,440 --> 00:00:20,960
+started initially with Netflix and now
+
+00:00:18,380 --> 00:00:25,520
+also Mellanox and Chelsea o is involved
+
+00:00:20,960 --> 00:00:29,330
+and my name is like sad conspiracy
+
+00:00:25,520 --> 00:00:32,509
+Laskey also called HP s where HSN asked
+
+00:00:29,330 --> 00:00:36,530
+at FreeBSD dot-org I started out a long
+
+00:00:32,509 --> 00:00:40,910
+time ago with USB and now I'm doing full
+
+00:00:36,530 --> 00:00:43,999
+time networking with Mellanox and here
+
+00:00:40,910 --> 00:00:46,510
+we have Joe Gallatin and I started off a
+
+00:00:43,999 --> 00:00:50,719
+long time ago with FreeBSD alpha and
+
+00:00:46,510 --> 00:00:56,089
+networking and various things and here
+
+00:00:50,719 --> 00:00:58,760
+we are with TLS sure so I have a little
+
+00:00:56,089 --> 00:01:00,949
+petition here so how many has ever been
+
+00:00:58,760 --> 00:01:04,640
+to a cryptography course before at
+
+00:01:00,949 --> 00:01:07,250
+university put your hands up so yeah
+
+00:01:04,640 --> 00:01:10,159
+there's a couple of people here so
+
+00:01:07,250 --> 00:01:12,229
+that's good so you may be familiar with
+
+00:01:10,159 --> 00:01:16,070
+Bob and Alice I need to say a little bit
+
+00:01:12,229 --> 00:01:18,320
+about why we do cryptography so Bob and
+
+00:01:16,070 --> 00:01:20,920
+Alice are the two famous characters that
+
+00:01:18,320 --> 00:01:23,509
+try to exchange our secret message and
+
+00:01:20,920 --> 00:01:28,390
+there's also the evil guy that try to
+
+00:01:23,509 --> 00:01:31,670
+eavesdrop and do daughter tampering so
+
+00:01:28,390 --> 00:01:35,479
+quickly summarized cryptography is
+
+00:01:31,670 --> 00:01:40,219
+making our numerical message depending
+
+00:01:35,479 --> 00:01:43,299
+on a small fee shared key and you can
+
+00:01:40,219 --> 00:01:46,880
+use it right or you can use it wrong and
+
+00:01:43,299 --> 00:01:50,000
+usually it's good it prevents leaking
+
+00:01:46,880 --> 00:01:54,579
+data to our Sun and also you can use it
+
+00:01:50,000 --> 00:01:56,359
+for checksumming and unfortunately also
+
+00:01:54,579 --> 00:01:59,950
+cryptography can make your daughter
+
+00:01:56,359 --> 00:02:03,729
+disappear faster when you lose your keys
+
+00:01:59,950 --> 00:02:03,729
+so be careful
+
+00:02:04,810 --> 00:02:09,710
+TLS that's maybe familiar to a lot of
+
+00:02:08,840 --> 00:02:11,980
+you guys
+
+00:02:09,710 --> 00:02:14,990
+it's short for transport layer security
+
+00:02:11,980 --> 00:02:20,060
+I'm trying to be very easy starting in
+
+00:02:14,990 --> 00:02:25,220
+the morning it's used behind HTTPS on
+
+00:02:20,060 --> 00:02:29,750
+port 443 and it can support multiple
+
+00:02:25,220 --> 00:02:32,060
+crypto codecs like AES we're mostly
+
+00:02:29,750 --> 00:02:37,580
+going to focus on IES because that's the
+
+00:02:32,060 --> 00:02:40,070
+main standard with us 1.3 and it can
+
+00:02:37,580 --> 00:02:43,610
+also support different key exchange
+
+00:02:40,070 --> 00:02:47,630
+protocols so we you maybe know about
+
+00:02:43,610 --> 00:02:52,239
+diffie-hellman and RSA and there might
+
+00:02:47,630 --> 00:02:52,239
+be more that we don't know about yet so
+
+00:02:52,660 --> 00:03:03,170
+like mentioned TLS is the protocol and
+
+00:02:57,880 --> 00:03:06,590
+it runs on top of TCP and then on top of
+
+00:03:03,170 --> 00:03:10,880
+TLS you can run other protocols like
+
+00:03:06,590 --> 00:03:13,040
+shown in the slide and this is just to
+
+00:03:10,880 --> 00:03:15,860
+give you a picture and I'm going to dig
+
+00:03:13,040 --> 00:03:18,799
+a little bit into details when I started
+
+00:03:15,860 --> 00:03:21,830
+doing TLS work this was a black box what
+
+00:03:18,799 --> 00:03:24,080
+is TLS and trying to find documentation
+
+00:03:21,830 --> 00:03:29,830
+was not so easy so I started with the
+
+00:03:24,080 --> 00:03:35,950
+code TLS has a small header that
+
+00:03:29,830 --> 00:03:40,700
+encapsulated ATO we have 13 bytes
+
+00:03:35,950 --> 00:03:43,760
+typically but it's variable so in the
+
+00:03:40,700 --> 00:03:46,610
+beginning we have a type it can be
+
+00:03:43,760 --> 00:03:49,310
+daughter handshake alert for example
+
+00:03:46,610 --> 00:03:52,400
+alert happens when someone is tampering
+
+00:03:49,310 --> 00:03:54,530
+with the dot on the receiver identifies
+
+00:03:52,400 --> 00:03:56,360
+oh I cannot decrypt this packet and it
+
+00:03:54,530 --> 00:04:00,230
+sounds alert message to terminate the
+
+00:03:56,360 --> 00:04:05,390
+connection then you have some major and
+
+00:04:00,230 --> 00:04:08,870
+minor numbers and for TLS 1.2 it's 3 and
+
+00:04:05,390 --> 00:04:13,040
+3 this actually dates back to the times
+
+00:04:08,870 --> 00:04:16,250
+of as a cell person tree so so it's not
+
+00:04:13,040 --> 00:04:17,030
+actually should be 1 and 2 but it's tree
+
+00:04:16,250 --> 00:04:22,190
+and tree
+
+00:04:17,030 --> 00:04:26,240
+and the tls length is a 16-bit number so
+
+00:04:22,190 --> 00:04:31,460
+you can actually encapsulate up to 64
+
+00:04:26,240 --> 00:04:34,640
+kilobytes minus 1 to be exact but a lot
+
+00:04:31,460 --> 00:04:39,530
+of applications limit is to 16 kilobytes
+
+00:04:34,640 --> 00:04:41,930
+and yeah that's just a kind of legacy
+
+00:04:39,530 --> 00:04:44,330
+thing you need to know that when you use
+
+00:04:41,930 --> 00:04:48,410
+TLS you might need you smaller blocks
+
+00:04:44,330 --> 00:04:51,380
+you cannot do so big blocks after the
+
+00:04:48,410 --> 00:04:57,080
+length you have some variable nonce it's
+
+00:04:51,380 --> 00:04:59,540
+usually 8 bytes with some crypto codecs
+
+00:04:57,080 --> 00:05:02,750
+depending on algorithm and sometimes
+
+00:04:59,540 --> 00:05:08,390
+it's not present and then you have the
+
+00:05:02,750 --> 00:05:12,140
+dart talk so this is TLS 1.2 so the
+
+00:05:08,390 --> 00:05:15,740
+difference for TLS 1.3 is basically that
+
+00:05:12,140 --> 00:05:18,560
+you don't have a nonce the nonce is kept
+
+00:05:15,740 --> 00:05:22,630
+on the side track of the protocol it's
+
+00:05:18,560 --> 00:05:27,740
+maintained by the hardware or software
+
+00:05:22,630 --> 00:05:30,890
+and to save bandwidth and as you can see
+
+00:05:27,740 --> 00:05:35,000
+here the major number and minor numbers
+
+00:05:30,890 --> 00:05:37,520
+are still 3 & 3 so why is that that's
+
+00:05:35,000 --> 00:05:39,919
+again we have a lot of routers and
+
+00:05:37,520 --> 00:05:42,020
+equipment at only support C last one or
+
+00:05:39,919 --> 00:05:44,990
+two and if you try to change this
+
+00:05:42,020 --> 00:05:47,750
+numbers then maybe that equipment won't
+
+00:05:44,990 --> 00:05:51,610
+support this protocol and your packets
+
+00:05:47,750 --> 00:05:54,590
+will be dropped so instead of putting
+
+00:05:51,610 --> 00:05:57,290
+the first fight to chill s type in the
+
+00:05:54,590 --> 00:05:59,240
+beginning we now put it after the TLS
+
+00:05:57,290 --> 00:06:04,700
+daughter that's not shown in the picture
+
+00:05:59,240 --> 00:06:08,750
+and yeah this is just curiosity at the
+
+00:06:04,700 --> 00:06:13,810
+moment I'm going to say a few words
+
+00:06:08,750 --> 00:06:16,280
+about a EES AES is old algorithm
+
+00:06:13,810 --> 00:06:19,400
+relatively old started in the
+
+00:06:16,280 --> 00:06:23,450
+Netherlands and it wasn't called AES you
+
+00:06:19,400 --> 00:06:26,690
+can read about it at Wikipedia it's
+
+00:06:23,450 --> 00:06:31,479
+basically doing 16 and 16 bytes at a
+
+00:06:26,690 --> 00:06:34,030
+time and it can be used as a stream
+
+00:06:31,479 --> 00:06:36,680
+version that means you can stop
+
+00:06:34,030 --> 00:06:39,380
+encrypting and keeping the state and you
+
+00:06:36,680 --> 00:06:42,260
+can resume encrypting so basically you
+
+00:06:39,380 --> 00:06:45,289
+can when you're encrypting a stream you
+
+00:06:42,260 --> 00:06:47,780
+can do byte by byte because it used the
+
+00:06:45,289 --> 00:06:50,780
+previous block output from the previous
+
+00:06:47,780 --> 00:06:53,330
+block to encrypt the next block and in
+
+00:06:50,780 --> 00:06:59,000
+the beginning there is initial vector
+
+00:06:53,330 --> 00:07:01,400
+that you used to start with and I can
+
+00:06:59,000 --> 00:07:07,520
+also master FreeBSD supports the North
+
+00:07:01,400 --> 00:07:11,419
+stream version of AES to the transport
+
+00:07:07,520 --> 00:07:14,390
+layer security is in FreeBSD implemented
+
+00:07:11,419 --> 00:07:19,160
+by open SSL I know there are other
+
+00:07:14,390 --> 00:07:20,780
+alternatives like libero Ribera SSL but
+
+00:07:19,160 --> 00:07:24,710
+I'm going to focus on what we have in
+
+00:07:20,780 --> 00:07:27,830
+FreeBSD at the moment you may be
+
+00:07:24,710 --> 00:07:32,080
+familiar with the term AES and I that's
+
+00:07:27,830 --> 00:07:36,830
+a es new instruction set it's usually
+
+00:07:32,080 --> 00:07:42,050
+CPU offload for AES and it makes it run
+
+00:07:36,830 --> 00:07:43,310
+faster then then we have also a software
+
+00:07:42,050 --> 00:07:45,650
+kernel TLS
+
+00:07:43,310 --> 00:07:49,010
+that means instead of doing this
+
+00:07:45,650 --> 00:07:52,310
+encryption in the user space we do it in
+
+00:07:49,010 --> 00:07:53,930
+the kernel instead and I will return to
+
+00:07:52,310 --> 00:07:57,140
+why we do that later on in the
+
+00:07:53,930 --> 00:08:01,729
+presentation there's also something
+
+00:07:57,140 --> 00:08:06,919
+called open crypto framework or ocf that
+
+00:08:01,729 --> 00:08:10,190
+is basically a PCI card that where you
+
+00:08:06,919 --> 00:08:14,380
+can DMA the data and get to encrypted
+
+00:08:10,190 --> 00:08:18,320
+data back and that's for the kernel and
+
+00:08:14,380 --> 00:08:20,990
+then we have yet another technology it's
+
+00:08:18,320 --> 00:08:25,190
+called TCP offload engine or Towey
+
+00:08:20,990 --> 00:08:27,530
+that means we stand only the TCP data to
+
+00:08:25,190 --> 00:08:32,360
+the network card and then a network card
+
+00:08:27,530 --> 00:08:34,209
+will do both the TCP and the TLS in the
+
+00:08:32,360 --> 00:08:38,529
+same operation
+
+00:08:34,209 --> 00:08:42,490
+and then we have Nick Colonel TLS that
+
+00:08:38,529 --> 00:08:45,429
+is when we're sounding full TCP frames
+
+00:08:42,490 --> 00:08:48,160
+with data to the Nick and a Nick will
+
+00:08:45,429 --> 00:08:51,069
+done decipher the header and undo the
+
+00:08:48,160 --> 00:08:55,179
+TLS encryption packet by packet and this
+
+00:08:51,069 --> 00:08:57,639
+way you can also do tier so so so you
+
+00:08:55,179 --> 00:08:59,709
+can put down a big chunk of data to the
+
+00:08:57,639 --> 00:09:02,619
+Nick the Nick will do both the
+
+00:08:59,709 --> 00:09:08,949
+fragmenting of the frames and it will do
+
+00:09:02,619 --> 00:09:11,199
+encryption at the same time so I'm going
+
+00:09:08,949 --> 00:09:17,259
+to look a little bit and open as the
+
+00:09:11,199 --> 00:09:20,829
+cell open SSL is you can look at it like
+
+00:09:17,259 --> 00:09:25,089
+a filter it's based around something
+
+00:09:20,829 --> 00:09:28,300
+called a bo structure it's like a source
+
+00:09:25,089 --> 00:09:31,600
+and sink for data and you can hook them
+
+00:09:28,300 --> 00:09:33,490
+together to to to make a chain of
+
+00:09:31,600 --> 00:09:35,649
+filters like you can read from a file
+
+00:09:33,490 --> 00:09:40,629
+you can do encryption and it can output
+
+00:09:35,649 --> 00:09:43,019
+to a socket and with this framework old
+
+00:09:40,629 --> 00:09:47,079
+Otto must have a pointer in user space
+
+00:09:43,019 --> 00:09:50,499
+so so it's passing around pointers it's
+
+00:09:47,079 --> 00:09:53,649
+zero coffee inside open SSL but when you
+
+00:09:50,499 --> 00:09:55,809
+do a socket to send done it will be a
+
+00:09:53,649 --> 00:10:03,999
+copy into the kernel so I will talk more
+
+00:09:55,809 --> 00:10:09,220
+about this later on as well open SSL and
+
+00:10:03,999 --> 00:10:12,759
+kernel T lasts so we have a guy at my
+
+00:10:09,220 --> 00:10:16,540
+office in not in Norway but in Israel
+
+00:10:12,759 --> 00:10:19,240
+that's called Boris he made 16 patches
+
+00:10:16,540 --> 00:10:23,110
+to support something called kernel T at
+
+00:10:19,240 --> 00:10:24,759
+us it's like offload for doing the
+
+00:10:23,110 --> 00:10:28,929
+encryption in the kernel instead of in
+
+00:10:24,759 --> 00:10:32,740
+user space and he did it initially for
+
+00:10:28,929 --> 00:10:38,110
+Linux and now we also have this in
+
+00:10:32,740 --> 00:10:41,009
+FreeBSD so the API is very simple it's
+
+00:10:38,110 --> 00:10:44,799
+to set socket options you have a
+
+00:10:41,009 --> 00:10:47,760
+successful adoption that turns on TLS
+
+00:10:44,799 --> 00:10:49,470
+for TX and you have a set
+
+00:10:47,760 --> 00:10:51,300
+adoption where you can switch the
+
+00:10:49,470 --> 00:10:55,140
+background you are using in the kernel
+
+00:10:51,300 --> 00:10:57,690
+so so you can for example say I want to
+
+00:10:55,140 --> 00:11:00,870
+use to Nick offload I want to use open
+
+00:10:57,690 --> 00:11:04,950
+crypto framework I want to use something
+
+00:11:00,870 --> 00:11:10,740
+else so so you can switch around which
+
+00:11:04,950 --> 00:11:13,950
+back-end you're using and I have a link
+
+00:11:10,740 --> 00:11:15,950
+here which shows when freebsd support
+
+00:11:13,950 --> 00:11:19,200
+without it it's revision three five one
+
+00:11:15,950 --> 00:11:21,420
+five two two and this is a cumulative
+
+00:11:19,200 --> 00:11:23,730
+work of many people
+
+00:11:21,420 --> 00:11:28,980
+so John Baldwin sitting here on the
+
+00:11:23,730 --> 00:11:31,940
+front did push button work and get it
+
+00:11:28,980 --> 00:11:36,210
+got it into the tree but but it's really
+
+00:11:31,940 --> 00:11:42,330
+like drew here real mansion in this part
+
+00:11:36,210 --> 00:11:44,430
+it's it's a lot of people involved ok as
+
+00:11:42,330 --> 00:11:47,840
+Hans was saying a lot of people were
+
+00:11:44,430 --> 00:11:50,490
+involved in this back in 2014 2015
+
+00:11:47,840 --> 00:11:52,290
+netflix made a commitment to protect the
+
+00:11:50,490 --> 00:11:54,810
+privacy of its users and to start
+
+00:11:52,290 --> 00:11:57,990
+encrypting the VOT VOT LS the streams
+
+00:11:54,810 --> 00:12:00,570
+that we send the movies to your to your
+
+00:11:57,990 --> 00:12:02,250
+devices in and so the problem was this
+
+00:12:00,570 --> 00:12:02,610
+is really expensive how are we gonna do
+
+00:12:02,250 --> 00:12:06,960
+this
+
+00:12:02,610 --> 00:12:09,060
+and Scott long and Randall Stewart did
+
+00:12:06,960 --> 00:12:11,790
+got along the idea Randall Stewart did
+
+00:12:09,060 --> 00:12:15,210
+the initial implementation of kernel TLS
+
+00:12:11,790 --> 00:12:17,760
+and the idea was to preserve our normal
+
+00:12:15,210 --> 00:12:19,860
+send file pipeline where you know
+
+00:12:17,760 --> 00:12:22,020
+instead of what what a lot of people do
+
+00:12:19,860 --> 00:12:23,490
+which is to read the data in you know
+
+00:12:22,020 --> 00:12:25,260
+from the kernel into a web server and
+
+00:12:23,490 --> 00:12:27,090
+then four and then write the data from
+
+00:12:25,260 --> 00:12:28,380
+the web server back into the kernel we
+
+00:12:27,090 --> 00:12:30,000
+kind of want to avoid that extra step
+
+00:12:28,380 --> 00:12:32,700
+and we just want to be able to do a send
+
+00:12:30,000 --> 00:12:34,860
+file so by doing TLS in the kernel we
+
+00:12:32,700 --> 00:12:36,540
+can preserve that same pipeline and we
+
+00:12:34,860 --> 00:12:38,040
+can still use async send file and
+
+00:12:36,540 --> 00:12:41,130
+everything looks basically the same
+
+00:12:38,040 --> 00:12:43,110
+except for the crypto stuff and the idea
+
+00:12:41,130 --> 00:12:45,090
+was we want to do it as you know as most
+
+00:12:43,110 --> 00:12:46,850
+as efficiently as possible and a huge
+
+00:12:45,090 --> 00:12:49,710
+amount of time was spent by randall
+
+00:12:46,850 --> 00:12:52,140
+making it efficient and then even more
+
+00:12:49,710 --> 00:12:54,330
+time was spent by me coming along after
+
+00:12:52,140 --> 00:12:56,430
+Randall and making even more and more
+
+00:12:54,330 --> 00:12:59,010
+efficient
+
+00:12:56,430 --> 00:13:01,600
+so in order to do some of these things
+
+00:12:59,010 --> 00:13:04,570
+in vote 40 laughs we needed some
+
+00:13:01,600 --> 00:13:07,060
+enhancements to em buffs and I'm going
+
+00:13:04,570 --> 00:13:08,680
+to talk about the the not ready flag I'm
+
+00:13:07,060 --> 00:13:11,230
+gonna talk about the I'm gonna talk
+
+00:13:08,680 --> 00:13:13,449
+about unmapped and bus and then Hans is
+
+00:13:11,230 --> 00:13:19,000
+gonna continue on with syntax for Nick
+
+00:13:13,449 --> 00:13:21,790
+GLS so what's the not ready flag this is
+
+00:13:19,000 --> 00:13:24,160
+something that Gleb Smirnoff also from
+
+00:13:21,790 --> 00:13:28,779
+Netflix came up with to support async
+
+00:13:24,160 --> 00:13:31,269
+send file and the idea is that when you
+
+00:13:28,779 --> 00:13:33,070
+are doing sun file you're reading stuff
+
+00:13:31,269 --> 00:13:34,300
+from disk and whenever you read stuff
+
+00:13:33,070 --> 00:13:38,410
+from disk there's a chance you're gonna
+
+00:13:34,300 --> 00:13:40,870
+block so rather than having nginx have
+
+00:13:38,410 --> 00:13:42,940
+to block and lose it nginx context and
+
+00:13:40,870 --> 00:13:47,529
+have to have a thread pool the idea is
+
+00:13:42,940 --> 00:13:53,560
+that nginx uses async send file so what
+
+00:13:47,529 --> 00:13:55,779
+happens is you send file submits the the
+
+00:13:53,560 --> 00:13:57,940
+Umba into the socket buffer and it
+
+00:13:55,779 --> 00:14:00,910
+issues the disk read to fill the pages
+
+00:13:57,940 --> 00:14:02,620
+that are attached to the EM buff but
+
+00:14:00,910 --> 00:14:04,389
+when it puts the EM buff on the socket
+
+00:14:02,620 --> 00:14:06,730
+buffer it marks it not ready and what
+
+00:14:04,389 --> 00:14:08,110
+that means is when TCP is processing the
+
+00:14:06,730 --> 00:14:10,240
+socket but we're looking for things to
+
+00:14:08,110 --> 00:14:12,459
+send it has to stop when it runs into it
+
+00:14:10,240 --> 00:14:15,699
+not ready so when the disk interrupt
+
+00:14:12,459 --> 00:14:18,160
+handler comes and the pages are now
+
+00:14:15,699 --> 00:14:21,370
+there it marks the end buffs ready and
+
+00:14:18,160 --> 00:14:23,560
+calls the TCP ready routine which which
+
+00:14:21,370 --> 00:14:25,930
+then calls TC Peter re-examine the
+
+00:14:23,560 --> 00:14:27,940
+socket buffer and send anything which
+
+00:14:25,930 --> 00:14:29,649
+has been marked ready and in that way
+
+00:14:27,940 --> 00:14:32,230
+you can avoid having an NG next threat
+
+00:14:29,649 --> 00:14:36,040
+pool were you having lots of contacts
+
+00:14:32,230 --> 00:14:38,410
+blocking the the handy thing is that I
+
+00:14:36,040 --> 00:14:40,420
+realized that it allows for a very
+
+00:14:38,410 --> 00:14:43,870
+simple way to sort of add a stage at
+
+00:14:40,420 --> 00:14:45,910
+that pipeline and after this the page is
+
+00:14:43,870 --> 00:14:48,430
+coming from disk you can leave them not
+
+00:14:45,910 --> 00:14:50,800
+ready and call a crypto routine which
+
+00:14:48,430 --> 00:14:52,810
+will then mark them not ready so that in
+
+00:14:50,800 --> 00:14:56,190
+that way we can use the not ready flag
+
+00:14:52,810 --> 00:14:56,190
+for Colonel TLS as well
+
+00:14:56,200 --> 00:15:01,150
+and so the next thing I want to talk
+
+00:14:58,990 --> 00:15:03,610
+about is unmapped n bus and what that
+
+00:15:01,150 --> 00:15:05,070
+really means is a an M buff that's
+
+00:15:03,610 --> 00:15:08,140
+basically pointing to an array of
+
+00:15:05,070 --> 00:15:10,150
+physical first it started off as
+
+00:15:08,140 --> 00:15:11,800
+physical pages and in fact the structure
+
+00:15:10,150 --> 00:15:15,220
+still kind of named that way but it's
+
+00:15:11,800 --> 00:15:16,660
+really just physical addresses so it's
+
+00:15:15,220 --> 00:15:19,390
+initially in bed and I initially thought
+
+00:15:16,660 --> 00:15:22,960
+of it for scent file and not for TLS and
+
+00:15:19,390 --> 00:15:26,080
+the idea was that in send file you have
+
+00:15:22,960 --> 00:15:29,890
+one M buff pointing to one page so for
+
+00:15:26,080 --> 00:15:33,910
+you know 64 K you've you've got 64 K
+
+00:15:29,890 --> 00:15:37,480
+divided by by 4 K or like 16 16 pages so
+
+00:15:33,910 --> 00:15:38,740
+basically for for every 4 K you're in a
+
+00:15:37,480 --> 00:15:40,410
+socket buffer you're walking a new n
+
+00:15:38,740 --> 00:15:42,880
+buff you're taking a new cache miss and
+
+00:15:40,410 --> 00:15:44,860
+TCP walks that socket buffer chains a
+
+00:15:42,880 --> 00:15:47,230
+lot especially you know processing acts
+
+00:15:44,860 --> 00:15:49,780
+and doing things like that if you can
+
+00:15:47,230 --> 00:15:52,390
+combine all of these all these into an
+
+00:15:49,780 --> 00:15:54,340
+array so instead of having just instead
+
+00:15:52,390 --> 00:15:56,800
+of just having 4 K reference to have 16
+
+00:15:54,340 --> 00:15:59,680
+K in the case in the case of TLS or you
+
+00:15:56,800 --> 00:16:02,320
+know like a hundred K in the case of non
+
+00:15:59,680 --> 00:16:05,410
+TLS you can reduce these cache misses a
+
+00:16:02,320 --> 00:16:08,290
+large factor and even in our unencrypted
+
+00:16:05,410 --> 00:16:09,940
+workloads at the time when I introduced
+
+00:16:08,290 --> 00:16:11,620
+this it reduced our CPU by something
+
+00:16:09,940 --> 00:16:15,190
+like between five and twenty percent
+
+00:16:11,620 --> 00:16:17,140
+depending on that on the machine so the
+
+00:16:15,190 --> 00:16:19,740
+other handy thing which I realized later
+
+00:16:17,140 --> 00:16:23,230
+is that it also provides a nice way to
+
+00:16:19,740 --> 00:16:24,910
+work well with TLS so by enhancing
+
+00:16:23,230 --> 00:16:26,920
+that's just a little bit by adding space
+
+00:16:24,910 --> 00:16:28,480
+to the front for the the 13 bytes that
+
+00:16:26,920 --> 00:16:30,520
+Hans was talking about for the beginning
+
+00:16:28,480 --> 00:16:32,470
+of the TLS record and adding some space
+
+00:16:30,520 --> 00:16:34,660
+at the back for the end of the TLS
+
+00:16:32,470 --> 00:16:37,390
+record all of a sudden you've got a
+
+00:16:34,660 --> 00:16:40,720
+single atomic way to refer to TLS record
+
+00:16:37,390 --> 00:16:43,470
+and that's really handy for being able
+
+00:16:40,720 --> 00:16:44,620
+to do reference counting for TCP
+
+00:16:43,470 --> 00:16:48,790
+retransmits
+
+00:16:44,620 --> 00:16:52,360
+for NIC TLS and the reason that's
+
+00:16:48,790 --> 00:16:55,540
+important is because TLS records don't
+
+00:16:52,360 --> 00:16:58,639
+always end up lining up
+
+00:16:55,540 --> 00:17:04,370
+TCP segment sizes so what can happen is
+
+00:16:58,639 --> 00:17:07,220
+TCP can get a knack for you know up to a
+
+00:17:04,370 --> 00:17:09,199
+certain point in a stream whereas that
+
+00:17:07,220 --> 00:17:11,779
+might be in the middle of a TLS record
+
+00:17:09,199 --> 00:17:13,549
+so what TCP wants to do is TCP says hey
+
+00:17:11,779 --> 00:17:16,730
+I'm done with everything up to this
+
+00:17:13,549 --> 00:17:19,370
+point go ahead and free it the problem
+
+00:17:16,730 --> 00:17:22,640
+could be that if if we need to
+
+00:17:19,370 --> 00:17:25,610
+retransmit then the very next piece the
+
+00:17:22,640 --> 00:17:27,350
+last part of the TLS record in order to
+
+00:17:25,610 --> 00:17:28,730
+in order for the NIC to be able to
+
+00:17:27,350 --> 00:17:31,399
+retransmit that it's got to see the
+
+00:17:28,730 --> 00:17:32,929
+front part so if we didn't have these
+
+00:17:31,399 --> 00:17:34,399
+I'm buff so we'd have to have we'd have
+
+00:17:32,929 --> 00:17:36,260
+to have come up with some more expensive
+
+00:17:34,399 --> 00:17:38,690
+reference counting way to prevent the
+
+00:17:36,260 --> 00:17:40,610
+front of the TLS record being freed so
+
+00:17:38,690 --> 00:17:44,059
+that the NIC could again DMA it down and
+
+00:17:40,610 --> 00:17:47,169
+and and recalculate the checksum for the
+
+00:17:44,059 --> 00:17:47,169
+first part of the TLS record
+
+00:17:48,530 --> 00:17:55,640
+so with all that said the first
+
+00:17:53,140 --> 00:17:59,780
+basically with for our software TLS
+
+00:17:55,640 --> 00:18:02,450
+implementation we pass the data from
+
+00:17:59,780 --> 00:18:04,310
+from user space into the kernel or from
+
+00:18:02,450 --> 00:18:07,490
+send file into you know into the kernel
+
+00:18:04,310 --> 00:18:12,980
+and the kernel does the TLS framing in
+
+00:18:07,490 --> 00:18:16,520
+the kernel and like I was in hinting at
+
+00:18:12,980 --> 00:18:17,690
+before the EM buffs are marked not ready
+
+00:18:16,520 --> 00:18:23,990
+while they're waiting to be encrypted
+
+00:18:17,690 --> 00:18:27,860
+and the basically the unbox are queued
+
+00:18:23,990 --> 00:18:30,740
+onto into basically a per a per CPU TLS
+
+00:18:27,860 --> 00:18:32,960
+kernel TLS worker thread and once that
+
+00:18:30,740 --> 00:18:36,350
+once that worker thread encrypts the
+
+00:18:32,960 --> 00:18:45,170
+data it marks it ready and it's ready to
+
+00:18:36,350 --> 00:18:48,290
+go to TCP yes so I'm going to talk a
+
+00:18:45,170 --> 00:18:57,710
+little bit about something called Amber
+
+00:18:48,290 --> 00:19:02,140
+San tags and this is basically a pointer
+
+00:18:57,710 --> 00:19:06,320
+so when you're doing Nick TLS or float
+
+00:19:02,140 --> 00:19:10,250
+you're allocating a resource on the neck
+
+00:19:06,320 --> 00:19:15,650
+to hold a crypto key and the crypto
+
+00:19:10,250 --> 00:19:20,510
+cursor and the San tag is kind of owned
+
+00:19:15,650 --> 00:19:24,410
+by the Nick and it allows network
+
+00:19:20,510 --> 00:19:27,650
+interface to decide if the packet coming
+
+00:19:24,410 --> 00:19:32,570
+in needs the special processing or not
+
+00:19:27,650 --> 00:19:37,600
+and the reason we put this and talk into
+
+00:19:32,570 --> 00:19:40,690
+am both is that it needs to be very fast
+
+00:19:37,600 --> 00:19:44,510
+we cannot do a lookup in a hash table
+
+00:19:40,690 --> 00:19:47,920
+mess around with five topples down in
+
+00:19:44,510 --> 00:19:52,690
+the Nick driver it needs to be fast so
+
+00:19:47,920 --> 00:19:56,510
+and also we need to be able to traverse
+
+00:19:52,690 --> 00:19:59,000
+technologies like villain and lag that's
+
+00:19:56,510 --> 00:20:02,690
+short for link aggregation
+
+00:19:59,000 --> 00:20:06,710
+and you can imagine when a packet goes
+
+00:20:02,690 --> 00:20:10,310
+out that it might not always go out on
+
+00:20:06,710 --> 00:20:12,800
+the same Nick if you reconfigure your
+
+00:20:10,310 --> 00:20:16,850
+lag for example the packet can suddenly
+
+00:20:12,800 --> 00:20:19,970
+change to another interface and it's
+
+00:20:16,850 --> 00:20:22,580
+very unfortunate if suddenly your
+
+00:20:19,970 --> 00:20:27,710
+unencrypted traffic goes straight on the
+
+00:20:22,580 --> 00:20:30,620
+wire so we added mechanisms that will
+
+00:20:27,710 --> 00:20:33,770
+detect route changes in both villain and
+
+00:20:30,620 --> 00:20:37,090
+log and it will also check if the
+
+00:20:33,770 --> 00:20:40,820
+underlying network device supports Nick
+
+00:20:37,090 --> 00:20:49,010
+GLSL float to prevent unencrypted data
+
+00:20:40,820 --> 00:20:51,590
+going on a wire the API for San tags is
+
+00:20:49,010 --> 00:20:54,710
+very simple we basically have four
+
+00:20:51,590 --> 00:20:57,830
+methods and these are function pointers
+
+00:20:54,710 --> 00:21:03,230
+in the network or struct if' net in
+
+00:20:57,830 --> 00:21:07,520
+freebsd you can allocate the Sontag you
+
+00:21:03,230 --> 00:21:10,430
+can modify it you can query it you can
+
+00:21:07,520 --> 00:21:11,240
+free it the allocate function is
+
+00:21:10,430 --> 00:21:13,790
+recursive
+
+00:21:11,240 --> 00:21:16,880
+so you basically ask your route
+
+00:21:13,790 --> 00:21:19,760
+interface I want to have a sand tag for
+
+00:21:16,880 --> 00:21:22,490
+TLS then it checks the capabilities of
+
+00:21:19,760 --> 00:21:25,130
+the network interface do I have G less
+
+00:21:22,490 --> 00:21:28,400
+support or not if I don't have to less
+
+00:21:25,130 --> 00:21:30,770
+support we return a failure and this is
+
+00:21:28,400 --> 00:21:35,140
+recursive so so if you have a VLAN on
+
+00:21:30,770 --> 00:21:39,350
+top it has to be non first and for log
+
+00:21:35,140 --> 00:21:41,210
+it so that log use something called hash
+
+00:21:39,350 --> 00:21:45,620
+of the five chop ball it's usually
+
+00:21:41,210 --> 00:21:47,960
+called a flow ID and this information is
+
+00:21:45,620 --> 00:21:51,860
+not always present at the beginning of
+
+00:21:47,960 --> 00:21:55,520
+the connection so so sometimes before
+
+00:21:51,860 --> 00:21:58,910
+you can allocate a crypto tag you need
+
+00:21:55,520 --> 00:22:02,690
+to wait for a few packets to be
+
+00:21:58,910 --> 00:22:07,390
+exchanged so that the socket can record
+
+00:22:02,690 --> 00:22:11,360
+which is my hash and which is my than
+
+00:22:07,390 --> 00:22:16,750
+output network interface under a lag
+
+00:22:11,360 --> 00:22:19,430
+and so again which is my destination
+
+00:22:16,750 --> 00:22:23,810
+output ring in the network interface
+
+00:22:19,430 --> 00:22:27,350
+this is usually called a topless - and
+
+00:22:23,810 --> 00:22:29,870
+we used seven least significant bits to
+
+00:22:27,350 --> 00:22:31,370
+switch the packets on the TX rings but
+
+00:22:29,870 --> 00:22:41,140
+maybe a lot of you are familiar with
+
+00:22:31,370 --> 00:22:47,600
+that from the network stack perspective
+
+00:22:41,140 --> 00:22:51,410
+things are very simple you basically set
+
+00:22:47,600 --> 00:22:54,350
+the San tag pointer which is San tag and
+
+00:22:51,410 --> 00:22:57,920
+packet header off to Amber and then you
+
+00:22:54,350 --> 00:23:02,260
+also need to set a checksum flag for the
+
+00:22:57,920 --> 00:23:05,420
+San tag because we try to avoid
+
+00:23:02,260 --> 00:23:09,790
+increasing the size of the am buff so it
+
+00:23:05,420 --> 00:23:12,380
+would use an order cache line and
+
+00:23:09,790 --> 00:23:14,360
+unfortunately we had to share the Sun
+
+00:23:12,380 --> 00:23:19,340
+tag were to receive interface pointer
+
+00:23:14,360 --> 00:23:21,860
+and to avoid leaking receive interface
+
+00:23:19,340 --> 00:23:24,260
+into San tags for example when you do a
+
+00:23:21,860 --> 00:23:27,580
+ping you might get back to receive
+
+00:23:24,260 --> 00:23:30,590
+interface pointer so it's in the Union
+
+00:23:27,580 --> 00:23:34,490
+this may be too much details for you but
+
+00:23:30,590 --> 00:23:36,830
+we have a flag we abuse a checksum flag
+
+00:23:34,490 --> 00:23:42,200
+to indicate if you have a sand tiger or
+
+00:23:36,830 --> 00:23:45,830
+not from the network driver perspective
+
+00:23:42,200 --> 00:23:51,020
+it basically does the opposite it checks
+
+00:23:45,830 --> 00:23:54,710
+if checksum flag is set and it does a
+
+00:23:51,020 --> 00:23:59,360
+container of the San tag you specified
+
+00:23:54,710 --> 00:24:04,180
+in the am buff and this usually gets you
+
+00:23:59,360 --> 00:24:06,560
+the power network interface specific
+
+00:24:04,180 --> 00:24:09,380
+structure that contains for example the
+
+00:24:06,560 --> 00:24:12,410
+destinations thank you or a copy of the
+
+00:24:09,380 --> 00:24:15,560
+so called flow ID and it can do a simple
+
+00:24:12,410 --> 00:24:18,370
+check is this packet still valid for
+
+00:24:15,560 --> 00:24:25,400
+this interface or not
+
+00:24:18,370 --> 00:24:33,320
+done this isn't a fast path so here you
+
+00:24:25,400 --> 00:24:40,700
+can see a set of different use cases for
+
+00:24:33,320 --> 00:24:43,640
+data flow so the the good old case is
+
+00:24:40,700 --> 00:24:47,080
+that you're using a socket right that is
+
+00:24:43,640 --> 00:24:52,370
+all to the left with OpenSSL you have a
+
+00:24:47,080 --> 00:24:55,430
+unencrypted buffer inside OpenSSL you do
+
+00:24:52,370 --> 00:24:57,890
+the encryption in userspace you coffee
+
+00:24:55,430 --> 00:25:02,060
+that encrypted buffer into the kernel
+
+00:24:57,890 --> 00:25:05,110
+and then again the NIC will read from
+
+00:25:02,060 --> 00:25:07,940
+the kernel buffer and put it on a wire
+
+00:25:05,110 --> 00:25:12,140
+in the second case where you have
+
+00:25:07,940 --> 00:25:14,960
+software kernel TLS you have the
+
+00:25:12,140 --> 00:25:17,300
+unencrypted buffer in user space you
+
+00:25:14,960 --> 00:25:22,550
+write it into the kernel of the system
+
+00:25:17,300 --> 00:25:25,220
+call and the kernel will down encrypt it
+
+00:25:22,550 --> 00:25:28,760
+like Drew said earlier we have a per CPU
+
+00:25:25,220 --> 00:25:31,520
+thread that will read unencrypted data
+
+00:25:28,760 --> 00:25:34,160
+with am not ready from the socket buffer
+
+00:25:31,520 --> 00:25:36,950
+and it will encrypt it and put a red
+
+00:25:34,160 --> 00:25:40,610
+flag and then the encrypted buffer will
+
+00:25:36,950 --> 00:25:44,480
+go on on to the neck and the NIC will
+
+00:25:40,610 --> 00:25:47,750
+put it on the wire and then with Nick
+
+00:25:44,480 --> 00:25:50,140
+kernel TLS you you as you can see you
+
+00:25:47,750 --> 00:25:56,860
+have an unencrypted buffer in user space
+
+00:25:50,140 --> 00:25:56,860
+you write it into the socket buffer and
+
+00:25:57,430 --> 00:26:04,190
+after it goes into the socket buffer we
+
+00:26:00,380 --> 00:26:06,860
+write it straight to the Nick and I can
+
+00:26:04,190 --> 00:26:10,940
+also mention that there is some magic
+
+00:26:06,860 --> 00:26:14,510
+here going on so so when you do a system
+
+00:26:10,940 --> 00:26:17,440
+call right to the socket buffer for
+
+00:26:14,510 --> 00:26:22,550
+every system call you do you will add
+
+00:26:17,440 --> 00:26:26,140
+TCP or TLS header and trailer so it will
+
+00:26:22,550 --> 00:26:29,780
+kind of wrap your transmitter data which
+
+00:26:26,140 --> 00:26:31,429
+automatically with the TLS header and
+
+00:26:29,780 --> 00:26:34,190
+trailer so so it's all
+
+00:26:31,429 --> 00:26:36,950
+to user space you just write down
+
+00:26:34,190 --> 00:26:40,690
+encrypted data and it's it's
+
+00:26:36,950 --> 00:26:43,879
+automatically encapsulated and then
+
+00:26:40,690 --> 00:26:47,809
+after the data is in the kernel with
+
+00:26:43,879 --> 00:26:50,089
+this additional header and trailer then
+
+00:26:47,809 --> 00:26:58,309
+it will go to the NIC and the NIC will
+
+00:26:50,089 --> 00:27:00,589
+do the encryption so this this I charge
+
+00:26:58,309 --> 00:27:05,299
+here basically shows the the data flow
+
+00:27:00,589 --> 00:27:07,070
+or send file and in particular I'm
+
+00:27:05,299 --> 00:27:09,679
+showing the data flow for send file with
+
+00:27:07,070 --> 00:27:12,109
+software kernel TLS and one thing you'll
+
+00:27:09,679 --> 00:27:14,599
+notice is that for basically every
+
+00:27:12,109 --> 00:27:15,950
+hundred gigabits is you know divided by
+
+00:27:14,599 --> 00:27:19,070
+eight four gigabytes it's twelve and a
+
+00:27:15,950 --> 00:27:22,729
+half gigabytes a second so when you're
+
+00:27:19,070 --> 00:27:24,259
+doing when you're doing send file with
+
+00:27:22,729 --> 00:27:25,580
+software kernel TLS basically the data
+
+00:27:24,259 --> 00:27:27,830
+flow is you bring things in from that
+
+00:27:25,580 --> 00:27:29,960
+you bring things in from the disks into
+
+00:27:27,830 --> 00:27:31,190
+memory and then the CPU has to read
+
+00:27:29,960 --> 00:27:33,589
+everything you just brought into the
+
+00:27:31,190 --> 00:27:34,909
+disk to do the crypto and then once it
+
+00:27:33,589 --> 00:27:37,609
+does the crypto it's got to write it
+
+00:27:34,909 --> 00:27:40,129
+back out into the memory and then from
+
+00:27:37,609 --> 00:27:42,619
+the memory it's got to write it or
+
+00:27:40,129 --> 00:27:44,629
+really DMA read it into the NIC so
+
+00:27:42,619 --> 00:27:46,249
+basically you multiply your your band if
+
+00:27:44,629 --> 00:27:47,690
+you want to do 100 Giga bits you've got
+
+00:27:46,249 --> 00:27:50,269
+to have four Giga bits of memory
+
+00:27:47,690 --> 00:27:53,299
+bandwidth there or 60 gigabytes a second
+
+00:27:50,269 --> 00:27:57,649
+which is basically just about as much as
+
+00:27:53,299 --> 00:28:01,129
+as a Broadwell Xeon can do the nice
+
+00:27:57,649 --> 00:28:02,389
+thing about neck TLS is all of a sudden
+
+00:28:01,129 --> 00:28:03,979
+see these green arrows that go up and
+
+00:28:02,389 --> 00:28:07,549
+down now you don't see them anymore
+
+00:28:03,979 --> 00:28:09,889
+because all of a sudden you you don't
+
+00:28:07,549 --> 00:28:10,429
+have to do this this memory read memory
+
+00:28:09,889 --> 00:28:12,289
+write anymore
+
+00:28:10,429 --> 00:28:14,299
+and you remember bandwidth requirements
+
+00:28:12,289 --> 00:28:18,409
+are cut almost in half and this is
+
+00:28:14,299 --> 00:28:21,049
+important because certain CPU vendors
+
+00:28:18,409 --> 00:28:24,229
+like to segment their product lines by
+
+00:28:21,049 --> 00:28:26,330
+memory channels and memory speeds and so
+
+00:28:24,229 --> 00:28:32,650
+you can you can maybe go down a product
+
+00:28:26,330 --> 00:28:37,760
+line if you can do Nick TLS next slide
+
+00:28:32,650 --> 00:28:41,539
+so here you can kind of see what you
+
+00:28:37,760 --> 00:28:44,480
+would expect if you did TCP dump with a
+
+00:28:41,539 --> 00:28:48,890
+modified iperf that support GLSL float
+
+00:28:44,480 --> 00:28:52,220
+in the kernel so if you do TCP dump on
+
+00:28:48,890 --> 00:28:55,370
+the iperf client sending the data you
+
+00:28:52,220 --> 00:28:58,429
+will see here the unencrypted data with
+
+00:28:55,370 --> 00:29:00,919
+TCP dump this is zero one two three four
+
+00:28:58,429 --> 00:29:03,380
+five six seven eight nine zero one two
+
+00:29:00,919 --> 00:29:05,149
+three four five six seven eight nine on
+
+00:29:03,380 --> 00:29:07,880
+the server side you will see the
+
+00:29:05,149 --> 00:29:10,159
+encrypted data so this is exactly the
+
+00:29:07,880 --> 00:29:12,950
+same packet so this is on the client
+
+00:29:10,159 --> 00:29:14,750
+side and this is on the server side and
+
+00:29:12,950 --> 00:29:19,190
+this is just to show you that this is
+
+00:29:14,750 --> 00:29:26,299
+what you can expect from Nick TLS and
+
+00:29:19,190 --> 00:29:28,610
+also software TLS offload so we hit some
+
+00:29:26,299 --> 00:29:37,549
+issues when trying to implement Nick
+
+00:29:28,610 --> 00:29:41,360
+Colonel T less as I said already the
+
+00:29:37,549 --> 00:29:45,200
+Nick is messing with the TCP data but it
+
+00:29:41,360 --> 00:29:47,840
+already does so with TSO so those
+
+00:29:45,200 --> 00:29:51,890
+familiar with the term TSO large sand
+
+00:29:47,840 --> 00:29:53,659
+offload the Nick already update the
+
+00:29:51,890 --> 00:29:57,549
+sequence number when it fragment big
+
+00:29:53,659 --> 00:29:57,549
+chunks of data and now it's also
+
+00:29:58,059 --> 00:30:05,779
+encrypting TCP data as you go along so
+
+00:30:02,320 --> 00:30:14,210
+so but who says we have to follow the
+
+00:30:05,779 --> 00:30:19,779
+OST model for everything retransmission
+
+00:30:14,210 --> 00:30:24,049
+of TLS packets as true sad there is a
+
+00:30:19,779 --> 00:30:26,330
+need for resounding the beginning of a
+
+00:30:24,049 --> 00:30:29,809
+TLS record if you're doing a retransmit
+
+00:30:26,330 --> 00:30:35,059
+in the middle of a TCP packet and this
+
+00:30:29,809 --> 00:30:37,070
+actually cross TLS record as you might
+
+00:30:35,059 --> 00:30:40,610
+remember I said in the beginning of the
+
+00:30:37,070 --> 00:30:44,299
+talk that we have a 16 K maximum length
+
+00:30:40,610 --> 00:30:45,740
+of TLS records and that basically means
+
+00:30:44,299 --> 00:30:48,679
+that if you need to
+
+00:30:45,740 --> 00:30:50,929
+transmitted one byte at the end of a
+
+00:30:48,679 --> 00:30:55,850
+cheerless record you need to kind of
+
+00:30:50,929 --> 00:30:58,940
+dump almost 16 K down to the Nick before
+
+00:30:55,850 --> 00:31:04,659
+you can retransmit that last byte in
+
+00:30:58,940 --> 00:31:09,200
+order to get the right crypto state so
+
+00:31:04,659 --> 00:31:13,570
+so but forget the good case you don't do
+
+00:31:09,200 --> 00:31:19,490
+this so so you might want to consider
+
+00:31:13,570 --> 00:31:22,460
+using something like rack or ya try to
+
+00:31:19,490 --> 00:31:25,490
+get to trance retransmission rate as low
+
+00:31:22,460 --> 00:31:31,490
+as possible when using TLS tema minimize
+
+00:31:25,490 --> 00:31:36,289
+the PCI bandwidth used then we have some
+
+00:31:31,490 --> 00:31:39,409
+benchmarks so so let's see what's first
+
+00:31:36,289 --> 00:31:41,059
+we are true so this is this is in the
+
+00:31:39,409 --> 00:31:44,980
+benchmarks section but it's not actually
+
+00:31:41,059 --> 00:31:49,010
+a benchmark this is data from a Netflix
+
+00:31:44,980 --> 00:31:51,380
+circa 2000 1,600 gig server it's
+
+00:31:49,010 --> 00:31:56,029
+basically a broad well based on with 16
+
+00:31:51,380 --> 00:32:00,970
+cores 32 threads for really fat fast
+
+00:31:56,029 --> 00:32:04,370
+nvme drives and one Chelsea ot 6 NIC and
+
+00:32:00,970 --> 00:32:07,880
+the case on the left is without kernel
+
+00:32:04,370 --> 00:32:09,890
+TLS and the blue bars are served by the
+
+00:32:07,880 --> 00:32:11,960
+bandwidth we're serving out of the NIC
+
+00:32:09,890 --> 00:32:15,919
+so as you can see we're maxing out
+
+00:32:11,960 --> 00:32:19,730
+around 40 gigabits a second and the CPU
+
+00:32:15,919 --> 00:32:21,080
+is is it's an average of 75 because it
+
+00:32:19,730 --> 00:32:24,890
+kind of zooms between a hundred and
+
+00:32:21,080 --> 00:32:26,630
+fifty it's it's a case where it's memory
+
+00:32:24,890 --> 00:32:29,029
+it's basically a memory memory bandwidth
+
+00:32:26,630 --> 00:32:30,559
+bound and it's miserable for clients
+
+00:32:29,029 --> 00:32:31,700
+because it speeds up and slows down and
+
+00:32:30,559 --> 00:32:34,000
+speeds up and slows down and never
+
+00:32:31,700 --> 00:32:37,250
+really never really finds a sweet spot
+
+00:32:34,000 --> 00:32:40,700
+it's just easier to say 75 and stop
+
+00:32:37,250 --> 00:32:43,360
+there but you know I ramble the second
+
+00:32:40,700 --> 00:32:46,399
+case is the case that Netflix runs today
+
+00:32:43,360 --> 00:32:48,320
+basically we're at we serve at 90
+
+00:32:46,399 --> 00:32:51,020
+gigabits a second that's our that's our
+
+00:32:48,320 --> 00:32:53,200
+target bandwidth 400 400 gigabit cache
+
+00:32:51,020 --> 00:32:54,820
+to to allow for
+
+00:32:53,200 --> 00:32:58,750
+a little bit of extra capacity on the
+
+00:32:54,820 --> 00:33:00,700
+link for other things and we're at about
+
+00:32:58,750 --> 00:33:03,820
+a little less than a little less than 70
+
+00:33:00,700 --> 00:33:07,180
+percent CPU with software TLS and the
+
+00:33:03,820 --> 00:33:09,670
+rightmost is with Nick TLS and as you
+
+00:33:07,180 --> 00:33:11,730
+can see the the CPU is cut almost in
+
+00:33:09,670 --> 00:33:15,130
+half for the for the same bandwidth and
+
+00:33:11,730 --> 00:33:18,850
+again this is Nick TLS on a Chelsea ot 6
+
+00:33:15,130 --> 00:33:21,040
+that's not available right now and had
+
+00:33:18,850 --> 00:33:24,250
+it's something that John Baldwin has
+
+00:33:21,040 --> 00:33:27,580
+patches for in github and you can talk
+
+00:33:24,250 --> 00:33:32,170
+to him after the after the presentation
+
+00:33:27,580 --> 00:33:34,890
+if you want more information on that so
+
+00:33:32,170 --> 00:33:41,070
+here we have some benchmarks with
+
+00:33:34,890 --> 00:33:45,910
+Mellanox thick TLS so the the orange
+
+00:33:41,070 --> 00:33:51,750
+line show here software colonel T lasts
+
+00:33:45,910 --> 00:33:53,620
+so that's basically using the a s AES
+
+00:33:51,750 --> 00:33:57,340
+instructions in the kernel to do
+
+00:33:53,620 --> 00:34:01,210
+encryption of the packet it's going on
+
+00:33:57,340 --> 00:34:07,470
+the wire and as you can see as you go up
+
+00:34:01,210 --> 00:34:10,270
+by number of threads so you easily start
+
+00:34:07,470 --> 00:34:13,560
+congesting the CPU because doing
+
+00:34:10,270 --> 00:34:17,530
+software encryption is relatively heavy
+
+00:34:13,560 --> 00:34:19,659
+even if it's done in the kernel and the
+
+00:34:17,530 --> 00:34:22,750
+blue line on the bottom is what you
+
+00:34:19,659 --> 00:34:29,200
+would get with plaintext so the CPU
+
+00:34:22,750 --> 00:34:33,899
+usage rises linearly maybe because on
+
+00:34:29,200 --> 00:34:33,899
+this machine you have like twenty eight
+
+00:34:33,990 --> 00:34:43,600
+cores available and you see here that as
+
+00:34:40,690 --> 00:34:48,750
+you go up to twenty eight it's almost
+
+00:34:43,600 --> 00:34:53,320
+leaner and done it rises to a bit and
+
+00:34:48,750 --> 00:34:57,580
+the gray line is showing Nick TLS with
+
+00:34:53,320 --> 00:34:59,600
+not yet on the market Mellanox connect X
+
+00:34:57,580 --> 00:35:02,900
+60 X
+
+00:34:59,600 --> 00:35:07,360
+and you can see it's used a little bit
+
+00:35:02,900 --> 00:35:10,130
+more CPU and that's likely because it's
+
+00:35:07,360 --> 00:35:14,380
+encapsulating it with smaller TLS record
+
+00:35:10,130 --> 00:35:18,260
+so he needs to encapsulate every 16
+
+00:35:14,380 --> 00:35:22,010
+kilobytes well if you use plain text you
+
+00:35:18,260 --> 00:35:30,110
+can do 64 kilobytes at a time with
+
+00:35:22,010 --> 00:35:32,090
+regular TSO and so so and and this is
+
+00:35:30,110 --> 00:35:35,390
+also interesting for those of you that
+
+00:35:32,090 --> 00:35:37,580
+do virtualization that you can imagine
+
+00:35:35,390 --> 00:35:40,460
+you can have a virtualized environment
+
+00:35:37,580 --> 00:35:43,640
+where you don't have to do encryption in
+
+00:35:40,460 --> 00:35:47,030
+software or at the CPU at all you can
+
+00:35:43,640 --> 00:35:49,520
+have a or a weak ARM processor can maybe
+
+00:35:47,030 --> 00:35:52,280
+also be a target for such applications
+
+00:35:49,520 --> 00:35:55,880
+so so you only need to switch the
+
+00:35:52,280 --> 00:35:58,940
+packets around and and then the NIC will
+
+00:35:55,880 --> 00:36:01,550
+do everything for you or almost
+
+00:35:58,940 --> 00:36:05,270
+everything except a TCP stack we we
+
+00:36:01,550 --> 00:36:09,100
+still want to do TCP stack yeah in the
+
+00:36:05,270 --> 00:36:14,920
+kernel and as I already mentioned
+
+00:36:09,100 --> 00:36:14,920
+Mellanox has a web page you can go to
+
+00:36:15,460 --> 00:36:21,670
+theoretically we can support up to 16
+
+00:36:18,380 --> 00:36:24,740
+million simultaneous chillest records
+
+00:36:21,670 --> 00:36:28,220
+our TLS streams at the same time either
+
+00:36:24,740 --> 00:36:31,420
+25 gig 50 gig hundred gig and not now
+
+00:36:28,220 --> 00:36:34,490
+also there will be 200 gigabit second
+
+00:36:31,420 --> 00:36:38,630
+the rest various configurations you can
+
+00:36:34,490 --> 00:36:41,800
+use this it's we can use 200 gig ports
+
+00:36:38,630 --> 00:36:44,630
+or you can have one 200 gig port so
+
+00:36:41,800 --> 00:36:48,470
+there's different ways you can get 200
+
+00:36:44,630 --> 00:36:51,890
+gig and yeah you maybe don't want to say
+
+00:36:48,470 --> 00:36:56,320
+how you get 200 gig over at Netflix I'll
+
+00:36:51,890 --> 00:37:00,530
+talk about that in the next hour yeah so
+
+00:36:56,320 --> 00:37:04,100
+then we have a little bit about shell
+
+00:37:00,530 --> 00:37:06,980
+SEOs hardware TLS or flow do you want to
+
+00:37:04,100 --> 00:37:11,010
+say a few words so John Baldwin or so
+
+00:37:06,980 --> 00:37:15,330
+basically the the t6 t6 Nick supports
+
+00:37:11,010 --> 00:37:19,260
+GLS 1.1.1 and 1.2 and the fairly unique
+
+00:37:15,330 --> 00:37:24,930
+thing is they can do both CBC and GCM we
+
+00:37:19,260 --> 00:37:27,690
+have John has toe support for the sorry
+
+00:37:24,930 --> 00:37:29,850
+Colonel TLS support for for the toe mode
+
+00:37:27,690 --> 00:37:31,260
+of gel Co in progress that's not
+
+00:37:29,850 --> 00:37:33,690
+something we use at Netflix but it's
+
+00:37:31,260 --> 00:37:35,220
+interesting to a lot of people and the
+
+00:37:33,690 --> 00:37:37,890
+really interesting thing is that the
+
+00:37:35,220 --> 00:37:41,340
+open crypto framework CCR gel co-driver
+
+00:37:37,890 --> 00:37:43,140
+is already usable in the tree and you
+
+00:37:41,340 --> 00:37:45,990
+can use it you know basically right now
+
+00:37:43,140 --> 00:37:47,970
+with what's in the tree for Bert it's
+
+00:37:45,990 --> 00:37:49,109
+actually one of the only it's basically
+
+00:37:47,970 --> 00:37:50,250
+the only thing we're talking about now
+
+00:37:49,109 --> 00:37:52,380
+for Hardware offload that you could
+
+00:37:50,250 --> 00:37:56,940
+actually like you know use like this at
+
+00:37:52,380 --> 00:37:59,880
+this second if you're running ahead so
+
+00:37:56,940 --> 00:38:03,109
+we reach the end of our talk and I would
+
+00:37:59,880 --> 00:38:03,109
+like to know are there any questions
+
+00:38:19,250 --> 00:38:34,100
+can you go can you go back to the slide
+
+00:38:24,720 --> 00:38:36,720
+with unallocated once I'm up I'm most so
+
+00:38:34,100 --> 00:38:39,600
+just because just understanding problem
+
+00:38:36,720 --> 00:38:40,950
+I instead of a chain with a pointers you
+
+00:38:39,600 --> 00:38:47,040
+are using just an array to point
+
+00:38:40,950 --> 00:38:49,680
+everywhere to to reduce okay okay so so
+
+00:38:47,040 --> 00:38:52,680
+that's a generally good advice to avoid
+
+00:38:49,680 --> 00:38:54,750
+that kind of cues with pointers put
+
+00:38:52,680 --> 00:38:56,190
+arrays in the modern yes it's something
+
+00:38:54,750 --> 00:38:58,620
+government it's something that Linux
+
+00:38:56,190 --> 00:39:00,240
+does with their with their skb pages I
+
+00:38:58,620 --> 00:39:01,740
+think that's what they call it and
+
+00:39:00,240 --> 00:39:03,900
+something that I want I wanted to do in
+
+00:39:01,740 --> 00:39:07,650
+FreeBSD for years okay thank you thank
+
+00:39:03,900 --> 00:39:10,140
+you morning
+
+00:39:07,650 --> 00:39:13,020
+you mentioned virtualized environments
+
+00:39:10,140 --> 00:39:19,500
+how will the NIC crypt offload be
+
+00:39:13,020 --> 00:39:22,920
+available to well that's really a good
+
+00:39:19,500 --> 00:39:25,980
+question I will just repeat so in
+
+00:39:22,920 --> 00:39:30,570
+virtualized environments with Mellanox
+
+00:39:25,980 --> 00:39:33,120
+NICs they provide virtualization inside
+
+00:39:30,570 --> 00:39:36,330
+a NIC so so the Nick has multiple
+
+00:39:33,120 --> 00:39:41,120
+virtual PCI functions and you can give
+
+00:39:36,330 --> 00:39:47,880
+this virtual PCI functions to your
+
+00:39:41,120 --> 00:39:51,150
+virtualized instance and this way you
+
+00:39:47,880 --> 00:39:54,660
+kind of have all the DMA rings inside
+
+00:39:51,150 --> 00:39:57,260
+your virtual machine and the NIC will
+
+00:39:54,660 --> 00:40:03,060
+actually read from this rings directly
+
+00:39:57,260 --> 00:40:06,990
+so so this is one you know unlike Intel
+
+00:40:03,060 --> 00:40:09,870
+adapters that they don't support this so
+
+00:40:06,990 --> 00:40:13,920
+well so we put with Mellanox cards you
+
+00:40:09,870 --> 00:40:17,130
+can really do it large scale so that you
+
+00:40:13,920 --> 00:40:19,950
+can spit up a one network card physical
+
+00:40:17,130 --> 00:40:22,860
+network card into many smaller virtuals
+
+00:40:19,950 --> 00:40:25,590
+PCI functions and you can just hand them
+
+00:40:22,860 --> 00:40:26,850
+out to your virtual machines what's that
+
+00:40:25,590 --> 00:40:31,400
+answer for your question
+
+00:40:26,850 --> 00:40:31,400
+thank you any more questions
+
+00:40:32,670 --> 00:40:39,670
+my question would be how much
+
+00:40:35,170 --> 00:40:42,040
+flexibility do you lose with that in
+
+00:40:39,670 --> 00:40:44,380
+regards to things like you TLS versions
+
+00:40:42,040 --> 00:40:47,140
+because I mean utilities versions come
+
+00:40:44,380 --> 00:40:49,300
+out you might want to use them and it
+
+00:40:47,140 --> 00:40:51,100
+gets a bit more complicated so far stuff
+
+00:40:49,300 --> 00:40:52,600
+is involved so it's it's pretty rare
+
+00:40:51,100 --> 00:40:55,810
+what's what's in what's in head right
+
+00:40:52,600 --> 00:40:58,810
+now is TLS up to 1.2 I actually have a
+
+00:40:55,810 --> 00:41:00,760
+patch for TLS 1.3 that's that's working
+
+00:40:58,810 --> 00:41:04,120
+it has served a real Netflix customer
+
+00:41:00,760 --> 00:41:07,660
+traffic so and and they've also run TLS
+
+00:41:04,120 --> 00:41:09,430
+1.3 with Nick TLS so I and I think a new
+
+00:41:07,660 --> 00:41:11,110
+TLS version at this point things are
+
+00:41:09,430 --> 00:41:13,420
+becoming ossified you can tell how
+
+00:41:11,110 --> 00:41:16,180
+ossified they're becoming because 1.3 is
+
+00:41:13,420 --> 00:41:17,560
+got a masquerade as 1.2 so I think that
+
+00:41:16,180 --> 00:41:20,410
+the I think that's gonna slow down a
+
+00:41:17,560 --> 00:41:24,100
+little bit just my personal opinion I
+
+00:41:20,410 --> 00:41:26,290
+mean I don't know but you do you do lose
+
+00:41:24,100 --> 00:41:28,270
+flexibility and that's definitely true
+
+00:41:26,290 --> 00:41:30,670
+but from our least from a Netflix
+
+00:41:28,270 --> 00:41:34,330
+perspective except for people watching
+
+00:41:30,670 --> 00:41:36,850
+on a web client we mostly most of the
+
+00:41:34,330 --> 00:41:38,950
+clients upgraded it fairly slow a fairly
+
+00:41:36,850 --> 00:41:42,010
+slow pace I mean one of our problems is
+
+00:41:38,950 --> 00:41:43,800
+is I'm still supporting TLS 1.2 because
+
+00:41:42,010 --> 00:41:50,920
+their grandma's smart TV she bought in
+
+00:41:43,800 --> 00:41:53,520
+2010 or whatever right so okay final
+
+00:41:50,920 --> 00:41:53,520
+question
+
+00:41:58,670 --> 00:42:09,639
+[Applause]
+
+00:42:25,590 --> 00:42:27,650
+
+YouTube URL: https://www.youtube.com/watch?v=p9fbofDUUr4
+
+

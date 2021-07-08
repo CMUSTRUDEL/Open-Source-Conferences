@@ -1,0 +1,2531 @@
+Title: Ghosts in the Runtime: Who Ate My Capabilities & Other Mysteries- Laurent Bernaille & Eric Mountain,
+Publication date: 2021-05-09
+Playlist: KubeCon + CloudNativeCon Europe 2021
+Description: 
+	Don’t miss out! Join us at our upcoming event: KubeCon + CloudNativeCon North America 2021 in Los Angeles, CA from October 12-15. Learn more at https://kubecon.io The conference features presentations from developers and end users of Kubernetes, Prometheus, Envoy, and all of the other CNCF-hosted projects.
+
+Ghosts in the Runtime: Who Ate My Capabilities and Other Mysteries - Laurent Bernaille & Eric Mountain, Datadog
+
+In the last 3 years Datadog migrated most of its workloads to dozens of Kubernetes clusters, many of which consist of thousands of nodes each. At this scale, our engineers encounter strange and surprising bugs on a regular basis. Some of the most difficult bugs to investigate are those related to the kubelet and its interactions with the container runtime.
+
+In this talk we will share some of our favorite investigations on this front, such as the container image that only worked when built on our laptops, rather than by our CI. You'll leave with a stronger understanding of the low level components that are responsible of a critical task: running your containers.
+Captions: 
+	00:00:00,719 --> 00:00:06,399
+hello uh we're very happy
+
+00:00:03,439 --> 00:00:07,600
+to be there with you today uh we'd
+
+00:00:06,399 --> 00:00:10,000
+rather be live with you
+
+00:00:07,600 --> 00:00:11,920
+and hopefully we might be able to uh in
+
+00:00:10,000 --> 00:00:15,040
+los angeles right
+
+00:00:11,920 --> 00:00:15,360
+uh so we are lujan eric and we're going
+
+00:00:15,040 --> 00:00:18,560
+to
+
+00:00:15,360 --> 00:00:21,439
+share stories about low-level problems
+
+00:00:18,560 --> 00:00:23,039
+uh we face from kubernetes we showed a
+
+00:00:21,439 --> 00:00:25,359
+few stories in the past about
+
+00:00:23,039 --> 00:00:26,800
+control plane challenges but today we're
+
+00:00:25,359 --> 00:00:30,480
+going to focus on what happens
+
+00:00:26,800 --> 00:00:31,599
+on nodes so in case you don't know
+
+00:00:30,480 --> 00:00:35,040
+datadog uh
+
+00:00:31,599 --> 00:00:36,480
+we're a monitoring company but today
+
+00:00:35,040 --> 00:00:38,480
+we're not going to talk about the
+
+00:00:36,480 --> 00:00:41,680
+product we're going to talk about the
+
+00:00:38,480 --> 00:00:44,239
+infrastructure behind the products and
+
+00:00:41,680 --> 00:00:46,160
+uh it's pretty large uh we're running
+
+00:00:44,239 --> 00:00:46,960
+tens of thousands of hosts and dozens of
+
+00:00:46,160 --> 00:00:50,640
+clusters
+
+00:00:46,960 --> 00:00:53,920
+uh with up to four thousand nodes uh
+
+00:00:50,640 --> 00:00:54,719
+and it comes with uh multiple challenges
+
+00:00:53,920 --> 00:00:58,000
+and this is
+
+00:00:54,719 --> 00:01:00,719
+what we're going to talk about today
+
+00:00:58,000 --> 00:01:01,840
+so we have a few stories uh not
+
+00:01:00,719 --> 00:01:05,119
+completely related
+
+00:01:01,840 --> 00:01:05,760
+but they they all happen locally on
+
+00:01:05,119 --> 00:01:08,799
+notes
+
+00:01:05,760 --> 00:01:12,400
+and we're going to to focus on that
+
+00:01:08,799 --> 00:01:15,439
+so let's start uh with this first story
+
+00:01:12,400 --> 00:01:18,400
+about disappearing containers
+
+00:01:15,439 --> 00:01:20,479
+so it started uh with this simple graph
+
+00:01:18,400 --> 00:01:23,200
+here when we migrated an application
+
+00:01:20,479 --> 00:01:24,240
+from a virtual machine to kubernetes and
+
+00:01:23,200 --> 00:01:27,520
+we noticed
+
+00:01:24,240 --> 00:01:30,560
+that the cpu profile was very different
+
+00:01:27,520 --> 00:01:34,000
+which was a bit worrying right
+
+00:01:30,560 --> 00:01:34,640
+so we looked at uh the pods running this
+
+00:01:34,000 --> 00:01:37,040
+application
+
+00:01:34,640 --> 00:01:38,799
+and we discovered that several of them
+
+00:01:37,040 --> 00:01:41,200
+were in great container error
+
+00:01:38,799 --> 00:01:43,600
+actually about 10 of them so they were
+
+00:01:41,200 --> 00:01:46,399
+not ready and not processing traffic
+
+00:01:43,600 --> 00:01:47,280
+we found very easy solutions to address
+
+00:01:46,399 --> 00:01:48,960
+this by
+
+00:01:47,280 --> 00:01:52,960
+editing the bird or researching the
+
+00:01:48,960 --> 00:01:55,280
+cubelet but it wasn't very satisfying
+
+00:01:52,960 --> 00:01:56,880
+so the first thing we did was try to
+
+00:01:55,280 --> 00:02:00,159
+understand what this error was
+
+00:01:56,880 --> 00:02:02,320
+so we looked at the qubit logs and
+
+00:02:00,159 --> 00:02:03,280
+basically the qubit is getting an error
+
+00:02:02,320 --> 00:02:06,159
+for the runtime
+
+00:02:03,280 --> 00:02:06,799
+containing in our case uh because it's
+
+00:02:06,159 --> 00:02:08,720
+trying
+
+00:02:06,799 --> 00:02:10,479
+it seems to be trying to create a
+
+00:02:08,720 --> 00:02:11,840
+container that already exists according
+
+00:02:10,479 --> 00:02:13,920
+to the runtime
+
+00:02:11,840 --> 00:02:16,480
+and it's doing this a lot as you can see
+
+00:02:13,920 --> 00:02:17,120
+here with 62 attempts right and it keeps
+
+00:02:16,480 --> 00:02:20,800
+retrying
+
+00:02:17,120 --> 00:02:20,800
+and getting the exact same results
+
+00:02:21,280 --> 00:02:27,599
+so of course we wonder well who is right
+
+00:02:24,640 --> 00:02:29,040
+uh who is wrong so the cubit believes it
+
+00:02:27,599 --> 00:02:29,920
+needs to create a container what about
+
+00:02:29,040 --> 00:02:32,080
+continuity
+
+00:02:29,920 --> 00:02:37,680
+so if we have container d this container
+
+00:02:32,080 --> 00:02:39,680
+is actually running completely fine
+
+00:02:37,680 --> 00:02:41,599
+the next step was to try and reproduce a
+
+00:02:39,680 --> 00:02:43,519
+problem in a test environment
+
+00:02:41,599 --> 00:02:45,519
+and we had noticed that it seemed to be
+
+00:02:43,519 --> 00:02:48,239
+related with cubelet restarts
+
+00:02:45,519 --> 00:02:50,000
+so we did a very simple script that we
+
+00:02:48,239 --> 00:02:53,599
+started the cubelet frequently
+
+00:02:50,000 --> 00:02:55,519
+and after only an hour as you can see
+
+00:02:53,599 --> 00:02:58,400
+all the parts in the deployment were in
+
+00:02:55,519 --> 00:03:01,840
+the same era so we were able to
+
+00:02:58,400 --> 00:03:04,959
+very easily reproduce it right
+
+00:03:01,840 --> 00:03:07,360
+so what is this error exactly
+
+00:03:04,959 --> 00:03:08,720
+so we went to the cubelet code and we
+
+00:03:07,360 --> 00:03:12,000
+looked for it
+
+00:03:08,720 --> 00:03:15,120
+and we found that this error is is
+
+00:03:12,000 --> 00:03:18,720
+appearing in the runtime manager where
+
+00:03:15,120 --> 00:03:21,920
+uh in the syncpod function so it seems
+
+00:03:18,720 --> 00:03:25,280
+that the cubelet wants to create this
+
+00:03:21,920 --> 00:03:25,280
+container and entails
+
+00:03:26,799 --> 00:03:30,080
+how is this function called
+
+00:03:30,799 --> 00:03:34,000
+so this function is called in in sync
+
+00:03:32,799 --> 00:03:35,840
+bud after
+
+00:03:34,000 --> 00:03:37,920
+computing both actions which is
+
+00:03:35,840 --> 00:03:38,720
+basically uh the reconciliation that
+
+00:03:37,920 --> 00:03:40,879
+needs to happen
+
+00:03:38,720 --> 00:03:42,159
+between the pod spec and what's in the
+
+00:03:40,879 --> 00:03:44,400
+runtime
+
+00:03:42,159 --> 00:03:45,760
+and in this case here it seems that the
+
+00:03:44,400 --> 00:03:48,080
+results of
+
+00:03:45,760 --> 00:03:50,239
+this computation is wrong how could that
+
+00:03:48,080 --> 00:03:50,239
+be
+
+00:03:51,040 --> 00:03:55,120
+we looked at clogged but we couldn't
+
+00:03:53,200 --> 00:03:58,560
+find much in logs even when we
+
+00:03:55,120 --> 00:03:59,599
+increased the velocity level so we did a
+
+00:03:58,560 --> 00:04:01,920
+very simple thing
+
+00:03:59,599 --> 00:04:03,200
+and we added print statements in in the
+
+00:04:01,920 --> 00:04:05,120
+code
+
+00:04:03,200 --> 00:04:06,879
+and it turned out it was very efficient
+
+00:04:05,120 --> 00:04:08,159
+because as you can see at the bottom of
+
+00:04:06,879 --> 00:04:11,200
+the screen
+
+00:04:08,159 --> 00:04:13,280
+um a container of the container 15 that
+
+00:04:11,200 --> 00:04:15,280
+is completely fine in the first
+
+00:04:13,280 --> 00:04:17,199
+output statement is missing in the
+
+00:04:15,280 --> 00:04:18,160
+second one but the container is still
+
+00:04:17,199 --> 00:04:20,639
+running
+
+00:04:18,160 --> 00:04:21,199
+so it seemed that container statuses
+
+00:04:20,639 --> 00:04:23,440
+which has
+
+00:04:21,199 --> 00:04:27,040
+the statuses of all the containers in a
+
+00:04:23,440 --> 00:04:27,040
+pod is actually wrong
+
+00:04:27,759 --> 00:04:32,400
+so we wanted to understand where this
+
+00:04:30,560 --> 00:04:35,759
+container status was coming from
+
+00:04:32,400 --> 00:04:37,680
+and how it could be wrong so here is an
+
+00:04:35,759 --> 00:04:40,080
+overview of the main component
+
+00:04:37,680 --> 00:04:41,440
+involved in this data path in the
+
+00:04:40,080 --> 00:04:44,240
+cubelets
+
+00:04:41,440 --> 00:04:45,360
+so everything starts with a single
+
+00:04:44,240 --> 00:04:47,840
+iteration which is
+
+00:04:45,360 --> 00:04:50,000
+the main sync loop in the cubelet this
+
+00:04:47,840 --> 00:04:52,720
+sync loop receives events on channels
+
+00:04:50,000 --> 00:04:53,759
+um and these events can be event from
+
+00:04:52,720 --> 00:04:57,600
+api server such
+
+00:04:53,759 --> 00:04:59,759
+as a spec change event from the
+
+00:04:57,600 --> 00:05:00,800
+lifecycle advanced generator which has
+
+00:04:59,759 --> 00:05:03,280
+which are events
+
+00:05:00,800 --> 00:05:04,479
+from the runtime and other types of
+
+00:05:03,280 --> 00:05:07,680
+events
+
+00:05:04,479 --> 00:05:10,479
+when there is a change to a pod it's
+
+00:05:07,680 --> 00:05:11,680
+then going to call pod workers which are
+
+00:05:10,479 --> 00:05:14,240
+going to
+
+00:05:11,680 --> 00:05:16,080
+get the status from the pod cache and
+
+00:05:14,240 --> 00:05:17,759
+called the syncpod function which is the
+
+00:05:16,080 --> 00:05:19,680
+function that was failing when it was
+
+00:05:17,759 --> 00:05:22,000
+calling the runtime before
+
+00:05:19,680 --> 00:05:23,520
+so it seemed that when the status is
+
+00:05:22,000 --> 00:05:25,360
+retrieved from the podcache
+
+00:05:23,520 --> 00:05:28,080
+it's wrong which triggered the problem
+
+00:05:25,360 --> 00:05:28,080
+down underground
+
+00:05:28,800 --> 00:05:33,039
+so what is the pod cache the pod cache
+
+00:05:31,039 --> 00:05:34,400
+is a cache of all the pods in the
+
+00:05:33,039 --> 00:05:37,520
+cubelets
+
+00:05:34,400 --> 00:05:38,639
+and how is it maintained so the podcast
+
+00:05:37,520 --> 00:05:41,840
+is maintained by
+
+00:05:38,639 --> 00:05:44,479
+the pod lifecycle event generator plague
+
+00:05:41,840 --> 00:05:45,759
+which is the component responsible for
+
+00:05:44,479 --> 00:05:47,120
+observing what's happening with the
+
+00:05:45,759 --> 00:05:50,160
+runtime
+
+00:05:47,120 --> 00:05:52,720
+updating the cache and generating events
+
+00:05:50,160 --> 00:05:54,479
+that will then be received by sync to
+
+00:05:52,720 --> 00:05:56,479
+preparation
+
+00:05:54,479 --> 00:05:59,360
+and it seemed that this cache gets
+
+00:05:56,479 --> 00:05:59,360
+corrupted somehow
+
+00:06:00,319 --> 00:06:05,680
+so here is what we know uh
+
+00:06:03,360 --> 00:06:08,080
+the data in the podcast is wrong the
+
+00:06:05,680 --> 00:06:10,479
+podcast is managed by the plague
+
+00:06:08,080 --> 00:06:12,639
+and there's nothing in the play that
+
+00:06:10,479 --> 00:06:15,680
+seems to indicate situations where
+
+00:06:12,639 --> 00:06:16,960
+we can get corruption so what's
+
+00:06:15,680 --> 00:06:19,680
+happening
+
+00:06:16,960 --> 00:06:20,560
+and at that point we we were wondering
+
+00:06:19,680 --> 00:06:22,319
+well
+
+00:06:20,560 --> 00:06:23,600
+what is something else is modifying the
+
+00:06:22,319 --> 00:06:25,840
+content of the cache
+
+00:06:23,600 --> 00:06:27,039
+in particular the container status is
+
+00:06:25,840 --> 00:06:30,880
+filled which is
+
+00:06:27,039 --> 00:06:34,000
+uh what's wrong here so we looked at
+
+00:06:30,880 --> 00:06:35,440
+um the code of the cubelet and after a
+
+00:06:34,000 --> 00:06:38,639
+lot of digging
+
+00:06:35,440 --> 00:06:41,680
+we found this function which is sorted
+
+00:06:38,639 --> 00:06:43,600
+which is sorting the container statuses
+
+00:06:41,680 --> 00:06:45,600
+and what's important here is that this
+
+00:06:43,600 --> 00:06:49,039
+function is actually sorting in place
+
+00:06:45,600 --> 00:06:50,639
+and modifying the slides so we now have
+
+00:06:49,039 --> 00:06:52,560
+another call in the cube that is
+
+00:06:50,639 --> 00:06:53,840
+modifying the podcast it's not only the
+
+00:06:52,560 --> 00:06:55,680
+plague anymore
+
+00:06:53,840 --> 00:06:58,319
+and so we looked at where this function
+
+00:06:55,680 --> 00:07:01,199
+is called and here you have
+
+00:06:58,319 --> 00:07:02,880
+the sequence of functions involved and
+
+00:07:01,199 --> 00:07:05,199
+what is important here is
+
+00:07:02,880 --> 00:07:06,639
+syncpod and sql iteration which are two
+
+00:07:05,199 --> 00:07:09,360
+functions we saw before
+
+00:07:06,639 --> 00:07:10,000
+are actually ending up calling this uh
+
+00:07:09,360 --> 00:07:13,759
+this
+
+00:07:10,000 --> 00:07:17,840
+this sort operation so
+
+00:07:13,759 --> 00:07:17,840
+let's go back to the cubelets
+
+00:07:18,160 --> 00:07:21,919
+to get back to the function that can
+
+00:07:20,160 --> 00:07:23,680
+actually modify the pod cache so as
+
+00:07:21,919 --> 00:07:24,560
+we've seen before the player can modify
+
+00:07:23,680 --> 00:07:27,840
+the pod cache
+
+00:07:24,560 --> 00:07:28,639
+but also the function generate api put
+
+00:07:27,840 --> 00:07:30,240
+status
+
+00:07:28,639 --> 00:07:33,360
+that can be called in two different
+
+00:07:30,240 --> 00:07:36,319
+cases one when there is a product date
+
+00:07:33,360 --> 00:07:38,720
+and one when there is a plague event
+
+00:07:36,319 --> 00:07:42,000
+where the contender dives
+
+00:07:38,720 --> 00:07:43,840
+and the problem is the handlers for
+
+00:07:42,000 --> 00:07:45,840
+these events are running in separate
+
+00:07:43,840 --> 00:07:50,960
+core routines so they can race
+
+00:07:45,840 --> 00:07:50,960
+and which can lead to uh cash corruption
+
+00:07:51,280 --> 00:07:56,000
+and uh here is a summary right we can
+
+00:07:53,599 --> 00:07:58,080
+have a concurrency between either
+
+00:07:56,000 --> 00:07:59,199
+syncpod if there's bot update from the
+
+00:07:58,080 --> 00:08:02,319
+api server
+
+00:07:59,199 --> 00:08:03,919
+if a container dies on the plague or
+
+00:08:02,319 --> 00:08:05,440
+during a plague release if there was
+
+00:08:03,919 --> 00:08:09,280
+something happening
+
+00:08:05,440 --> 00:08:10,479
+on the runtime so we had a theory and we
+
+00:08:09,280 --> 00:08:13,280
+wanted to validate it
+
+00:08:10,479 --> 00:08:15,280
+so what we did is instead of sorting the
+
+00:08:13,280 --> 00:08:17,840
+slice in place
+
+00:08:15,280 --> 00:08:20,960
+we made a copy of it and then did all
+
+00:08:17,840 --> 00:08:23,759
+the operation on the copy
+
+00:08:20,960 --> 00:08:25,360
+and look everything is running now even
+
+00:08:23,759 --> 00:08:28,800
+if we restart the cubelet
+
+00:08:25,360 --> 00:08:32,800
+every few seconds so we
+
+00:08:28,800 --> 00:08:35,360
+created a pr upstream and we're
+
+00:08:32,800 --> 00:08:35,919
+pretty happy because we've found and
+
+00:08:35,360 --> 00:08:39,200
+fixed the
+
+00:08:35,919 --> 00:08:40,000
+the issue i also wanted to to credit
+
+00:08:39,200 --> 00:08:42,640
+nayef for
+
+00:08:40,000 --> 00:08:43,279
+doing all the work on this investigation
+
+00:08:42,640 --> 00:08:47,920
+and
+
+00:08:43,279 --> 00:08:51,040
+uh diving very deep inside the cubelet
+
+00:08:47,920 --> 00:08:52,959
+so key takeaways from this is that the
+
+00:08:51,040 --> 00:08:55,200
+current internals are complex
+
+00:08:52,959 --> 00:08:57,120
+but they're accessible if you spend the
+
+00:08:55,200 --> 00:08:59,519
+time
+
+00:08:57,120 --> 00:09:01,120
+since the internals are complex we're
+
+00:08:59,519 --> 00:09:03,839
+not 100 sure
+
+00:09:01,120 --> 00:09:06,160
+that our fix is the best one and that
+
+00:09:03,839 --> 00:09:06,959
+the data path i described is the full
+
+00:09:06,160 --> 00:09:08,959
+one
+
+00:09:06,959 --> 00:09:11,279
+but what we know is the fix definitely
+
+00:09:08,959 --> 00:09:13,360
+works and solved our problem
+
+00:09:11,279 --> 00:09:15,600
+and the pr has not been much upstream
+
+00:09:13,360 --> 00:09:17,839
+but we hope it will soon or
+
+00:09:15,600 --> 00:09:19,040
+an equivalent pr fixing thinking the
+
+00:09:17,839 --> 00:09:20,480
+problem
+
+00:09:19,040 --> 00:09:22,480
+we're a bit lucky on this one because we
+
+00:09:20,480 --> 00:09:23,279
+cut the problem in staging which allowed
+
+00:09:22,480 --> 00:09:24,959
+us to
+
+00:09:23,279 --> 00:09:28,480
+depot the production completely
+
+00:09:24,959 --> 00:09:32,320
+completely fine which was good news
+
+00:09:28,480 --> 00:09:34,160
+so in in in this first um story we had a
+
+00:09:32,320 --> 00:09:36,720
+story about the cubelets and and now
+
+00:09:34,160 --> 00:09:38,160
+eric is going to dive even deeper into
+
+00:09:36,720 --> 00:09:40,880
+something that's happening in the
+
+00:09:38,160 --> 00:09:40,880
+runtime itself
+
+00:09:41,440 --> 00:09:45,360
+yeah thanks man so this one is titled
+
+00:09:43,680 --> 00:09:51,839
+random failures which as we'll see
+
+00:09:45,360 --> 00:09:51,839
+is a double pun on the actual problem
+
+00:09:52,880 --> 00:09:59,120
+so the the problem we saw was that
+
+00:09:56,480 --> 00:10:02,640
+occasionally we had a database crash and
+
+00:09:59,120 --> 00:10:05,120
+it was preceded by a rather puzzling log
+
+00:10:02,640 --> 00:10:05,920
+the pro the database couldn't open their
+
+00:10:05,120 --> 00:10:07,200
+view random
+
+00:10:05,920 --> 00:10:08,959
+and it was getting an operation not
+
+00:10:07,200 --> 00:10:11,279
+permitted error
+
+00:10:08,959 --> 00:10:12,880
+and this is happening occasionally i
+
+00:10:11,279 --> 00:10:14,720
+mean clearly the database works most of
+
+00:10:12,880 --> 00:10:17,760
+the time and then all of a sudden
+
+00:10:14,720 --> 00:10:20,160
+it can't open debut random so what's
+
+00:10:17,760 --> 00:10:20,160
+happening
+
+00:10:20,480 --> 00:10:23,680
+if we look inside the container
+
+00:10:22,160 --> 00:10:25,920
+everything is fine the
+
+00:10:23,680 --> 00:10:27,120
+file permissions on debut random are
+
+00:10:25,920 --> 00:10:29,440
+perfectly
+
+00:10:27,120 --> 00:10:30,720
+open to everyone to read everyone right
+
+00:10:29,440 --> 00:10:32,000
+everyone
+
+00:10:30,720 --> 00:10:36,160
+we don't really see why we should be
+
+00:10:32,000 --> 00:10:36,160
+having a problem opening devi ran
+
+00:10:36,640 --> 00:10:42,880
+so we write a straightforward
+
+00:10:39,680 --> 00:10:45,200
+very stupid reproducer very blunt
+
+00:10:42,880 --> 00:10:46,079
+it just sits in a loop and keeps opening
+
+00:10:45,200 --> 00:10:49,680
+debug random
+
+00:10:46,079 --> 00:10:51,680
+and errors if it fails to do so
+
+00:10:49,680 --> 00:10:53,360
+and very quickly we see that we're able
+
+00:10:51,680 --> 00:10:54,640
+to reproduce the problem we get the
+
+00:10:53,360 --> 00:10:57,040
+operation not permitted
+
+00:10:54,640 --> 00:10:59,440
+message and what's more interesting
+
+00:10:57,040 --> 00:11:01,920
+maybe is that this happens every
+
+00:10:59,440 --> 00:11:04,320
+10 or so seconds so it's extremely
+
+00:11:01,920 --> 00:11:04,320
+regular
+
+00:11:05,839 --> 00:11:10,560
+if we search a little bit more for logs
+
+00:11:08,720 --> 00:11:12,800
+that the cubelet might be
+
+00:11:10,560 --> 00:11:14,000
+emitting for for this for this pod we
+
+00:11:12,800 --> 00:11:16,720
+realized that in fact
+
+00:11:14,000 --> 00:11:17,519
+every 10 seconds the cpu manager
+
+00:11:16,720 --> 00:11:20,560
+component
+
+00:11:17,519 --> 00:11:21,600
+is emitting a reconcile state log
+
+00:11:20,560 --> 00:11:22,959
+message
+
+00:11:21,600 --> 00:11:25,279
+and if we look at the details of that
+
+00:11:22,959 --> 00:11:27,920
+message we see that
+
+00:11:25,279 --> 00:11:28,480
+it's actually includes a configuration
+
+00:11:27,920 --> 00:11:32,240
+for the
+
+00:11:28,480 --> 00:11:33,760
+cpu set so i need to explain a little
+
+00:11:32,240 --> 00:11:38,079
+bit more what the cpu set
+
+00:11:33,760 --> 00:11:40,959
+is in this situation our pod
+
+00:11:38,079 --> 00:11:41,839
+is in guaranteed qrs class meaning that
+
+00:11:40,959 --> 00:11:43,839
+it has
+
+00:11:41,839 --> 00:11:45,040
+requests and limits which are all
+
+00:11:43,839 --> 00:11:48,560
+specified and all
+
+00:11:45,040 --> 00:11:51,839
+equal for all the resources it requires
+
+00:11:48,560 --> 00:11:54,720
+it also makes an integer request for
+
+00:11:51,839 --> 00:11:56,160
+cpus so six in this example
+
+00:11:54,720 --> 00:11:58,639
+and finally we use a cubelet
+
+00:11:56,160 --> 00:11:59,440
+configuration where the cpu manager
+
+00:11:58,639 --> 00:12:03,839
+policy
+
+00:11:59,440 --> 00:12:05,040
+is static now the static cpu manager
+
+00:12:03,839 --> 00:12:08,320
+policy
+
+00:12:05,040 --> 00:12:08,800
+is there to allow requesting and setting
+
+00:12:08,320 --> 00:12:12,639
+aside
+
+00:12:08,800 --> 00:12:16,560
+a specific set of cpus for a container
+
+00:12:12,639 --> 00:12:20,000
+and doing so using the
+
+00:12:16,560 --> 00:12:20,000
+cpu set control group
+
+00:12:21,040 --> 00:12:24,079
+so now if we look at the flow of
+
+00:12:22,959 --> 00:12:25,839
+configuration here
+
+00:12:24,079 --> 00:12:27,760
+so in the container runtime so we have
+
+00:12:25,839 --> 00:12:30,959
+the cubelet which
+
+00:12:27,760 --> 00:12:33,120
+talks to container d over grpc so
+
+00:12:30,959 --> 00:12:34,480
+telling container d what containers need
+
+00:12:33,120 --> 00:12:36,079
+to be launched what uh
+
+00:12:34,480 --> 00:12:38,720
+configuration what characteristics they
+
+00:12:36,079 --> 00:12:39,839
+need to have container indeed container
+
+00:12:38,720 --> 00:12:42,959
+d in turn
+
+00:12:39,839 --> 00:12:45,440
+uh fork ex container shims
+
+00:12:42,959 --> 00:12:46,399
+which are per container and communicates
+
+00:12:45,440 --> 00:12:49,760
+them over time
+
+00:12:46,399 --> 00:12:50,399
+through grpc also and the container the
+
+00:12:49,760 --> 00:12:53,279
+shim
+
+00:12:50,399 --> 00:12:55,360
+fork execs run c to actually start
+
+00:12:53,279 --> 00:12:57,360
+containers and potentially update them
+
+00:12:55,360 --> 00:12:57,920
+again over time so for instance it will
+
+00:12:57,360 --> 00:13:02,160
+update
+
+00:12:57,920 --> 00:13:02,160
+the c group files of the containers
+
+00:13:03,920 --> 00:13:06,959
+so if we follow the smoking gun through
+
+00:13:05,920 --> 00:13:08,639
+that flow
+
+00:13:06,959 --> 00:13:10,480
+we look at container d now and we see
+
+00:13:08,639 --> 00:13:13,440
+that container d also
+
+00:13:10,480 --> 00:13:15,440
+is every 10 seconds reflecting an update
+
+00:13:13,440 --> 00:13:20,160
+to container resources
+
+00:13:15,440 --> 00:13:21,839
+not a big surprise at this point we
+
+00:13:20,160 --> 00:13:22,399
+follow further down and we trace the
+
+00:13:21,839 --> 00:13:25,040
+shim
+
+00:13:22,399 --> 00:13:26,240
+we see that the shim every 10 seconds
+
+00:13:25,040 --> 00:13:28,320
+launches run c
+
+00:13:26,240 --> 00:13:28,880
+and in particular launches run c with an
+
+00:13:28,320 --> 00:13:30,160
+update
+
+00:13:28,880 --> 00:13:33,680
+[Music]
+
+00:13:30,160 --> 00:13:36,399
+instruction tracing the run c
+
+00:13:33,680 --> 00:13:38,000
+execution itself we see something rather
+
+00:13:36,399 --> 00:13:41,360
+surprising on the other hand
+
+00:13:38,000 --> 00:13:45,519
+we see that the um
+
+00:13:41,360 --> 00:13:48,639
+update to control group devices
+
+00:13:45,519 --> 00:13:51,360
+section is starting with a deny
+
+00:13:48,639 --> 00:13:52,000
+on all devices and then followed by
+
+00:13:51,360 --> 00:13:54,639
+individual
+
+00:13:52,000 --> 00:13:55,920
+allows for the rest of the devices for
+
+00:13:54,639 --> 00:13:58,320
+the ones that we actually
+
+00:13:55,920 --> 00:13:59,199
+should be allowed to access and so we
+
+00:13:58,320 --> 00:14:02,000
+found a race
+
+00:13:59,199 --> 00:14:03,440
+in effect there's a window where for a
+
+00:14:02,000 --> 00:14:06,240
+certain amount of time
+
+00:14:03,440 --> 00:14:08,160
+all devices are not allowed and
+
+00:14:06,240 --> 00:14:08,639
+progressively some will be re-allowed
+
+00:14:08,160 --> 00:14:10,160
+until
+
+00:14:08,639 --> 00:14:11,760
+finally everything that should be
+
+00:14:10,160 --> 00:14:13,920
+allowed is allowed but there's a
+
+00:14:11,760 --> 00:14:16,240
+definite window of opportunity here
+
+00:14:13,920 --> 00:14:17,680
+to attempt to open a device and to find
+
+00:14:16,240 --> 00:14:18,720
+that we're not allowed to do so because
+
+00:14:17,680 --> 00:14:22,000
+of the
+
+00:14:18,720 --> 00:14:22,000
+default denial
+
+00:14:24,079 --> 00:14:27,760
+so we found the issue and in fact what
+
+00:14:27,040 --> 00:14:29,440
+we're in luck
+
+00:14:27,760 --> 00:14:31,839
+because the problem has actually been
+
+00:14:29,440 --> 00:14:34,160
+fixed upstream and so we really only
+
+00:14:31,839 --> 00:14:35,120
+needed to upgrade run c here to resolve
+
+00:14:34,160 --> 00:14:37,440
+the issue
+
+00:14:35,120 --> 00:14:38,480
+and the way run c resolved the problem
+
+00:14:37,440 --> 00:14:40,240
+is by
+
+00:14:38,480 --> 00:14:41,920
+emulating the changes that would be
+
+00:14:40,240 --> 00:14:43,680
+taken on update
+
+00:14:41,920 --> 00:14:45,199
+and checking them against what is in
+
+00:14:43,680 --> 00:14:47,519
+place and only reflecting
+
+00:14:45,199 --> 00:14:48,880
+the differences between the desired
+
+00:14:47,519 --> 00:14:52,720
+state and the
+
+00:14:48,880 --> 00:14:56,959
+current state so this was
+
+00:14:52,720 --> 00:14:59,040
+an interesting problem we relearned how
+
+00:14:56,959 --> 00:15:00,560
+the flow of configuration from through
+
+00:14:59,040 --> 00:15:01,920
+the runtime from the cubelet down all
+
+00:15:00,560 --> 00:15:04,240
+the way down to the container
+
+00:15:01,920 --> 00:15:05,199
+and we learned about uh c group device
+
+00:15:04,240 --> 00:15:07,199
+updates as well
+
+00:15:05,199 --> 00:15:08,399
+and possibly a little bit about the cpu
+
+00:15:07,199 --> 00:15:11,600
+set um
+
+00:15:08,399 --> 00:15:14,800
+all this uh investigation goes to
+
+00:15:11,600 --> 00:15:16,000
+benjamin pino who delved into this a
+
+00:15:14,800 --> 00:15:18,959
+little while back
+
+00:15:16,000 --> 00:15:18,959
+thank you very much to him
+
+00:15:20,320 --> 00:15:24,399
+so key takeaways it's really good to
+
+00:15:23,600 --> 00:15:26,240
+know the
+
+00:15:24,399 --> 00:15:27,680
+the container runtime flow and
+
+00:15:26,240 --> 00:15:30,160
+understand it and how the different
+
+00:15:27,680 --> 00:15:32,240
+components interact
+
+00:15:30,160 --> 00:15:33,839
+it's also important to realize that here
+
+00:15:32,240 --> 00:15:36,800
+we had several
+
+00:15:33,839 --> 00:15:37,920
+parameters influencing the overall
+
+00:15:36,800 --> 00:15:40,000
+behavior
+
+00:15:37,920 --> 00:15:42,560
+for instance we had pods with guaranteed
+
+00:15:40,000 --> 00:15:44,399
+qos integer cpu requests and a cpu
+
+00:15:42,560 --> 00:15:46,959
+manager configuration for static
+
+00:15:44,399 --> 00:15:48,320
+if any of those three parameters had
+
+00:15:46,959 --> 00:15:51,360
+been different we would not have
+
+00:15:48,320 --> 00:15:51,360
+encountered this issue
+
+00:15:52,320 --> 00:15:59,680
+and so now i'll uh let lauren dive into
+
+00:15:56,079 --> 00:16:04,320
+an even deeper investigation with the uh
+
+00:15:59,680 --> 00:16:07,279
+network uh layer of kubernetes
+
+00:16:04,320 --> 00:16:09,040
+we're we're not going to talk about uh
+
+00:16:07,279 --> 00:16:12,880
+how well ips can become
+
+00:16:09,040 --> 00:16:15,120
+zombies so
+
+00:16:12,880 --> 00:16:16,880
+this problem started with containers
+
+00:16:15,120 --> 00:16:17,199
+remaining in status container creating
+
+00:16:16,880 --> 00:16:19,279
+for
+
+00:16:17,199 --> 00:16:20,399
+for a long time and the error message
+
+00:16:19,279 --> 00:16:23,600
+was fun
+
+00:16:20,399 --> 00:16:27,440
+in our sense of fun which is well
+
+00:16:23,600 --> 00:16:29,199
+very weird so here the queue is telling
+
+00:16:27,440 --> 00:16:31,440
+us that it can't create the butt sandbox
+
+00:16:29,199 --> 00:16:33,680
+so it can create networking in the bud
+
+00:16:31,440 --> 00:16:36,880
+because it's failing to add an ip
+
+00:16:33,680 --> 00:16:38,800
+address because this address is already
+
+00:16:36,880 --> 00:16:40,720
+in use which is weird because
+
+00:16:38,800 --> 00:16:43,360
+it never happened before and suddenly
+
+00:16:40,720 --> 00:16:45,519
+it's starting to open
+
+00:16:43,360 --> 00:16:47,360
+so address already in use let's see if
+
+00:16:45,519 --> 00:16:50,560
+this address is banned on the host
+
+00:16:47,360 --> 00:16:52,959
+it's not can i add it to an interface i
+
+00:16:50,560 --> 00:16:57,040
+definitely can
+
+00:16:52,959 --> 00:16:59,920
+so nothing obvious there so
+
+00:16:57,040 --> 00:17:00,399
+of course it could also be an ip address
+
+00:16:59,920 --> 00:17:03,199
+from
+
+00:17:00,399 --> 00:17:05,280
+a container so let's look at network
+
+00:17:03,199 --> 00:17:06,400
+name spaces and look at ip addresses in
+
+00:17:05,280 --> 00:17:09,520
+them
+
+00:17:06,400 --> 00:17:12,559
+none of the network name spaces
+
+00:17:09,520 --> 00:17:12,559
+have disappeared address
+
+00:17:12,640 --> 00:17:15,760
+so we've done the obvious and now we
+
+00:17:15,439 --> 00:17:17,520
+need
+
+00:17:15,760 --> 00:17:20,880
+to take a step back to exactly
+
+00:17:17,520 --> 00:17:20,880
+understand what the components
+
+00:17:21,360 --> 00:17:25,839
+what components are involved in this so
+
+00:17:24,079 --> 00:17:26,400
+let's look at our cni plugin on this
+
+00:17:25,839 --> 00:17:28,880
+cluster
+
+00:17:26,400 --> 00:17:29,600
+so we use the livescenic plugin which is
+
+00:17:28,880 --> 00:17:32,640
+uh
+
+00:17:29,600 --> 00:17:33,440
+basically allowing us to attach ip
+
+00:17:32,640 --> 00:17:36,640
+addresses
+
+00:17:33,440 --> 00:17:39,280
+from the underlying cloud provider aws
+
+00:17:36,640 --> 00:17:41,360
+directly to pods and not have an overlay
+
+00:17:39,280 --> 00:17:43,200
+so it starts with an ipam plugin
+
+00:17:41,360 --> 00:17:46,640
+responsible for
+
+00:17:43,200 --> 00:17:48,799
+the aws api call and then there is an
+
+00:17:46,640 --> 00:17:50,080
+ipvlan plugin that is creating the main
+
+00:17:48,799 --> 00:17:53,919
+pod interface
+
+00:17:50,080 --> 00:17:56,080
+and giving it an ip there's
+
+00:17:53,919 --> 00:17:57,520
+another interface that is only used for
+
+00:17:56,080 --> 00:17:58,960
+communication with the host and it
+
+00:17:57,520 --> 00:18:00,640
+doesn't really matter here
+
+00:17:58,960 --> 00:18:02,080
+what is interesting is what's happening
+
+00:18:00,640 --> 00:18:04,480
+with ipplan
+
+00:18:02,080 --> 00:18:06,080
+so now that we know that on this host
+
+00:18:04,480 --> 00:18:08,160
+we're using ipvlan
+
+00:18:06,080 --> 00:18:10,960
+let's say we can create a new ipvland
+
+00:18:08,160 --> 00:18:12,720
+device with this opening ip
+
+00:18:10,960 --> 00:18:14,480
+and as you can see on the top of the
+
+00:18:12,720 --> 00:18:17,440
+slide if we try
+
+00:18:14,480 --> 00:18:19,360
+we actually can't and and we get a very
+
+00:18:17,440 --> 00:18:19,840
+clear error message saying that this ip
+
+00:18:19,360 --> 00:18:22,799
+address
+
+00:18:19,840 --> 00:18:25,360
+is already already assigned sorry to an
+
+00:18:22,799 --> 00:18:26,799
+ipv land device
+
+00:18:25,360 --> 00:18:28,400
+something i want to mention here is that
+
+00:18:26,799 --> 00:18:30,559
+the message is very clear
+
+00:18:28,400 --> 00:18:33,120
+but it doesn't make it to the cubelet
+
+00:18:30,559 --> 00:18:36,480
+because of the netflix library used
+
+00:18:33,120 --> 00:18:38,640
+by the plugin which only use um
+
+00:18:36,480 --> 00:18:40,080
+the error code right and not the error
+
+00:18:38,640 --> 00:18:41,600
+message so we only have
+
+00:18:40,080 --> 00:18:43,440
+address news and we don't have the full
+
+00:18:41,600 --> 00:18:46,080
+detailed message which would have been
+
+00:18:43,440 --> 00:18:46,080
+helpful right
+
+00:18:47,679 --> 00:18:52,000
+so now we need to understand uh what
+
+00:18:50,160 --> 00:18:54,880
+else why are you seeing a plugin is
+
+00:18:52,000 --> 00:18:54,880
+using this ip
+
+00:18:55,039 --> 00:18:59,120
+if we look at the registry of ips used
+
+00:18:57,520 --> 00:19:01,440
+by the plugin this ip is
+
+00:18:59,120 --> 00:19:03,120
+known which means it has been used and
+
+00:19:01,440 --> 00:19:06,240
+assigned to a pod in the past
+
+00:19:03,120 --> 00:19:08,480
+but it's been released but somehow
+
+00:19:06,240 --> 00:19:09,360
+it's been released but not completely
+
+00:19:08,480 --> 00:19:11,120
+right because
+
+00:19:09,360 --> 00:19:13,840
+the ip address is still bound to the
+
+00:19:11,120 --> 00:19:16,240
+appeal and device
+
+00:19:13,840 --> 00:19:18,000
+so we looked at how ipvline handles
+
+00:19:16,240 --> 00:19:20,559
+deletion in this plugin
+
+00:19:18,000 --> 00:19:22,160
+and as you can see here there's code to
+
+00:19:20,559 --> 00:19:24,480
+delete the interface
+
+00:19:22,160 --> 00:19:26,160
+but we never run it because we use
+
+00:19:24,480 --> 00:19:30,320
+chaining and in the case of chaining
+
+00:19:26,160 --> 00:19:33,360
+the deletion call is is never done
+
+00:19:30,320 --> 00:19:37,039
+so we never delete the device however uh
+
+00:19:33,360 --> 00:19:39,840
+it works usually because the runtime
+
+00:19:37,039 --> 00:19:40,960
+uh at the end of the deletion of a pod
+
+00:19:39,840 --> 00:19:42,160
+will actually delete the network
+
+00:19:40,960 --> 00:19:43,840
+namespace which would
+
+00:19:42,160 --> 00:19:46,799
+which will take care of garbage
+
+00:19:43,840 --> 00:19:46,799
+collecting everything
+
+00:19:47,039 --> 00:19:50,720
+so what we know so far the ipa has been
+
+00:19:49,360 --> 00:19:52,960
+a drain has been
+
+00:19:50,720 --> 00:19:55,360
+located to a pod the pod was deleted and
+
+00:19:52,960 --> 00:19:58,320
+vip was marked free
+
+00:19:55,360 --> 00:19:59,440
+the equivalent interface was not deleted
+
+00:19:58,320 --> 00:20:02,080
+when the runtime
+
+00:19:59,440 --> 00:20:04,080
+called network deletion and so we can
+
+00:20:02,080 --> 00:20:06,320
+reuse the ip
+
+00:20:04,080 --> 00:20:07,840
+what's important about network namespace
+
+00:20:06,320 --> 00:20:09,200
+deletion is when you delete the
+
+00:20:07,840 --> 00:20:12,000
+namespace
+
+00:20:09,200 --> 00:20:13,120
+uh the qnl will tell you okay i can i
+
+00:20:12,000 --> 00:20:15,200
+can delete it
+
+00:20:13,120 --> 00:20:16,640
+but it won't actually delete the
+
+00:20:15,200 --> 00:20:19,760
+namespace until
+
+00:20:16,640 --> 00:20:22,960
+every single process running it
+
+00:20:19,760 --> 00:20:25,039
+is is is done running right but what's
+
+00:20:22,960 --> 00:20:28,240
+important here is everything is fine
+
+00:20:25,039 --> 00:20:30,400
+from cni and from the runtime right
+
+00:20:28,240 --> 00:20:33,039
+but the kernel hasn't finished deleting
+
+00:20:30,400 --> 00:20:33,039
+the namespace
+
+00:20:33,120 --> 00:20:36,559
+now that we have this piece of
+
+00:20:34,720 --> 00:20:39,520
+information can we can we reproduce
+
+00:20:36,559 --> 00:20:41,440
+so what we did is we took a part we
+
+00:20:39,520 --> 00:20:42,799
+exact into its network namespace from
+
+00:20:41,440 --> 00:20:46,000
+the commands
+
+00:20:42,799 --> 00:20:49,200
+and as you can see here we can see here
+
+00:20:46,000 --> 00:20:50,799
+that the um network namespace
+
+00:20:49,200 --> 00:20:53,039
+of this process is actually the one of
+
+00:20:50,799 --> 00:20:55,440
+the bug right
+
+00:20:53,039 --> 00:20:56,240
+if we delete this namespace everything
+
+00:20:55,440 --> 00:20:59,760
+works
+
+00:20:56,240 --> 00:21:02,559
+the cni marks the ips released however
+
+00:20:59,760 --> 00:21:04,000
+we can't reuse it and add it to an end
+
+00:21:02,559 --> 00:21:06,559
+device
+
+00:21:04,000 --> 00:21:08,480
+and what's interesting is if we enter
+
+00:21:06,559 --> 00:21:09,360
+the network namespace of the process we
+
+00:21:08,480 --> 00:21:11,679
+created
+
+00:21:09,360 --> 00:21:13,120
+we can still see the iqlan interface so
+
+00:21:11,679 --> 00:21:17,840
+we have a very good idea
+
+00:21:13,120 --> 00:21:17,840
+what's happening here
+
+00:21:18,000 --> 00:21:23,520
+so um let's see if we can find
+
+00:21:22,000 --> 00:21:26,240
+the process holding this network
+
+00:21:23,520 --> 00:21:27,039
+namespace so what we did here is we
+
+00:21:26,240 --> 00:21:28,400
+looked at
+
+00:21:27,039 --> 00:21:31,120
+all the processes and the network
+
+00:21:28,400 --> 00:21:33,919
+namespaces and we entered them
+
+00:21:31,120 --> 00:21:35,120
+and we looked for vip for our process we
+
+00:21:33,919 --> 00:21:37,600
+were able to find it
+
+00:21:35,120 --> 00:21:40,480
+however we were not able to find it for
+
+00:21:37,600 --> 00:21:42,720
+the iphone that was already in use right
+
+00:21:40,480 --> 00:21:43,520
+so that was we have an idea but we can't
+
+00:21:42,720 --> 00:21:44,960
+actually
+
+00:21:43,520 --> 00:21:46,720
+trace the problem back to an actual
+
+00:21:44,960 --> 00:21:49,039
+process
+
+00:21:46,720 --> 00:21:50,559
+so we took a step back because we had a
+
+00:21:49,039 --> 00:21:53,440
+good idea what was happening
+
+00:21:50,559 --> 00:21:55,039
+but we were not able to pinpoint exactly
+
+00:21:53,440 --> 00:21:57,039
+what was the concrete
+
+00:21:55,039 --> 00:21:58,240
+we had a few additional data points we
+
+00:21:57,039 --> 00:21:58,880
+knew that the problem started with a
+
+00:21:58,240 --> 00:22:01,760
+node
+
+00:21:58,880 --> 00:22:02,559
+and slowly propagated to others and that
+
+00:22:01,760 --> 00:22:05,039
+regularly
+
+00:22:02,559 --> 00:22:07,520
+the problem was completely disappearing
+
+00:22:05,039 --> 00:22:09,600
+and restarting again
+
+00:22:07,520 --> 00:22:10,799
+so what are we looking for we're looking
+
+00:22:09,600 --> 00:22:11,919
+at the process
+
+00:22:10,799 --> 00:22:14,640
+we're looking for a process that is
+
+00:22:11,919 --> 00:22:16,880
+running on all nodes that is
+
+00:22:14,640 --> 00:22:19,280
+regularly either stopped restarted or
+
+00:22:16,880 --> 00:22:21,120
+redeployed
+
+00:22:19,280 --> 00:22:23,360
+what kind of process is that maybe a
+
+00:22:21,120 --> 00:22:25,760
+demon set right
+
+00:22:23,360 --> 00:22:27,520
+so we look at demon sets and we have a
+
+00:22:25,760 --> 00:22:29,440
+lot of very few demon sets
+
+00:22:27,520 --> 00:22:30,799
+but there's one that has a lot of that
+
+00:22:29,440 --> 00:22:34,559
+does a lot of things
+
+00:22:30,799 --> 00:22:36,480
+and it's data log agents so we
+
+00:22:34,559 --> 00:22:38,240
+actually were able to trace back the
+
+00:22:36,480 --> 00:22:39,360
+fact that when the deadlock agent was
+
+00:22:38,240 --> 00:22:42,480
+redeployed
+
+00:22:39,360 --> 00:22:44,320
+the error was fixed so we reached out to
+
+00:22:42,480 --> 00:22:46,559
+the team and they told us well
+
+00:22:44,320 --> 00:22:48,000
+we actually have a feature that is
+
+00:22:46,559 --> 00:22:50,240
+allowing us to instrument
+
+00:22:48,000 --> 00:22:51,919
+the contract and nuts inside network and
+
+00:22:50,240 --> 00:22:54,159
+space of containers
+
+00:22:51,919 --> 00:22:55,039
+and so we looked into it with them and
+
+00:22:54,159 --> 00:22:56,880
+it turned out
+
+00:22:55,039 --> 00:22:58,240
+this new feature was using a long-lived
+
+00:22:56,880 --> 00:22:59,600
+connection
+
+00:22:58,240 --> 00:23:02,400
+on a netting circuit to get this
+
+00:22:59,600 --> 00:23:03,039
+information and of course this was
+
+00:23:02,400 --> 00:23:05,440
+holding
+
+00:23:03,039 --> 00:23:06,559
+the network namespaces and to fix that
+
+00:23:05,440 --> 00:23:08,000
+we just had to use
+
+00:23:06,559 --> 00:23:10,320
+short-lived connections in terms of
+
+00:23:08,000 --> 00:23:13,840
+long-lived one so the network namespace
+
+00:23:10,320 --> 00:23:13,840
+could be released by the kernel
+
+00:23:14,880 --> 00:23:19,919
+key takeaways uh interaction between all
+
+00:23:17,520 --> 00:23:22,080
+these components are complex
+
+00:23:19,919 --> 00:23:23,760
+it's also very difficult in the kernel
+
+00:23:22,080 --> 00:23:24,480
+to understand what's happening at the
+
+00:23:23,760 --> 00:23:27,520
+networking
+
+00:23:24,480 --> 00:23:28,400
+level because a lot of information can't
+
+00:23:27,520 --> 00:23:31,840
+be found
+
+00:23:28,400 --> 00:23:33,360
+so you need to to guess a lot and also i
+
+00:23:31,840 --> 00:23:36,640
+said that we were lucky because
+
+00:23:33,360 --> 00:23:38,240
+we code this in staging and also this
+
+00:23:36,640 --> 00:23:41,919
+error was made very visible
+
+00:23:38,240 --> 00:23:44,320
+by the cni issue but
+
+00:23:41,919 --> 00:23:46,159
+if we hadn't seen it in the sinai issue
+
+00:23:44,320 --> 00:23:51,039
+we would have leaked network namespace
+
+00:23:46,159 --> 00:23:53,200
+with unknown consequences right and
+
+00:23:51,039 --> 00:23:54,080
+that's it for this network debugging
+
+00:23:53,200 --> 00:23:56,240
+problem i mean
+
+00:23:54,080 --> 00:23:58,320
+i love networking but i think the story
+
+00:23:56,240 --> 00:24:00,320
+that eric is going to share next
+
+00:23:58,320 --> 00:24:01,440
+uh which is even deeper because of the
+
+00:24:00,320 --> 00:24:05,200
+channels is
+
+00:24:01,440 --> 00:24:08,720
+even more interesting
+
+00:24:05,200 --> 00:24:10,880
+yeah thanks so who ate my capabilities
+
+00:24:08,720 --> 00:24:14,640
+this is the the story that gave its
+
+00:24:10,880 --> 00:24:14,640
+title to to the presentation
+
+00:24:16,159 --> 00:24:22,880
+okay a word about uh lingus capabilities
+
+00:24:20,799 --> 00:24:25,120
+capabilities are a feature of the linux
+
+00:24:22,880 --> 00:24:27,919
+kernel that allow us to
+
+00:24:25,120 --> 00:24:28,960
+give privileges to certain processes
+
+00:24:27,919 --> 00:24:31,039
+that are not
+
+00:24:28,960 --> 00:24:32,640
+normally privileges that don't run as
+
+00:24:31,039 --> 00:24:35,600
+root for instance
+
+00:24:32,640 --> 00:24:36,559
+so in the example that i'm showing here
+
+00:24:35,600 --> 00:24:39,360
+we have the
+
+00:24:36,559 --> 00:24:41,440
+capture pro program that just displays
+
+00:24:39,360 --> 00:24:43,520
+the capabilities that it has and decodes
+
+00:24:41,440 --> 00:24:45,760
+them for us
+
+00:24:43,520 --> 00:24:48,000
+which initially doesn't have any and to
+
+00:24:45,760 --> 00:24:49,679
+which i then assign a capability
+
+00:24:48,000 --> 00:24:51,200
+through the extended attributes of the
+
+00:24:49,679 --> 00:24:53,919
+file on disk
+
+00:24:51,200 --> 00:24:55,520
+and then when i run so here the capnet
+
+00:24:53,919 --> 00:24:57,039
+bind service which means i
+
+00:24:55,520 --> 00:24:59,200
+this process would be allowed to bind
+
+00:24:57,039 --> 00:25:01,600
+ports under 1024 which is
+
+00:24:59,200 --> 00:25:02,240
+privileged normally reserved for root
+
+00:25:01,600 --> 00:25:04,880
+and
+
+00:25:02,240 --> 00:25:06,720
+um then once it has these capabilities
+
+00:25:04,880 --> 00:25:08,720
+on the file and extended attributes
+
+00:25:06,720 --> 00:25:11,200
+if i run the program i see that i have
+
+00:25:08,720 --> 00:25:15,440
+this privilege now
+
+00:25:11,200 --> 00:25:18,159
+so we wanted to use this for
+
+00:25:15,440 --> 00:25:19,440
+the api server the cube api server which
+
+00:25:18,159 --> 00:25:22,720
+we run as a pod in
+
+00:25:19,440 --> 00:25:25,600
+certain circumstances and so
+
+00:25:22,720 --> 00:25:27,200
+quite simply in our docker file we set
+
+00:25:25,600 --> 00:25:29,360
+the capability on the file
+
+00:25:27,200 --> 00:25:30,480
+and then when we run the prod the
+
+00:25:29,360 --> 00:25:32,960
+strange thing is that
+
+00:25:30,480 --> 00:25:35,039
+it doesn't work we are unable to bind
+
+00:25:32,960 --> 00:25:36,320
+port 443 we get a permission denied
+
+00:25:35,039 --> 00:25:38,720
+error just as if we didn't have the
+
+00:25:36,320 --> 00:25:38,720
+privilege
+
+00:25:40,240 --> 00:25:43,760
+so if we look at the actual process
+
+00:25:42,720 --> 00:25:46,320
+characteristics
+
+00:25:43,760 --> 00:25:48,159
+we see that indeed it does not have the
+
+00:25:46,320 --> 00:25:49,279
+privilege it doesn't have the capability
+
+00:25:48,159 --> 00:25:50,960
+the
+
+00:25:49,279 --> 00:25:52,480
+permitted capabilities the effective
+
+00:25:50,960 --> 00:25:54,960
+capabilities of the process
+
+00:25:52,480 --> 00:25:56,159
+are all zero there all the bits are
+
+00:25:54,960 --> 00:25:59,600
+cleared
+
+00:25:56,159 --> 00:26:01,520
+um even though we should have 400 uh
+
+00:25:59,600 --> 00:26:03,279
+where the the value of the cabinet main
+
+00:26:01,520 --> 00:26:06,080
+service uh
+
+00:26:03,279 --> 00:26:07,760
+a bit and yet if we look at the
+
+00:26:06,080 --> 00:26:10,000
+capabilities on the file system
+
+00:26:07,760 --> 00:26:11,200
+they're there it's what we built in the
+
+00:26:10,000 --> 00:26:14,320
+dockerfile so
+
+00:26:11,200 --> 00:26:14,320
+again what is happening
+
+00:26:15,840 --> 00:26:18,880
+if we think about the usual suspects um
+
+00:26:18,240 --> 00:26:21,520
+there's the
+
+00:26:18,880 --> 00:26:23,440
+no new privileges flag we check and that
+
+00:26:21,520 --> 00:26:25,679
+isn't set
+
+00:26:23,440 --> 00:26:26,559
+we're not using no set user id file
+
+00:26:25,679 --> 00:26:29,120
+systems
+
+00:26:26,559 --> 00:26:31,200
+our kernels are booted with file
+
+00:26:29,120 --> 00:26:34,159
+capabilities allowed
+
+00:26:31,200 --> 00:26:35,679
+um and yet one interesting observation
+
+00:26:34,159 --> 00:26:39,279
+here is that
+
+00:26:35,679 --> 00:26:42,640
+since the capabilities are all clear
+
+00:26:39,279 --> 00:26:44,559
+it means and yet the program it ran
+
+00:26:42,640 --> 00:26:46,640
+was was launched by the kernel it does
+
+00:26:44,559 --> 00:26:48,320
+mean that the file capabilities
+
+00:26:46,640 --> 00:26:50,320
+literally don't apply according to the
+
+00:26:48,320 --> 00:26:52,720
+kernel
+
+00:26:50,320 --> 00:26:53,840
+and another thing we build the image on
+
+00:26:52,720 --> 00:26:57,120
+our laptops and
+
+00:26:53,840 --> 00:26:57,120
+interestingly it works
+
+00:26:59,200 --> 00:27:02,799
+so that prompts us to look at the layers
+
+00:27:02,159 --> 00:27:06,159
+of the
+
+00:27:02,799 --> 00:27:09,520
+image that we build and here we realize
+
+00:27:06,159 --> 00:27:12,320
+that the extended attributes of the file
+
+00:27:09,520 --> 00:27:12,960
+are actually different in the laptop
+
+00:27:12,320 --> 00:27:16,159
+case
+
+00:27:12,960 --> 00:27:20,080
+we see that the capabilities are encoded
+
+00:27:16,159 --> 00:27:21,760
+using a version 2 and in the comp by
+
+00:27:20,080 --> 00:27:24,000
+the the image built up by our continuous
+
+00:27:21,760 --> 00:27:25,600
+integration has a version three
+
+00:27:24,000 --> 00:27:29,520
+and we also see that in the version
+
+00:27:25,600 --> 00:27:29,520
+three there's more information
+
+00:27:32,480 --> 00:27:36,000
+so what are these attributes exactly in
+
+00:27:35,440 --> 00:27:38,799
+fact
+
+00:27:36,000 --> 00:27:40,480
+now we realize that there's actually an
+
+00:27:38,799 --> 00:27:43,039
+extra option on the get cap command
+
+00:27:40,480 --> 00:27:46,240
+which we didn't notice initially
+
+00:27:43,039 --> 00:27:48,159
+which causes the extra information the
+
+00:27:46,240 --> 00:27:49,919
+version 3 capabilities information
+
+00:27:48,159 --> 00:27:51,679
+to be displayed and it's in fact a user
+
+00:27:49,919 --> 00:27:55,279
+id the root id
+
+00:27:51,679 --> 00:27:57,600
+so what exactly is this root id well
+
+00:27:55,279 --> 00:28:00,799
+in our ci's docker configuration we
+
+00:27:57,600 --> 00:28:03,760
+actually run it with user name spaces
+
+00:28:00,799 --> 00:28:04,480
+usernamespaces is a great feature uh
+
+00:28:03,760 --> 00:28:06,080
+very
+
+00:28:04,480 --> 00:28:08,399
+applicable in this particular context
+
+00:28:06,080 --> 00:28:12,159
+where we want to run untrusted code
+
+00:28:08,399 --> 00:28:14,480
+and so what usernamespaces do
+
+00:28:12,159 --> 00:28:16,159
+is that they actually remap user ids and
+
+00:28:14,480 --> 00:28:19,600
+group ids
+
+00:28:16,159 --> 00:28:21,919
+and in this situation the kernel needs
+
+00:28:19,600 --> 00:28:25,440
+to ensure from a security perspective
+
+00:28:21,919 --> 00:28:27,279
+that if a program run in one username
+
+00:28:25,440 --> 00:28:30,240
+space
+
+00:28:27,279 --> 00:28:31,120
+grants a certain set of capabilities to
+
+00:28:30,240 --> 00:28:33,200
+a file
+
+00:28:31,120 --> 00:28:35,279
+you can't simply take that file and run
+
+00:28:33,200 --> 00:28:36,559
+it in another username space and acquire
+
+00:28:35,279 --> 00:28:38,559
+those same privileges
+
+00:28:36,559 --> 00:28:39,679
+that would be an immediate security
+
+00:28:38,559 --> 00:28:41,360
+issue
+
+00:28:39,679 --> 00:28:43,279
+so what the kernel does is that it
+
+00:28:41,360 --> 00:28:46,480
+persists the root user id
+
+00:28:43,279 --> 00:28:48,559
+of the user namespace in the extended
+
+00:28:46,480 --> 00:28:50,960
+file attribute
+
+00:28:48,559 --> 00:28:52,640
+so that it can ensure that if it's run
+
+00:28:50,960 --> 00:28:53,600
+in another username space unless the
+
+00:28:52,640 --> 00:28:57,520
+user ids map
+
+00:28:53,600 --> 00:28:59,440
+match sorry they will not be applied
+
+00:28:57,520 --> 00:29:00,960
+now as it happens this is irrelevant for
+
+00:28:59,440 --> 00:29:01,760
+container image builds because clearly
+
+00:29:00,960 --> 00:29:03,600
+we want to build
+
+00:29:01,760 --> 00:29:05,520
+images in one place and run them
+
+00:29:03,600 --> 00:29:06,799
+anywhere else that we that we wish so we
+
+00:29:05,520 --> 00:29:11,279
+really don't want
+
+00:29:06,799 --> 00:29:14,480
+a v3 capability here we just want
+
+00:29:11,279 --> 00:29:15,520
+the v2 without the root id and and in
+
+00:29:14,480 --> 00:29:18,799
+this case
+
+00:29:15,520 --> 00:29:22,480
+the fact that um docker mobi
+
+00:29:18,799 --> 00:29:25,039
+build actually persists this um
+
+00:29:22,480 --> 00:29:26,480
+this information this user id is is an
+
+00:29:25,039 --> 00:29:29,679
+error and so
+
+00:29:26,480 --> 00:29:31,679
+we developed a fix and the pr was merged
+
+00:29:29,679 --> 00:29:34,880
+upstream and we should have to fix
+
+00:29:31,679 --> 00:29:34,880
+in docker 21.
+
+00:29:35,840 --> 00:29:41,760
+so key takeaways here well read the
+
+00:29:39,200 --> 00:29:42,720
+manuals the capabilities manual page is
+
+00:29:41,760 --> 00:29:44,320
+really excellent
+
+00:29:42,720 --> 00:29:46,080
+contains a lot of detail a lot of
+
+00:29:44,320 --> 00:29:47,360
+explanations and allows you to reason
+
+00:29:46,080 --> 00:29:49,200
+about what is happening
+
+00:29:47,360 --> 00:29:51,840
+with respect to capabilities in great
+
+00:29:49,200 --> 00:29:54,320
+detail also read the get capman page
+
+00:29:51,840 --> 00:29:55,919
+this is the one that we missed initially
+
+00:29:54,320 --> 00:29:57,679
+where we didn't see the dash n option
+
+00:29:55,919 --> 00:30:00,159
+which would have been really useful
+
+00:29:57,679 --> 00:30:00,960
+and finally reproducible build yes by
+
+00:30:00,159 --> 00:30:06,399
+all means
+
+00:30:00,960 --> 00:30:09,520
+but to within bugs so there we have it
+
+00:30:06,399 --> 00:30:11,600
+and just to conclude then um
+
+00:30:09,520 --> 00:30:12,799
+kubernetes does an awful lot of heavy
+
+00:30:11,600 --> 00:30:16,159
+lifting for us
+
+00:30:12,799 --> 00:30:17,600
+um and all the associated uh
+
+00:30:16,159 --> 00:30:19,279
+software around it the container
+
+00:30:17,600 --> 00:30:20,399
+runtimes the container network
+
+00:30:19,279 --> 00:30:23,520
+interfaces
+
+00:30:20,399 --> 00:30:24,159
+um however the bigger your organization
+
+00:30:23,520 --> 00:30:26,240
+grows
+
+00:30:24,159 --> 00:30:27,919
+the more strange issues you are going to
+
+00:30:26,240 --> 00:30:29,520
+encounter and these will challenge you
+
+00:30:27,919 --> 00:30:31,840
+to go deep in your understanding
+
+00:30:29,520 --> 00:30:33,039
+of the of kubernetes and the overall
+
+00:30:31,840 --> 00:30:36,080
+ecosystem
+
+00:30:33,039 --> 00:30:38,159
+but it is extremely interesting to do so
+
+00:30:36,080 --> 00:30:40,000
+we have maybe a strange definition of
+
+00:30:38,159 --> 00:30:41,600
+fun but we definitely like digging into
+
+00:30:40,000 --> 00:30:43,520
+these kinds of issues
+
+00:30:41,600 --> 00:30:44,799
+we think the debugging also teaches us
+
+00:30:43,520 --> 00:30:47,679
+an awful lot about the
+
+00:30:44,799 --> 00:30:50,480
+the platform and that overall it allows
+
+00:30:47,679 --> 00:30:51,919
+us to give our users a better experience
+
+00:30:50,480 --> 00:30:54,240
+because we're able to help them better
+
+00:30:51,919 --> 00:30:57,200
+because we know the platform well
+
+00:30:54,240 --> 00:30:57,919
+and it's not easy definitely but it is
+
+00:30:57,200 --> 00:30:59,360
+feasible
+
+00:30:57,919 --> 00:31:01,120
+in particular because here we are
+
+00:30:59,360 --> 00:31:02,840
+dealing with open source and so we're
+
+00:31:01,120 --> 00:31:04,000
+able to dig through absolutely
+
+00:31:02,840 --> 00:31:05,519
+everything
+
+00:31:04,000 --> 00:31:08,399
+but it is definitely worth it and we
+
+00:31:05,519 --> 00:31:11,519
+find it's very rewarding
+
+00:31:08,399 --> 00:31:14,399
+so thank you for listening watching and
+
+00:31:11,519 --> 00:31:18,240
+we hope to see you one day in person
+
+00:31:14,399 --> 00:31:18,240
+
+YouTube URL: https://www.youtube.com/watch?v=1bi5H9hMuFY
+
+

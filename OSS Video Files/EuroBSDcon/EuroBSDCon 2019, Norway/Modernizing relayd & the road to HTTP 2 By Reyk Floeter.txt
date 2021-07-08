@@ -1,0 +1,2366 @@
+Title: Modernizing relayd & the road to HTTP 2 By Reyk Floeter
+Publication date: 2019-10-20
+Playlist: EuroBSDCon 2019, Norway
+Description: 
+	This talk is about my recent work to modernize relayd, to fix long-standing issues and limitations, and about the road to HTTP/2 in OpenBSD’s web stack.
+
+relayd’s HTTP support dates back to early 2007, about three months after it was imported into OpenBSD for the first time. It was a necessary feature to complement relayd’s pf-based redirections with layer 7 load balancing for cookie-awareness, SSL acceleration, and basic header or URL filtering. The daemon has been improved, renamed, hardened, and widely deployed over the years.
+
+Meanwhile, the web has changed a lot. While relayd is still a very useful tool, it had to get modernized to stay relevant. OpenBSD’s Claudio Jeker had updated the TLS support in 2017, and I added missing features such as TLS SNI and OCSP this year. Furthermore, I improved the protocol filters to offer greater flexibility when relaying HTTP traffic and I finally fixed a persistency bug that was a big show stopper for such filters.
+
+But the most important step forward is HTTP/2. While the IETF was about to finalize the QUIC- and UDP-based HTTP/3, relayd and httpd were still based on the dated and text-based HTTP/1.1. I started my road to add HTTP/2 support to relayd and subsequently to httpd. This talk addresses the ongoing work of the implementation, awesome HPACK header compression, and challenges with HTTP/2 states and multiplexing.
+
+More Info:
+https://2019.eurobsdcon.org/talk-speakers/#relayd
+Captions: 
+	00:00:03,690 --> 00:00:11,770
+alright thanks for making it back after
+
+00:00:06,580 --> 00:00:14,110
+lunch right now right floater will talk
+
+00:00:11,770 --> 00:00:17,760
+to us about modernizing Real ID and the
+
+00:00:14,110 --> 00:00:28,600
+dare I say rocky road to http/2
+
+00:00:17,760 --> 00:00:31,630
+please welcome right thank you yeah okay
+
+00:00:28,600 --> 00:00:34,629
+it's it's great to see you here
+
+00:00:31,630 --> 00:00:36,820
+especially after lunch I think I had a
+
+00:00:34,629 --> 00:00:42,520
+plate was that much meat and fish and
+
+00:00:36,820 --> 00:00:46,600
+all that and now I have to talk so we
+
+00:00:42,520 --> 00:00:48,820
+see I hope it's worth it so let me talk
+
+00:00:46,600 --> 00:00:55,270
+about modernizing real ad and a little
+
+00:00:48,820 --> 00:00:58,590
+bit about http/2 and why the focus of
+
+00:00:55,270 --> 00:01:02,739
+this talk shifted a little bit to two
+
+00:00:58,590 --> 00:01:09,159
+other things we did in reality over the
+
+00:01:02,739 --> 00:01:12,869
+last few months by the way this people
+
+00:01:09,159 --> 00:01:16,539
+rarely know that real ad has its own
+
+00:01:12,869 --> 00:01:17,259
+puffy mascot version that I once did
+
+00:01:16,539 --> 00:01:21,039
+myself
+
+00:01:17,259 --> 00:01:27,219
+it's a plumber the the prefer plumber
+
+00:01:21,039 --> 00:01:31,049
+puffy that you see in the corner so a
+
+00:01:27,219 --> 00:01:35,289
+little history lesson about real ad and
+
+00:01:31,049 --> 00:01:37,450
+in the in the latest context then I will
+
+00:01:35,289 --> 00:01:40,889
+talk about some new features and
+
+00:01:37,450 --> 00:01:44,020
+enhancements or things that have been
+
+00:01:40,889 --> 00:01:48,549
+requested many times over the years and
+
+00:01:44,020 --> 00:01:53,679
+I finally unselect and and fixed or
+
+00:01:48,549 --> 00:01:55,779
+finished about http/2 and what is being
+
+00:01:53,679 --> 00:02:00,310
+worked on there and some some other
+
+00:01:55,779 --> 00:02:05,919
+future stuff and then I hope you you
+
+00:02:00,310 --> 00:02:13,000
+have some questions asked afterwards so
+
+00:02:05,919 --> 00:02:16,260
+we lady God imported in 2006 so it's
+
+00:02:13,000 --> 00:02:16,260
+almost ancient now
+
+00:02:16,629 --> 00:02:24,670
+and it was in interesting piece of code
+
+00:02:21,159 --> 00:02:30,489
+because I wrote a little demon that was
+
+00:02:24,670 --> 00:02:34,959
+able to do health checks on on different
+
+00:02:30,489 --> 00:02:38,409
+web servers like using ICMP checks or
+
+00:02:34,959 --> 00:02:41,370
+TCP check so a little HTTP check and
+
+00:02:38,409 --> 00:02:44,980
+then based on the health check results
+
+00:02:41,370 --> 00:02:50,200
+configure a PF table - so in the back in
+
+00:02:44,980 --> 00:02:54,549
+the days we had these are DRS in PF and
+
+00:02:50,200 --> 00:02:57,609
+the Arias code only forward to a
+
+00:02:54,549 --> 00:03:00,579
+round-robin table so PF gots a request
+
+00:02:57,609 --> 00:03:02,769
+and uses a round-robin table to senses
+
+00:03:00,579 --> 00:03:04,659
+to back-end hosts and this was statics
+
+00:03:02,769 --> 00:03:08,079
+or one of the hosts in this table was
+
+00:03:04,659 --> 00:03:09,909
+down PF did it anyway so the little idea
+
+00:03:08,079 --> 00:03:14,470
+was just to health checks and based on
+
+00:03:09,909 --> 00:03:20,949
+that populate the table and then about
+
+00:03:14,470 --> 00:03:24,790
+the same time care if showed up and he
+
+00:03:20,949 --> 00:03:28,690
+has her head implemented something very
+
+00:03:24,790 --> 00:03:34,930
+similar this s LBD simple load balancing
+
+00:03:28,690 --> 00:03:37,840
+daemon that he did and it was the same
+
+00:03:34,930 --> 00:03:40,150
+idea and it had a few who knew more
+
+00:03:37,840 --> 00:03:42,159
+things that I didn't have in my
+
+00:03:40,150 --> 00:03:45,370
+implementation and and he lacked other
+
+00:03:42,159 --> 00:03:47,470
+so it's like oh great let's import this
+
+00:03:45,370 --> 00:03:50,199
+this load balancing demon I convinced
+
+00:03:47,470 --> 00:03:52,419
+steel and we can also get a new
+
+00:03:50,199 --> 00:03:56,620
+developer because we also imported peer
+
+00:03:52,419 --> 00:04:00,430
+even the project basically so based on
+
+00:03:56,620 --> 00:04:04,449
+that we we we worked on the code made it
+
+00:04:00,430 --> 00:04:09,729
+ready for the tree and this because I
+
+00:04:04,449 --> 00:04:16,720
+didn't like the name we name we renamed
+
+00:04:09,729 --> 00:04:20,949
+it to even worse thing - oh it was host
+
+00:04:16,720 --> 00:04:23,800
+state Eve in the beginning and and this
+
+00:04:20,949 --> 00:04:26,789
+yeah that was the famous first comet
+
+00:04:23,800 --> 00:04:26,789
+with many to Do's
+
+00:04:28,479 --> 00:04:38,289
+so it got in in 2006 in 2007 so in the
+
+00:04:35,860 --> 00:04:41,139
+beginning it was basically just running
+
+00:04:38,289 --> 00:04:44,379
+health checks and then configuring PF
+
+00:04:41,139 --> 00:04:48,939
+for this as I say redirects or the
+
+00:04:44,379 --> 00:04:54,490
+layered three forwarding but then I got
+
+00:04:48,939 --> 00:05:00,419
+asked myself by somebody who wanted to
+
+00:04:54,490 --> 00:05:02,469
+to run an a load balancer in a big web
+
+00:05:00,419 --> 00:05:05,650
+application it was a platform where you
+
+00:05:02,469 --> 00:05:08,529
+could buy screams from German soccer
+
+00:05:05,650 --> 00:05:10,360
+games and all that and this Megantic
+
+00:05:08,529 --> 00:05:12,099
+company was involved there and they
+
+00:05:10,360 --> 00:05:16,860
+asked or can you do load balancing and
+
+00:05:12,099 --> 00:05:21,479
+do your support and SSL termination I
+
+00:05:16,860 --> 00:05:24,099
+said sure and then I looked it up and
+
+00:05:21,479 --> 00:05:28,659
+implemented it actually and this is how
+
+00:05:24,099 --> 00:05:33,129
+real ad got support for the the relays a
+
+00:05:28,659 --> 00:05:36,370
+layer seven part so the difference is
+
+00:05:33,129 --> 00:05:41,379
+one thing I can terminate here a TLS
+
+00:05:36,370 --> 00:05:45,370
+connection on the front and talk HTTP to
+
+00:05:41,379 --> 00:05:50,199
+the backend so this requires me to go on
+
+00:05:45,370 --> 00:05:52,629
+all on the application layer no right so
+
+00:05:50,199 --> 00:05:55,569
+this is basically SSL termination in
+
+00:05:52,629 --> 00:05:58,839
+this particular product as well as good
+
+00:05:55,569 --> 00:06:01,870
+because it was a it was a free low test
+
+00:05:58,839 --> 00:06:04,629
+basically because thousands of people at
+
+00:06:01,870 --> 00:06:06,699
+the same time wanted to order their a
+
+00:06:04,629 --> 00:06:10,029
+soccer game that I could watch online
+
+00:06:06,699 --> 00:06:11,589
+and all that and I was sitting in the
+
+00:06:10,029 --> 00:06:13,749
+data center with with some people
+
+00:06:11,589 --> 00:06:15,639
+watching the game and at the same time
+
+00:06:13,749 --> 00:06:18,689
+see all real ad crashed okay let's fix
+
+00:06:15,639 --> 00:06:23,439
+it run it again and so it was kind of
+
+00:06:18,689 --> 00:06:26,409
+live testing the good thing is we had
+
+00:06:23,439 --> 00:06:28,180
+real ad redundant so if one crash the
+
+00:06:26,409 --> 00:06:31,569
+other one took over and nobody noticed
+
+00:06:28,180 --> 00:06:34,060
+any problem so this is how real ad got
+
+00:06:31,569 --> 00:06:36,550
+the real a part if your known the syntax
+
+00:06:34,060 --> 00:06:40,580
+it has redirects and relays so the relay
+
+00:06:36,550 --> 00:06:43,100
+parts came a few months later
+
+00:06:40,580 --> 00:06:44,600
+you can do a little bit more so for
+
+00:06:43,100 --> 00:06:47,210
+example instead of just doing the load
+
+00:06:44,600 --> 00:06:50,600
+balancing based on source IP what PF
+
+00:06:47,210 --> 00:06:54,710
+basically does you can look at at the
+
+00:06:50,600 --> 00:06:57,200
+cookie value so that you maintain some
+
+00:06:54,710 --> 00:07:00,440
+persistence so if a client provides a
+
+00:06:57,200 --> 00:07:02,660
+specific cookie you send it to do the
+
+00:07:00,440 --> 00:07:05,480
+same back end or you hash and some other
+
+00:07:02,660 --> 00:07:09,800
+values to make it less obvious for for
+
+00:07:05,480 --> 00:07:14,930
+some attackers basically so this is all
+
+00:07:09,800 --> 00:07:16,660
+part of the layer seven over the time it
+
+00:07:14,930 --> 00:07:19,130
+got renamed multiple times
+
+00:07:16,660 --> 00:07:21,500
+LBD in the beginning as I said host
+
+00:07:19,130 --> 00:07:25,280
+state D which I never really liked it
+
+00:07:21,500 --> 00:07:28,040
+was a compromise house state II we saw
+
+00:07:25,280 --> 00:07:31,880
+it as clever until some Americans told
+
+00:07:28,040 --> 00:07:35,180
+me that the first thought is not really
+
+00:07:31,880 --> 00:07:38,690
+a good idea and the last thing I came up
+
+00:07:35,180 --> 00:07:41,150
+with a name real ad which because it is
+
+00:07:38,690 --> 00:07:44,780
+more than just something that monitors
+
+00:07:41,150 --> 00:07:50,410
+the state of servers it is relaying from
+
+00:07:44,780 --> 00:07:53,419
+A to B and I even like a relay the name
+
+00:07:50,410 --> 00:07:56,180
+more than like proxy because a proxy is
+
+00:07:53,419 --> 00:07:58,940
+usually very application specific and a
+
+00:07:56,180 --> 00:08:02,300
+relay is very generic real ad can do
+
+00:07:58,940 --> 00:08:06,110
+generic TCP but it can also do TLS and
+
+00:08:02,300 --> 00:08:08,830
+HTTP so getting stuff from A to B in the
+
+00:08:06,110 --> 00:08:14,330
+middle now that's what real ad does and
+
+00:08:08,830 --> 00:08:17,690
+a few years later real ad got an
+
+00:08:14,330 --> 00:08:24,080
+offspring basically when we removed
+
+00:08:17,690 --> 00:08:26,510
+nginx from openbsd and we needed another
+
+00:08:24,080 --> 00:08:29,030
+web server I said okay I can we turn
+
+00:08:26,510 --> 00:08:33,110
+real ad into a web server because it
+
+00:08:29,030 --> 00:08:35,360
+already has part of the implementation
+
+00:08:33,110 --> 00:08:38,120
+right so HTTP D is its own piece of
+
+00:08:35,360 --> 00:08:39,919
+software but it's based on real ad still
+
+00:08:38,120 --> 00:08:43,839
+and I try to sync
+
+00:08:39,919 --> 00:08:49,550
+code back and forth okay long history
+
+00:08:43,839 --> 00:08:51,560
+but meanwhile in 2019 the web has
+
+00:08:49,550 --> 00:08:52,680
+changed a bit right so everything is
+
+00:08:51,560 --> 00:08:56,189
+distributed
+
+00:08:52,680 --> 00:08:58,199
+and everything is like cloud and apps
+
+00:08:56,189 --> 00:09:00,480
+and whatever and people don't even use
+
+00:08:58,199 --> 00:09:05,240
+real web servers anymore you have some
+
+00:09:00,480 --> 00:09:05,240
+nodejs and whatever is fancy right now
+
+00:09:05,420 --> 00:09:14,610
+so we see ok we need to clean it a
+
+00:09:10,709 --> 00:09:17,220
+little bit up technically like like
+
+00:09:14,610 --> 00:09:20,699
+Claudius change to use lip TLS instead
+
+00:09:17,220 --> 00:09:24,470
+of up mrs. L that's just a detail but
+
+00:09:20,699 --> 00:09:30,499
+this enables us to use modern TLS
+
+00:09:24,470 --> 00:09:36,589
+versions basically or as annihilator and
+
+00:09:30,499 --> 00:09:42,329
+but still what real ad laxed or lacked
+
+00:09:36,589 --> 00:09:45,540
+partially is do some filtering for the
+
+00:09:42,329 --> 00:09:50,009
+requests blocking based on source IP
+
+00:09:45,540 --> 00:09:51,779
+things like that or assume forward to a
+
+00:09:50,009 --> 00:09:55,079
+back-end where where the nodes have
+
+00:09:51,779 --> 00:09:57,480
+different ports this is one thing that
+
+00:09:55,079 --> 00:10:01,139
+any in the in the past you had like a
+
+00:09:57,480 --> 00:10:05,100
+pool of web servers and all of them had
+
+00:10:01,139 --> 00:10:07,499
+their own IP and and but all of them
+
+00:10:05,100 --> 00:10:09,629
+were running on port 80 and now this is
+
+00:10:07,499 --> 00:10:12,449
+not the case anymore if you have some
+
+00:10:09,629 --> 00:10:16,800
+whatever docker forum and and things
+
+00:10:12,449 --> 00:10:22,110
+like that yeah so this already existed
+
+00:10:16,800 --> 00:10:25,410
+in a way in 2007 that there were some I
+
+00:10:22,110 --> 00:10:27,749
+think Ruby frameworks where you run the
+
+00:10:25,410 --> 00:10:30,149
+services on some weird ports and I'm
+
+00:10:27,749 --> 00:10:32,519
+some front and forwards it but I always
+
+00:10:30,149 --> 00:10:38,999
+said that's stupid who does it right so
+
+00:10:32,519 --> 00:10:40,949
+we never supported it yeah so it's about
+
+00:10:38,999 --> 00:10:45,299
+small features that we added and then
+
+00:10:40,949 --> 00:10:47,819
+there are available now and then the
+
+00:10:45,299 --> 00:10:51,240
+biggest thing to add is just we're
+
+00:10:47,819 --> 00:10:55,730
+running on an old version of of the HTTP
+
+00:10:51,240 --> 00:11:01,350
+protocol right we lady is still HTTP 1 1
+
+00:10:55,730 --> 00:11:04,740
+only it works in most of the cases I
+
+00:11:01,350 --> 00:11:06,209
+mean there's no regression yet but it
+
+00:11:04,740 --> 00:11:13,709
+can be better at
+
+00:11:06,209 --> 00:11:17,910
+maybe faster and all that with http/2 so
+
+00:11:13,709 --> 00:11:22,619
+in May I decided to to have a hackathon
+
+00:11:17,910 --> 00:11:25,110
+with myself so I went to the cafe which
+
+00:11:22,619 --> 00:11:26,730
+is kind of a cafe a co-working kind of
+
+00:11:25,110 --> 00:11:29,009
+thing and sit on my chair and was
+
+00:11:26,730 --> 00:11:31,470
+hacking there and people were looking at
+
+00:11:29,009 --> 00:11:33,509
+me what is he doing there every day and
+
+00:11:31,470 --> 00:11:35,249
+so I had my one big hackathon where I
+
+00:11:33,509 --> 00:11:42,660
+implemented for some of the obvious
+
+00:11:35,249 --> 00:11:45,749
+things and yeah some some others so one
+
+00:11:42,660 --> 00:11:47,790
+thing is that was actually a balk I knew
+
+00:11:45,749 --> 00:11:50,850
+about this bak it was a little bit hard
+
+00:11:47,790 --> 00:11:54,709
+to fix but I finally did it so real ad
+
+00:11:50,850 --> 00:11:57,509
+has so you have the relay statement
+
+00:11:54,709 --> 00:12:00,449
+usually a listen on and off for over two
+
+00:11:57,509 --> 00:12:04,980
+so one side the other side and then you
+
+00:12:00,449 --> 00:12:08,329
+can attach a protocol to it for what for
+
+00:12:04,980 --> 00:12:13,889
+the yield in this case the HTTP filters
+
+00:12:08,329 --> 00:12:16,439
+so in the past the problem was so I
+
+00:12:13,889 --> 00:12:20,639
+added this possibility based on a
+
+00:12:16,439 --> 00:12:22,829
+back-end or now on a URL path to switch
+
+00:12:20,639 --> 00:12:25,379
+the backend which is very common right
+
+00:12:22,829 --> 00:12:27,600
+you have a website and it has static
+
+00:12:25,379 --> 00:12:29,459
+content like slash images or slash
+
+00:12:27,600 --> 00:12:34,259
+static and you want to serve this from
+
+00:12:29,459 --> 00:12:36,600
+the whatever small static web server and
+
+00:12:34,259 --> 00:12:40,199
+then you have all the dynamic stuff you
+
+00:12:36,600 --> 00:12:44,490
+want to serve from your Noche as go rust
+
+00:12:40,199 --> 00:12:46,949
+whatever wrap application so in order to
+
+00:12:44,490 --> 00:12:50,069
+do this you have to write a such a
+
+00:12:46,949 --> 00:12:52,619
+filter and then you can switch the the
+
+00:12:50,069 --> 00:12:54,420
+backend it only contains one IP here
+
+00:12:52,619 --> 00:12:58,249
+right now but it can be a pool of
+
+00:12:54,420 --> 00:13:02,369
+multiple hosts as well so the problem is
+
+00:12:58,249 --> 00:13:05,899
+this didn't really work because real ad
+
+00:13:02,369 --> 00:13:09,959
+took in a keepalive session like HTTP
+
+00:13:05,899 --> 00:13:11,970
+keepalive a persistent connection it it
+
+00:13:09,959 --> 00:13:18,329
+selected the backend for the first
+
+00:13:11,970 --> 00:13:19,710
+request and then this was sticky right
+
+00:13:18,329 --> 00:13:23,130
+then it kept on using
+
+00:13:19,710 --> 00:13:26,220
+selected beckoned for all connections of
+
+00:13:23,130 --> 00:13:28,560
+the same of all requests of the same
+
+00:13:26,220 --> 00:13:31,890
+connections now I have it so the
+
+00:13:28,560 --> 00:13:37,020
+workaround was really terrible basically
+
+00:13:31,890 --> 00:13:40,710
+and forced a connection to close for
+
+00:13:37,020 --> 00:13:44,700
+each request so like in the old time
+
+00:13:40,710 --> 00:13:47,850
+like one request per TCP connection this
+
+00:13:44,700 --> 00:13:51,000
+work but was not a nice way so a fix
+
+00:13:47,850 --> 00:13:54,510
+this finally to be able to to remove
+
+00:13:51,000 --> 00:13:57,800
+this and now you can really use uses
+
+00:13:54,510 --> 00:14:00,720
+feature to have multiple server beckons
+
+00:13:57,800 --> 00:14:03,840
+in order to use it it only works with
+
+00:14:00,720 --> 00:14:08,160
+tables right now but as I said you can
+
+00:14:03,840 --> 00:14:10,470
+put one IP address in there and this
+
+00:14:08,160 --> 00:14:12,660
+there some special implementation
+
+00:14:10,470 --> 00:14:16,140
+details so you have one listen on and
+
+00:14:12,660 --> 00:14:19,800
+one or more for two rules so the first
+
+00:14:16,140 --> 00:14:22,290
+one is always the default that gets
+
+00:14:19,800 --> 00:14:24,540
+elected the other ones are kind of
+
+00:14:22,290 --> 00:14:27,390
+ignored unless you you're selected with
+
+00:14:24,540 --> 00:14:31,350
+a rule but you have to define them here
+
+00:14:27,390 --> 00:14:34,290
+as well you can also add a health check
+
+00:14:31,350 --> 00:14:37,080
+statement there if not then their hosts
+
+00:14:34,290 --> 00:14:43,530
+are always online so this is working now
+
+00:14:37,080 --> 00:14:47,030
+also like since May and the from to
+
+00:14:43,530 --> 00:14:49,980
+filter rules and something that I added
+
+00:14:47,030 --> 00:14:51,720
+actually the code was partially there
+
+00:14:49,980 --> 00:14:54,870
+and my lady and I never finished it
+
+00:14:51,720 --> 00:14:57,980
+somehow and I forgot about it but now
+
+00:14:54,870 --> 00:15:01,530
+you can you can write these rules and
+
+00:14:57,980 --> 00:15:03,810
+specify source destination matching
+
+00:15:01,530 --> 00:15:07,560
+syntax so that you you give a specific
+
+00:15:03,810 --> 00:15:10,620
+URL only to to internal hose and think
+
+00:15:07,560 --> 00:15:12,960
+like that yeah so you can do it yeah I
+
+00:15:10,620 --> 00:15:17,130
+know it looks a little bit like PF right
+
+00:15:12,960 --> 00:15:19,230
+it is not PF it people said is it really
+
+00:15:17,130 --> 00:15:21,300
+wise to use the same syntax and I said
+
+00:15:19,230 --> 00:15:28,020
+well it is an application layer
+
+00:15:21,300 --> 00:15:32,010
+firewalls possible now you can also
+
+00:15:28,020 --> 00:15:34,480
+block based on IPS or network ranges and
+
+00:15:32,010 --> 00:15:37,550
+things like that
+
+00:15:34,480 --> 00:15:44,720
+and it's evaluated and last mention
+
+00:15:37,550 --> 00:15:47,959
+order of course yes ni so if you ever
+
+00:15:44,720 --> 00:15:51,220
+looked at OpenSSL itself and how s and I
+
+00:15:47,959 --> 00:15:53,959
+is a server name indication is
+
+00:15:51,220 --> 00:15:57,010
+implemented if you if you if you use the
+
+00:15:53,959 --> 00:16:00,320
+library it this kind of mess right you
+
+00:15:57,010 --> 00:16:02,480
+you have multiple SSL objects and you
+
+00:16:00,320 --> 00:16:05,360
+somehow need to to deal with this with
+
+00:16:02,480 --> 00:16:08,240
+some callbacks and all that and so in
+
+00:16:05,360 --> 00:16:14,029
+Libra so cell we have Lib tlf which is a
+
+00:16:08,240 --> 00:16:18,320
+really nice TLS library that is sits on
+
+00:16:14,029 --> 00:16:21,670
+top of the lip SSL library but it's
+
+00:16:18,320 --> 00:16:23,149
+really easy to use it is safe it's
+
+00:16:21,670 --> 00:16:27,980
+nicely designed
+
+00:16:23,149 --> 00:16:30,020
+I am wondering myself why is it such a
+
+00:16:27,980 --> 00:16:33,230
+rare seeing not so many people are using
+
+00:16:30,020 --> 00:16:38,029
+lib TLS saying Lib TLS is one of the
+
+00:16:33,230 --> 00:16:41,060
+main advantages of libras it's a really
+
+00:16:38,029 --> 00:16:43,610
+nice library just just try to use it and
+
+00:16:41,060 --> 00:16:46,520
+you can make a TLS server it was just a
+
+00:16:43,610 --> 00:16:49,310
+few lines it's very easy to use and
+
+00:16:46,520 --> 00:16:51,320
+there are awesome we used it with rust
+
+00:16:49,310 --> 00:16:53,899
+as well and all that because also very
+
+00:16:51,320 --> 00:16:55,490
+easy to integrate Lib TLS in other
+
+00:16:53,899 --> 00:16:58,880
+languages and you don't have to deal
+
+00:16:55,490 --> 00:17:01,339
+with all these optimises elements so lip
+
+00:16:58,880 --> 00:17:04,550
+TL has made it easier to add as a nice
+
+00:17:01,339 --> 00:17:06,800
+support and as an eye basically means
+
+00:17:04,550 --> 00:17:09,770
+instead of having one server certificate
+
+00:17:06,800 --> 00:17:13,929
+the server has a default certificate
+
+00:17:09,770 --> 00:17:17,059
+once again but it can select a different
+
+00:17:13,929 --> 00:17:20,420
+certificate based on the server name
+
+00:17:17,059 --> 00:17:28,570
+that is sent as part of the TLS header
+
+00:17:20,420 --> 00:17:31,280
+or it's an extension so now you you can
+
+00:17:28,570 --> 00:17:34,130
+by default Real ID you don't have to
+
+00:17:31,280 --> 00:17:37,250
+configure your TLS it looks up the the
+
+00:17:34,130 --> 00:17:42,060
+when you do SSL it looks up the TLS in a
+
+00:17:37,250 --> 00:17:45,100
+magic pass yeah et Cie SSL then
+
+00:17:42,060 --> 00:17:47,320
+the real ADOT key and and and things
+
+00:17:45,100 --> 00:17:50,710
+like that it's documented and a man page
+
+00:17:47,320 --> 00:17:52,840
+but now you can configure motive per
+
+00:17:50,710 --> 00:17:55,900
+month and it was it still uses as past
+
+00:17:52,840 --> 00:17:59,680
+et Cie SSL and so on as documented but
+
+00:17:55,900 --> 00:18:02,440
+then we'll see specified base name file
+
+00:17:59,680 --> 00:18:04,920
+name so you had multiple ones and then
+
+00:18:02,440 --> 00:18:07,900
+if they match it uses a different key
+
+00:18:04,920 --> 00:18:11,290
+very easy to configure actually just
+
+00:18:07,900 --> 00:18:13,750
+just drop in the new new keys and and
+
+00:18:11,290 --> 00:18:16,090
+add a line for each and and then your
+
+00:18:13,750 --> 00:18:18,940
+sni works and then in the backend your
+
+00:18:16,090 --> 00:18:23,920
+web servers can actually deal with the
+
+00:18:18,940 --> 00:18:25,960
+different host and all that everyone who
+
+00:18:23,920 --> 00:18:33,610
+has looked up this IP address yet but
+
+00:18:25,960 --> 00:18:36,250
+anyway OCSP another thing httpd got OCSP
+
+00:18:33,610 --> 00:18:40,240
+support like some time ago it's even
+
+00:18:36,250 --> 00:18:44,170
+mentioned in the HTTP deandre lady
+
+00:18:40,240 --> 00:18:50,920
+mastery book shameless plug from michael
+
+00:18:44,170 --> 00:18:54,760
+w Leuchars so there he mentions and
+
+00:18:50,920 --> 00:18:57,570
+describes how to use OCS PE was httpd
+
+00:18:54,760 --> 00:19:00,730
+this is code that while back added and
+
+00:18:57,570 --> 00:19:02,890
+now i finally got this over to real lady
+
+00:19:00,730 --> 00:19:05,260
+with a little different syntax because
+
+00:19:02,890 --> 00:19:08,560
+real lady has this you see the magic
+
+00:19:05,260 --> 00:19:12,130
+path again so when there's a file dot
+
+00:19:08,560 --> 00:19:15,520
+OCSP either for name and port or just
+
+00:19:12,130 --> 00:19:19,810
+name then it will uses so the OCSP as
+
+00:19:15,520 --> 00:19:22,030
+basically and I'm not a TLS person per
+
+00:19:19,810 --> 00:19:23,980
+se but it basically means you you ask
+
+00:19:22,030 --> 00:19:28,690
+the West web server and the web server
+
+00:19:23,980 --> 00:19:32,200
+can give you assigned OCSP respond from
+
+00:19:28,690 --> 00:19:34,750
+from the CA that says tells you about
+
+00:19:32,200 --> 00:19:40,210
+the validity of the certificate it's
+
+00:19:34,750 --> 00:19:44,170
+OCSP stapling and so when you do that it
+
+00:19:40,210 --> 00:19:46,600
+it really you don't see a functional
+
+00:19:44,170 --> 00:19:48,850
+difference but it makes it easier for
+
+00:19:46,600 --> 00:19:51,100
+your clients to look up the validity of
+
+00:19:48,850 --> 00:19:52,540
+the certificate and then fast and things
+
+00:19:51,100 --> 00:19:55,290
+up because you don't have to do an
+
+00:19:52,540 --> 00:20:00,450
+external requests to
+
+00:19:55,290 --> 00:20:06,660
+Oh CSP server or use a relocation list
+
+00:20:00,450 --> 00:20:11,130
+or something like this so the road to
+
+00:20:06,660 --> 00:20:13,530
+http - it started really nicely I took
+
+00:20:11,130 --> 00:20:18,030
+this picture from a motorcycle trip this
+
+00:20:13,530 --> 00:20:19,860
+year so yeah you have some stones and
+
+00:20:18,030 --> 00:20:21,270
+it's rocky and all that but on the other
+
+00:20:19,860 --> 00:20:24,780
+side you have the beautiful view and
+
+00:20:21,270 --> 00:20:28,620
+this is fear watch that away right so it
+
+00:20:24,780 --> 00:20:30,780
+looked like that and okay it's like okay
+
+00:20:28,620 --> 00:20:33,780
+I did these features on my list and then
+
+00:20:30,780 --> 00:20:37,049
+I started well we do need HTTP to
+
+00:20:33,780 --> 00:20:41,760
+support after some time like OpenBSD
+
+00:20:37,049 --> 00:20:44,400
+very often is and we get asked about in
+
+00:20:41,760 --> 00:20:49,530
+a new thing we say no that's terrible
+
+00:20:44,400 --> 00:20:52,799
+we don't do this like ACPI move terrible
+
+00:20:49,530 --> 00:20:56,429
+thing and APM works great right so we
+
+00:20:52,799 --> 00:20:59,790
+didn't get a CPI until somebody
+
+00:20:56,429 --> 00:21:01,830
+implemented a CPI and with a lot of work
+
+00:20:59,790 --> 00:21:04,559
+we have a really nicely working a CPI
+
+00:21:01,830 --> 00:21:06,750
+stack the good thing was a CPI was we
+
+00:21:04,559 --> 00:21:09,120
+didn't drink the kool-aid and we didn't
+
+00:21:06,750 --> 00:21:12,260
+get the reference code we have like a
+
+00:21:09,120 --> 00:21:15,570
+really nice and working implementation
+
+00:21:12,260 --> 00:21:17,880
+the same hurtin bear was bmd right we
+
+00:21:15,570 --> 00:21:20,270
+hypervisor some VMs are bad but now we
+
+00:21:17,880 --> 00:21:23,309
+have a really nice implementation that
+
+00:21:20,270 --> 00:21:27,330
+contains VMs much better than qmo does
+
+00:21:23,309 --> 00:21:36,720
+and and so on and with HTTP 2 we said
+
+00:21:27,330 --> 00:21:40,320
+this is HTTP HTTP 2 and is what was the
+
+00:21:36,720 --> 00:21:42,620
+previous name screws it just lost Skippy
+
+00:21:40,320 --> 00:21:46,110
+yeah skip
+
+00:21:42,620 --> 00:21:49,260
+speedy speedy yeah why do I think speedy
+
+00:21:46,110 --> 00:21:51,030
+speedy so speedy Vasya was basically
+
+00:21:49,260 --> 00:21:52,860
+this at the beginning speedy had one
+
+00:21:51,030 --> 00:21:55,559
+major difference how it compressed the
+
+00:21:52,860 --> 00:21:57,929
+headers but you say oh ok all these
+
+00:21:55,559 --> 00:22:00,870
+additional states and multiplexing that
+
+00:21:57,929 --> 00:22:04,320
+looks very dangerous right so I think it
+
+00:22:00,870 --> 00:22:07,909
+it's very easy to make it wrong so there
+
+00:22:04,320 --> 00:22:07,909
+were skeptical about this
+
+00:22:09,789 --> 00:22:17,299
+but I said okay now it's time actually
+
+00:22:12,820 --> 00:22:19,850
+2019 at the time since HTTP 3 is is it
+
+00:22:17,299 --> 00:22:21,799
+already stunner I saw they plan to do it
+
+00:22:19,850 --> 00:22:26,059
+this year I'm not sure if the RFC is out
+
+00:22:21,799 --> 00:22:27,860
+yet but so since we get HTTP reno HTTP 2
+
+00:22:26,059 --> 00:22:32,149
+is vintage computing so let's implement
+
+00:22:27,860 --> 00:22:34,129
+it right so I started working on it but
+
+00:22:32,149 --> 00:22:36,889
+but because it needs so many changes in
+
+00:22:34,129 --> 00:22:39,440
+in real ad I started something very
+
+00:22:36,889 --> 00:22:41,929
+nasty instead of sending millions of
+
+00:22:39,440 --> 00:22:45,230
+patches around on OpenBSD lists I
+
+00:22:41,929 --> 00:22:46,909
+started just moving ahead doing stuff
+
+00:22:45,230 --> 00:22:50,230
+and then later when I feel confident
+
+00:22:46,909 --> 00:22:53,720
+enough I I will share it and
+
+00:22:50,230 --> 00:22:56,809
+incrementally not in one block but
+
+00:22:53,720 --> 00:22:58,700
+instead of doing this just silently on
+
+00:22:56,809 --> 00:23:00,590
+my own I said ok I shared this github
+
+00:22:58,700 --> 00:23:05,809
+you can follow it but this is like work
+
+00:23:00,590 --> 00:23:08,629
+in progress code right so HTTP 2 is
+
+00:23:05,809 --> 00:23:11,720
+multiplex multi stream protocol that's a
+
+00:23:08,629 --> 00:23:13,909
+major difference it is using header
+
+00:23:11,720 --> 00:23:16,309
+compression an answer small binary
+
+00:23:13,909 --> 00:23:19,039
+protocol so instead of like opening a
+
+00:23:16,309 --> 00:23:23,499
+telnet and typing get HTTP to whatever
+
+00:23:19,039 --> 00:23:27,259
+or and see you know you you basically
+
+00:23:23,499 --> 00:23:29,840
+have the same you have the headers but
+
+00:23:27,259 --> 00:23:32,480
+they are all encoded so it's it's binary
+
+00:23:29,840 --> 00:23:35,600
+protocol for the headers and for the
+
+00:23:32,480 --> 00:23:38,029
+communication itself one thing that they
+
+00:23:35,600 --> 00:23:42,860
+did all headers are lowercase No
+
+00:23:38,029 --> 00:23:45,379
+and they define some standard headers
+
+00:23:42,860 --> 00:23:49,159
+that the most common ones will cease :
+
+00:23:45,379 --> 00:23:52,549
+Sint works so method is no a header not
+
+00:23:49,159 --> 00:23:55,369
+something of the string anymore an
+
+00:23:52,549 --> 00:23:57,980
+authority used to be the host header but
+
+00:23:55,369 --> 00:24:00,679
+you can still add arbitrary headers
+
+00:23:57,980 --> 00:24:03,590
+below that like user agent or your own X
+
+00:24:00,679 --> 00:24:07,519
+organization and all that so I'm not
+
+00:24:03,590 --> 00:24:09,830
+going too much into the HTTP to detail
+
+00:24:07,519 --> 00:24:12,470
+but one thing for examples real ad was
+
+00:24:09,830 --> 00:24:15,799
+written in a way that it expects request
+
+00:24:12,470 --> 00:24:18,049
+response or actually it does support
+
+00:24:15,799 --> 00:24:20,480
+pipelining in a way that the client
+
+00:24:18,049 --> 00:24:21,260
+sends multiple requests and then you
+
+00:24:20,480 --> 00:24:25,300
+answer these
+
+00:24:21,260 --> 00:24:29,360
+cliff in the same order so it's
+
+00:24:25,300 --> 00:24:32,120
+possibility and http1 it's broken in
+
+00:24:29,360 --> 00:24:34,250
+many cases but it still they try to
+
+00:24:32,120 --> 00:24:36,650
+solve some issues with it and it never
+
+00:24:34,250 --> 00:24:39,350
+really work but usually it's still the
+
+00:24:36,650 --> 00:24:44,000
+same request/response game even if you
+
+00:24:39,350 --> 00:24:46,820
+just make it in chunks but HTTP to like
+
+00:24:44,000 --> 00:24:50,060
+one client connection like a single TCP
+
+00:24:46,820 --> 00:24:52,910
+TLS connection can can open multiple
+
+00:24:50,060 --> 00:24:54,800
+streams and this totally are
+
+00:24:52,910 --> 00:24:56,960
+synchronously so you open the connection
+
+00:24:54,800 --> 00:25:00,680
+who are your web server and the web
+
+00:24:56,960 --> 00:25:02,750
+server can push responses to you
+
+00:25:00,680 --> 00:25:04,940
+basically because there's some picture
+
+00:25:02,750 --> 00:25:06,800
+like the logo of the company you're
+
+00:25:04,940 --> 00:25:08,630
+accessing website that you might need so
+
+00:25:06,800 --> 00:25:11,120
+just sending you the logo without you
+
+00:25:08,630 --> 00:25:14,420
+ever asking right that's one feature or
+
+00:25:11,120 --> 00:25:20,500
+you you can have just one connection and
+
+00:25:14,420 --> 00:25:23,120
+then start multiple streams connection
+
+00:25:20,500 --> 00:25:25,760
+requesting different things like the CSS
+
+00:25:23,120 --> 00:25:27,530
+and the JavaScript and the page all at
+
+00:25:25,760 --> 00:25:29,960
+the same time over one connection and
+
+00:25:27,530 --> 00:25:35,600
+then the server sends the responses in
+
+00:25:29,960 --> 00:25:37,580
+in in frames and in packets with stream
+
+00:25:35,600 --> 00:25:39,950
+ID so you know where they belong what
+
+00:25:37,580 --> 00:25:41,680
+they arrive totally out of order it
+
+00:25:39,950 --> 00:25:45,140
+doesn't matter anymore
+
+00:25:41,680 --> 00:25:47,420
+so you just need one connection and you
+
+00:25:45,140 --> 00:25:51,680
+can also send your DNS requests over it
+
+00:25:47,420 --> 00:25:53,630
+right and so it's all going there so we
+
+00:25:51,680 --> 00:25:57,020
+laid he was not designed for this so one
+
+00:25:53,630 --> 00:26:00,110
+word this is actually a branch in my my
+
+00:25:57,020 --> 00:26:02,530
+code because it's I need to merge it in
+
+00:26:00,110 --> 00:26:05,150
+at some point but it's it's a lot of
+
+00:26:02,530 --> 00:26:07,160
+mechanical work in the tree I had to
+
+00:26:05,150 --> 00:26:09,620
+split like one main structure that was
+
+00:26:07,160 --> 00:26:13,400
+used for the relaying request response I
+
+00:26:09,620 --> 00:26:17,300
+had to split it into like a peer like
+
+00:26:13,400 --> 00:26:20,060
+one side and then multiple streams to it
+
+00:26:17,300 --> 00:26:23,450
+so that that one peer can have multiple
+
+00:26:20,060 --> 00:26:26,030
+streams and so the way so you can
+
+00:26:23,450 --> 00:26:28,100
+entirely rectly access some fields like
+
+00:26:26,030 --> 00:26:30,740
+the pure address anymore and then you
+
+00:26:28,100 --> 00:26:34,010
+you you look look at up and see so this
+
+00:26:30,740 --> 00:26:34,870
+is large defect Lee and I'm really
+
+00:26:34,010 --> 00:26:37,000
+scared about
+
+00:26:34,870 --> 00:26:44,110
+getting this in but I get an okay Ben oh
+
+00:26:37,000 --> 00:26:49,059
+and then it's it's all fine um okay I
+
+00:26:44,110 --> 00:26:51,340
+still have time each pack so I talked
+
+00:26:49,059 --> 00:26:54,280
+about header compression so this whole
+
+00:26:51,340 --> 00:26:56,590
+thing these HTTP header is doing header
+
+00:26:54,280 --> 00:26:58,990
+compression actually and speedy day I
+
+00:26:56,590 --> 00:27:02,770
+think they use deflate or something and
+
+00:26:58,990 --> 00:27:06,580
+it was vulnerable to what are the crime
+
+00:27:02,770 --> 00:27:10,210
+attacked so an HTTP to use a uses 8-pack
+
+00:27:06,580 --> 00:27:13,929
+algorithm and actually I looking at it
+
+00:27:10,210 --> 00:27:16,929
+it's really nice idea yeah let's just
+
+00:27:13,929 --> 00:27:19,920
+think about it you have an persistent
+
+00:27:16,929 --> 00:27:25,830
+connection where you send multiple
+
+00:27:19,920 --> 00:27:29,200
+requests so some headers like pass slash
+
+00:27:25,830 --> 00:27:31,720
+is something that repeats all the time
+
+00:27:29,200 --> 00:27:35,380
+so HP allows to reduce it to one byte
+
+00:27:31,720 --> 00:27:38,410
+just in a static table and in index and
+
+00:27:35,380 --> 00:27:41,110
+you have other common these : headers is
+
+00:27:38,410 --> 00:27:43,660
+very common combinations where they just
+
+00:27:41,110 --> 00:27:46,690
+index and then your encoded like this
+
+00:27:43,660 --> 00:27:49,240
+and then other things that might be your
+
+00:27:46,690 --> 00:27:52,630
+you use a string like user agent user
+
+00:27:49,240 --> 00:27:55,900
+agent is usually a very large thing but
+
+00:27:52,630 --> 00:27:58,270
+it never changes so when you have one
+
+00:27:55,900 --> 00:28:00,660
+connection where you do 100 requests
+
+00:27:58,270 --> 00:28:05,070
+you only need to send us user agent ones
+
+00:28:00,660 --> 00:28:07,780
+then HVAC adds it to a dynamic table and
+
+00:28:05,070 --> 00:28:10,809
+then the next request only sends you an
+
+00:28:07,780 --> 00:28:13,480
+index in this table so instead of the
+
+00:28:10,809 --> 00:28:16,380
+huge string for the second subsequent
+
+00:28:13,480 --> 00:28:20,679
+request in any of the streams in this
+
+00:28:16,380 --> 00:28:24,820
+you only send like the idea 127 or
+
+00:28:20,679 --> 00:28:28,960
+something like this that's very
+
+00:28:24,820 --> 00:28:32,710
+simplified description of how H pack
+
+00:28:28,960 --> 00:28:36,160
+works so you index bound on headers and
+
+00:28:32,710 --> 00:28:38,860
+you'll learn other headers dynamically
+
+00:28:36,160 --> 00:28:41,140
+during a connection so the request size
+
+00:28:38,860 --> 00:28:46,480
+of the headers can be stripped down to
+
+00:28:41,140 --> 00:28:49,210
+just a few bytes so I implemented expect
+
+00:28:46,480 --> 00:28:52,030
+it's not an optimist yet because there's
+
+00:28:49,210 --> 00:28:55,120
+no use case for it but the plan is to to
+
+00:28:52,030 --> 00:28:59,140
+use this in real ad and later httpd for
+
+00:28:55,120 --> 00:29:01,180
+the http/2 cold so it's it's seeker I
+
+00:28:59,140 --> 00:29:02,950
+looked at existing implementations but
+
+00:29:01,180 --> 00:29:05,730
+usually isn't yeah it doesn't really fit
+
+00:29:02,950 --> 00:29:11,950
+and actually it was a nice experience
+
+00:29:05,730 --> 00:29:13,450
+implementing this stuff and I I looked
+
+00:29:11,950 --> 00:29:16,480
+at the I mean it's always with
+
+00:29:13,450 --> 00:29:18,220
+algorithms right people learn algorithms
+
+00:29:16,480 --> 00:29:19,510
+are thinking we have to do very smart
+
+00:29:18,220 --> 00:29:22,690
+and you have to invent your own
+
+00:29:19,510 --> 00:29:26,500
+algorithms to make them even better but
+
+00:29:22,690 --> 00:29:28,840
+all these tricks are really scary once
+
+00:29:26,500 --> 00:29:31,990
+you do multiple loops and pointer
+
+00:29:28,840 --> 00:29:34,420
+aromatics and all that so say ok my
+
+00:29:31,990 --> 00:29:38,320
+implementation I think I want it to be
+
+00:29:34,420 --> 00:29:40,360
+fast but the goal is not to optimize it
+
+00:29:38,320 --> 00:29:45,430
+as much as possible the goal is to make
+
+00:29:40,360 --> 00:29:48,250
+the code somehow readable and obvious so
+
+00:29:45,430 --> 00:29:50,560
+even if I allocate more data or my my
+
+00:29:48,250 --> 00:29:53,260
+whatever my space complexity is a little
+
+00:29:50,560 --> 00:29:55,840
+bit more than it could be at the ideas
+
+00:29:53,260 --> 00:29:59,620
+to to have such a really solid piece of
+
+00:29:55,840 --> 00:30:02,710
+software so smart tricks are all always
+
+00:29:59,620 --> 00:30:05,470
+dangerous and I also want to utilize
+
+00:30:02,710 --> 00:30:10,600
+some like like autos malach tricks for
+
+00:30:05,470 --> 00:30:15,880
+example like free zero and things like
+
+00:30:10,600 --> 00:30:18,580
+that so so this is the year also online
+
+00:30:15,880 --> 00:30:22,510
+the thing is I I spent some days running
+
+00:30:18,580 --> 00:30:25,600
+AFL fuzzing on my code and I have like
+
+00:30:22,510 --> 00:30:27,940
+hundreds of test cases to verify it
+
+00:30:25,600 --> 00:30:30,850
+actually AFL after running for like 10
+
+00:30:27,940 --> 00:30:34,710
+hours found one really hard to find bark
+
+00:30:30,850 --> 00:30:40,570
+and and I was able to to fix it so I'm
+
+00:30:34,710 --> 00:30:43,480
+thankful for for that yeah and so it
+
+00:30:40,570 --> 00:30:45,910
+evolved into a little API so it's part
+
+00:30:43,480 --> 00:30:48,550
+of the man page so you see I even wrote
+
+00:30:45,910 --> 00:30:52,270
+a man page and all that so it sits there
+
+00:30:48,550 --> 00:30:56,350
+nobody uses it but it intends to be
+
+00:30:52,270 --> 00:30:59,480
+clean so that we can integrate it later
+
+00:30:56,350 --> 00:30:59,480
+[Music]
+
+00:31:00,050 --> 00:31:06,900
+yeah but this is basically it we have
+
+00:31:03,240 --> 00:31:12,150
+each pack we have the streams something
+
+00:31:06,900 --> 00:31:18,270
+that works with it and I can parse maybe
+
+00:31:12,150 --> 00:31:20,250
+the first HTTP to request but then after
+
+00:31:18,270 --> 00:31:26,310
+I submitted to talk actually the last
+
+00:31:20,250 --> 00:31:28,350
+month I yeah had some changes so I
+
+00:31:26,310 --> 00:31:30,680
+couldn't really much focus on on
+
+00:31:28,350 --> 00:31:34,260
+continuing this work
+
+00:31:30,680 --> 00:31:37,170
+so is it vaporware now it is not because
+
+00:31:34,260 --> 00:31:40,170
+there's already some code and we have
+
+00:31:37,170 --> 00:31:44,010
+time I mean real ad exists since 2006 so
+
+00:31:40,170 --> 00:31:47,490
+we have time until 2026 or whatever to
+
+00:31:44,010 --> 00:31:52,770
+add HTTP to support but I'm still
+
+00:31:47,490 --> 00:31:56,610
+working on this yeah by the way this is
+
+00:31:52,770 --> 00:32:02,940
+a tunnel in Glaros in in Switzerland as
+
+00:31:56,610 --> 00:32:07,110
+well so I have some initial code you see
+
+00:32:02,940 --> 00:32:11,160
+these magic HTTP to preface that what
+
+00:32:07,110 --> 00:32:17,040
+they send over after you negotiated HTTP
+
+00:32:11,160 --> 00:32:19,320
+to which is TLS are LPN you can switch
+
+00:32:17,040 --> 00:32:21,690
+to it so it is compatible that you
+
+00:32:19,320 --> 00:32:24,570
+support both protocols and then the
+
+00:32:21,690 --> 00:32:26,340
+first packet is this weird preface I
+
+00:32:24,570 --> 00:32:28,590
+don't really know why they're doing this
+
+00:32:26,340 --> 00:32:31,470
+because it's static but it's part of the
+
+00:32:28,590 --> 00:32:36,380
+protocol and then you have do you have
+
+00:32:31,470 --> 00:32:39,930
+to bathe a cat or some kind of TLB right
+
+00:32:36,380 --> 00:32:43,200
+it's a stream IDs and then each packet
+
+00:32:39,930 --> 00:32:45,780
+so they're different ones like Gator but
+
+00:32:43,200 --> 00:32:52,080
+headers as well the the HP a compressed
+
+00:32:45,780 --> 00:32:54,540
+headers and then some some other packets
+
+00:32:52,080 --> 00:32:58,800
+that you don't have in an HTTP one well
+
+00:32:54,540 --> 00:33:03,690
+what I like go away I think that's still
+
+00:32:58,800 --> 00:33:05,820
+from the speedy Google days but also is
+
+00:33:03,690 --> 00:33:08,370
+the scary ones like we know update and
+
+00:33:05,820 --> 00:33:10,460
+all that so that reminds me a bit of TCP
+
+00:33:08,370 --> 00:33:13,770
+right and that's the whole goal of like
+
+00:33:10,460 --> 00:33:17,070
+removing control from the OS and moving
+
+00:33:13,770 --> 00:33:19,310
+it to the browser by by doing things
+
+00:33:17,070 --> 00:33:19,310
+like that
+
+00:33:20,040 --> 00:33:27,240
+and ping as a heartbeat for example I'm
+
+00:33:24,030 --> 00:33:32,540
+not sure how dangerous this is
+
+00:33:27,240 --> 00:33:36,060
+but then in just a months ago there was
+
+00:33:32,540 --> 00:33:39,570
+this list of CVS right you've probably
+
+00:33:36,060 --> 00:33:44,790
+saw on all web servers ten minutes okay
+
+00:33:39,570 --> 00:33:46,830
+yeah and because all HTTP two
+
+00:33:44,790 --> 00:33:49,470
+implementations out there are vulnerable
+
+00:33:46,830 --> 00:33:51,650
+to to denial of service attacks and all
+
+00:33:49,470 --> 00:33:54,390
+that because they didn't get the
+
+00:33:51,650 --> 00:33:56,640
+multiplexing right they have resource
+
+00:33:54,390 --> 00:33:58,380
+exhaustion attacks and all that all the
+
+00:33:56,640 --> 00:34:00,390
+things we were concerned about back in
+
+00:33:58,380 --> 00:34:05,490
+the days right so we were right and they
+
+00:34:00,390 --> 00:34:08,100
+were wrong and so we can try to make it
+
+00:34:05,490 --> 00:34:11,190
+right now learn from these mistakes and
+
+00:34:08,100 --> 00:34:13,380
+in implemented properly it's a thing as
+
+00:34:11,190 --> 00:34:16,830
+some of these issues are really related
+
+00:34:13,380 --> 00:34:20,400
+to the protocol itself so you really
+
+00:34:16,830 --> 00:34:22,530
+need to work around this but it's
+
+00:34:20,400 --> 00:34:24,780
+possible so I'm really great glad that
+
+00:34:22,530 --> 00:34:30,300
+this happened before we finish the
+
+00:34:24,780 --> 00:34:37,080
+implementation so click know just
+
+00:34:30,300 --> 00:34:43,440
+quickly is HTTP 2 over TLS over UDP or
+
+00:34:37,080 --> 00:34:46,110
+Detailers and this is HTTP 3 yay TCP is
+
+00:34:43,440 --> 00:34:48,630
+dead who needs us it is a UDP based
+
+00:34:46,110 --> 00:34:53,880
+protocol that you cannot really firewall
+
+00:34:48,630 --> 00:34:56,790
+anymore but just cannot know so of
+
+00:34:53,880 --> 00:35:00,450
+course you can still block it yeah you
+
+00:34:56,790 --> 00:35:01,650
+you have UDP port is it for first year
+
+00:35:00,450 --> 00:35:03,660
+saying it's something to you so you can
+
+00:35:01,650 --> 00:35:06,960
+block the quick port and I'm doing this
+
+00:35:03,660 --> 00:35:13,020
+on my firewall so so they they go to to
+
+00:35:06,960 --> 00:35:15,300
+the HTTP ports but this is basically the
+
+00:35:13,020 --> 00:35:18,030
+same protocol with main difference that
+
+00:35:15,300 --> 00:35:21,060
+the HP algorithm got a little bit
+
+00:35:18,030 --> 00:35:22,940
+changed and this makes sense because HP
+
+00:35:21,060 --> 00:35:26,030
+has some state
+
+00:35:22,940 --> 00:35:28,849
+and it expects the individual requests
+
+00:35:26,030 --> 00:35:31,010
+to arrive in order what happens on an
+
+00:35:28,849 --> 00:35:34,069
+TCP connection but no which was quick
+
+00:35:31,010 --> 00:35:36,890
+they can arrive out of order and then it
+
+00:35:34,069 --> 00:35:38,720
+the H Peck might cause head of line
+
+00:35:36,890 --> 00:35:43,849
+blocking where you wait for a specific
+
+00:35:38,720 --> 00:35:47,750
+state to advance but otherwise I have to
+
+00:35:43,849 --> 00:35:50,480
+admit once we have HTTP 2 it might not
+
+00:35:47,750 --> 00:35:56,690
+be too difficult to add quick support
+
+00:35:50,480 --> 00:36:02,630
+but no we're not doing this ok that's
+
+00:35:56,690 --> 00:36:04,520
+about almost the last slide really so
+
+00:36:02,630 --> 00:36:07,609
+let's rewrite it and rust because that's
+
+00:36:04,520 --> 00:36:10,039
+what everyone doing is doing no actually
+
+00:36:07,609 --> 00:36:10,910
+I do started to like rust but yeah I'm
+
+00:36:10,039 --> 00:36:17,170
+kidding really
+
+00:36:10,910 --> 00:36:21,079
+seriously I did implement oMG in rust
+
+00:36:17,170 --> 00:36:24,140
+RMG after they announced Emacs and Russ
+
+00:36:21,079 --> 00:36:31,029
+are a mix a serious project I made my
+
+00:36:24,140 --> 00:36:31,029
+not so serious project RMG but this is
+
+00:36:31,480 --> 00:36:40,279
+basically on my roadmap there's not so
+
+00:36:37,549 --> 00:36:43,549
+much I know right now I think HTTP 2 is
+
+00:36:40,279 --> 00:36:45,440
+the most important thing we did get a
+
+00:36:43,549 --> 00:36:49,430
+few other features like new binary
+
+00:36:45,440 --> 00:36:51,470
+health checks I know and some WebSockets
+
+00:36:49,430 --> 00:36:54,380
+compatibility so we got some
+
+00:36:51,470 --> 00:37:01,190
+user-contributed patches into real ad as
+
+00:36:54,380 --> 00:37:03,829
+well yeah just keep on sending them so
+
+00:37:01,190 --> 00:37:07,460
+for the questions if you still have a
+
+00:37:03,829 --> 00:37:10,130
+minute yeah we do I would also like to
+
+00:37:07,460 --> 00:37:13,220
+ask you right now what do you think is
+
+00:37:10,130 --> 00:37:14,750
+needed these days followed by lenses or
+
+00:37:13,220 --> 00:37:19,190
+what can you do with another load
+
+00:37:14,750 --> 00:37:22,640
+balancer like engines that you cannot do
+
+00:37:19,190 --> 00:37:24,950
+with real ad oh I will utterly evil
+
+00:37:22,640 --> 00:37:27,829
+words like fully routing to my in
+
+00:37:24,950 --> 00:37:30,310
+support so you can run multiple
+
+00:37:27,829 --> 00:37:32,650
+realities and
+
+00:37:30,310 --> 00:37:33,610
+or different routing domains it's still
+
+00:37:32,650 --> 00:37:42,730
+not there
+
+00:37:33,610 --> 00:37:45,820
+um yes I have a patch i I have a patch
+
+00:37:42,730 --> 00:37:49,630
+no for about half a year or maybe yeah
+
+00:37:45,820 --> 00:37:52,810
+like this that allows one real ad to two
+
+00:37:49,630 --> 00:37:56,410
+to run in multiple our domains and relay
+
+00:37:52,810 --> 00:38:03,040
+between them and all that and I think I
+
+00:37:56,410 --> 00:38:07,270
+have to upstream this patch somehow it's
+
+00:38:03,040 --> 00:38:09,670
+not too long yeah I have to really the
+
+00:38:07,270 --> 00:38:14,500
+this this is a good thing I should
+
+00:38:09,670 --> 00:38:17,170
+remember just digging out this detach
+
+00:38:14,500 --> 00:38:19,450
+and to do this which I really wanted as
+
+00:38:17,170 --> 00:38:21,850
+well I actually used it but then I
+
+00:38:19,450 --> 00:38:25,780
+didn't have time to polish it up and
+
+00:38:21,850 --> 00:38:28,030
+release it I had I was using VMD where
+
+00:38:25,780 --> 00:38:30,310
+multiple VMs were running in different
+
+00:38:28,030 --> 00:38:33,100
+routing domains and then I had a real ad
+
+00:38:30,310 --> 00:38:35,620
+in the front and to to do some like TLS
+
+00:38:33,100 --> 00:38:43,000
+termination / routing domain for that I
+
+00:38:35,620 --> 00:38:45,130
+had exactly this problem yeah I did not
+
+00:38:43,000 --> 00:38:48,730
+really understand how the lady works
+
+00:38:45,130 --> 00:38:51,100
+with HTTP do on the backend so I get it
+
+00:38:48,730 --> 00:38:53,620
+corrected of the issue early support is
+
+00:38:51,100 --> 00:38:56,080
+supposed to support HTTP tea in the
+
+00:38:53,620 --> 00:38:59,200
+front end as in terminating the HTTP -
+
+00:38:56,080 --> 00:39:01,030
+yeah but can I also use it to like
+
+00:38:59,200 --> 00:39:03,550
+establish new HTTP connection to
+
+00:39:01,030 --> 00:39:06,280
+downstream to the upstream side but
+
+00:39:03,550 --> 00:39:08,950
+that's that's a good question so he asks
+
+00:39:06,280 --> 00:39:14,680
+what I do with HTTP to support in the
+
+00:39:08,950 --> 00:39:18,580
+back end talking to the server not in
+
+00:39:14,680 --> 00:39:20,950
+the front end top right well the basic
+
+00:39:18,580 --> 00:39:26,410
+idea of HTTP 2 is more or less if you
+
+00:39:20,950 --> 00:39:29,620
+look at it it it's bi-directional so you
+
+00:39:26,410 --> 00:39:33,640
+open a connection and of course you want
+
+00:39:29,620 --> 00:39:36,820
+data from from the server but every site
+
+00:39:33,640 --> 00:39:39,460
+can make push or
+
+00:39:36,820 --> 00:39:42,070
+request so it's it's not such a big
+
+00:39:39,460 --> 00:39:43,660
+difference talking from a client or
+
+00:39:42,070 --> 00:39:45,670
+server than from a server to the client
+
+00:39:43,660 --> 00:39:48,760
+because the handshake is almost the same
+
+00:39:45,670 --> 00:39:53,740
+and all that so my plan is first on
+
+00:39:48,760 --> 00:39:57,040
+working on the real a DS server side to
+
+00:39:53,740 --> 00:40:00,790
+the outside and then yeah in the
+
+00:39:57,040 --> 00:40:04,150
+beginning it would have to most probably
+
+00:40:00,790 --> 00:40:08,770
+that in my POC that does one request I'm
+
+00:40:04,150 --> 00:40:10,210
+talking HTTP one to the inside but any
+
+00:40:08,770 --> 00:40:12,670
+and that doesn't really matter I mean
+
+00:40:10,210 --> 00:40:16,690
+real ad for example long before we had a
+
+00:40:12,670 --> 00:40:19,270
+of two npf supports not six four it can
+
+00:40:16,690 --> 00:40:22,060
+do sick ipv6 on the outside we four on
+
+00:40:19,270 --> 00:40:24,220
+the inside so just generally it doesn't
+
+00:40:22,060 --> 00:40:26,650
+really matter you can use different
+
+00:40:24,220 --> 00:40:28,720
+protocols and then the relay can
+
+00:40:26,650 --> 00:40:31,630
+translate it but the plan is first
+
+00:40:28,720 --> 00:40:41,380
+accepting HTTP to and doing HTTP one in
+
+00:40:31,630 --> 00:40:43,600
+the inside I want to ask about the
+
+00:40:41,380 --> 00:40:46,720
+tooling for debugging HTTP to
+
+00:40:43,600 --> 00:40:49,360
+connections on OpenBSD what would you
+
+00:40:46,720 --> 00:40:52,210
+use what would you probably need to
+
+00:40:49,360 --> 00:40:55,570
+implement for instance that you I mean
+
+00:40:52,210 --> 00:40:59,590
+nowadays you just netcat to a server and
+
+00:40:55,570 --> 00:41:02,490
+you know right in its in the text but
+
+00:40:59,590 --> 00:41:05,350
+that probably isn't really possible
+
+00:41:02,490 --> 00:41:07,210
+anymore so are you thinking about
+
+00:41:05,350 --> 00:41:09,940
+writing some tool that you could like
+
+00:41:07,210 --> 00:41:13,090
+plugging between netiquette and you and
+
+00:41:09,940 --> 00:41:16,270
+that would like create this binary stuff
+
+00:41:13,090 --> 00:41:18,520
+Wow maybe even the streams and stuff so
+
+00:41:16,270 --> 00:41:23,250
+you can actually test it with something
+
+00:41:18,520 --> 00:41:25,960
+that is yeah scriptable well one thing
+
+00:41:23,250 --> 00:41:28,420
+when Google did speedy that did one
+
+00:41:25,960 --> 00:41:33,040
+thing right because they define speedy
+
+00:41:28,420 --> 00:41:35,950
+to be TLS only so there is no plain text
+
+00:41:33,040 --> 00:41:37,840
+version of speedy and then the
+
+00:41:35,950 --> 00:41:42,280
+committee's came in and they said all we
+
+00:41:37,840 --> 00:41:44,140
+need HTTP to over a TCP as well and I'm
+
+00:41:42,280 --> 00:41:45,940
+not sure if I think the browser's didn't
+
+00:41:44,140 --> 00:41:49,180
+want to implement it I'm not sure if
+
+00:41:45,940 --> 00:41:50,480
+they do it now or not but in theory at
+
+00:41:49,180 --> 00:41:53,090
+least that was a design
+
+00:41:50,480 --> 00:41:55,430
+and you cannot netcat it because it's TL
+
+00:41:53,090 --> 00:41:59,359
+as always now I think it's a good idea I
+
+00:41:55,430 --> 00:42:01,850
+don't plan to support HTTP 2 over TCP at
+
+00:41:59,359 --> 00:42:04,070
+this point because well it could but
+
+00:42:01,850 --> 00:42:06,350
+that's not the idea the idea was that
+
+00:42:04,070 --> 00:42:08,930
+it's always keyless so then you cannot
+
+00:42:06,350 --> 00:42:11,359
+net cut it so how do ID bucket well no
+
+00:42:08,930 --> 00:42:15,950
+no printers and all that you could
+
+00:42:11,359 --> 00:42:19,190
+probably I mean and I we had something
+
+00:42:15,950 --> 00:42:21,920
+like this or I think NPD you the demon
+
+00:42:19,190 --> 00:42:27,020
+could put it into a pcap format that you
+
+00:42:21,920 --> 00:42:30,050
+can use TCP dump on it but yeah sorry
+
+00:42:27,020 --> 00:42:32,900
+just a plug if you if you extend it
+
+00:42:30,050 --> 00:42:37,210
+netcat with lib TLS because it's so nice
+
+00:42:32,900 --> 00:42:40,510
+and easy and then you could basically
+
+00:42:37,210 --> 00:42:45,890
+establish a TLS connection using netcat
+
+00:42:40,510 --> 00:42:49,220
+and then then you would have a basis for
+
+00:42:45,890 --> 00:42:52,600
+for debugging maybe or you can try to
+
+00:42:49,220 --> 00:42:55,040
+write a refer to modularize it's better
+
+00:42:52,600 --> 00:42:57,440
+yeah yeah well maybe it would be
+
+00:42:55,040 --> 00:43:01,580
+interesting thing to do this SS MN in
+
+00:42:57,440 --> 00:43:03,980
+the middle in netcat okay other
+
+00:43:01,580 --> 00:43:06,140
+questions do we still have a minute one
+
+00:43:03,980 --> 00:43:09,460
+more question or something like this yep
+
+00:43:06,140 --> 00:43:09,460
+one last question
+
+00:43:10,900 --> 00:43:15,940
+okay otherwise thank you very much panel
+
+00:43:22,580 --> 00:43:35,070
+yeah but but the the the Gotthard trade
+
+00:43:27,300 --> 00:43:36,960
+the train tunnel is is much longer yeah
+
+00:43:35,070 --> 00:43:40,820
+I live in Switzerland so I like the
+
+00:43:36,960 --> 00:43:48,339
+Thomas okay thank you
+
+00:43:40,820 --> 00:43:48,339
+[Applause]
+
+00:43:53,960 --> 00:43:56,020
+
+YouTube URL: https://www.youtube.com/watch?v=o4T41IQFhMg
+
+

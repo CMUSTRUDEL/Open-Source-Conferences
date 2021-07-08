@@ -1,0 +1,2286 @@
+Title: LVC20 106 4G 4G virtual memory split in arm32 kernel
+Publication date: 2020-10-09
+Playlist: Linaro Virtual Connect 2020
+Description: 
+	4G virtual memory.
+On 32-bit Linux machines, the 4GB of virtual memory are usually split between 3GB address space for user processes and a little under 1GB directly mapped physical memory.
+
+While kernels can address more physical memory than what is directly mapped, this requires the "highmem" feature that is likely going away in the long run, while there are still systems using 32-bit ARM Linux with 2GB or more that should get kernel updates for many years to come.
+
+As an alternative to highmem, we are proposing a new way to split the available virtual memory, giving 3.75GB of address space to both user space and to the linear physical memory mapping.
+
+In this presentation, we discuss the state of those patches and the trade-offs we found for performance, security and compatibility with existing systems.
+
+For presentation see: https://static.linaro.org/connect/lvc20/presentations/LVC20-106-0.pdf
+Captions: 
+	00:00:00,480 --> 00:00:04,000
+welcome to my talk on the 4 gigabyte by
+
+00:00:02,879 --> 00:00:07,520
+4 gigabyte
+
+00:00:04,000 --> 00:00:08,480
+vm split um this is something that has
+
+00:00:07,520 --> 00:00:10,960
+been
+
+00:00:08,480 --> 00:00:13,599
+coming for a while and we haven't really
+
+00:00:10,960 --> 00:00:16,720
+started working on it but we have a plan
+
+00:00:13,599 --> 00:00:18,320
+um to explain really what we're doing
+
+00:00:16,720 --> 00:00:20,880
+here
+
+00:00:18,320 --> 00:00:22,240
+i need i'm taking a big step back and
+
+00:00:20,880 --> 00:00:26,160
+just explain
+
+00:00:22,240 --> 00:00:28,960
+how monolithic kernels work in general
+
+00:00:26,160 --> 00:00:30,720
+and then we'll go from there so in the
+
+00:00:28,960 --> 00:00:34,320
+operating system like linux
+
+00:00:30,720 --> 00:00:37,600
+we have um user processors
+
+00:00:34,320 --> 00:00:38,480
+that are strictly strictly isolated from
+
+00:00:37,600 --> 00:00:39,760
+one another
+
+00:00:38,480 --> 00:00:41,520
+and they each have their own address
+
+00:00:39,760 --> 00:00:43,520
+space and their own resources that are
+
+00:00:41,520 --> 00:00:47,280
+all virtualized and then we have the
+
+00:00:43,520 --> 00:00:50,000
+kernel which has everything shared so
+
+00:00:47,280 --> 00:00:50,719
+everything the kernel does on its own is
+
+00:00:50,000 --> 00:00:52,800
+shared
+
+00:00:50,719 --> 00:00:55,199
+no matter what process you are running
+
+00:00:52,800 --> 00:00:58,079
+on um
+
+00:00:55,199 --> 00:01:00,160
+so the kernel has the same view of
+
+00:00:58,079 --> 00:01:03,440
+memory
+
+00:01:00,160 --> 00:01:05,680
+whatever process is running
+
+00:01:03,440 --> 00:01:07,119
+and it can see its own memory and it can
+
+00:01:05,680 --> 00:01:09,040
+see the user's memory but the user
+
+00:01:07,119 --> 00:01:11,600
+cannot see the current's memory
+
+00:01:09,040 --> 00:01:13,119
+so whenever something happens that
+
+00:01:11,600 --> 00:01:14,400
+either is triggered by the application
+
+00:01:13,119 --> 00:01:15,600
+doing something intentionally or
+
+00:01:14,400 --> 00:01:17,439
+unintentionally
+
+00:01:15,600 --> 00:01:19,040
+or by the hardware that requires the
+
+00:01:17,439 --> 00:01:22,159
+chronos attention
+
+00:01:19,040 --> 00:01:23,280
+um you change state from unprivileged to
+
+00:01:22,159 --> 00:01:25,600
+privileged
+
+00:01:23,280 --> 00:01:27,520
+and then execute in memory that is only
+
+00:01:25,600 --> 00:01:30,000
+visible to the kernel
+
+00:01:27,520 --> 00:01:31,600
+and whenever the kernel is done with it
+
+00:01:30,000 --> 00:01:34,560
+it just returns
+
+00:01:31,600 --> 00:01:34,560
+to user space
+
+00:01:35,119 --> 00:01:39,439
+and that user space could be a different
+
+00:01:37,360 --> 00:01:42,799
+task in which case we have
+
+00:01:39,439 --> 00:01:46,240
+at a task switch or process which um
+
+00:01:42,799 --> 00:01:48,240
+what this means on linux and arm this is
+
+00:01:46,240 --> 00:01:49,759
+the generic memory map that you would
+
+00:01:48,240 --> 00:01:50,640
+see on a lot of architectures but not
+
+00:01:49,759 --> 00:01:54,000
+all of them
+
+00:01:50,640 --> 00:01:57,759
+um so usually uh as it is on
+
+00:01:54,000 --> 00:02:01,920
+arm we have the user space
+
+00:01:57,759 --> 00:02:05,680
+see it's on memory at low addresses
+
+00:02:01,920 --> 00:02:10,560
+so anything up to task size is
+
+00:02:05,680 --> 00:02:13,040
+user addressable memory virtualized
+
+00:02:10,560 --> 00:02:15,520
+and anything above it is only visible to
+
+00:02:13,040 --> 00:02:15,520
+the kernel
+
+00:02:15,599 --> 00:02:21,760
+and then above task size we have two
+
+00:02:18,959 --> 00:02:23,280
+main areas one of them is linear mapping
+
+00:02:21,760 --> 00:02:25,280
+of physical memory
+
+00:02:23,280 --> 00:02:27,680
+and the other one is what we call the vm
+
+00:02:25,280 --> 00:02:31,040
+log zone where we put everything else
+
+00:02:27,680 --> 00:02:34,560
+that is um accessed
+
+00:02:31,040 --> 00:02:37,200
+uh that is mapped dynamically at runtime
+
+00:02:34,560 --> 00:02:38,239
+so that could be loadable modules or it
+
+00:02:37,200 --> 00:02:39,840
+could be
+
+00:02:38,239 --> 00:02:43,360
+large allocations of non-contiguous
+
+00:02:39,840 --> 00:02:43,360
+memory anything like that
+
+00:02:44,239 --> 00:02:48,640
+um and then there's something called
+
+00:02:46,800 --> 00:02:50,400
+high mam
+
+00:02:48,640 --> 00:02:52,160
+what it means to have high mem on a
+
+00:02:50,400 --> 00:02:54,640
+32-bit machine
+
+00:02:52,160 --> 00:02:57,040
+this physical warm-up area is typically
+
+00:02:54,640 --> 00:02:57,040
+only
+
+00:02:57,159 --> 00:03:02,959
+768 megabytes in size
+
+00:03:00,000 --> 00:03:04,720
+so that's as much physical memory as you
+
+00:03:02,959 --> 00:03:08,080
+can map
+
+00:03:04,720 --> 00:03:12,879
+into this red line area and if you have
+
+00:03:08,080 --> 00:03:15,519
+more than this the rest becomes high mam
+
+00:03:12,879 --> 00:03:17,120
+and the user process has a random
+
+00:03:15,519 --> 00:03:20,159
+mapping of physical pages
+
+00:03:17,120 --> 00:03:22,400
+for kilobyte pages between
+
+00:03:20,159 --> 00:03:25,280
+um the physical address on the right and
+
+00:03:22,400 --> 00:03:28,720
+the virtual address on the left
+
+00:03:25,280 --> 00:03:31,280
+but in in color space only the
+
+00:03:28,720 --> 00:03:32,640
+the low the low mem is mapped so if we
+
+00:03:31,280 --> 00:03:34,720
+want to access
+
+00:03:32,640 --> 00:03:36,080
+high mam pages from the kernel we have
+
+00:03:34,720 --> 00:03:38,319
+to map them
+
+00:03:36,080 --> 00:03:39,920
+into vmware into the vmware log area
+
+00:03:38,319 --> 00:03:41,519
+dynamically
+
+00:03:39,920 --> 00:03:44,080
+do whatever action we need to do and
+
+00:03:41,519 --> 00:03:46,400
+then unlock them again
+
+00:03:44,080 --> 00:03:49,599
+to get the space back because we can't
+
+00:03:46,400 --> 00:03:52,640
+map at all that's the whole point
+
+00:03:49,599 --> 00:03:54,879
+um highman is a huge
+
+00:03:52,640 --> 00:03:57,040
+problem for a number of reasons so
+
+00:03:54,879 --> 00:03:58,480
+there's just this week there's another
+
+00:03:57,040 --> 00:04:01,360
+discussion about
+
+00:03:58,480 --> 00:04:02,480
+um what can we do about highman because
+
+00:04:01,360 --> 00:04:06,239
+it's so annoying
+
+00:04:02,480 --> 00:04:07,680
+to have to to go and map one page at a
+
+00:04:06,239 --> 00:04:10,959
+time when we want to access it
+
+00:04:07,680 --> 00:04:13,360
+which has all kinds of implications um
+
+00:04:10,959 --> 00:04:15,439
+so thomas gleichner posted a patch
+
+00:04:13,360 --> 00:04:17,440
+series to
+
+00:04:15,439 --> 00:04:18,479
+fix some of the problems that we have
+
+00:04:17,440 --> 00:04:20,639
+with heimann
+
+00:04:18,479 --> 00:04:22,479
+but he also said like the the only real
+
+00:04:20,639 --> 00:04:25,040
+solution is to remove it
+
+00:04:22,479 --> 00:04:26,240
+completely and the patch series has gone
+
+00:04:25,040 --> 00:04:27,759
+back and forth
+
+00:04:26,240 --> 00:04:29,360
+we still don't have a solution for the
+
+00:04:27,759 --> 00:04:30,320
+particular problem that we're trying to
+
+00:04:29,360 --> 00:04:32,000
+solve
+
+00:04:30,320 --> 00:04:34,160
+and this has been going on for a while
+
+00:04:32,000 --> 00:04:35,919
+there are two interesting
+
+00:04:34,160 --> 00:04:38,160
+articles in lw and that you can read
+
+00:04:35,919 --> 00:04:41,919
+about it
+
+00:04:38,160 --> 00:04:42,639
+one is a story from earlier this year
+
+00:04:41,919 --> 00:04:46,000
+where
+
+00:04:42,639 --> 00:04:48,000
+we first discussed like how long do we
+
+00:04:46,000 --> 00:04:49,759
+still need to do to have heinem
+
+00:04:48,000 --> 00:04:52,000
+can we remove it now can we remove it
+
+00:04:49,759 --> 00:04:55,040
+later why should we remove it
+
+00:04:52,000 --> 00:04:55,040
+or what needs to be done
+
+00:04:55,360 --> 00:04:58,720
+and the other story is about the recent
+
+00:04:57,360 --> 00:05:00,400
+development
+
+00:04:58,720 --> 00:05:02,479
+where one of the solutions is to make a
+
+00:05:00,400 --> 00:05:06,080
+little bit slower but less
+
+00:05:02,479 --> 00:05:07,919
+annoying um
+
+00:05:06,080 --> 00:05:10,960
+there's another solution that you can do
+
+00:05:07,919 --> 00:05:15,039
+on a particular system
+
+00:05:10,960 --> 00:05:17,440
+the the the boundary between
+
+00:05:15,039 --> 00:05:19,039
+user memory and low mem is actually
+
+00:05:17,440 --> 00:05:19,759
+configurable at compile time of the
+
+00:05:19,039 --> 00:05:23,440
+kernel
+
+00:05:19,759 --> 00:05:26,000
+so you can compile the kernel to have
+
+00:05:23,440 --> 00:05:28,720
+let's say one gigabyte of low mem
+
+00:05:26,000 --> 00:05:31,280
+instead of 768 megabytes
+
+00:05:28,720 --> 00:05:33,840
+or you can have it in the extreme case
+
+00:05:31,280 --> 00:05:35,199
+set to 2.75 gigabytes
+
+00:05:33,840 --> 00:05:37,759
+but that means you only have one
+
+00:05:35,199 --> 00:05:40,320
+gigabyte of virtual addresses for
+
+00:05:37,759 --> 00:05:41,680
+user space and that is a huge limitation
+
+00:05:40,320 --> 00:05:43,759
+for some processes
+
+00:05:41,680 --> 00:05:45,360
+like a lot of applications wouldn't ever
+
+00:05:43,759 --> 00:05:48,960
+notice because they run
+
+00:05:45,360 --> 00:05:51,199
+fine within one gigabyte but
+
+00:05:48,960 --> 00:05:52,880
+another lwn article that i'm citing here
+
+00:05:51,199 --> 00:05:56,000
+that you can read up on
+
+00:05:52,880 --> 00:05:57,680
+is a description of what goes wrong with
+
+00:05:56,000 --> 00:06:01,120
+the current three gigabyte limit
+
+00:05:57,680 --> 00:06:04,000
+so there are already um
+
+00:06:01,120 --> 00:06:06,560
+tasks that fail because they run out of
+
+00:06:04,000 --> 00:06:09,520
+virtual addresses even if you have
+
+00:06:06,560 --> 00:06:10,000
+a lot of physical memory still available
+
+00:06:09,520 --> 00:06:13,280
+so
+
+00:06:10,000 --> 00:06:15,440
+reducing it to less than three gigabytes
+
+00:06:13,280 --> 00:06:17,840
+means that more applications will run
+
+00:06:15,440 --> 00:06:20,240
+into this particular problem
+
+00:06:17,840 --> 00:06:21,280
+ideally we would make it larger and on a
+
+00:06:20,240 --> 00:06:23,520
+64 gigabyte
+
+00:06:21,280 --> 00:06:24,800
+on a 64-bit corner you can actually use
+
+00:06:23,520 --> 00:06:26,400
+the full
+
+00:06:24,800 --> 00:06:29,120
+four gigabytes of address space for
+
+00:06:26,400 --> 00:06:29,120
+users in space
+
+00:06:29,360 --> 00:06:35,199
+so this is the idea that we've had for
+
+00:06:32,400 --> 00:06:37,600
+how we can solve this problem by
+
+00:06:35,199 --> 00:06:40,639
+introducing a number of others
+
+00:06:37,600 --> 00:06:43,840
+so rather than having multiple processes
+
+00:06:40,639 --> 00:06:46,560
+at low addresses and then
+
+00:06:43,840 --> 00:06:47,039
+um a little bit of physical lawman we
+
+00:06:46,560 --> 00:06:51,039
+would
+
+00:06:47,039 --> 00:06:53,280
+have a fairly large amount of low mem
+
+00:06:51,039 --> 00:06:54,400
+and a fairly large amount of address
+
+00:06:53,280 --> 00:06:56,639
+space for user space
+
+00:06:54,400 --> 00:06:58,160
+but only have one of them at a time and
+
+00:06:56,639 --> 00:06:59,680
+then we switch back and forth between
+
+00:06:58,160 --> 00:07:01,520
+them
+
+00:06:59,680 --> 00:07:03,840
+so just like we switch between user
+
+00:07:01,520 --> 00:07:08,240
+processors
+
+00:07:03,840 --> 00:07:08,240
+we now also have to switch to the kernel
+
+00:07:10,240 --> 00:07:15,919
+this means we can still have highman
+
+00:07:13,280 --> 00:07:19,199
+but in all systems that have less than
+
+00:07:15,919 --> 00:07:20,960
+3.75 gigabytes of ram
+
+00:07:19,199 --> 00:07:22,400
+we wouldn't need highman if we do have
+
+00:07:20,960 --> 00:07:26,880
+heinem
+
+00:07:22,400 --> 00:07:29,440
+then the lowman becomes much larger
+
+00:07:26,880 --> 00:07:30,240
+and we would still have to map highman
+
+00:07:29,440 --> 00:07:33,280
+pages
+
+00:07:30,240 --> 00:07:35,520
+into the vm log area so how often is
+
+00:07:33,280 --> 00:07:38,720
+that the case
+
+00:07:35,520 --> 00:07:41,599
+i took a very unscientific look
+
+00:07:38,720 --> 00:07:44,960
+at what kind of machines people actually
+
+00:07:41,599 --> 00:07:49,199
+use on 32-bit arm
+
+00:07:44,960 --> 00:07:51,199
+in a talk i gave at the last connect
+
+00:07:49,199 --> 00:07:52,560
+i talked about how many machines i
+
+00:07:51,199 --> 00:07:55,919
+actually still use
+
+00:07:52,560 --> 00:07:57,039
+with a 32-bit arm and it's about half of
+
+00:07:55,919 --> 00:08:00,879
+the ones that
+
+00:07:57,039 --> 00:08:03,039
+we get patches for in the armstock tree
+
+00:08:00,879 --> 00:08:04,479
+but it turns out that most of them don't
+
+00:08:03,039 --> 00:08:06,879
+actually have more than one gigabyte of
+
+00:08:04,479 --> 00:08:06,879
+memory
+
+00:08:07,120 --> 00:08:10,400
+so only the ones on the right of the
+
+00:08:09,599 --> 00:08:12,240
+screen
+
+00:08:10,400 --> 00:08:14,879
+are actually affected so these are the
+
+00:08:12,240 --> 00:08:18,160
+ones that use some amount of high mem
+
+00:08:14,879 --> 00:08:21,680
+and everything to the left doesn't
+
+00:08:18,160 --> 00:08:24,080
+as long as we make the vm split so that
+
+00:08:21,680 --> 00:08:26,560
+that whole gigabyte can be mapped the
+
+00:08:24,080 --> 00:08:30,800
+one gigabyte case is extremely popular
+
+00:08:26,560 --> 00:08:33,200
+the two gigabyte case is
+
+00:08:30,800 --> 00:08:34,959
+not quite popular because a lot of the
+
+00:08:33,200 --> 00:08:37,440
+machines with two gigabyte and more
+
+00:08:34,959 --> 00:08:38,080
+are already running 64-bit kernels in
+
+00:08:37,440 --> 00:08:41,279
+that case
+
+00:08:38,080 --> 00:08:42,719
+uh we don't have a problem here
+
+00:08:41,279 --> 00:08:44,320
+and this is actually a trend that i
+
+00:08:42,719 --> 00:08:49,839
+expect to continue
+
+00:08:44,320 --> 00:08:53,600
+um just because at two gigabytes
+
+00:08:49,839 --> 00:08:56,080
+it's uh often cheaper to get the 64-bit
+
+00:08:53,600 --> 00:08:59,600
+system with lpddr4 memory
+
+00:08:56,080 --> 00:09:01,279
+then have a 32-bit system with ddr3
+
+00:08:59,600 --> 00:09:03,519
+memory and have four chips at the same
+
+00:09:01,279 --> 00:09:03,519
+time
+
+00:09:04,640 --> 00:09:09,200
+um so this is what i expect 32-bit
+
+00:09:08,240 --> 00:09:11,600
+systems
+
+00:09:09,200 --> 00:09:13,360
+to look like in the long run we'll have
+
+00:09:11,600 --> 00:09:15,440
+something like a cortex a7
+
+00:09:13,360 --> 00:09:17,200
+most likely a lot of this systems will
+
+00:09:15,440 --> 00:09:20,560
+actually use a cortex a7
+
+00:09:17,200 --> 00:09:23,360
+512 megabytes of ddr3 memory is
+
+00:09:20,560 --> 00:09:24,240
+kind of the sweet spot because that is
+
+00:09:23,360 --> 00:09:28,080
+the
+
+00:09:24,240 --> 00:09:30,399
+largest chip that is in mass production
+
+00:09:28,080 --> 00:09:32,240
+that you would use on such a system if
+
+00:09:30,399 --> 00:09:36,320
+you get to
+
+00:09:32,240 --> 00:09:38,000
+larger memory you need more chips
+
+00:09:36,320 --> 00:09:41,200
+and that makes a more expensive ball
+
+00:09:38,000 --> 00:09:43,279
+design at some point you get into the
+
+00:09:41,200 --> 00:09:44,800
+area where running 64-bit again is
+
+00:09:43,279 --> 00:09:47,920
+cheaper
+
+00:09:44,800 --> 00:09:49,120
+and anything other than ddr3 so the
+
+00:09:47,920 --> 00:09:52,320
+older technologies
+
+00:09:49,120 --> 00:09:55,279
+are already kind of obsolete because you
+
+00:09:52,320 --> 00:09:57,839
+can't save much money by using
+
+00:09:55,279 --> 00:09:59,600
+ddr1 memory instead of ddr3 the only
+
+00:09:57,839 --> 00:10:01,040
+reason you would do it is because
+
+00:09:59,600 --> 00:10:04,399
+you have picked a chip that does not
+
+00:10:01,040 --> 00:10:07,120
+have ddr3
+
+00:10:04,399 --> 00:10:08,560
+um then you might have 64-bit hardware
+
+00:10:07,120 --> 00:10:10,800
+in which case
+
+00:10:08,560 --> 00:10:12,000
+i would just strongly recommend to run a
+
+00:10:10,800 --> 00:10:13,839
+64-bit corner
+
+00:10:12,000 --> 00:10:16,320
+as i said with a 64-bit kernel you don't
+
+00:10:13,839 --> 00:10:20,800
+have any of these problems
+
+00:10:16,320 --> 00:10:20,800
+um there's no high mem and
+
+00:10:21,600 --> 00:10:24,800
+you might still want to run 32-bit user
+
+00:10:23,920 --> 00:10:26,160
+space
+
+00:10:24,800 --> 00:10:28,800
+especially if you have less than 2
+
+00:10:26,160 --> 00:10:32,320
+gigabytes of ram it makes sense because
+
+00:10:28,800 --> 00:10:32,880
+32-bit user space by definition uses
+
+00:10:32,320 --> 00:10:35,760
+less
+
+00:10:32,880 --> 00:10:36,320
+memory it has smaller pointers smaller
+
+00:10:35,760 --> 00:10:39,680
+long
+
+00:10:36,320 --> 00:10:44,839
+variables and you can also use form 2
+
+00:10:39,680 --> 00:10:46,959
+instructions to have a smaller eye cache
+
+00:10:44,839 --> 00:10:50,880
+um
+
+00:10:46,959 --> 00:10:51,760
+yes um so how do we actually implement
+
+00:10:50,880 --> 00:10:54,160
+it on the
+
+00:10:51,760 --> 00:10:55,760
+machines that we still care about that
+
+00:10:54,160 --> 00:10:58,880
+will that are running the
+
+00:10:55,760 --> 00:11:01,120
+two gigabytes of low man and will have
+
+00:10:58,880 --> 00:11:03,120
+to support for a while
+
+00:11:01,120 --> 00:11:05,120
+there are two different classes of
+
+00:11:03,120 --> 00:11:05,839
+machines that are still popular today
+
+00:11:05,120 --> 00:11:09,839
+there's
+
+00:11:05,839 --> 00:11:14,480
+the classic um which is anything before
+
+00:11:09,839 --> 00:11:16,880
+on v7 plus the cortex a8 a9 and a5
+
+00:11:14,480 --> 00:11:18,399
+um and then there's the the modern
+
+00:11:16,880 --> 00:11:21,920
+chorus on v7 ve
+
+00:11:18,399 --> 00:11:24,000
+which is cortex a7 um a 15
+
+00:11:21,920 --> 00:11:25,279
+a 17 and and a couple of others and
+
+00:11:24,000 --> 00:11:28,399
+anything on v8
+
+00:11:25,279 --> 00:11:30,000
+and higher so as i said um
+
+00:11:28,399 --> 00:11:31,839
+four gigabytes is already fairly
+
+00:11:30,000 --> 00:11:33,120
+uncommon but there are important systems
+
+00:11:31,839 --> 00:11:35,279
+that use it
+
+00:11:33,120 --> 00:11:36,480
+and there are even some systems with
+
+00:11:35,279 --> 00:11:38,240
+eight gigabytes
+
+00:11:36,480 --> 00:11:39,519
+that we will still have to support at
+
+00:11:38,240 --> 00:11:42,399
+least for
+
+00:11:39,519 --> 00:11:44,959
+another few years before the existing
+
+00:11:42,399 --> 00:11:48,399
+users move off of them
+
+00:11:44,959 --> 00:11:50,320
+on older cores it's exceptional to have
+
+00:11:48,399 --> 00:11:52,480
+an army 11 with one gigabyte
+
+00:11:50,320 --> 00:11:54,320
+although that does happen and on the
+
+00:11:52,480 --> 00:11:57,680
+cortex a9
+
+00:11:54,320 --> 00:12:00,959
+2 gigabytes is already rare and
+
+00:11:57,680 --> 00:12:02,959
+four gigabytes is the absolute exception
+
+00:12:00,959 --> 00:12:06,480
+yes there are those systems
+
+00:12:02,959 --> 00:12:10,959
+um but they are in very small numbers
+
+00:12:06,480 --> 00:12:15,839
+so maybe you can wait for them to all
+
+00:12:10,959 --> 00:12:15,839
+be to all fall out of use
+
+00:12:17,519 --> 00:12:24,160
+the most important exception is the imx
+
+00:12:21,040 --> 00:12:24,800
+6 quad and quad plus that has a cortex
+
+00:12:24,160 --> 00:12:28,079
+a9
+
+00:12:24,800 --> 00:12:30,160
+does not have a modern mmu with lpae
+
+00:12:28,079 --> 00:12:33,600
+but some people have shipped them in the
+
+00:12:30,160 --> 00:12:33,600
+past with four gigabytes
+
+00:12:34,079 --> 00:12:38,320
+so this is the timeline that i can
+
+00:12:35,839 --> 00:12:39,600
+imagine for what we would do we would
+
+00:12:38,320 --> 00:12:42,079
+introduce
+
+00:12:39,600 --> 00:12:43,200
+the vm split four gig four gig option
+
+00:12:42,079 --> 00:12:46,560
+that i've
+
+00:12:43,200 --> 00:12:48,320
+briefly shown um we would make it the
+
+00:12:46,560 --> 00:12:49,639
+default which means that any system
+
+00:12:48,320 --> 00:12:53,040
+using
+
+00:12:49,639 --> 00:12:56,160
+3.75 gigabytes of ram
+
+00:12:53,040 --> 00:12:59,279
+would uh not use hi-mem at all
+
+00:12:56,160 --> 00:13:00,880
+but systems that do use hi-mem um that
+
+00:12:59,279 --> 00:13:02,800
+systems that do have more than four
+
+00:13:00,880 --> 00:13:03,920
+gigabytes they would still be able to
+
+00:13:02,800 --> 00:13:07,440
+use
+
+00:13:03,920 --> 00:13:09,120
+hi-mem um until we have determined that
+
+00:13:07,440 --> 00:13:11,120
+all of these systems
+
+00:13:09,120 --> 00:13:12,480
+have been have fallen out of use and at
+
+00:13:11,120 --> 00:13:14,800
+that point we can drop
+
+00:13:12,480 --> 00:13:18,320
+highman support and for the older
+
+00:13:14,800 --> 00:13:18,320
+kernels for the older hardware
+
+00:13:18,399 --> 00:13:25,519
+i would like to add the 2gig opt
+
+00:13:22,240 --> 00:13:27,839
+option which means we allow exactly 2
+
+00:13:25,519 --> 00:13:28,959
+gigabytes of ram to be accessed without
+
+00:13:27,839 --> 00:13:32,160
+having haiman because
+
+00:13:28,959 --> 00:13:35,200
+currently if you have the 2gig
+
+00:13:32,160 --> 00:13:36,560
+memory split you get slightly under two
+
+00:13:35,200 --> 00:13:38,240
+gigabytes of memory
+
+00:13:36,560 --> 00:13:40,160
+and then a little bit of heimann which
+
+00:13:38,240 --> 00:13:41,440
+is almost as nasty as having a lot of
+
+00:13:40,160 --> 00:13:44,880
+heimam
+
+00:13:41,440 --> 00:13:47,440
+um and then equally we would
+
+00:13:44,880 --> 00:13:48,079
+keep using hi-mem for some systems but
+
+00:13:47,440 --> 00:13:50,800
+eventually
+
+00:13:48,079 --> 00:13:52,639
+drop it when we are fairly certain that
+
+00:13:50,800 --> 00:13:56,560
+the existing users
+
+00:13:52,639 --> 00:13:59,199
+do not care anymore and in both cases we
+
+00:13:56,560 --> 00:14:02,000
+don't i do not expect to see any
+
+00:13:59,199 --> 00:14:03,760
+new users so this would be the the
+
+00:14:02,000 --> 00:14:07,040
+heinen system
+
+00:14:03,760 --> 00:14:10,399
+on in those two cases would be for
+
+00:14:07,040 --> 00:14:10,399
+users of existing hardware
+
+00:14:10,880 --> 00:14:16,480
+um so back to the implementation
+
+00:14:13,920 --> 00:14:17,760
+um so there was actually a vm split for
+
+00:14:16,480 --> 00:14:21,519
+gig for gig option
+
+00:14:17,760 --> 00:14:23,199
+for x86 some 18 years ago
+
+00:14:21,519 --> 00:14:26,880
+when there were still large numera
+
+00:14:23,199 --> 00:14:30,639
+systems with something like 16
+
+00:14:26,880 --> 00:14:34,240
+discrete cpus on x86 and they could
+
+00:14:30,639 --> 00:14:34,720
+address tons of hymen and there was a
+
+00:14:34,240 --> 00:14:38,480
+patch
+
+00:14:34,720 --> 00:14:41,279
+to get make the low man larger
+
+00:14:38,480 --> 00:14:43,040
+while still having high mem and it was
+
+00:14:41,279 --> 00:14:44,800
+fairly expensive
+
+00:14:43,040 --> 00:14:46,240
+and it was ugly and that is the reason
+
+00:14:44,800 --> 00:14:47,760
+it never got merged
+
+00:14:46,240 --> 00:14:49,680
+so the the baseline is we have to be
+
+00:14:47,760 --> 00:14:51,199
+better than that um
+
+00:14:49,680 --> 00:14:52,720
+to have it they even have a chance of
+
+00:14:51,199 --> 00:14:54,959
+getting it merged
+
+00:14:52,720 --> 00:14:57,440
+so this was shipped in redhead
+
+00:14:54,959 --> 00:15:00,720
+enterprise linux at the time and then
+
+00:14:57,440 --> 00:15:00,720
+it completely fell out of use
+
+00:15:00,959 --> 00:15:06,959
+with the um v7
+
+00:15:04,639 --> 00:15:09,440
+with the ipa emu there are a couple of
+
+00:15:06,959 --> 00:15:12,959
+tricks that we can do
+
+00:15:09,440 --> 00:15:16,480
+that help us we have
+
+00:15:12,959 --> 00:15:20,320
+two page table base registers
+
+00:15:16,480 --> 00:15:23,360
+that is unlike x86 we can split we can
+
+00:15:20,320 --> 00:15:26,000
+change the address basis
+
+00:15:23,360 --> 00:15:28,560
+for high addresses and low addresses
+
+00:15:26,000 --> 00:15:28,560
+separately
+
+00:15:29,360 --> 00:15:34,720
+we have address space identifiers that
+
+00:15:32,399 --> 00:15:36,000
+mean we do not have to flush tlbs which
+
+00:15:34,720 --> 00:15:37,519
+was some of the
+
+00:15:36,000 --> 00:15:41,120
+where the largest overhead came from in
+
+00:15:37,519 --> 00:15:44,320
+the old approach
+
+00:15:41,120 --> 00:15:44,320
+and um
+
+00:15:44,880 --> 00:15:48,560
+the the mu is flexible enough that we
+
+00:15:48,000 --> 00:15:51,120
+can
+
+00:15:48,560 --> 00:15:52,399
+pick any ratio between the upper and the
+
+00:15:51,120 --> 00:15:55,199
+higher
+
+00:15:52,399 --> 00:15:55,759
+the the upper and the lower page tables
+
+00:15:55,199 --> 00:15:58,480
+within
+
+00:15:55,759 --> 00:16:00,079
+certain bounds so the the minimum size
+
+00:15:58,480 --> 00:16:01,519
+for one of the page tables is a quarter
+
+00:16:00,079 --> 00:16:06,160
+gigabyte of memory
+
+00:16:01,519 --> 00:16:06,160
+um and there's um
+
+00:16:06,399 --> 00:16:09,920
+the that's where this came from that i
+
+00:16:09,199 --> 00:16:14,079
+said we would
+
+00:16:09,920 --> 00:16:16,639
+keep the vm alloy area of 256 megabytes
+
+00:16:14,079 --> 00:16:18,880
+permanently mapped um there are two
+
+00:16:16,639 --> 00:16:22,800
+problems with this
+
+00:16:18,880 --> 00:16:24,000
+the first one is how we do the exception
+
+00:16:22,800 --> 00:16:26,079
+entry
+
+00:16:24,000 --> 00:16:28,000
+and exit and the other one is how we
+
+00:16:26,079 --> 00:16:30,000
+access user space memory
+
+00:16:28,000 --> 00:16:32,720
+when we are in kernel and user space has
+
+00:16:30,000 --> 00:16:32,720
+been unmapped
+
+00:16:32,800 --> 00:16:38,240
+so for the exception entry um
+
+00:16:36,160 --> 00:16:39,279
+at the moment the kernel runs actually
+
+00:16:38,240 --> 00:16:41,440
+in the linear mapping
+
+00:16:39,279 --> 00:16:44,399
+and when that is going away we cannot
+
+00:16:41,440 --> 00:16:47,839
+just jump into the kernel
+
+00:16:44,399 --> 00:16:47,839
+at the time an exception happens
+
+00:16:47,920 --> 00:16:51,440
+and for x86 the approach was that
+
+00:16:50,160 --> 00:16:53,519
+there's
+
+00:16:51,440 --> 00:16:54,639
+a small trampoline like just a little uh
+
+00:16:53,519 --> 00:16:56,639
+one or two pages
+
+00:16:54,639 --> 00:16:58,399
+at the top of the address space that
+
+00:16:56,639 --> 00:17:00,079
+hold a little trampoline
+
+00:16:58,399 --> 00:17:02,880
+all the exceptions would end up in that
+
+00:17:00,079 --> 00:17:04,240
+trampoline then swap the page tables and
+
+00:17:02,880 --> 00:17:06,000
+then start executing the normal
+
+00:17:04,240 --> 00:17:09,520
+currently
+
+00:17:06,000 --> 00:17:11,439
+but what i think would be better for a
+
+00:17:09,520 --> 00:17:13,760
+number of reasons here
+
+00:17:11,439 --> 00:17:14,880
+is to have the vmlog space permanently
+
+00:17:13,760 --> 00:17:17,039
+mapped
+
+00:17:14,880 --> 00:17:18,799
+user space would still not be able to
+
+00:17:17,039 --> 00:17:22,000
+access it just as it
+
+00:17:18,799 --> 00:17:23,199
+isn't now um
+
+00:17:22,000 --> 00:17:24,880
+but it would be there and all the
+
+00:17:23,199 --> 00:17:26,640
+exceptions could just point in there and
+
+00:17:24,880 --> 00:17:30,160
+we need to move the kernel
+
+00:17:26,640 --> 00:17:31,840
+into it um the coil is around 20
+
+00:17:30,160 --> 00:17:33,440
+megabytes typically under 20 on the
+
+00:17:31,840 --> 00:17:36,640
+32-bit system
+
+00:17:33,440 --> 00:17:39,440
+so that easily fits it's maybe 10
+
+00:17:36,640 --> 00:17:42,640
+percent of the available address space
+
+00:17:39,440 --> 00:17:45,600
+um we could also map
+
+00:17:42,640 --> 00:17:46,160
+the kernel stack into the same vm log
+
+00:17:45,600 --> 00:17:48,080
+area
+
+00:17:46,160 --> 00:17:49,600
+which we currently don't uh so this is
+
+00:17:48,080 --> 00:17:51,919
+something we we have to decide at some
+
+00:17:49,600 --> 00:17:54,160
+point and we'll see later why
+
+00:17:51,919 --> 00:17:56,960
+um we would have to reserve one address
+
+00:17:54,160 --> 00:18:00,000
+space identifier
+
+00:17:56,960 --> 00:18:01,840
+and the the address space
+
+00:18:00,000 --> 00:18:03,200
+switch just happens whenever we enter
+
+00:18:01,840 --> 00:18:05,039
+the corner so all the
+
+00:18:03,200 --> 00:18:06,240
+kernel code is already mapped so we can
+
+00:18:05,039 --> 00:18:10,480
+use the
+
+00:18:06,240 --> 00:18:13,280
+existing entry code we just reload the
+
+00:18:10,480 --> 00:18:14,160
+page table base register when entering
+
+00:18:13,280 --> 00:18:16,400
+the kernel
+
+00:18:14,160 --> 00:18:17,760
+and we actually have an early prototype
+
+00:18:16,400 --> 00:18:22,320
+of this that
+
+00:18:17,760 --> 00:18:22,320
+mohammed has implemented um
+
+00:18:23,440 --> 00:18:26,640
+but there's more work that needs to be
+
+00:18:24,960 --> 00:18:28,559
+done on this
+
+00:18:26,640 --> 00:18:30,160
+the other problem that i mentioned is
+
+00:18:28,559 --> 00:18:31,360
+accessing user memory
+
+00:18:30,160 --> 00:18:33,039
+so this is something that you do
+
+00:18:31,360 --> 00:18:33,600
+whenever there's a system call that
+
+00:18:33,039 --> 00:18:36,640
+passes
+
+00:18:33,600 --> 00:18:40,480
+arguments outside of registers so if you
+
+00:18:36,640 --> 00:18:43,840
+um call the rule system call
+
+00:18:40,480 --> 00:18:46,000
+the kernel would um operate on
+
+00:18:43,840 --> 00:18:47,200
+a file descriptor get the data and then
+
+00:18:46,000 --> 00:18:50,000
+it would call
+
+00:18:47,200 --> 00:18:51,440
+copy to user to actually copy the
+
+00:18:50,000 --> 00:18:55,039
+resulting data
+
+00:18:51,440 --> 00:18:56,880
+into the target address at that point
+
+00:18:55,039 --> 00:19:00,240
+you need to have
+
+00:18:56,880 --> 00:19:02,240
+access to user space memory um
+
+00:19:00,240 --> 00:19:04,559
+and all the existing code wouldn't work
+
+00:19:02,240 --> 00:19:07,200
+so we we have to rewrite it
+
+00:19:04,559 --> 00:19:08,240
+somehow unfortunately none of those
+
+00:19:07,200 --> 00:19:11,840
+options that we
+
+00:19:08,240 --> 00:19:14,720
+come up so far with uh a really nice
+
+00:19:11,840 --> 00:19:16,480
+but i'll show you anyway what we have so
+
+00:19:14,720 --> 00:19:19,120
+the first one would be
+
+00:19:16,480 --> 00:19:21,280
+what the existing x86 method does and
+
+00:19:19,120 --> 00:19:23,200
+again we have a prototype for this
+
+00:19:21,280 --> 00:19:25,360
+um but it turned out to be really really
+
+00:19:23,200 --> 00:19:28,559
+slow
+
+00:19:25,360 --> 00:19:30,480
+the idea is that we do the same thing as
+
+00:19:28,559 --> 00:19:32,320
+the hardware we walk the page table
+
+00:19:30,480 --> 00:19:33,679
+there's a function called get user pages
+
+00:19:32,320 --> 00:19:36,960
+that we can use
+
+00:19:33,679 --> 00:19:40,240
+to map to find out
+
+00:19:36,960 --> 00:19:44,320
+where in the physical memory this is um
+
+00:19:40,240 --> 00:19:46,320
+then if it's actually highland page
+
+00:19:44,320 --> 00:19:48,000
+we remap it dynamically otherwise it's
+
+00:19:46,320 --> 00:19:50,000
+already mapped
+
+00:19:48,000 --> 00:19:51,280
+once that page is mapped we just do a
+
+00:19:50,000 --> 00:19:55,039
+mem copy
+
+00:19:51,280 --> 00:19:57,919
+um it won't fault and
+
+00:19:55,039 --> 00:19:58,320
+the data is there then we unmap it and
+
+00:19:57,919 --> 00:20:00,559
+uh
+
+00:19:58,320 --> 00:20:02,320
+we might have to do this for one page at
+
+00:20:00,559 --> 00:20:03,919
+the time for if there's a
+
+00:20:02,320 --> 00:20:05,360
+like a large read system call or
+
+00:20:03,919 --> 00:20:08,480
+something other then
+
+00:20:05,360 --> 00:20:08,480
+that takes a lot of data
+
+00:20:09,280 --> 00:20:12,799
+and nobody really likes this approach
+
+00:20:10,880 --> 00:20:14,799
+but it is actually possible to implement
+
+00:20:12,799 --> 00:20:17,760
+this in an architecture independent way
+
+00:20:14,799 --> 00:20:20,000
+and that's a good baseline so we might
+
+00:20:17,760 --> 00:20:23,039
+keep this
+
+00:20:20,000 --> 00:20:24,320
+the second one is the get user put user
+
+00:20:23,039 --> 00:20:28,400
+functions
+
+00:20:24,320 --> 00:20:32,240
+are optimized versions of copy from user
+
+00:20:28,400 --> 00:20:34,240
+copy to user and they just
+
+00:20:32,240 --> 00:20:35,919
+read or write one register so what we
+
+00:20:34,240 --> 00:20:37,600
+can do here is
+
+00:20:35,919 --> 00:20:39,840
+since the code is already in the mlog
+
+00:20:37,600 --> 00:20:42,960
+space it won't go away
+
+00:20:39,840 --> 00:20:44,720
+we flip the page table we do the access
+
+00:20:42,960 --> 00:20:46,880
+to the user pointer and then we flip the
+
+00:20:44,720 --> 00:20:48,480
+page table back
+
+00:20:46,880 --> 00:20:50,159
+the overhead isn't quite as bad if
+
+00:20:48,480 --> 00:20:51,600
+you're just reading one word as with the
+
+00:20:50,159 --> 00:20:54,720
+other approach
+
+00:20:51,600 --> 00:20:56,559
+um but you still have to load
+
+00:20:54,720 --> 00:20:58,080
+you have to store that page table base
+
+00:20:56,559 --> 00:21:00,480
+register and then
+
+00:20:58,080 --> 00:21:02,559
+have a barrier so there's a there's a
+
+00:21:00,480 --> 00:21:04,960
+significant overhead still if
+
+00:21:02,559 --> 00:21:08,720
+especially if you want to do this for a
+
+00:21:04,960 --> 00:21:10,880
+large copy rather than just one word
+
+00:21:08,720 --> 00:21:12,400
+so the next trick would be to do exactly
+
+00:21:10,880 --> 00:21:14,720
+the same but do it
+
+00:21:12,400 --> 00:21:16,000
+for multiple registers if the memory is
+
+00:21:14,720 --> 00:21:19,679
+aligned we can
+
+00:21:16,000 --> 00:21:22,320
+just do load multiple store multiple
+
+00:21:19,679 --> 00:21:24,720
+and do 32 bytes at a time which is
+
+00:21:22,320 --> 00:21:24,720
+something
+
+00:21:25,360 --> 00:21:29,840
+approach number four would be to use all
+
+00:21:28,320 --> 00:21:31,520
+the registers we have available
+
+00:21:29,840 --> 00:21:35,280
+including the neon registers
+
+00:21:31,520 --> 00:21:39,440
+and the neon registers give us 256 bytes
+
+00:21:35,280 --> 00:21:42,640
+so we could do a copy of a whole page
+
+00:21:39,440 --> 00:21:45,120
+by flipping back and forth 16 times
+
+00:21:42,640 --> 00:21:46,480
+which is still expensive but it might
+
+00:21:45,120 --> 00:21:50,080
+just be good enough
+
+00:21:46,480 --> 00:21:50,080
+for large copies
+
+00:21:51,679 --> 00:21:56,320
+another approach is rather than
+
+00:21:57,600 --> 00:21:59,840
+having
+
+00:22:02,240 --> 00:22:05,600
+mapping the user space into kernel we do
+
+00:22:05,039 --> 00:22:08,559
+we just
+
+00:22:05,600 --> 00:22:09,840
+map the linear page to a different
+
+00:22:08,559 --> 00:22:14,159
+location
+
+00:22:09,840 --> 00:22:15,840
+in the vml lab area and
+
+00:22:14,159 --> 00:22:17,440
+then do a mem copy there which is a
+
+00:22:15,840 --> 00:22:20,559
+little bit cheaper than
+
+00:22:17,440 --> 00:22:22,559
+mapping user space but we still have to
+
+00:22:20,559 --> 00:22:24,720
+update the page tables and flush it at
+
+00:22:22,559 --> 00:22:27,360
+least one tlb locally
+
+00:22:24,720 --> 00:22:30,320
+and we'll still have the the reload of
+
+00:22:27,360 --> 00:22:30,320
+the base register
+
+00:22:30,799 --> 00:22:36,159
+and then one more idea if we have the vm
+
+00:22:34,159 --> 00:22:39,440
+along stacks that i mentioned earlier
+
+00:22:36,159 --> 00:22:43,200
+so all the the per thread
+
+00:22:39,440 --> 00:22:43,200
+stack memory is also part of
+
+00:22:43,520 --> 00:22:48,799
+the vmlog area then
+
+00:22:46,799 --> 00:22:50,240
+we can have an even larger error we
+
+00:22:48,799 --> 00:22:52,400
+don't have to
+
+00:22:50,240 --> 00:22:55,120
+save and restore the neon registers but
+
+00:22:52,400 --> 00:22:57,520
+we could have for example one kilobyte
+
+00:22:55,120 --> 00:22:58,559
+of stack space that we reserve for this
+
+00:22:57,520 --> 00:23:02,080
+purpose
+
+00:22:58,559 --> 00:23:03,200
+um so anytime we do a mem copy a copy
+
+00:23:02,080 --> 00:23:07,520
+from user
+
+00:23:03,200 --> 00:23:10,640
+we would put an array of one kilobyte
+
+00:23:07,520 --> 00:23:12,000
+on the corner stack flip the page table
+
+00:23:10,640 --> 00:23:15,360
+and then do a mem copy
+
+00:23:12,000 --> 00:23:18,640
+between that the disadvantage
+
+00:23:15,360 --> 00:23:21,360
+is we have to do the mam copy twice
+
+00:23:18,640 --> 00:23:24,480
+um and it's still not that much memory
+
+00:23:21,360 --> 00:23:24,480
+that we can copy at once
+
+00:23:24,960 --> 00:23:29,120
+so for which of those six approaches
+
+00:23:27,520 --> 00:23:30,799
+we'll actually take
+
+00:23:29,120 --> 00:23:33,280
+i think we'll have to probably try them
+
+00:23:30,799 --> 00:23:34,240
+out all we'll have to see how expensive
+
+00:23:33,280 --> 00:23:37,840
+it is
+
+00:23:34,240 --> 00:23:37,840
+to flip the page tables
+
+00:23:38,000 --> 00:23:41,200
+and then come up with a good combination
+
+00:23:40,320 --> 00:23:43,520
+of
+
+00:23:41,200 --> 00:23:47,520
+the approaches that work best depending
+
+00:23:43,520 --> 00:23:47,520
+on the particular size of the copy
+
+00:23:49,279 --> 00:23:56,240
+there are possible other benefits
+
+00:23:53,200 --> 00:23:59,520
+besides avoiding high mem and giving
+
+00:23:56,240 --> 00:24:01,440
+more address space we have the
+
+00:23:59,520 --> 00:24:04,480
+privileged access never feature
+
+00:24:01,440 --> 00:24:06,159
+on modern 64-bit cpus and we have
+
+00:24:04,480 --> 00:24:10,480
+software implementations
+
+00:24:06,159 --> 00:24:13,679
+for both uh rv 8.0
+
+00:24:10,480 --> 00:24:15,600
+and for anything that does not run the
+
+00:24:13,679 --> 00:24:19,679
+lpae kernel
+
+00:24:15,600 --> 00:24:21,760
+we can emulate the behavior where we
+
+00:24:19,679 --> 00:24:23,360
+prevent the kernel from accessing user
+
+00:24:21,760 --> 00:24:26,960
+space
+
+00:24:23,360 --> 00:24:28,960
+other than with the get user put user
+
+00:24:26,960 --> 00:24:30,320
+functions and if you want to know more
+
+00:24:28,960 --> 00:24:31,679
+about that there's a good link that i
+
+00:24:30,320 --> 00:24:33,840
+put in
+
+00:24:31,679 --> 00:24:33,840
+again
+
+00:24:34,799 --> 00:24:42,080
+but with the proposed
+
+00:24:38,400 --> 00:24:45,440
+approach we would get this also on lpae
+
+00:24:42,080 --> 00:24:48,640
+basically it's the same feature
+
+00:24:45,440 --> 00:24:51,600
+another implication would be
+
+00:24:48,640 --> 00:24:51,600
+that it is
+
+00:24:52,480 --> 00:24:55,520
+kind of similar to the page table
+
+00:24:54,000 --> 00:24:59,279
+isolation
+
+00:24:55,520 --> 00:25:02,400
+that we have on 64-bit architectures it
+
+00:24:59,279 --> 00:25:06,000
+doesn't give you the whole isolation um
+
+00:25:02,400 --> 00:25:08,960
+so user space if there's um
+
+00:25:06,000 --> 00:25:10,400
+a cpu with a bug that lets you bypass
+
+00:25:08,960 --> 00:25:12,840
+the page protections
+
+00:25:10,400 --> 00:25:15,679
+like the meltdown bug did on certain
+
+00:25:12,840 --> 00:25:19,760
+cpus
+
+00:25:15,679 --> 00:25:22,159
+the idea is that by isolating the page
+
+00:25:19,760 --> 00:25:25,200
+tables
+
+00:25:22,159 --> 00:25:27,679
+the kernel would just not be mapped
+
+00:25:25,200 --> 00:25:29,520
+and you can't gain knowledge about
+
+00:25:27,679 --> 00:25:32,559
+what's going on in the kernel
+
+00:25:29,520 --> 00:25:34,799
+um with this approach we would prevent
+
+00:25:32,559 --> 00:25:36,559
+user space from accessing the linear map
+
+00:25:34,799 --> 00:25:38,640
+but we do not prevent it from accessing
+
+00:25:36,559 --> 00:25:42,000
+the bmi log space so it's like
+
+00:25:38,640 --> 00:25:43,760
+halfway there um
+
+00:25:42,000 --> 00:25:46,480
+i also looked at what we can do for
+
+00:25:43,760 --> 00:25:49,520
+other 32-bit architectures
+
+00:25:46,480 --> 00:25:53,360
+just because um the question
+
+00:25:49,520 --> 00:25:55,840
+is how long will we
+
+00:25:53,360 --> 00:25:57,520
+need to keep him around if we can't get
+
+00:25:55,840 --> 00:26:00,640
+rid of heimim ever
+
+00:25:57,520 --> 00:26:03,279
+then this is all uh not that interesting
+
+00:26:00,640 --> 00:26:04,400
+but if nobody else uses heimim and arm32
+
+00:26:03,279 --> 00:26:06,559
+is the only thing that's still
+
+00:26:04,400 --> 00:26:08,880
+interested in it
+
+00:26:06,559 --> 00:26:10,799
+then it is it becomes very important to
+
+00:26:08,880 --> 00:26:13,440
+do this
+
+00:26:10,799 --> 00:26:16,000
+it turned out that most architectures
+
+00:26:13,440 --> 00:26:17,840
+are in a similar situation
+
+00:26:16,000 --> 00:26:19,520
+and most 32-bit architectures are
+
+00:26:17,840 --> 00:26:22,559
+actually
+
+00:26:19,520 --> 00:26:24,559
+not used as much as arm32 so mips
+
+00:26:22,559 --> 00:26:26,080
+is probably the one that is most
+
+00:26:24,559 --> 00:26:30,000
+affected
+
+00:26:26,080 --> 00:26:31,919
+there are two soc families that
+
+00:26:30,000 --> 00:26:33,440
+people are still actively work on in the
+
+00:26:31,919 --> 00:26:37,279
+kernel
+
+00:26:33,440 --> 00:26:39,679
+that have this problem so the bicar t1
+
+00:26:37,279 --> 00:26:40,559
+soc was just merged into the mips kernel
+
+00:26:39,679 --> 00:26:42,960
+and they run
+
+00:26:40,559 --> 00:26:45,440
+up to eight gigabytes but can only have
+
+00:26:42,960 --> 00:26:47,600
+half a gigabyte of low man
+
+00:26:45,440 --> 00:26:50,000
+so they certainly have this problem they
+
+00:26:47,600 --> 00:26:52,559
+could use the same approach to get
+
+00:26:50,000 --> 00:26:54,799
+maybe up to three gigabytes just because
+
+00:26:52,559 --> 00:26:58,640
+the mips architecture is a bit different
+
+00:26:54,799 --> 00:27:02,240
+for the ingenic chips they are
+
+00:26:58,640 --> 00:27:03,600
+in some of the very cheap devices um
+
+00:27:02,240 --> 00:27:06,240
+but the ones that actually have one
+
+00:27:03,600 --> 00:27:09,039
+gigabyte are no longer being marketed
+
+00:27:06,240 --> 00:27:10,080
+so these might go away around the same
+
+00:27:09,039 --> 00:27:12,880
+time as the last
+
+00:27:10,080 --> 00:27:14,880
+arm systems that have more than eight
+
+00:27:12,880 --> 00:27:18,559
+more than four gigabytes
+
+00:27:14,880 --> 00:27:20,880
+for x86 as i said there were
+
+00:27:18,559 --> 00:27:24,320
+large numa systems in the past but they
+
+00:27:20,880 --> 00:27:24,320
+are basically all gone now
+
+00:27:25,600 --> 00:27:31,120
+and the only things that i found that
+
+00:27:28,720 --> 00:27:36,320
+would be relevant for x86
+
+00:27:31,120 --> 00:27:40,480
+are round about 2006 to 2008
+
+00:27:36,320 --> 00:27:42,159
+era netbooks and 32-bit laptops that
+
+00:27:40,480 --> 00:27:44,080
+have up to three gigabytes
+
+00:27:42,159 --> 00:27:45,679
+and they could use a vm split for three
+
+00:27:44,080 --> 00:27:48,240
+gigabytes but it is
+
+00:27:45,679 --> 00:27:49,360
+um if anybody still uses those laptops
+
+00:27:48,240 --> 00:27:51,120
+they have a problem
+
+00:27:49,360 --> 00:27:54,799
+and then there's an embedded system
+
+00:27:51,120 --> 00:27:56,799
+called the vertex 86ex2 that can address
+
+00:27:54,799 --> 00:27:58,240
+up to two gigabytes of physical memory
+
+00:27:56,799 --> 00:27:59,840
+and that is actually still being
+
+00:27:58,240 --> 00:28:00,559
+marketed today and they come out with
+
+00:27:59,840 --> 00:28:05,520
+new versions
+
+00:28:00,559 --> 00:28:09,440
+so they would also have a problem there
+
+00:28:05,520 --> 00:28:12,720
+on powerpc most of the systems are
+
+00:28:09,440 --> 00:28:14,640
+fairly old too the the powerbook laptops
+
+00:28:12,720 --> 00:28:16,700
+are in a similar situation to the
+
+00:28:14,640 --> 00:28:18,000
+x86 laptops
+
+00:28:16,700 --> 00:28:21,120
+[Music]
+
+00:28:18,000 --> 00:28:23,200
+and then nxp has a couple of socs
+
+00:28:21,120 --> 00:28:24,960
+that are also getting old by now that
+
+00:28:23,200 --> 00:28:27,520
+can address up to eight gigabytes of
+
+00:28:24,960 --> 00:28:30,080
+memory on a 32-bit
+
+00:28:27,520 --> 00:28:30,960
+cpu i couldn't really find out anything
+
+00:28:30,080 --> 00:28:32,480
+about the other
+
+00:28:30,960 --> 00:28:34,480
+architectures that i've listed but those
+
+00:28:32,480 --> 00:28:37,679
+are all the ones that
+
+00:28:34,480 --> 00:28:37,679
+use hi-mem today
+
+00:28:37,840 --> 00:28:42,840
+and that's it from me i see there are a
+
+00:28:40,159 --> 00:28:44,960
+couple of questions
+
+00:28:42,840 --> 00:28:48,720
+um so
+
+00:28:44,960 --> 00:28:49,840
+art says that ash32 only has 16 million
+
+00:28:48,720 --> 00:28:53,039
+registers
+
+00:28:49,840 --> 00:28:54,399
+um yes that is true but i think that the
+
+00:28:53,039 --> 00:28:59,840
+00:28:54,399 --> 00:28:59,840
+bytes was correct right um
+
+00:29:00,399 --> 00:29:04,480
+is it possible to do dma in place of mem
+
+00:29:02,640 --> 00:29:08,320
+copy is another question
+
+00:29:04,480 --> 00:29:10,720
+um if you want to do dma you still have
+
+00:29:08,320 --> 00:29:14,000
+to know the physical address
+
+00:29:10,720 --> 00:29:17,120
+so they what makes the approach that i
+
+00:29:14,000 --> 00:29:20,240
+mentioned expensive
+
+00:29:17,120 --> 00:29:22,960
+with the user memory access is mostly
+
+00:29:20,240 --> 00:29:23,919
+finding the page and making sure it
+
+00:29:22,960 --> 00:29:26,399
+doesn't go away
+
+00:29:23,919 --> 00:29:27,679
+so if you want to do dma you have almost
+
+00:29:26,399 --> 00:29:29,120
+the same overhead
+
+00:29:27,679 --> 00:29:31,200
+and then you additionally have the
+
+00:29:29,120 --> 00:29:31,760
+overhead of starting the dma and waiting
+
+00:29:31,200 --> 00:29:35,120
+for it
+
+00:29:31,760 --> 00:29:35,120
+so this wouldn't be any faster
+
+00:29:35,279 --> 00:29:41,520
+another question when
+
+00:29:39,039 --> 00:29:43,520
+using when we are using the option is
+
+00:29:41,520 --> 00:29:45,360
+kernel helper function mapping to the
+
+00:29:43,520 --> 00:29:47,760
+same
+
+00:29:45,360 --> 00:29:51,360
+vm analog area in this case is the vm
+
+00:29:47,760 --> 00:29:51,360
+analog space too small
+
+00:29:52,159 --> 00:29:56,720
+my expectation is that 256 megabytes of
+
+00:29:55,200 --> 00:29:59,360
+vmware log area
+
+00:29:56,720 --> 00:30:00,080
+is sufficient if it's not sufficient we
+
+00:29:59,360 --> 00:30:02,320
+can
+
+00:30:00,080 --> 00:30:03,279
+double the size like we can go in any
+
+00:30:02,320 --> 00:30:06,159
+power of two
+
+00:30:03,279 --> 00:30:07,679
+so it could be 256 megabytes 512 or one
+
+00:30:06,159 --> 00:30:10,799
+gigabyte
+
+00:30:07,679 --> 00:30:14,399
+which in turn means we have less low man
+
+00:30:10,799 --> 00:30:17,600
+um but that is currently the trade-off i
+
+00:30:14,399 --> 00:30:23,520
+think that the 256 megabytes should
+
+00:30:17,600 --> 00:30:25,840
+generally be in general be enough
+
+00:30:23,520 --> 00:30:28,559
+and the video is actually part of the
+
+00:30:25,840 --> 00:30:28,559
+user mapping
+
+00:30:31,200 --> 00:30:37,120
+what's the time okay i think we're out
+
+00:30:34,480 --> 00:30:38,880
+of time anyway um
+
+00:30:37,120 --> 00:30:40,799
+so there is a slack channel so people
+
+00:30:38,880 --> 00:30:42,640
+can carry on the conversation it's like
+
+00:30:40,799 --> 00:30:44,399
+there is a question from dan thompson in
+
+00:30:42,640 --> 00:30:47,840
+this channel already
+
+00:30:44,399 --> 00:30:51,440
+okay i'll go into the slack channel then
+
+00:30:47,840 --> 00:30:51,440
+
+YouTube URL: https://www.youtube.com/watch?v=lHsnJ3UIugk
+
+

@@ -1,0 +1,1508 @@
+Title: Petr Viktorin - The Magic of Attribute Access
+Publication date: 2015-04-18
+Playlist: EuroPython 2014
+Description: 
+	Petr Viktorin - The Magic of Attribute Access
+[EuroPython 2014]
+[22 July 2014]
+
+Have you ever wondered how the "self" argument appears when you call a method? Did you know there is a general mechanism behind it? Come learn all about attributes and descriptors.
+
+-----
+
+The first part of this talk will describe what exactly happens when you
+read or write an attribute in Python.
+
+While this behavior is, of course, explained in the Python docs,
+more precisely in the [Data model][1] section and [related][2] [writeups][3],
+the documentation gives one a "bag of tools" and leaves combining them
+to the reader.
+
+This talk, on the other hand, will present one chunk of functionality,
+the attribute lookup, and show how its mechanisms and customization
+options work together to provide the flexibility (and gotchas) Python provides.
+The topics covered will be:
+
+* method resolution order, with a nod to the C3 algorithm
+* instance-, class-, and metaclass-level variables
+* `__dict__` and `__slots__`
+* data/non-data descriptors
+* special methods (`__getattr__`, `__getattribute__`, `__setattr__`, `__dir__`)
+
+
+In the second part of the talk, I will show how to use the customization
+primitives explained before on several interesting and/or useful examples:
+
+* A proxy object using `__getattr__`
+* Generic desciptor - an ORM column sketch
+* the rudimentary `@property`, method, `staticmethod` reimplemented in
+  pure Python (explained [here][2] and elsewhere), which lead to
+* SQLAlchemy's [`@hybrid_proprerty`][4]
+* Pyramid's deceptively simple memoizing decorator, [`@reify`][5]
+* An ["Unpacked" tuple properties][6] example to drive home the idea that
+  descriptors can do more than provide attribute access
+  (and mention weak dicts as a way to non-intrusively store data on an object)
+
+
+(These are subject to change as I compose the talk. Also some examples may
+end up interleaved with the theory.)
+
+Hopefully I'll have time to conclude with a remark about how Python manages to be
+a "simple language" despite having these relatively complex mechanisms.
+
+
+[1]: http://docs.python.org/3/reference/datamodel.html
+[2]: http://docs.python.org/3/howto/descriptor.html
+[3]: https://www.python.org/download/releases/2.3/mro/
+[4]: http://docs.sqlalchemy.org/en/rel_0_9/orm/extensions/hybrid.html
+[5]: http://docs.pylonsproject.org/projects/pyramid/en/latest/api/decorator.html
+[6]: https://gist.github.com/encukou/9789993
+Captions: 
+	00:00:14,690 --> 00:00:21,410
+alright how can you hear me okay so I'm
+
+00:00:19,789 --> 00:00:24,050
+sure you're all familiar with the
+
+00:00:21,410 --> 00:00:26,060
+operators in Python not all of them are
+
+00:00:24,050 --> 00:00:28,279
+as interesting as some of the others but
+
+00:00:26,060 --> 00:00:31,730
+the most interesting one of all is the
+
+00:00:28,279 --> 00:00:34,309
+smallest so hello I'm Peter and I'll be
+
+00:00:31,730 --> 00:00:37,520
+diving into the depths of the dot
+
+00:00:34,309 --> 00:00:41,329
+operator now as you know python has a
+
+00:00:37,520 --> 00:00:46,129
+giant standard library where the dot is
+
+00:00:41,329 --> 00:00:50,239
+sort of the fat separator so you have
+
+00:00:46,129 --> 00:00:52,879
+some parent module and you get some
+
+00:00:50,239 --> 00:00:54,559
+child out of it now this is a different
+
+00:00:52,879 --> 00:00:59,839
+use of the dog then i'll be speaking
+
+00:00:54,559 --> 00:01:03,440
+about but it it's a case where the dot
+
+00:00:59,839 --> 00:01:05,440
+does some kind of names name spacing so
+
+00:01:03,440 --> 00:01:08,420
+what I will be talking about is
+
+00:01:05,440 --> 00:01:11,090
+attribute access so the three things you
+
+00:01:08,420 --> 00:01:13,700
+can do with the dot is set an attribute
+
+00:01:11,090 --> 00:01:16,220
+on an object get an attribute out of an
+
+00:01:13,700 --> 00:01:20,900
+object and delete the attribute the
+
+00:01:16,220 --> 00:01:23,390
+syntax I hope you all know now these are
+
+00:01:20,900 --> 00:01:27,470
+some of the most optimized operations in
+
+00:01:23,390 --> 00:01:29,180
+Python so it's very good to use them but
+
+00:01:27,470 --> 00:01:31,280
+you always know have to know the name of
+
+00:01:29,180 --> 00:01:32,690
+the attribute you're getting if you
+
+00:01:31,280 --> 00:01:35,450
+don't know it you can use the built-in
+
+00:01:32,690 --> 00:01:38,300
+functions setattr get outer and divider
+
+00:01:35,450 --> 00:01:42,770
+which actually do the exact same thing
+
+00:01:38,300 --> 00:01:47,180
+just a bit slower now to understand what
+
+00:01:42,770 --> 00:01:49,670
+the dot does will introduce this very
+
+00:01:47,180 --> 00:01:52,880
+simple approximation of what an object
+
+00:01:49,670 --> 00:01:55,850
+is in Python so if you have an object it
+
+00:01:52,880 --> 00:01:58,940
+has a type which doesn't change very
+
+00:01:55,850 --> 00:02:02,210
+often and it defines the behavior of the
+
+00:01:58,940 --> 00:02:04,610
+object and then you have the dict which
+
+00:02:02,210 --> 00:02:07,430
+contains all the data specific to that
+
+00:02:04,610 --> 00:02:09,170
+one instance and that's expected to
+
+00:02:07,430 --> 00:02:11,120
+change quite a lot of course there are
+
+00:02:09,170 --> 00:02:16,310
+always exceptions but we'll go with this
+
+00:02:11,120 --> 00:02:19,519
+simple model now as an example I have
+
+00:02:16,310 --> 00:02:22,850
+some class square i define a method on
+
+00:02:19,519 --> 00:02:24,920
+it that gets put in the type and then
+
+00:02:22,850 --> 00:02:26,550
+when I define an attribute on an
+
+00:02:24,920 --> 00:02:28,950
+instance of that object the
+
+00:02:26,550 --> 00:02:31,220
+it goes in the dict and the dick is
+
+00:02:28,950 --> 00:02:34,890
+under the hood just a simple dictionary
+
+00:02:31,220 --> 00:02:37,490
+and five hun three it's more than a
+
+00:02:34,890 --> 00:02:41,760
+simple dictionary but it acts like one
+
+00:02:37,490 --> 00:02:44,070
+and then when I want to get the
+
+00:02:41,760 --> 00:02:47,700
+attribute out I just use the dot again
+
+00:02:44,070 --> 00:02:49,380
+and Python looks in the dict and if it
+
+00:02:47,700 --> 00:02:51,210
+doesn't find the attribute in the dick
+
+00:02:49,380 --> 00:02:54,120
+then it looks on the type so I can also
+
+00:02:51,210 --> 00:02:57,900
+get the gate area method which is not
+
+00:02:54,120 --> 00:03:00,630
+not in the instance date so here are the
+
+00:02:57,900 --> 00:03:02,850
+simple rules when you set an attribute
+
+00:03:00,630 --> 00:03:05,610
+it goes directly to the dict when you
+
+00:03:02,850 --> 00:03:08,580
+get the Hat tribute a you try in the
+
+00:03:05,610 --> 00:03:14,520
+dict then you try the type and if it's
+
+00:03:08,580 --> 00:03:17,220
+not there then fail and most of this
+
+00:03:14,520 --> 00:03:21,810
+talk will be about how to make this work
+
+00:03:17,220 --> 00:03:25,970
+somehow differently so the first thing
+
+00:03:21,810 --> 00:03:29,940
+you can do to override this behavior is
+
+00:03:25,970 --> 00:03:33,180
+to put a special get outer method on the
+
+00:03:29,940 --> 00:03:36,030
+type what this does is it hooks into
+
+00:03:33,180 --> 00:03:39,300
+step three here and instead of failing
+
+00:03:36,030 --> 00:03:41,459
+right away this function get cold and
+
+00:03:39,300 --> 00:03:43,890
+gets called and whatever it returns gets
+
+00:03:41,459 --> 00:03:48,120
+returned as the value of the attribute
+
+00:03:43,890 --> 00:03:52,400
+so this simple class just proxies all
+
+00:03:48,120 --> 00:03:56,610
+attribute access to some other object
+
+00:03:52,400 --> 00:04:01,050
+this works it has some limitations for
+
+00:03:56,610 --> 00:04:03,209
+example it won't it won't work on
+
+00:04:01,050 --> 00:04:06,690
+attributes that are already in the dick
+
+00:04:03,209 --> 00:04:09,020
+so you if you ask for underscore object
+
+00:04:06,690 --> 00:04:12,540
+here which is already said they're the
+
+00:04:09,020 --> 00:04:15,090
+get out it won't be called now there's
+
+00:04:12,540 --> 00:04:18,660
+another method you can do which is get
+
+00:04:15,090 --> 00:04:22,410
+attribute it has a longer name and it's
+
+00:04:18,660 --> 00:04:24,950
+more powerful this one actually takes
+
+00:04:22,410 --> 00:04:29,820
+over the whole attribute getting process
+
+00:04:24,950 --> 00:04:32,310
+so it's a bit more difficult to use
+
+00:04:29,820 --> 00:04:36,169
+because if there's any attribute you
+
+00:04:32,310 --> 00:04:39,539
+already have on the object you have to
+
+00:04:36,169 --> 00:04:39,780
+make a special case for it otherwise you
+
+00:04:39,539 --> 00:04:41,400
+can
+
+00:04:39,780 --> 00:04:48,030
+do anything you want in this function
+
+00:04:41,400 --> 00:04:49,889
+and it'll work now that's getting
+
+00:04:48,030 --> 00:04:52,520
+attributes there's one more thing you
+
+00:04:49,889 --> 00:04:57,360
+want to do and that's setting them and
+
+00:04:52,520 --> 00:05:00,389
+for that we can have a set out of method
+
+00:04:57,360 --> 00:05:02,880
+so what this class will do is it keeps
+
+00:05:00,389 --> 00:05:06,000
+the dictionary when you try to get an
+
+00:05:02,880 --> 00:05:08,639
+attribute from the object it looks in
+
+00:05:06,000 --> 00:05:10,770
+the dictionary and returns whatever it
+
+00:05:08,639 --> 00:05:15,750
+finds and if you want to set an
+
+00:05:10,770 --> 00:05:20,010
+attribute it also looks in the
+
+00:05:15,750 --> 00:05:21,419
+dictionary and well it's since the
+
+00:05:20,010 --> 00:05:23,910
+attribute on the dictionary as you can
+
+00:05:21,419 --> 00:05:25,650
+see I'm special casing the dict because
+
+00:05:23,910 --> 00:05:29,130
+i'm setting the dict here and I don't
+
+00:05:25,650 --> 00:05:33,450
+want to set the dick that you know use
+
+00:05:29,130 --> 00:05:37,040
+the big that's not set already we also
+
+00:05:33,450 --> 00:05:39,750
+have the day latter which does are
+
+00:05:37,040 --> 00:05:44,190
+deleting attributes so it's it's the
+
+00:05:39,750 --> 00:05:46,169
+same did you have time to read it I
+
+00:05:44,190 --> 00:05:56,100
+guess most of you are looking at me so
+
+00:05:46,169 --> 00:05:59,640
+ah yeah the question is do any of these
+
+00:05:56,100 --> 00:06:01,950
+hooks run during in it they run every
+
+00:05:59,640 --> 00:06:04,890
+time you set an attribute in Python so
+
+00:06:01,950 --> 00:06:07,740
+if the inert has attributes setting then
+
+00:06:04,890 --> 00:06:09,180
+yeah and if there's just a function that
+
+00:06:07,740 --> 00:06:11,640
+gets called on the beginning it's
+
+00:06:09,180 --> 00:06:14,280
+there's nothing too special about in it
+
+00:06:11,640 --> 00:06:19,280
+so now I have two special a special case
+
+00:06:14,280 --> 00:06:22,530
+this for the setting here in the unit
+
+00:06:19,280 --> 00:06:25,440
+now if you ever find yourself writing
+
+00:06:22,530 --> 00:06:28,530
+something like this think twice because
+
+00:06:25,440 --> 00:06:31,320
+the attribute name space is not entirely
+
+00:06:28,530 --> 00:06:35,580
+under your control you have attributes
+
+00:06:31,320 --> 00:06:38,220
+like Dunder anything you'll inevitably
+
+00:06:35,580 --> 00:06:42,360
+want to add some methods to your class
+
+00:06:38,220 --> 00:06:46,169
+you'll want to enable subclasses to add
+
+00:06:42,360 --> 00:06:48,150
+new attributes so usually when you have
+
+00:06:46,169 --> 00:06:49,860
+something like a dictionary stick to a
+
+00:06:48,150 --> 00:06:51,009
+dictionary interface and don't mess
+
+00:06:49,860 --> 00:06:53,439
+around with attribute
+
+00:06:51,009 --> 00:07:00,159
+otherwise you'll run into trouble pretty
+
+00:06:53,439 --> 00:07:02,469
+fast yeah so I haven't seen this many
+
+00:07:00,159 --> 00:07:05,830
+times actually because this sort of
+
+00:07:02,469 --> 00:07:08,550
+blanket overriding of getting and
+
+00:07:05,830 --> 00:07:10,779
+setting attributes is not that useful
+
+00:07:08,550 --> 00:07:13,839
+usually what you want to do is you have
+
+00:07:10,779 --> 00:07:16,119
+one attribute that needs some kind of
+
+00:07:13,839 --> 00:07:18,339
+special treatment or you have several
+
+00:07:16,119 --> 00:07:21,610
+but each one is special in its own way
+
+00:07:18,339 --> 00:07:24,969
+so if you did the get outer you would
+
+00:07:21,610 --> 00:07:28,569
+have a nasty tree of ifs and it's it's
+
+00:07:24,969 --> 00:07:31,529
+not very nice so for this python has a
+
+00:07:28,569 --> 00:07:35,050
+very special feature called descriptors
+
+00:07:31,529 --> 00:07:38,020
+now what descriptors do is you put a
+
+00:07:35,050 --> 00:07:40,360
+special object in the type which will
+
+00:07:38,020 --> 00:07:42,009
+control access to the specified
+
+00:07:40,360 --> 00:07:44,589
+attributes so if I have some kind of
+
+00:07:42,009 --> 00:07:48,719
+square and I want it to have an area I
+
+00:07:44,589 --> 00:07:52,289
+put some kind of magic special object
+
+00:07:48,719 --> 00:07:54,849
+into the class and when I set the side
+
+00:07:52,289 --> 00:07:59,620
+the and then I look at the area
+
+00:07:54,849 --> 00:08:02,589
+attribute this descriptor will take the
+
+00:07:59,620 --> 00:08:05,979
+side the this five here square it and
+
+00:08:02,589 --> 00:08:08,620
+give it that give that back this is
+
+00:08:05,979 --> 00:08:10,479
+pretty easy to implement the descriptor
+
+00:08:08,620 --> 00:08:16,599
+object only needs one method which is
+
+00:08:10,479 --> 00:08:19,389
+get so double underscores get what this
+
+00:08:16,599 --> 00:08:21,729
+method to gets is the instance so that
+
+00:08:19,389 --> 00:08:25,449
+would be the square here and if the
+
+00:08:21,729 --> 00:08:27,580
+instance is set it can return the value
+
+00:08:25,449 --> 00:08:30,279
+of the attribute if the instance is not
+
+00:08:27,580 --> 00:08:32,409
+said that means we're getting the
+
+00:08:30,279 --> 00:08:35,860
+attribute from the class itself so
+
+00:08:32,409 --> 00:08:39,519
+that's the usage on the bottom here and
+
+00:08:35,860 --> 00:08:41,709
+what most well-behaved descriptors do is
+
+00:08:39,519 --> 00:08:48,550
+return the descriptor itself so you can
+
+00:08:41,709 --> 00:08:51,370
+use it for some other reasons sorry okay
+
+00:08:48,550 --> 00:08:54,329
+is that clear you just have special
+
+00:08:51,370 --> 00:08:57,670
+object to control access to an attribute
+
+00:08:54,329 --> 00:09:01,779
+now with what this object can also do is
+
+00:08:57,670 --> 00:09:04,270
+control setting so if you use a method
+
+00:09:01,779 --> 00:09:06,700
+called set it gets
+
+00:09:04,270 --> 00:09:08,170
+the instance and the value the users
+
+00:09:06,700 --> 00:09:13,660
+trying to set and it's free to do
+
+00:09:08,170 --> 00:09:16,270
+anything at once in my case we want to
+
+00:09:13,660 --> 00:09:20,170
+update the side because the user set an
+
+00:09:16,270 --> 00:09:27,400
+area to something so we can update the
+
+00:09:20,170 --> 00:09:33,940
+side to match so anybody having trouble
+
+00:09:27,400 --> 00:09:37,900
+reading about it's not okay and the last
+
+00:09:33,940 --> 00:09:40,390
+thing there is is delete the short Dell
+
+00:09:37,900 --> 00:09:42,490
+was already taken so it's longer this
+
+00:09:40,390 --> 00:09:44,350
+one isn't that useful because you don't
+
+00:09:42,490 --> 00:09:46,000
+find yourself deleting attributes all
+
+00:09:44,350 --> 00:09:50,740
+that often but for completeness it's
+
+00:09:46,000 --> 00:09:53,650
+there now a bit of terminology huh when
+
+00:09:50,740 --> 00:09:55,960
+a descriptor has this set method it's
+
+00:09:53,650 --> 00:09:58,620
+called a date a descriptor if it does
+
+00:09:55,960 --> 00:10:02,860
+not it's called a non-date a descriptor
+
+00:09:58,620 --> 00:10:05,080
+this is the this set means that pretty
+
+00:10:02,860 --> 00:10:07,540
+much you want to control all access to
+
+00:10:05,080 --> 00:10:10,240
+the attribute if you only have get your
+
+00:10:07,540 --> 00:10:12,640
+just just getting that out if you have
+
+00:10:10,240 --> 00:10:14,350
+set means there's some data you
+
+00:10:12,640 --> 00:10:16,930
+presumably want to store in that
+
+00:10:14,350 --> 00:10:20,500
+attribute so that's why it's called the
+
+00:10:16,930 --> 00:10:24,880
+data description now how many of you
+
+00:10:20,500 --> 00:10:28,390
+know the property decorator almost
+
+00:10:24,880 --> 00:10:32,140
+everyone yeah so as you can see I've
+
+00:10:28,390 --> 00:10:33,790
+pretty much gone the long way to do
+
+00:10:32,140 --> 00:10:36,790
+something like the property decorator
+
+00:10:33,790 --> 00:10:39,190
+and in fact the property decorator all
+
+00:10:36,790 --> 00:10:41,740
+it does is create a descriptor you can
+
+00:10:39,190 --> 00:10:43,620
+actually implement property in pure
+
+00:10:41,740 --> 00:10:47,770
+python as a descriptor you know you just
+
+00:10:43,620 --> 00:10:50,200
+give it three functions and call them in
+
+00:10:47,770 --> 00:10:54,040
+the appropriate special methods and why
+
+00:10:50,200 --> 00:10:58,030
+have example here so I have a set area
+
+00:10:54,040 --> 00:11:01,900
+get area del area give these three
+
+00:10:58,030 --> 00:11:05,080
+functions to the property and without an
+
+00:11:01,900 --> 00:11:07,630
+area you can actually call the built-in
+
+00:11:05,080 --> 00:11:11,650
+property like this and it'll do the
+
+00:11:07,630 --> 00:11:13,570
+right thing if you add some more sugar
+
+00:11:11,650 --> 00:11:15,460
+to this class then you can really
+
+00:11:13,570 --> 00:11:16,170
+reimplement all the mechanics of the
+
+00:11:15,460 --> 00:11:19,380
+prop
+
+00:11:16,170 --> 00:11:31,079
+and again this has set so it's a data
+
+00:11:19,380 --> 00:11:33,320
+description okay one time yeah so Python
+
+00:11:31,079 --> 00:11:35,940
+actually likes descriptors very much and
+
+00:11:33,320 --> 00:11:37,920
+anytime there is something special to do
+
+00:11:35,940 --> 00:11:42,060
+on attribute access you have a
+
+00:11:37,920 --> 00:11:45,329
+descriptor for example if you look at a
+
+00:11:42,060 --> 00:11:47,760
+simple function if you look at the
+
+00:11:45,329 --> 00:11:49,889
+attributes a task one of them is get
+
+00:11:47,760 --> 00:11:53,100
+because functions themselves are
+
+00:11:49,889 --> 00:11:56,100
+descriptors when you have a function on
+
+00:11:53,100 --> 00:11:57,660
+a class then and then you have an
+
+00:11:56,100 --> 00:11:59,250
+instance of the class so you want to get
+
+00:11:57,660 --> 00:12:02,220
+the function you don't get the function
+
+00:11:59,250 --> 00:12:04,889
+back you get a method get an object that
+
+00:12:02,220 --> 00:12:10,139
+has the function itself and the self
+
+00:12:04,889 --> 00:12:13,070
+argument baked in alright so here's a
+
+00:12:10,139 --> 00:12:18,480
+very simple class with a very simple
+
+00:12:13,070 --> 00:12:22,290
+function and when you get them when you
+
+00:12:18,480 --> 00:12:25,500
+get the attribute from an instance of
+
+00:12:22,290 --> 00:12:28,230
+that class you get a bound method if you
+
+00:12:25,500 --> 00:12:32,250
+call that it automatically provides
+
+00:12:28,230 --> 00:12:36,089
+their self argument and if you get a
+
+00:12:32,250 --> 00:12:38,699
+line from the class it gives you the
+
+00:12:36,089 --> 00:12:41,970
+original decorator or the original
+
+00:12:38,699 --> 00:12:43,890
+function as I said most well-behaved
+
+00:12:41,970 --> 00:12:46,560
+descriptors return themselves when you
+
+00:12:43,890 --> 00:12:49,140
+get them from a class in Python to you
+
+00:12:46,560 --> 00:12:53,970
+would get something called an unbound
+
+00:12:49,140 --> 00:12:58,050
+method which doesn't really do anything
+
+00:12:53,970 --> 00:13:01,170
+that useful but it's there now they sort
+
+00:12:58,050 --> 00:13:04,380
+of fixed it so it's just gets the the
+
+00:13:01,170 --> 00:13:07,940
+function but now if you look closely to
+
+00:13:04,380 --> 00:13:11,060
+the farthest descriptor with we had it
+
+00:13:07,940 --> 00:13:13,709
+yeah it works pretty much the same way
+
+00:13:11,060 --> 00:13:16,800
+that's something special when you get
+
+00:13:13,709 --> 00:13:19,740
+the thing from the instance when you get
+
+00:13:16,800 --> 00:13:27,089
+it from the class it returns the
+
+00:13:19,740 --> 00:13:30,209
+descriptor itself right another thing I
+
+00:13:27,089 --> 00:13:33,420
+want to talk about is
+
+00:13:30,209 --> 00:13:36,660
+this little trick for saving memory if I
+
+00:13:33,420 --> 00:13:39,740
+had a point class and I had millions of
+
+00:13:36,660 --> 00:13:42,329
+these objects around I wouldn't want
+
+00:13:39,740 --> 00:13:44,459
+each of them to have this
+
+00:13:42,329 --> 00:13:46,470
+attribute which as I said is the normal
+
+00:13:44,459 --> 00:13:49,589
+dick so it takes up memory and i know
+
+00:13:46,470 --> 00:13:51,619
+that in a point i'll only ever have an X
+
+00:13:49,589 --> 00:13:55,290
+number and a y number and nothing else
+
+00:13:51,619 --> 00:13:59,759
+so what this special magic incantation
+
+00:13:55,290 --> 00:14:03,540
+will do is it will actually make the
+
+00:13:59,759 --> 00:14:05,759
+type not have a dict attribute it'll
+
+00:14:03,540 --> 00:14:09,569
+have the type and it will have directly
+
+00:14:05,759 --> 00:14:11,309
+the x and y in the sea object itself so
+
+00:14:09,569 --> 00:14:14,850
+there will be no dictionary and middle
+
+00:14:11,309 --> 00:14:17,639
+save the memory you can of course set
+
+00:14:14,850 --> 00:14:19,740
+and get the x and y attributes but you
+
+00:14:17,639 --> 00:14:22,709
+cannot set anything else because there's
+
+00:14:19,740 --> 00:14:26,249
+no space in the object for anything
+
+00:14:22,709 --> 00:14:30,079
+extra all right and if you try to get
+
+00:14:26,249 --> 00:14:34,649
+eggs from the class you get this
+
+00:14:30,079 --> 00:14:37,110
+descriptor so every every time there's
+
+00:14:34,649 --> 00:14:41,459
+some special attribute Python implements
+
+00:14:37,110 --> 00:14:44,610
+it with a descriptor right and I think
+
+00:14:41,459 --> 00:14:48,660
+now is the time to give you the whole
+
+00:14:44,610 --> 00:14:51,149
+magic formula so this is the way an
+
+00:14:48,660 --> 00:14:55,199
+attribute is gotten from an instance
+
+00:14:51,149 --> 00:14:59,459
+first you try get attribute if there is
+
+00:14:55,199 --> 00:15:02,009
+getcha attribute you just call it and
+
+00:14:59,459 --> 00:15:05,660
+get it back if it make if it throws an
+
+00:15:02,009 --> 00:15:09,389
+error yeah the error is raised if
+
+00:15:05,660 --> 00:15:11,910
+there's no getattribute you look up the
+
+00:15:09,389 --> 00:15:15,059
+attribute on the class and if it is a
+
+00:15:11,910 --> 00:15:19,049
+data descriptor then you called it's get
+
+00:15:15,059 --> 00:15:21,329
+method and return that only after that
+
+00:15:19,049 --> 00:15:26,369
+only after looking for the data
+
+00:15:21,329 --> 00:15:30,119
+descriptor the dict is checked so the
+
+00:15:26,369 --> 00:15:33,119
+value has gotten directly from from the
+
+00:15:30,119 --> 00:15:35,429
+instance attributes this doesn't call
+
+00:15:33,119 --> 00:15:38,279
+any descriptors you just get the value
+
+00:15:35,429 --> 00:15:41,429
+straight back after that you check the
+
+00:15:38,279 --> 00:15:43,290
+non-data descriptor well or you check if
+
+00:15:41,429 --> 00:15:46,589
+the descriptor is not data that's the
+
+00:15:43,290 --> 00:15:48,300
+face then you call that if it's not a
+
+00:15:46,589 --> 00:15:51,480
+descriptor at all if it doesn't have the
+
+00:15:48,300 --> 00:15:54,600
+gender get method then you just return
+
+00:15:51,480 --> 00:15:58,529
+it directly so if underclass I have some
+
+00:15:54,600 --> 00:16:02,130
+value like you know and a class
+
+00:15:58,529 --> 00:16:05,699
+attribute constant for example it's just
+
+00:16:02,130 --> 00:16:08,819
+returned directly after that you fall
+
+00:16:05,699 --> 00:16:12,680
+back to get at her and if that is also
+
+00:16:08,819 --> 00:16:16,500
+not there than not to be drivers race
+
+00:16:12,680 --> 00:16:19,199
+now there are there is this weird thing
+
+00:16:16,500 --> 00:16:21,860
+about the data description non-data
+
+00:16:19,199 --> 00:16:24,630
+descriptor being in two different places
+
+00:16:21,860 --> 00:16:27,180
+what this allows is if you have a data
+
+00:16:24,630 --> 00:16:32,550
+descriptor it pretty much controls all
+
+00:16:27,180 --> 00:16:34,880
+the access to the attribute and so what
+
+00:16:32,550 --> 00:16:38,160
+the Python designers thought is that if
+
+00:16:34,880 --> 00:16:41,250
+you define both get and set then you
+
+00:16:38,160 --> 00:16:44,790
+probably want to control the access to
+
+00:16:41,250 --> 00:16:47,579
+that attribute yourself all right if you
+
+00:16:44,790 --> 00:16:50,399
+don't define the set then you're free to
+
+00:16:47,579 --> 00:16:54,649
+override that attribute in the instance
+
+00:16:50,399 --> 00:16:54,649
+so you can put something in the dict and
+
+00:16:54,829 --> 00:17:01,769
+then since its non-data descriptor you
+
+00:16:59,730 --> 00:17:05,240
+will get get it back from the dick
+
+00:17:01,769 --> 00:17:09,900
+before the descriptors chain right
+
+00:17:05,240 --> 00:17:12,179
+there's a one nice use of it in the
+
+00:17:09,900 --> 00:17:14,579
+pyramid framework it's called rifi some
+
+00:17:12,179 --> 00:17:18,169
+other frameworks called cash property of
+
+00:17:14,579 --> 00:17:21,870
+call I've heard it called lazy property
+
+00:17:18,169 --> 00:17:24,689
+what this does is you give it a function
+
+00:17:21,870 --> 00:17:29,669
+and then when you get the corresponding
+
+00:17:24,689 --> 00:17:35,450
+attribute the function is called and
+
+00:17:29,669 --> 00:17:38,820
+then the attribute set with the value
+
+00:17:35,450 --> 00:17:42,230
+you've computed so cause the function
+
+00:17:38,820 --> 00:17:45,900
+puts the result in the in the dict and
+
+00:17:42,230 --> 00:17:48,210
+whenever you get the attribute again it
+
+00:17:45,900 --> 00:17:50,040
+doesn't call the function again it
+
+00:17:48,210 --> 00:17:53,309
+doesn't go to the descriptor just
+
+00:17:50,040 --> 00:17:56,290
+returns the cash value from the dick so
+
+00:17:53,309 --> 00:17:58,420
+this is a way if you
+
+00:17:56,290 --> 00:18:02,470
+yeah if you want to implement laser
+
+00:17:58,420 --> 00:18:06,360
+property there's some discussion about
+
+00:18:02,470 --> 00:18:09,670
+adding this to the standard library and
+
+00:18:06,360 --> 00:18:12,730
+yeah so maybe we'll see it's under some
+
+00:18:09,670 --> 00:18:22,660
+name is there anyone who doesn't
+
+00:18:12,730 --> 00:18:24,880
+understand excuse me if you want to
+
+00:18:22,660 --> 00:18:29,860
+invalidate this you just remove it from
+
+00:18:24,880 --> 00:18:37,120
+the ticket yet you just delete the
+
+00:18:29,860 --> 00:18:39,970
+attribute yeah it the magic is that you
+
+00:18:37,120 --> 00:18:41,830
+can just set the attribute normally now
+
+00:18:39,970 --> 00:18:44,560
+if you would know the name in advance
+
+00:18:41,830 --> 00:18:47,560
+this would literally be instant dot name
+
+00:18:44,560 --> 00:18:50,290
+equal value now the setting is not
+
+00:18:47,560 --> 00:18:53,770
+affected at all with with this
+
+00:18:50,290 --> 00:18:57,820
+descriptor so if you want to change the
+
+00:18:53,770 --> 00:18:59,440
+value in the deck to just do it normally
+
+00:18:57,820 --> 00:19:03,100
+you only think that's different is
+
+00:18:59,440 --> 00:19:07,600
+getting and that's only when it's not
+
+00:19:03,100 --> 00:19:22,120
+already in the date the questions on
+
+00:19:07,600 --> 00:19:25,660
+this I'm not finished yeah yeah if you
+
+00:19:22,120 --> 00:19:30,370
+have a general question then then just
+
+00:19:25,660 --> 00:19:33,070
+wait okay so another thing about this
+
+00:19:30,370 --> 00:19:36,300
+magic formula is this on class which i
+
+00:19:33,070 --> 00:19:40,240
+put in italics because it's not as easy
+
+00:19:36,300 --> 00:19:43,540
+as it looks because looking up something
+
+00:19:40,240 --> 00:19:46,410
+on the class of instances not an actual
+
+00:19:43,540 --> 00:19:52,300
+attribute access it's a bit different
+
+00:19:46,410 --> 00:19:54,760
+and it has to do with something called a
+
+00:19:52,300 --> 00:19:56,560
+method resolution origin so if you have
+
+00:19:54,760 --> 00:20:00,700
+a class and you have a subclass of it
+
+00:19:56,560 --> 00:20:03,190
+you can check for the method resolution
+
+00:20:00,700 --> 00:20:05,800
+order and it gives you the child the
+
+00:20:03,190 --> 00:20:08,050
+parent and the object now when you look
+
+00:20:05,800 --> 00:20:09,539
+something up in the class it goes
+
+00:20:08,050 --> 00:20:11,669
+through the classes in this over
+
+00:20:09,539 --> 00:20:15,359
+so the attribute would be defined on
+
+00:20:11,669 --> 00:20:17,999
+child it would be returned from the
+
+00:20:15,359 --> 00:20:19,950
+child if it's not on the child Python
+
+00:20:17,999 --> 00:20:23,570
+looks and parent if it's not there
+
+00:20:19,950 --> 00:20:26,690
+python looks in the universal superclass
+
+00:20:23,570 --> 00:20:29,129
+now if you have some kind of weird
+
+00:20:26,690 --> 00:20:31,440
+hierarchy of classes with multiple
+
+00:20:29,129 --> 00:20:35,669
+inheritance and stuff like that there's
+
+00:20:31,440 --> 00:20:38,369
+an algorithm called I think c2 which you
+
+00:20:35,669 --> 00:20:42,149
+could look up there's which converts
+
+00:20:38,369 --> 00:20:47,279
+this hierarchy to just a list that's
+
+00:20:42,149 --> 00:20:52,889
+checked linearly one more thing about
+
+00:20:47,279 --> 00:20:55,799
+this mro it's actually an attribute
+
+00:20:52,889 --> 00:20:59,070
+define on the metaclass I don't know if
+
+00:20:55,799 --> 00:21:05,489
+you're familiar with that but it's
+
+00:20:59,070 --> 00:21:09,059
+defined on on the on the type metaclass
+
+00:21:05,489 --> 00:21:13,169
+and if you have an instance of the
+
+00:21:09,059 --> 00:21:14,999
+object it doesn't show up because if you
+
+00:21:13,169 --> 00:21:18,119
+have an instance you only check the
+
+00:21:14,999 --> 00:21:20,879
+instance itself and its class not its
+
+00:21:18,119 --> 00:21:23,729
+metaclass so this is maybe you a useful
+
+00:21:20,879 --> 00:21:25,229
+way to hide things from instances if you
+
+00:21:23,729 --> 00:21:27,840
+need them all the type you just put it
+
+00:21:25,229 --> 00:21:29,489
+in metal clasp and if you don't know
+
+00:21:27,840 --> 00:21:32,609
+what meta classes are I'm sorry but I
+
+00:21:29,489 --> 00:21:41,210
+don't really have time to explain it hey
+
+00:21:32,609 --> 00:21:41,210
+that's it time for questions
+
+00:21:46,860 --> 00:21:52,870
+okay thanks to Peter and we have almost
+
+00:21:51,430 --> 00:21:54,820
+eight minutes for questions so please
+
+00:21:52,870 --> 00:21:59,830
+raise your hand and I woke up with a
+
+00:21:54,820 --> 00:22:01,780
+microphone hi thank you very much for
+
+00:21:59,830 --> 00:22:07,570
+the insides really really interesting
+
+00:22:01,780 --> 00:22:11,860
+and one thing I actually saw which was
+
+00:22:07,570 --> 00:22:13,780
+quite quite distinct was the slots the
+
+00:22:11,860 --> 00:22:21,280
+slots attribute how would you compare
+
+00:22:13,780 --> 00:22:23,260
+this to a name topple and what are the
+
+00:22:21,280 --> 00:22:26,470
+understand what the advantages are
+
+00:22:23,260 --> 00:22:29,740
+compared to to name topple but then why
+
+00:22:26,470 --> 00:22:31,960
+do we need Nate double name temple is
+
+00:22:29,740 --> 00:22:36,550
+actually used a bit differently the name
+
+00:22:31,960 --> 00:22:37,990
+temple is immutable that's the first
+
+00:22:36,550 --> 00:22:40,690
+thing and the second thing of name
+
+00:22:37,990 --> 00:22:42,270
+template has order in the attributes so
+
+00:22:40,690 --> 00:22:45,730
+you can actually use it as a temple here
+
+00:22:42,270 --> 00:22:50,800
+you don't don't have order so use
+
+00:22:45,730 --> 00:22:54,220
+whatever makes sense in your case right
+
+00:22:50,800 --> 00:22:56,290
+if if I wanted to add for example and
+
+00:22:54,220 --> 00:22:58,870
+it's right around this or make this an
+
+00:22:56,290 --> 00:23:00,310
+iterator I couldn't really do that with
+
+00:22:58,870 --> 00:23:03,180
+name temple since that's already in
+
+00:23:00,310 --> 00:23:03,180
+energy generator
+
+00:23:13,350 --> 00:23:21,460
+can I return that a descriptor for
+
+00:23:17,770 --> 00:23:24,330
+example like from get attribute method
+
+00:23:21,460 --> 00:23:29,410
+excuse me can I return that this
+
+00:23:24,330 --> 00:23:32,830
+descriptor from get attribute method uh
+
+00:23:29,410 --> 00:23:34,600
+well you can return it but it won't the
+
+00:23:32,830 --> 00:23:36,309
+get method won't be called you can
+
+00:23:34,600 --> 00:23:38,530
+actually call the get method yourself
+
+00:23:36,309 --> 00:23:47,559
+that's that's not a problem but I've
+
+00:23:38,530 --> 00:23:53,370
+only called if you just return it okay
+
+00:23:47,559 --> 00:23:53,370
+any any more questions what there's one
+
+00:23:57,090 --> 00:24:04,210
+the that is sorry the site that you
+
+00:24:02,440 --> 00:24:07,950
+implemented there with the area
+
+00:24:04,210 --> 00:24:10,660
+descriptor could perhaps just as easily
+
+00:24:07,950 --> 00:24:13,120
+possibly even clean early be implemented
+
+00:24:10,660 --> 00:24:15,250
+using straight properties in that it's
+
+00:24:13,120 --> 00:24:17,650
+it's then in line in one spot nuh it's
+
+00:24:15,250 --> 00:24:19,330
+easy to find what what real world
+
+00:24:17,650 --> 00:24:21,190
+examples do you have of where
+
+00:24:19,330 --> 00:24:24,370
+descriptors are actually useful in code
+
+00:24:21,190 --> 00:24:27,600
+that they add more than they take I've
+
+00:24:24,370 --> 00:24:33,040
+had the I've just seen them used before
+
+00:24:27,600 --> 00:24:34,600
+we're effectively they could have been
+
+00:24:33,040 --> 00:24:36,490
+implemented in other ways but now the
+
+00:24:34,600 --> 00:24:38,110
+descriptor class because it was separate
+
+00:24:36,490 --> 00:24:39,640
+it involved a lot more jumping around
+
+00:24:38,110 --> 00:24:43,450
+the code to try and follow the logic of
+
+00:24:39,640 --> 00:24:46,870
+what was going on yeah if you just have
+
+00:24:43,450 --> 00:24:49,870
+a simple case like I have here it is
+
+00:24:46,870 --> 00:24:52,390
+better to use property if you can one
+
+00:24:49,870 --> 00:24:55,240
+thing I took from this like from the
+
+00:24:52,390 --> 00:25:00,490
+talk because of time reasons is actually
+
+00:24:55,240 --> 00:25:03,280
+examples of more complex descriptors if
+
+00:25:00,490 --> 00:25:05,350
+you have an ORM like say sequel alchemy
+
+00:25:03,280 --> 00:25:07,540
+that uses descriptors along and it's
+
+00:25:05,350 --> 00:25:09,640
+because the descriptor is a class in
+
+00:25:07,540 --> 00:25:11,559
+itself so it can have other behavior
+
+00:25:09,640 --> 00:25:14,950
+than just getting and setting you're
+
+00:25:11,559 --> 00:25:22,150
+just controlling attribute access for
+
+00:25:14,950 --> 00:25:24,160
+example in CQ alchemy you can you can do
+
+00:25:22,150 --> 00:25:28,000
+operations with the descriptor
+
+00:25:24,160 --> 00:25:31,690
+which is a column on the database and it
+
+00:25:28,000 --> 00:25:34,420
+will generate sequel statements right
+
+00:25:31,690 --> 00:25:36,460
+and if well if you use it on the class
+
+00:25:34,420 --> 00:25:38,830
+it generates the sequel or statements if
+
+00:25:36,460 --> 00:25:43,090
+use it on its instance it gets the data
+
+00:25:38,830 --> 00:25:45,070
+of that column all right so there are ya
+
+00:25:43,090 --> 00:25:48,900
+in simple cases it's better just to use
+
+00:25:45,070 --> 00:25:51,670
+property which is also a descriptor is
+
+00:25:48,900 --> 00:25:54,010
+just a simple one in complex when you
+
+00:25:51,670 --> 00:25:56,770
+need some more state or functionality
+
+00:25:54,010 --> 00:25:59,410
+built into the descriptor then use a
+
+00:25:56,770 --> 00:26:02,500
+class and you can when you have several
+
+00:25:59,410 --> 00:26:05,200
+different several related attributes
+
+00:26:02,500 --> 00:26:11,440
+like that you can just create a
+
+00:26:05,200 --> 00:26:17,650
+descriptor class and reuse it but yeah I
+
+00:26:11,440 --> 00:26:19,360
+I agree that the code is not as readable
+
+00:26:17,650 --> 00:26:21,010
+as it could be when you use descriptors
+
+00:26:19,360 --> 00:26:26,470
+because there's one more place you have
+
+00:26:21,010 --> 00:26:29,590
+to check but it's magic use it wisely
+
+00:26:26,470 --> 00:26:31,750
+and I think this was the perfect
+
+00:26:29,590 --> 00:26:34,140
+conclusion for this talk thanks again
+
+00:26:31,750 --> 00:26:34,140
+Peter
+
+00:26:40,230 --> 00:26:42,290
+
+YouTube URL: https://www.youtube.com/watch?v=NiSqG6s8skA
+
+

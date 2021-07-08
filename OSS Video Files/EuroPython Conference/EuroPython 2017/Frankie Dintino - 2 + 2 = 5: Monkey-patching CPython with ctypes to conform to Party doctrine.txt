@@ -1,0 +1,1918 @@
+Title: Frankie Dintino - 2 + 2 = 5: Monkey-patching CPython with ctypes to conform to Party doctrine
+Publication date: 2017-09-17
+Playlist: EuroPython 2017
+Description: 
+	"2 + 2 = 5: Monkey-patching CPython with ctypes to conform to Party doctrine
+[EuroPython 2017 - Talk - 2017-07-10 - PyCharm Room]
+[Rimini, Italy]
+
+A few weeks into your tenure as a software engineer at the Ministry of Truth you are assigned your first real feature request: write a context manager that can make “2 + 2” equal 5 at runtime. Your solution should be written only in Python (for maximum portability). Absurd? Perhaps, but you know better than to ask questions. You are no thought-criminal.
+
+In this talk I walk through the steps I took to modify the value of two plus two in CPython at runtime—using only Python and the ctypes module. What began for me as a silly and frivolous side project became an education in how the python data model works behind the scenes and how CPython compiles, optimizes, and executes python code.
+
+The goal of this talk is to provide an introduction to CPython internals while walking through the steps needed to monkeypatch integer addition to make “2 + 2” equal 5. The audience should come away with a better understanding of how python objects and types are represented in memory, how references are counted, and how python scripts are transformed into abstract syntax trees, compiled into code objects, and then executed by the CPython virtual stack machine. And because I’ve limited myself to using ctypes, these topics can be explored without familiarity with C as a prerequisite.
+
+License: This video is licensed under the CC BY-NC-SA 3.0 license: https://creativecommons.org/licenses/by-nc-sa/3.0/
+Please see our speaker release agreement for details: https://ep2017.europython.eu/en/speaker-release-agreement/
+Captions: 
+	00:00:03,129 --> 00:00:13,949
+give a warm welcome to little Frankie hi
+
+00:00:10,660 --> 00:00:16,600
+thank you so I'm the lead developer
+
+00:00:13,949 --> 00:00:19,270
+platform developer for the Atlantic comm
+
+00:00:16,600 --> 00:00:20,440
+the eponymous website for 160 year old
+
+00:00:19,270 --> 00:00:23,230
+politics and culture magazine
+
+00:00:20,440 --> 00:00:24,310
+headquarters in Washington DC today I'm
+
+00:00:23,230 --> 00:00:26,410
+going to be talking about how to
+
+00:00:24,310 --> 00:00:27,520
+manipulate the internals of cpython so
+
+00:00:26,410 --> 00:00:30,850
+that you can make the interpreter
+
+00:00:27,520 --> 00:00:33,550
+evaluate two plus two to equal five so a
+
+00:00:30,850 --> 00:00:34,690
+bit of background on my topic originally
+
+00:00:33,550 --> 00:00:36,429
+what I was trying to do is create a
+
+00:00:34,690 --> 00:00:41,050
+class decorator API that looks something
+
+00:00:36,429 --> 00:00:44,229
+like this so here you have a class and
+
+00:00:41,050 --> 00:00:46,749
+then you pass as its parent class a meta
+
+00:00:44,229 --> 00:00:48,219
+class of sorts that tells it it should
+
+00:00:46,749 --> 00:00:50,559
+be patching and then you define the
+
+00:00:48,219 --> 00:00:52,960
+method and you'd be able to use super to
+
+00:00:50,559 --> 00:00:55,059
+call the original method it turned out
+
+00:00:52,960 --> 00:00:57,190
+it really wasn't possible or rather it
+
+00:00:55,059 --> 00:00:59,499
+was but it was very inadvisable because
+
+00:00:57,190 --> 00:01:01,929
+it required you to mutate the mro or
+
+00:00:59,499 --> 00:01:03,370
+method resolution order of the classes
+
+00:01:01,929 --> 00:01:06,130
+in a way that can only be done by
+
+00:01:03,370 --> 00:01:08,049
+accessing the underlying c structs but
+
+00:01:06,130 --> 00:01:09,520
+in the semi failed attempt I became
+
+00:01:08,049 --> 00:01:12,070
+curious about just how far you could
+
+00:01:09,520 --> 00:01:14,740
+push the limits of manipulating C Python
+
+00:01:12,070 --> 00:01:16,780
+internals at runtime with C types would
+
+00:01:14,740 --> 00:01:19,930
+it be possible for instance to make 2
+
+00:01:16,780 --> 00:01:24,450
+plus 2 equal 5 and it also seen maybe
+
+00:01:19,930 --> 00:01:26,710
+slightly topical with recent events so
+
+00:01:24,450 --> 00:01:29,049
+it was one of those situations where I'd
+
+00:01:26,710 --> 00:01:32,100
+gone down a rabbit hole several points I
+
+00:01:29,049 --> 00:01:34,869
+came very close and so the tantalizing
+
+00:01:32,100 --> 00:01:38,439
+nature of it kind of drove me forward to
+
+00:01:34,869 --> 00:01:40,829
+eventually achieve it and also in the
+
+00:01:38,439 --> 00:01:42,789
+process I learned a lot about how
+
+00:01:40,829 --> 00:01:44,770
+different parts of the Python
+
+00:01:42,789 --> 00:01:47,320
+interpreter work and so I'll go over
+
+00:01:44,770 --> 00:01:49,960
+those I'll sort of structure the talk so
+
+00:01:47,320 --> 00:01:52,030
+that it kind of recapitulates the order
+
+00:01:49,960 --> 00:01:54,340
+that I attempted to solve the problem
+
+00:01:52,030 --> 00:01:57,119
+and then along the way explain the
+
+00:01:54,340 --> 00:02:02,439
+different techniques and underlying
+
+00:01:57,119 --> 00:02:04,659
+structures that that inform it so prior
+
+00:02:02,439 --> 00:02:06,460
+art and reference there's a library
+
+00:02:04,659 --> 00:02:07,929
+forbidden fruit that does something sort
+
+00:02:06,460 --> 00:02:11,830
+of similar it doesn't go to quite the
+
+00:02:07,929 --> 00:02:13,600
+same extent but it does cover the first
+
+00:02:11,830 --> 00:02:15,430
+technique that I use to try to patch
+
+00:02:13,600 --> 00:02:17,950
+integer addition
+
+00:02:15,430 --> 00:02:21,010
+and the full code for this presentation
+
+00:02:17,950 --> 00:02:24,670
+is in Python double scripts which is at
+
+00:02:21,010 --> 00:02:31,299
+that URL there and it has running unit
+
+00:02:24,670 --> 00:02:33,040
+tests and whatnot so yeah so let's saves
+
+00:02:31,299 --> 00:02:36,129
+test-driven development we're going to
+
+00:02:33,040 --> 00:02:38,200
+write a test case probably a context
+
+00:02:36,129 --> 00:02:39,790
+manager is a good idea because you don't
+
+00:02:38,200 --> 00:02:43,000
+want to set two plus two to equal five
+
+00:02:39,790 --> 00:02:44,530
+across the entire lifespan of the
+
+00:02:43,000 --> 00:02:46,840
+executable that'll certainly crash
+
+00:02:44,530 --> 00:02:48,760
+something I mean I don't know how it
+
+00:02:46,840 --> 00:02:51,040
+wouldn't so do is the context manager
+
+00:02:48,760 --> 00:02:54,129
+and then assert that two plus two equals
+
+00:02:51,040 --> 00:02:56,019
+five so naive approach and if only naive
+
+00:02:54,129 --> 00:02:59,669
+because it doesn't work but I mean in
+
+00:02:56,019 --> 00:03:02,349
+any other respect it would work is you
+
+00:02:59,669 --> 00:03:04,989
+take a reference to the old underscore
+
+00:03:02,349 --> 00:03:07,209
+underscore add method you define a new
+
+00:03:04,989 --> 00:03:09,879
+method that if a and B are both to
+
+00:03:07,209 --> 00:03:13,239
+return five otherwise call the old add
+
+00:03:09,879 --> 00:03:15,159
+method and then you try and maybe set in
+
+00:03:13,239 --> 00:03:17,049
+underscore underscore add equals in add
+
+00:03:15,159 --> 00:03:18,969
+you get a type error can't set
+
+00:03:17,049 --> 00:03:21,370
+attributes a built in extension type int
+
+00:03:18,969 --> 00:03:23,889
+you try and set it on the dick you get
+
+00:03:21,370 --> 00:03:28,750
+dick proxy objects not support item
+
+00:03:23,889 --> 00:03:33,099
+assignment so quick kind of crash course
+
+00:03:28,750 --> 00:03:34,689
+in C types C types allows you to load
+
+00:03:33,099 --> 00:03:36,609
+any shared library but comes with a
+
+00:03:34,689 --> 00:03:38,889
+convenience attribute for accessing the
+
+00:03:36,609 --> 00:03:41,979
+Lib Python C library by ways of C type
+
+00:03:38,889 --> 00:03:43,479
+Python API any C functions that are
+
+00:03:41,979 --> 00:03:45,849
+exposed in the library can be accessed
+
+00:03:43,479 --> 00:03:47,829
+as attributes of C types type Python API
+
+00:03:45,849 --> 00:03:50,590
+there are a few quirks with how it
+
+00:03:47,829 --> 00:03:52,959
+handles types for instance you set the
+
+00:03:50,590 --> 00:03:55,689
+attributes archetypes and res type on
+
+00:03:52,959 --> 00:03:57,519
+the functions so that the C types module
+
+00:03:55,689 --> 00:04:01,449
+knows how to pass arguments that is the
+
+00:03:57,519 --> 00:04:04,090
+cat a convert say a number in object in
+
+00:04:01,449 --> 00:04:05,409
+Python into an actual C int or whether
+
+00:04:04,090 --> 00:04:09,459
+it should actually be a Python object
+
+00:04:05,409 --> 00:04:11,620
+int so in this case we're using PI get
+
+00:04:09,459 --> 00:04:15,040
+version it returns a pointer to a null
+
+00:04:11,620 --> 00:04:16,989
+terminated Carol a so we use C type C
+
+00:04:15,040 --> 00:04:19,959
+care P it also comes with a bunch of
+
+00:04:16,989 --> 00:04:22,870
+built-in types like C care P which is a
+
+00:04:19,959 --> 00:04:27,789
+pointer to a care C void P which is like
+
+00:04:22,870 --> 00:04:28,900
+a pointer to any address etc so arc
+
+00:04:27,789 --> 00:04:30,730
+types
+
+00:04:28,900 --> 00:04:32,770
+when you specify it it's a list each
+
+00:04:30,730 --> 00:04:36,400
+element corresponds to the type of that
+
+00:04:32,770 --> 00:04:38,770
+positional argument it also has this
+
+00:04:36,400 --> 00:04:40,540
+very useful type PI object which lets
+
+00:04:38,770 --> 00:04:42,640
+you pass Python objects into functions
+
+00:04:40,540 --> 00:04:44,680
+and get them back as Python objects
+
+00:04:42,640 --> 00:04:47,440
+instead of as some sort of abstract type
+
+00:04:44,680 --> 00:04:49,450
+that you can't use alternatively you
+
+00:04:47,440 --> 00:04:51,310
+could set the res type to see void P for
+
+00:04:49,450 --> 00:04:53,320
+instances another type that would just
+
+00:04:51,310 --> 00:04:54,940
+give you the address and so you wouldn't
+
+00:04:53,320 --> 00:04:58,300
+be able to do much but just as an
+
+00:04:54,940 --> 00:05:01,380
+example so another really powerful
+
+00:04:58,300 --> 00:05:03,430
+feature of C types is the structure type
+
+00:05:01,380 --> 00:05:04,750
+for this talk the only thing we'll
+
+00:05:03,430 --> 00:05:06,580
+really be concerned with the structure
+
+00:05:04,750 --> 00:05:09,190
+class is the underscore fields
+
+00:05:06,580 --> 00:05:11,920
+underscore attribute it's a list of two
+
+00:05:09,190 --> 00:05:14,440
+tuples the first item is the name of the
+
+00:05:11,920 --> 00:05:16,690
+attribute and the second item is the
+
+00:05:14,440 --> 00:05:18,790
+type these provide a way to create
+
+00:05:16,690 --> 00:05:20,950
+Python objects that act like c structs
+
+00:05:18,790 --> 00:05:23,200
+and can be passed as c structs into c
+
+00:05:20,950 --> 00:05:25,840
+functions and otherwise act more or less
+
+00:05:23,200 --> 00:05:27,340
+like normal Python objects so here I've
+
+00:05:25,840 --> 00:05:29,890
+listed the struct definition for the
+
+00:05:27,340 --> 00:05:33,520
+base Python object PI object which is
+
+00:05:29,890 --> 00:05:35,920
+two fields Obie ref count which is the
+
+00:05:33,520 --> 00:05:39,250
+reference count and it's the PI size s
+
+00:05:35,920 --> 00:05:40,810
+i--'s T which represents the size of a
+
+00:05:39,250 --> 00:05:43,090
+block in memory that can be read or
+
+00:05:40,810 --> 00:05:45,580
+written in a single operation though not
+
+00:05:43,090 --> 00:05:48,400
+entirely in place on three it defaults
+
+00:05:45,580 --> 00:05:50,560
+to the 64-bit version even on 32-bit
+
+00:05:48,400 --> 00:05:56,260
+machines but it's kind of a minor detail
+
+00:05:50,560 --> 00:05:58,540
+so the reference counts defined in the C
+
+00:05:56,260 --> 00:06:00,940
+code as P PI F sized T so we follow that
+
+00:05:58,540 --> 00:06:04,630
+and then the next variable in the struct
+
+00:06:00,940 --> 00:06:07,030
+is a pointer to the objects type like a
+
+00:06:04,630 --> 00:06:09,370
+quick recap for hel structure like
+
+00:06:07,030 --> 00:06:11,400
+conventionally used in large
+
+00:06:09,370 --> 00:06:13,990
+programming language interpreters
+
+00:06:11,400 --> 00:06:16,690
+because structs are can basically
+
+00:06:13,990 --> 00:06:19,090
+contiguous blocks of memory and it's
+
+00:06:16,690 --> 00:06:22,420
+just a list of objects that say this
+
+00:06:19,090 --> 00:06:24,310
+first number of bits should be used as
+
+00:06:22,420 --> 00:06:27,430
+this type of object the next set of bits
+
+00:06:24,310 --> 00:06:29,650
+abuses that type of object you can use
+
+00:06:27,430 --> 00:06:32,710
+the same you can have a base type and
+
+00:06:29,650 --> 00:06:35,140
+pass that around and then as long as the
+
+00:06:32,710 --> 00:06:37,480
+memory is allocated for more things to
+
+00:06:35,140 --> 00:06:39,100
+be added to it you can up cast it to
+
+00:06:37,480 --> 00:06:41,770
+something more specific so for instance
+
+00:06:39,100 --> 00:06:42,550
+you get a PI object look at the Obi type
+
+00:06:41,770 --> 00:06:44,230
+oh it's a
+
+00:06:42,550 --> 00:06:46,810
+and your type and then you call a method
+
+00:06:44,230 --> 00:06:49,270
+to sort of populate the integer and now
+
+00:06:46,810 --> 00:06:50,950
+you have a full hydrated integer field
+
+00:06:49,270 --> 00:06:56,320
+with a pointer to the number that it
+
+00:06:50,950 --> 00:06:58,000
+represents for instance and so in order
+
+00:06:56,320 --> 00:07:00,130
+to actually be able to use this we need
+
+00:06:58,000 --> 00:07:04,060
+a way to be able to turn our Python
+
+00:07:00,130 --> 00:07:06,190
+objects into C type structures the pipe
+
+00:07:04,060 --> 00:07:08,020
+in C Python the built in function ID
+
+00:07:06,190 --> 00:07:10,120
+returns the object's address in memory
+
+00:07:08,020 --> 00:07:13,210
+so it's very convenient for this purpose
+
+00:07:10,120 --> 00:07:16,900
+because the from address class method on
+
+00:07:13,210 --> 00:07:19,950
+structures cakes at an address in memory
+
+00:07:16,900 --> 00:07:22,330
+and returns a struct for it
+
+00:07:19,950 --> 00:07:24,610
+so I'd note C types has a pointer
+
+00:07:22,330 --> 00:07:26,860
+function that transforms a type into a
+
+00:07:24,610 --> 00:07:29,680
+pointer that type will use that later
+
+00:07:26,860 --> 00:07:31,390
+and will make more sense in context so
+
+00:07:29,680 --> 00:07:34,060
+here I'm getting the reference count the
+
+00:07:31,390 --> 00:07:36,910
+PI object you can see in the first case
+
+00:07:34,060 --> 00:07:39,160
+it's seven and in the second case it's
+
+00:07:36,910 --> 00:07:41,500
+eight the difference is that in sis get
+
+00:07:39,160 --> 00:07:43,360
+ref count there's an extra reference for
+
+00:07:41,500 --> 00:07:48,310
+the argument inside the get ref count
+
+00:07:43,360 --> 00:07:51,010
+function all right so now let's try to
+
+00:07:48,310 --> 00:07:53,230
+override int add will return to our
+
+00:07:51,010 --> 00:07:58,060
+original naive approach of patching
+
+00:07:53,230 --> 00:08:00,850
+integer addition in the dict so if we
+
+00:07:58,060 --> 00:08:03,250
+could mutate the add item in the dict we
+
+00:08:00,850 --> 00:08:05,620
+would be able to achieve our goal now
+
+00:08:03,250 --> 00:08:07,180
+but since underscore our score dict
+
+00:08:05,620 --> 00:08:10,300
+underscore underscore isn't a regular
+
+00:08:07,180 --> 00:08:12,880
+dick and it's some sort of proxy for a
+
+00:08:10,300 --> 00:08:14,710
+dict we need to do something with that
+
+00:08:12,880 --> 00:08:16,330
+and it turns out that the underlying C
+
+00:08:14,710 --> 00:08:21,760
+struct has a pointer to an ordinary
+
+00:08:16,330 --> 00:08:23,800
+mutable dict so another side note a
+
+00:08:21,760 --> 00:08:25,870
+useful feature of C type structures is
+
+00:08:23,800 --> 00:08:28,570
+that like I mentioned about how like pi
+
+00:08:25,870 --> 00:08:30,490
+int object can extend pi object you can
+
+00:08:28,570 --> 00:08:32,950
+do that with the class inheritance
+
+00:08:30,490 --> 00:08:37,090
+syntax in python so here we have class
+
+00:08:32,950 --> 00:08:39,400
+stick proxy and it's because the struct
+
+00:08:37,090 --> 00:08:41,500
+starts with the PI object attributes
+
+00:08:39,400 --> 00:08:44,050
+those are the first fields and then the
+
+00:08:41,500 --> 00:08:46,600
+next field is the date when we use that
+
+00:08:44,050 --> 00:08:48,460
+we can create a function that lets us
+
+00:08:46,600 --> 00:08:51,430
+mutate the class it uses a little bit of
+
+00:08:48,460 --> 00:08:52,960
+trickery this is a functionality that I
+
+00:08:51,430 --> 00:08:56,320
+sort of borrowed from the forbidden
+
+00:08:52,960 --> 00:08:59,080
+fruit library you aggress
+
+00:08:56,320 --> 00:09:00,580
+populates the dicks proxy then you
+
+00:08:59,080 --> 00:09:03,940
+create a temporary dictionary and you
+
+00:09:00,580 --> 00:09:06,400
+set a key set an item with a key none
+
+00:09:03,940 --> 00:09:07,840
+and the value that dict and return it
+
+00:09:06,400 --> 00:09:09,430
+that's the thing you get back as a
+
+00:09:07,840 --> 00:09:14,320
+regular Python dictionary that you can
+
+00:09:09,430 --> 00:09:17,620
+change so we make it mutable we change
+
+00:09:14,320 --> 00:09:19,540
+the double underscore add method and it
+
+00:09:17,620 --> 00:09:21,400
+doesn't work I mean it does in a sense
+
+00:09:19,540 --> 00:09:23,890
+you can call the underscoring Square add
+
+00:09:21,400 --> 00:09:26,800
+method and you get the desired result
+
+00:09:23,890 --> 00:09:28,510
+but in every other case it doesn't so
+
+00:09:26,800 --> 00:09:32,920
+why doesn't overriding double underscore
+
+00:09:28,510 --> 00:09:36,130
+add suffice in the C code if you look at
+
+00:09:32,920 --> 00:09:37,990
+the function that adds numbers it's
+
+00:09:36,130 --> 00:09:42,510
+doing something where it's looking at
+
+00:09:37,990 --> 00:09:47,260
+the slot function for the int type so
+
+00:09:42,510 --> 00:09:50,080
+kind of a quick like look here at what a
+
+00:09:47,260 --> 00:09:52,570
+PI type object is and so this is again
+
+00:09:50,080 --> 00:09:54,760
+extends the PI object and has extra
+
+00:09:52,570 --> 00:09:57,760
+attributes one of them is a list of
+
+00:09:54,760 --> 00:10:01,990
+methods if the thing is a number in the
+
+00:09:57,760 --> 00:10:05,410
+case that it is a number it has a couple
+
+00:10:01,990 --> 00:10:09,400
+of functions so we have number add
+
+00:10:05,410 --> 00:10:13,090
+number subtract number multiply etc for
+
+00:10:09,400 --> 00:10:17,440
+the the first thing there the syntax is
+
+00:10:13,090 --> 00:10:20,800
+a little bit odd for defining types in
+
+00:10:17,440 --> 00:10:23,500
+C's that are functions or pointers to
+
+00:10:20,800 --> 00:10:25,810
+functions the PI object star is the
+
+00:10:23,500 --> 00:10:28,450
+return type so it's returning a pointer
+
+00:10:25,810 --> 00:10:30,640
+to apply object star binaries func is
+
+00:10:28,450 --> 00:10:32,560
+the name of the thing it's a it's a
+
+00:10:30,640 --> 00:10:35,260
+binary binary func as the name and it's
+
+00:10:32,560 --> 00:10:39,580
+a pointer and then the next parentheses
+
+00:10:35,260 --> 00:10:42,090
+is are the arguments so we can set that
+
+00:10:39,580 --> 00:10:44,470
+with C types by using the C func type
+
+00:10:42,090 --> 00:10:47,290
+function which takes return type and
+
+00:10:44,470 --> 00:10:51,280
+then arc types is a list of arguments so
+
+00:10:47,290 --> 00:10:53,200
+we duplicate that there and we use a
+
+00:10:51,280 --> 00:10:55,930
+structure to represent the pie number
+
+00:10:53,200 --> 00:10:58,330
+struct so here we have the fields for
+
+00:10:55,930 --> 00:11:00,880
+number add and we specifies the type of
+
+00:10:58,330 --> 00:11:03,520
+binary function all right so we put it
+
+00:11:00,880 --> 00:11:06,190
+all together we define the PI type
+
+00:11:03,520 --> 00:11:07,840
+object copying over the attributes that
+
+00:11:06,190 --> 00:11:14,080
+we had over here
+
+00:11:07,840 --> 00:11:17,170
+and we populate it with from address ID
+
+00:11:14,080 --> 00:11:19,300
+int and then we try and call number add
+
+00:11:17,170 --> 00:11:23,830
+and we get what we would expect two plus
+
+00:11:19,300 --> 00:11:26,620
+two is four so ignore the top function
+
+00:11:23,830 --> 00:11:28,240
+there so again we're going to try and do
+
+00:11:26,620 --> 00:11:30,750
+it as a context manager so we don't blow
+
+00:11:28,240 --> 00:11:35,290
+everything up in the process of testing
+
+00:11:30,750 --> 00:11:37,000
+we get the the tricky thing with like
+
+00:11:35,290 --> 00:11:39,820
+the original approach of grabbing the
+
+00:11:37,000 --> 00:11:41,590
+original add function and then using it
+
+00:11:39,820 --> 00:11:43,690
+again is that it wouldn't work if you
+
+00:11:41,590 --> 00:11:45,880
+were to just use and be add because when
+
+00:11:43,690 --> 00:11:47,560
+you change it the thing you're then
+
+00:11:45,880 --> 00:11:49,540
+referencing is still a pointer to that
+
+00:11:47,560 --> 00:11:51,460
+change thing so you need to get the
+
+00:11:49,540 --> 00:11:53,770
+address of the original function and
+
+00:11:51,460 --> 00:11:56,080
+then create a new binary function that
+
+00:11:53,770 --> 00:11:58,570
+points to that address so that's what we
+
+00:11:56,080 --> 00:12:01,720
+do here in these first two lines of old
+
+00:11:58,570 --> 00:12:07,110
+env add address and old env add we
+
+00:12:01,720 --> 00:12:09,520
+define our new add function and then we
+
+00:12:07,110 --> 00:12:11,500
+replace the function and call the
+
+00:12:09,520 --> 00:12:14,320
+original the same way we did in this
+
+00:12:11,500 --> 00:12:17,530
+sort of naive approach we get pretty
+
+00:12:14,320 --> 00:12:20,340
+close if you just do two plus two that
+
+00:12:17,530 --> 00:12:23,380
+doesn't work but eval two plus two does
+
+00:12:20,340 --> 00:12:24,040
+so let's use the disk module to see
+
+00:12:23,380 --> 00:12:26,980
+what's going on
+
+00:12:24,040 --> 00:12:28,960
+this lets you pass it either a code
+
+00:12:26,980 --> 00:12:31,420
+object or a string of code and it'll
+
+00:12:28,960 --> 00:12:35,170
+give you back diagnostics and
+
+00:12:31,420 --> 00:12:37,690
+information about the tokens that the
+
+00:12:35,170 --> 00:12:41,290
+abstract syntax tree that Python uses to
+
+00:12:37,690 --> 00:12:43,630
+represent it so here we have a global
+
+00:12:41,290 --> 00:12:46,270
+variable two equals the number two and
+
+00:12:43,630 --> 00:12:48,100
+then a function add two plus two and
+
+00:12:46,270 --> 00:12:52,710
+then inside return two plus two and you
+
+00:12:48,100 --> 00:12:55,570
+can see in the how it interprets that is
+
+00:12:52,710 --> 00:12:58,660
+load the global to load the global to
+
+00:12:55,570 --> 00:13:02,200
+again add the last two things and then
+
+00:12:58,660 --> 00:13:06,850
+return the value so that binary add
+
+00:13:02,200 --> 00:13:11,560
+instruction opcode in the C Python code
+
+00:13:06,850 --> 00:13:13,780
+there's a little kind of optimization
+
+00:13:11,560 --> 00:13:17,350
+where it checks if both of the things
+
+00:13:13,780 --> 00:13:19,020
+are int and if they are and then it does
+
+00:13:17,350 --> 00:13:21,090
+the addition in C
+
+00:13:19,020 --> 00:13:22,410
+as like sort of speed optimization so
+
+00:13:21,090 --> 00:13:26,640
+that doesn't actually call on scrum
+
+00:13:22,410 --> 00:13:28,560
+score ad so how do you fix that well you
+
+00:13:26,640 --> 00:13:34,560
+change the class of two to something
+
+00:13:28,560 --> 00:13:37,590
+other than int call it into so define in
+
+00:13:34,560 --> 00:13:40,610
+two extends int has its own ad function
+
+00:13:37,590 --> 00:13:44,640
+so it's not an int not exactly anyway
+
+00:13:40,610 --> 00:13:47,010
+and then we go to set it type our class
+
+00:13:44,640 --> 00:13:48,810
+assignment only for heap types but of
+
+00:13:47,010 --> 00:13:52,170
+course this is something we can get
+
+00:13:48,810 --> 00:13:54,000
+around by manipulating the structures so
+
+00:13:52,170 --> 00:13:57,510
+here we have a function that sets the
+
+00:13:54,000 --> 00:14:00,150
+type there's a little bit of I always
+
+00:13:57,510 --> 00:14:01,770
+like sort of unsure about whether I
+
+00:14:00,150 --> 00:14:03,210
+should include like fully functional
+
+00:14:01,770 --> 00:14:04,890
+code that had things that increased
+
+00:14:03,210 --> 00:14:07,440
+references and decrease them for
+
+00:14:04,890 --> 00:14:09,740
+simplicity remove them I opted to keep
+
+00:14:07,440 --> 00:14:15,150
+them in but the important thing here is
+
+00:14:09,740 --> 00:14:17,430
+the grabbing of the old type populating
+
+00:14:15,150 --> 00:14:19,850
+the PI object from the new thing and
+
+00:14:17,430 --> 00:14:22,290
+then overwriting the Obi type and then
+
+00:14:19,850 --> 00:14:24,690
+having a sort of context manager to let
+
+00:14:22,290 --> 00:14:28,320
+us change to to be an int to and then
+
+00:14:24,690 --> 00:14:31,320
+back to an end afterwards so here's
+
+00:14:28,320 --> 00:14:34,290
+where we are with override type two in
+
+00:14:31,320 --> 00:14:37,860
+two we evaluate 2+2 it's five
+
+00:14:34,290 --> 00:14:40,770
+so same resolves we got before we define
+
+00:14:37,860 --> 00:14:43,560
+a variable two and then we override type
+
+00:14:40,770 --> 00:14:48,090
+two to into and print it we get a five
+
+00:14:43,560 --> 00:14:50,130
+but if we do just two plus two not the
+
+00:14:48,090 --> 00:14:53,640
+variable two plus the variable to be it
+
+00:14:50,130 --> 00:14:56,000
+forward why the final obstacle is
+
+00:14:53,640 --> 00:14:58,560
+something called peephole optimization
+
+00:14:56,000 --> 00:15:00,920
+it's called a peephole optimization
+
+00:14:58,560 --> 00:15:03,990
+because it sort of looks through the
+
+00:15:00,920 --> 00:15:05,880
+abstract syntax tree in little windows
+
+00:15:03,990 --> 00:15:08,850
+and tries to find bits of code that it
+
+00:15:05,880 --> 00:15:10,770
+can fold together or simplify returns of
+
+00:15:08,850 --> 00:15:12,350
+something faster so one of the things it
+
+00:15:10,770 --> 00:15:14,610
+does is it looks at there are two
+
+00:15:12,350 --> 00:15:17,400
+literal integers being added together
+
+00:15:14,610 --> 00:15:19,890
+and if they are it combines them so if
+
+00:15:17,400 --> 00:15:21,720
+we use that disk module and instead of
+
+00:15:19,890 --> 00:15:25,620
+using a variable - like we did the last
+
+00:15:21,720 --> 00:15:30,060
+time we use a literal - then we see that
+
+00:15:25,620 --> 00:15:32,100
+in the bytecode it just has a four and
+
+00:15:30,060 --> 00:15:32,790
+if you were to look at the PI C file if
+
+00:15:32,100 --> 00:15:34,620
+you were to look at
+
+00:15:32,790 --> 00:15:36,480
+eyes up high tea file you would see a
+
+00:15:34,620 --> 00:15:39,540
+four there there would be no two and two
+
+00:15:36,480 --> 00:15:43,730
+so that's why that kind of prevents us
+
+00:15:39,540 --> 00:15:46,290
+from doing what we wanted to do in
+
+00:15:43,730 --> 00:15:48,570
+cpython this is performed by the C
+
+00:15:46,290 --> 00:15:50,640
+function pi code optimized it doesn't
+
+00:15:48,570 --> 00:15:53,010
+occur in an eval which is why eval 2+2
+
+00:15:50,640 --> 00:15:55,850
+works but not when it's defined in a
+
+00:15:53,010 --> 00:15:58,350
+Python function or an interpreter so
+
+00:15:55,850 --> 00:16:01,340
+this is the craziest part of the way to
+
+00:15:58,350 --> 00:16:04,290
+get around this which is to disable
+
+00:16:01,340 --> 00:16:06,500
+Python code optimization with what's
+
+00:16:04,290 --> 00:16:10,020
+called a trampoline function you
+
+00:16:06,500 --> 00:16:12,780
+basically take the memory where the PI
+
+00:16:10,020 --> 00:16:15,000
+code optimized function is you overwrite
+
+00:16:12,780 --> 00:16:17,010
+the first few assembly instructions to
+
+00:16:15,000 --> 00:16:20,130
+jump to a new address that new address
+
+00:16:17,010 --> 00:16:22,890
+is a no op function that just returns
+
+00:16:20,130 --> 00:16:26,730
+the code unchanged and increments the
+
+00:16:22,890 --> 00:16:30,540
+reference and you go from here and
+
+00:16:26,730 --> 00:16:39,840
+success you run tests and our test
+
+00:16:30,540 --> 00:16:43,140
+passes so yeah that's sort of my talk a
+
+00:16:39,840 --> 00:16:46,770
+quick kind of thing because we're
+
+00:16:43,140 --> 00:16:48,660
+allowed to do this we're hiring at the
+
+00:16:46,770 --> 00:16:51,390
+Atlantic we're looking for DevOps we're
+
+00:16:48,660 --> 00:16:54,990
+looking for full stack we're looking for
+
+00:16:51,390 --> 00:16:58,050
+front-end developers we just opened an
+
+00:16:54,990 --> 00:16:59,670
+office in london james Fallows it's if
+
+00:16:58,050 --> 00:17:01,230
+you follow the publication James Sal's
+
+00:16:59,670 --> 00:17:03,360
+has moved to London and he's opening the
+
+00:17:01,230 --> 00:17:05,550
+London office and a few staff writers
+
+00:17:03,360 --> 00:17:06,690
+are moving with him so I think there
+
+00:17:05,550 --> 00:17:09,150
+will be room for developer in that
+
+00:17:06,690 --> 00:17:11,310
+office and then also obviously plenty of
+
+00:17:09,150 --> 00:17:15,090
+room in Washington DC or with our
+
+00:17:11,310 --> 00:17:18,660
+marketing team in New York and contact
+
+00:17:15,090 --> 00:17:22,170
+information and again that URL for
+
+00:17:18,660 --> 00:17:24,000
+getting the code which has a lot more
+
+00:17:22,170 --> 00:17:26,490
+detail like I sort of showed a
+
+00:17:24,000 --> 00:17:29,250
+simplified version of PI type object it
+
+00:17:26,490 --> 00:17:30,930
+has like a fully fleshed out like every
+
+00:17:29,250 --> 00:17:32,970
+attribute matches whatever it is in
+
+00:17:30,930 --> 00:17:36,950
+Python 2 in Python 3 and has the
+
+00:17:32,970 --> 00:17:38,470
+differences between both figured into it
+
+00:17:36,950 --> 00:17:44,540
+thank you
+
+00:17:38,470 --> 00:17:47,400
+[Applause]
+
+00:17:44,540 --> 00:17:48,870
+got plenty of time for questions so if
+
+00:17:47,400 --> 00:17:50,910
+you have any questions please raise your
+
+00:17:48,870 --> 00:18:05,070
+hand we have a microphone for for
+
+00:17:50,910 --> 00:18:08,990
+recording them hi can you show us the
+
+00:18:05,070 --> 00:18:11,490
+code which you used to patch the
+
+00:18:08,990 --> 00:18:17,970
+assembly code to introduce the
+
+00:18:11,490 --> 00:18:20,540
+o-line function could you um maybe I'm
+
+00:18:17,970 --> 00:18:24,090
+not sure I understand the question
+
+00:18:20,540 --> 00:18:28,559
+so which code in the last slide to you
+
+00:18:24,090 --> 00:18:33,480
+you showed us the one before yes oh this
+
+00:18:28,559 --> 00:18:35,630
+yes how did you do it sure I can pull
+
+00:18:33,480 --> 00:18:35,630
+that up
+
+00:18:43,030 --> 00:18:45,780
+what's that
+
+00:18:53,720 --> 00:18:57,610
+turn on mirroring here
+
+00:19:13,330 --> 00:19:20,500
+so in order to paper over the
+
+00:19:18,440 --> 00:19:22,790
+differences between Windows and Linux
+
+00:19:20,500 --> 00:19:26,480
+Mac's there's like a lot of sort of
+
+00:19:22,790 --> 00:19:29,270
+boilerplate constant stuff here but the
+
+00:19:26,480 --> 00:19:31,220
+main the main thing is there's a there's
+
+00:19:29,270 --> 00:19:32,990
+a function called M protect where it
+
+00:19:31,220 --> 00:19:39,020
+exists as different on Windows and in
+
+00:19:32,990 --> 00:19:41,480
+Linux and UNIX and OS 10 but it you give
+
+00:19:39,020 --> 00:19:43,400
+it an address in memory and a length and
+
+00:19:41,480 --> 00:19:45,980
+you tell it how you want to you want to
+
+00:19:43,400 --> 00:19:49,400
+change what that memory does so by
+
+00:19:45,980 --> 00:19:51,230
+default the executable memory of Python
+
+00:19:49,400 --> 00:19:53,180
+that gets loaded into memory is not
+
+00:19:51,230 --> 00:19:54,650
+writable but you can use this function
+
+00:19:53,180 --> 00:19:56,840
+to make it writable so the first thing
+
+00:19:54,650 --> 00:19:59,840
+you do is you figure out where the
+
+00:19:56,840 --> 00:20:03,140
+function is and how long you need to set
+
+00:19:59,840 --> 00:20:06,050
+the jump instruction for and then you
+
+00:20:03,140 --> 00:20:09,220
+make it writable there so that's the M
+
+00:20:06,050 --> 00:20:11,840
+protect stuff here you define your no op
+
+00:20:09,220 --> 00:20:13,150
+which is to increment the reference
+
+00:20:11,840 --> 00:20:16,250
+because that's what it does in that
+
+00:20:13,150 --> 00:20:18,560
+original C Python codes that seemed you
+
+00:20:16,250 --> 00:20:22,520
+know maybe it's superstitious but it
+
+00:20:18,560 --> 00:20:24,620
+made sense to do it and if you're
+
+00:20:22,520 --> 00:20:26,990
+overriding a function in this way you
+
+00:20:24,620 --> 00:20:29,150
+can't return pointers to Python objects
+
+00:20:26,990 --> 00:20:31,640
+in the normal way so I just returned the
+
+00:20:29,150 --> 00:20:36,380
+address which it interprets correctly as
+
+00:20:31,640 --> 00:20:39,230
+a pointer this quaternary func a
+
+00:20:36,380 --> 00:20:40,640
+function that takes four Python objects
+
+00:20:39,230 --> 00:20:43,850
+and doesn't return anything that's what
+
+00:20:40,640 --> 00:20:45,620
+the PI code optimized is the first one
+
+00:20:43,850 --> 00:20:50,450
+is the code and then there's like the
+
+00:20:45,620 --> 00:20:53,080
+locals and the frame etc and then here's
+
+00:20:50,450 --> 00:20:55,610
+the override so if it's not an x86
+
+00:20:53,080 --> 00:20:58,310
+architecture it throws an error because
+
+00:20:55,610 --> 00:21:01,580
+I didn't write it for arm or any of the
+
+00:20:58,310 --> 00:21:04,340
+other you know machine languages you get
+
+00:21:01,580 --> 00:21:08,300
+the pointer to the old function and to
+
+00:21:04,340 --> 00:21:10,130
+your new patched function you change the
+
+00:21:08,300 --> 00:21:12,680
+jump instruction will be five bytes the
+
+00:21:10,130 --> 00:21:16,070
+first one is the jump bytecode which is
+
+00:21:12,680 --> 00:21:18,980
+e 9 and then the next four is a relative
+
+00:21:16,070 --> 00:21:21,320
+offset to the new address so you set
+
+00:21:18,980 --> 00:21:25,760
+those five bytes as readable executable
+
+00:21:21,320 --> 00:21:27,710
+and writable you find the offset between
+
+00:21:25,760 --> 00:21:30,770
+the two
+
+00:21:27,710 --> 00:21:35,090
+and then this was from me kind of just
+
+00:21:30,770 --> 00:21:40,720
+testing it and then you combine them all
+
+00:21:35,090 --> 00:21:44,210
+together into a list of op codes you can
+
+00:21:40,720 --> 00:21:47,120
+the multiplication operator with C types
+
+00:21:44,210 --> 00:21:52,310
+lets you create arrays of things so here
+
+00:21:47,120 --> 00:21:54,110
+we have like a unsigned byte and x 5
+
+00:21:52,310 --> 00:21:56,210
+will give us an array of 5 of these
+
+00:21:54,110 --> 00:21:58,910
+things and then we do from address we
+
+00:21:56,210 --> 00:22:00,650
+get back an array that has five bytes
+
+00:21:58,910 --> 00:22:02,750
+each for the different instructions
+
+00:22:00,650 --> 00:22:06,290
+we're going to overwrite and then we
+
+00:22:02,750 --> 00:22:10,160
+just use the slice syntax to replace it
+
+00:22:06,290 --> 00:22:11,780
+and then once you do that that patches
+
+00:22:10,160 --> 00:22:14,230
+it to be a jump instructions a new
+
+00:22:11,780 --> 00:22:14,230
+function
+
+00:22:26,510 --> 00:22:30,560
+hello and thank you very much for the
+
+00:22:28,190 --> 00:22:33,020
+talk so it's basically I have two
+
+00:22:30,560 --> 00:22:35,060
+questions what kept you going because
+
+00:22:33,020 --> 00:22:38,120
+there's always a certain point where you
+
+00:22:35,060 --> 00:22:40,040
+might say I can't keep doing that and
+
+00:22:38,120 --> 00:22:43,370
+how long did that take you
+
+00:22:40,040 --> 00:22:48,080
+ah it actually didn't take all that long
+
+00:22:43,370 --> 00:22:50,990
+I was pretty determined I think one of
+
+00:22:48,080 --> 00:22:52,930
+the this particular bit of code is
+
+00:22:50,990 --> 00:22:55,220
+interesting because this is how a lot of
+
+00:22:52,930 --> 00:22:59,200
+rootkits and things work is that they'll
+
+00:22:55,220 --> 00:23:02,600
+sort of set memory writable and then
+
+00:22:59,200 --> 00:23:06,560
+like change actual assembly instructions
+
+00:23:02,600 --> 00:23:08,390
+in memory in order to you know exploit
+
+00:23:06,560 --> 00:23:10,640
+some sort of kernel vulnerability or
+
+00:23:08,390 --> 00:23:12,740
+something like that and so like kind of
+
+00:23:10,640 --> 00:23:14,600
+delving into that was interesting in its
+
+00:23:12,740 --> 00:23:17,990
+own right and so that kind of kept me
+
+00:23:14,600 --> 00:23:19,670
+going along that route and then once I
+
+00:23:17,990 --> 00:23:24,140
+knew how to do it then I sort of
+
+00:23:19,670 --> 00:23:26,450
+transferred it to this so it was it was
+
+00:23:24,140 --> 00:23:28,340
+it wasn't so much that like I was
+
+00:23:26,450 --> 00:23:31,580
+determined to get to plus 2 to equal 5
+
+00:23:28,340 --> 00:23:34,220
+so much is that like the things that I
+
+00:23:31,580 --> 00:23:35,750
+had to do in order to accomplish it and
+
+00:23:34,220 --> 00:23:37,730
+the things I had to learn were
+
+00:23:35,750 --> 00:23:40,840
+interesting enough on their own that
+
+00:23:37,730 --> 00:23:40,840
+that kind of kept me going
+
+00:23:49,110 --> 00:23:55,860
+I simply thanks for the talk my question
+
+00:23:52,980 --> 00:23:57,870
+is besides having fun have you ever have
+
+00:23:55,860 --> 00:24:02,670
+you ever had a need to do such stuff in
+
+00:23:57,870 --> 00:24:05,400
+production or no you know although there
+
+00:24:02,670 --> 00:24:08,660
+is one case where I've considered using
+
+00:24:05,400 --> 00:24:11,700
+something like this if you want to
+
+00:24:08,660 --> 00:24:14,610
+change so going back to that original
+
+00:24:11,700 --> 00:24:16,890
+like attempt to do the patching patch
+
+00:24:14,610 --> 00:24:18,120
+class where you can just call super to
+
+00:24:16,890 --> 00:24:19,590
+call the original instead of having to
+
+00:24:18,120 --> 00:24:20,850
+do something weird like past the
+
+00:24:19,590 --> 00:24:23,190
+original function at the first argument
+
+00:24:20,850 --> 00:24:29,570
+which is what a lot of patching things
+
+00:24:23,190 --> 00:24:32,610
+do that would have been useful for I
+
+00:24:29,570 --> 00:24:36,210
+been working on like this sort of
+
+00:24:32,610 --> 00:24:37,590
+combination of tip tools and pip pip
+
+00:24:36,210 --> 00:24:40,470
+does this thing where it does a reset
+
+00:24:37,590 --> 00:24:42,360
+hard for any editable repositories and
+
+00:24:40,470 --> 00:24:45,150
+if you're really great if I could like
+
+00:24:42,360 --> 00:24:47,910
+hook into that and instead of have it
+
+00:24:45,150 --> 00:24:52,470
+reset and potentially destroy your
+
+00:24:47,910 --> 00:24:55,230
+changes in you know an editable package
+
+00:24:52,470 --> 00:24:57,840
+that's in the SRC folder it prompts you
+
+00:24:55,230 --> 00:25:00,059
+and says this branch is dirty this there
+
+00:24:57,840 --> 00:25:02,070
+are uncommitted changes do you want to
+
+00:25:00,059 --> 00:25:04,760
+do something with that as a way to sort
+
+00:25:02,070 --> 00:25:06,809
+of make it easier for our developers to
+
+00:25:04,760 --> 00:25:10,350
+sync up their code with the latest
+
+00:25:06,809 --> 00:25:13,440
+changes on our github so that was like
+
+00:25:10,350 --> 00:25:14,790
+the one place where it's not exactly
+
+00:25:13,440 --> 00:25:18,990
+production right because it would only
+
+00:25:14,790 --> 00:25:23,160
+be run within the span of like a
+
+00:25:18,990 --> 00:25:24,960
+developer updating some requirements on
+
+00:25:23,160 --> 00:25:26,400
+their own development machine as opposed
+
+00:25:24,960 --> 00:25:28,910
+to say in production where you'd build
+
+00:25:26,400 --> 00:25:30,840
+from scratch or something like that um
+
+00:25:28,910 --> 00:25:32,130
+but you know what developer wants to
+
+00:25:30,840 --> 00:25:35,520
+save time and just update the one
+
+00:25:32,130 --> 00:25:39,179
+package um so that's where I kind of
+
+00:25:35,520 --> 00:25:43,010
+looked into this it never has actually
+
+00:25:39,179 --> 00:25:43,010
+happened but it's a possibility
+
+00:25:54,730 --> 00:26:02,410
+hi thanks for the talk you mentioned
+
+00:25:59,020 --> 00:26:05,590
+that the people optimizer runs quite
+
+00:26:02,410 --> 00:26:08,770
+early and that the twos do not even show
+
+00:26:05,590 --> 00:26:11,530
+up in the pi c file is that the people
+
+00:26:08,770 --> 00:26:14,320
+optimizer removing these twos or is it
+
+00:26:11,530 --> 00:26:16,570
+some it's do you need to disable the
+
+00:26:14,320 --> 00:26:19,510
+people optimizer right as the
+
+00:26:16,570 --> 00:26:21,370
+interpreter starter can do this on the
+
+00:26:19,510 --> 00:26:23,320
+spot I'm confused and when things
+
+00:26:21,370 --> 00:26:25,390
+actually run when does this optimizer
+
+00:26:23,320 --> 00:26:27,580
+run and what's the reason this four
+
+00:26:25,390 --> 00:26:28,870
+shows up in the PI C another two is that
+
+00:26:27,580 --> 00:26:33,580
+the same where there's two different
+
+00:26:28,870 --> 00:26:36,160
+pauses sure so the PI C is sort of like
+
+00:26:33,580 --> 00:26:39,790
+a cache of the compiled bytecode so if
+
+00:26:36,160 --> 00:26:42,430
+the PI C was generated without having
+
+00:26:39,790 --> 00:26:44,740
+run this people disable optimization
+
+00:26:42,430 --> 00:26:47,110
+thing you're going to it's not going to
+
+00:26:44,740 --> 00:26:48,670
+work like the PI C is going to trump it
+
+00:26:47,110 --> 00:26:52,390
+there's like an environment variable you
+
+00:26:48,670 --> 00:26:56,530
+can set to not use the PI C files but
+
+00:26:52,390 --> 00:27:00,520
+and and so actually in the run tests
+
+00:26:56,530 --> 00:27:02,740
+like the sort of test runner I set
+
+00:27:00,520 --> 00:27:05,470
+sistah don't write bytecode equals true
+
+00:27:02,740 --> 00:27:07,540
+um just so that you know there aren't
+
+00:27:05,470 --> 00:27:12,730
+any PI T files to sort of mess things up
+
+00:27:07,540 --> 00:27:14,320
+and and and cause that to occur but but
+
+00:27:12,730 --> 00:27:16,240
+yeah so that's that's sort of how it
+
+00:27:14,320 --> 00:27:19,390
+connects with the PI C files otherwise
+
+00:27:16,240 --> 00:27:21,880
+if there isn't a PI C file yet when it
+
+00:27:19,390 --> 00:27:24,970
+executes and it's set to write the PI C
+
+00:27:21,880 --> 00:27:27,220
+file it'll use whatever is in memory so
+
+00:27:24,970 --> 00:27:29,710
+either the people optimizer is enabled
+
+00:27:27,220 --> 00:27:33,820
+or not and then generate the bytecode
+
+00:27:29,710 --> 00:27:35,980
+and save it to disk after that so
+
+00:27:33,820 --> 00:27:38,530
+hypothetically if you ran this once and
+
+00:27:35,980 --> 00:27:42,850
+a generate a PI C file that had the
+
+00:27:38,530 --> 00:27:44,560
+two's distinct then you would it would
+
+00:27:42,850 --> 00:27:47,130
+stay that way the next time you ran with
+
+00:27:44,560 --> 00:27:47,130
+PI C files
+
+00:27:54,350 --> 00:27:58,679
+haider you had a really interesting
+
+00:27:56,340 --> 00:28:02,220
+hackish talk in the previous file you
+
+00:27:58,679 --> 00:28:03,750
+had some microsoft and now hate looks
+
+00:28:02,220 --> 00:28:07,559
+something like that it's an interesting
+
+00:28:03,750 --> 00:28:09,299
+how how easy was it to find bits higher
+
+00:28:07,559 --> 00:28:11,070
+higher office file you had some
+
+00:28:09,299 --> 00:28:11,909
+constants and then you should document
+
+00:28:11,070 --> 00:28:15,659
+yourself
+
+00:28:11,909 --> 00:28:18,049
+oh these here okay yeah oh I know yes so
+
+00:28:15,659 --> 00:28:23,960
+these debug where do these come from
+
+00:28:18,049 --> 00:28:27,600
+yeah so um for the the constants for
+
+00:28:23,960 --> 00:28:31,650
+read write and execute privileges those
+
+00:28:27,600 --> 00:28:36,380
+are in this system and H include file
+
+00:28:31,650 --> 00:28:39,690
+that's on Linux UNIX systems and then
+
+00:28:36,380 --> 00:28:43,289
+Microsoft does this thing where they
+
+00:28:39,690 --> 00:28:45,090
+have bit masks so you know like that the
+
+00:28:43,289 --> 00:28:47,490
+benefit of bit mask is like you have one
+
+00:28:45,090 --> 00:28:48,990
+you have two and then you can end them
+
+00:28:47,490 --> 00:28:50,549
+and then you have like the byte
+
+00:28:48,990 --> 00:28:53,730
+the first byte is 1 and the second byte
+
+00:28:50,549 --> 00:28:56,190
+is 1 and so they're both on Microsoft
+
+00:28:53,730 --> 00:28:59,400
+does this weird thing with this function
+
+00:28:56,190 --> 00:29:02,730
+where besides like even though all of
+
+00:28:59,400 --> 00:29:06,419
+the values are offset by one in the list
+
+00:29:02,730 --> 00:29:08,750
+of bits they also have extra properties
+
+00:29:06,419 --> 00:29:10,980
+that combine them instead of just like
+
+00:29:08,750 --> 00:29:13,350
+anding them which would be the sensible
+
+00:29:10,980 --> 00:29:15,840
+thing to do but anyway these I found
+
+00:29:13,350 --> 00:29:17,880
+from like a Microsoft calm you know like
+
+00:29:15,840 --> 00:29:20,460
+explanation of how M protect works on
+
+00:29:17,880 --> 00:29:22,530
+Windows because it seems like horrible
+
+00:29:20,460 --> 00:29:26,880
+to be bugging in a testing environment
+
+00:29:22,530 --> 00:29:29,760
+is it actually like I follow the spec
+
+00:29:26,880 --> 00:29:31,320
+and it just worked I mean because the
+
+00:29:29,760 --> 00:29:33,059
+functions are pretty similar they're
+
+00:29:31,320 --> 00:29:34,650
+like the differences are kind of
+
+00:29:33,059 --> 00:29:36,630
+miniscule so once I had it working on
+
+00:29:34,650 --> 00:29:38,280
+Linux UNIX then I just had to like make
+
+00:29:36,630 --> 00:29:40,020
+a few tweaks to get it to run on Windows
+
+00:29:38,280 --> 00:29:41,100
+like the flags that you pass are
+
+00:29:40,020 --> 00:29:42,900
+slightly different the order of
+
+00:29:41,100 --> 00:29:45,950
+arguments is different but in every
+
+00:29:42,900 --> 00:29:45,950
+other respect it's the same
+
+00:29:56,570 --> 00:30:03,780
+okay if there are no more questions just
+
+00:29:59,520 --> 00:30:06,630
+a quick note on the Euro Python up in
+
+00:30:03,780 --> 00:30:08,730
+your mobile you can just write the app
+
+00:30:06,630 --> 00:30:11,340
+you can add comment you can send the
+
+00:30:08,730 --> 00:30:14,039
+speaker you cannot any any feedback you
+
+00:30:11,340 --> 00:30:16,020
+you want any constructive feedback for
+
+00:30:14,039 --> 00:30:19,060
+for the speaker so please think again
+
+00:30:16,020 --> 00:30:27,300
+the Frankie
+
+00:30:19,060 --> 00:30:27,300
+
+YouTube URL: https://www.youtube.com/watch?v=tZ3ZfBX61eE
+
+

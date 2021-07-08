@@ -1,0 +1,1647 @@
+Title: LTD20-301 Virtio on Type-1 hypervisors
+Publication date: 2020-04-01
+Playlist: Linaro Tech Days 2020
+Description: 
+	Description:
+
+Virtio is a framework that specifies how certain class of IO devices can be
+accessed in virtual environments. Virtio devices are typically implemented in
+software, which has a front-end portion that runs in guest OS context and a
+backend portion which runs in a context outside of that guest OS. In case of
+Type-2 hypervisor like KVM, backend portion runs in the context of a VMM (Qemu,
+LKVM etc) or in some cases KVM host kenrel itself. In case of Type-1 hypervisors
+like Xen or ACRN, backend runs in the context of another guest OS.
+
+A crucial aspect of Virtio is memory access provided for backends. Typically
+backends have read/write access to complete guest OS memory that is hosting the
+front-end counterpart. Such wholesale access to memory is not desirable when a
+guest OS is running security-sensitive applications. It is desireable to
+restrict access for backend only to the regions required. How can that be best
+accomplished while still adhering to the Virtio specification?
+
+This discussion is based on Qualcomm's efforts to implement virtio for a Linux
+guest OS running on a Type-1 hypervisor. Frontend and backend portions of virtio
+run in separate guest OS contexts. A very small portion of memory is shared
+between the two guest OS. We present the changes done to virtio front-end
+drivers to accomodate the memory-access limitations for backends. A further
+limitation addressed is lack of support in hypervisor to trap virtio config
+space access and have that be handled in backend. Instead suitable changes are
+discussed how virtio-mmio transport can accommodate a message passing mechanism.
+Finally we present the need for a new backend implementation that is hypervisor
+agnostic and can handle various limitations presented by different hypervisors.
+
+Session Speakers
+Srivatsa Vaddagiri
+Qualcomm, Principal Engineer
+
+
+Srivatsa Vaddagiri works as Principal Engineer at Qualcomm Innovation Center in Bangalore, India. He has over 20 years of experience working with various Unix kernels, including AIX and Linux. His Linux kernel contributions include cpu hotplug support and cgroup-aware extensions to CPU scheduler. At Qualcomm, Srivatsa's focus includes improving Linux kernel used in automotive products and virtio development on a Type-1 hypervisor. Srivatsa holds a MS degree in Software systems from BITS, Pilani.
+
+
+You can view this sessions presentation here:
+https://connect.linaro.org/resources/ltd20/ltd20-301/
+Captions: 
+	00:00:00,359 --> 00:00:06,160
+hello everyone I'm free matza I work in
+
+00:00:03,280 --> 00:00:09,669
+the Linux kernel group at Qualcomm
+
+00:00:06,160 --> 00:00:12,309
+Bangalore we have been working with
+
+00:00:09,669 --> 00:00:15,699
+playing with vertigo on a type 1
+
+00:00:12,309 --> 00:00:17,740
+hypervisor we saw several problems that
+
+00:00:15,699 --> 00:00:19,780
+we had to solve so this is an attempt to
+
+00:00:17,740 --> 00:00:22,990
+summarize some of those problems and
+
+00:00:19,780 --> 00:00:27,000
+some of the solutions that we think will
+
+00:00:22,990 --> 00:00:29,560
+work so this is the first step towards
+
+00:00:27,000 --> 00:00:31,660
+making the community aware of the
+
+00:00:29,560 --> 00:00:33,699
+problems we are seeing and following
+
+00:00:31,660 --> 00:00:37,350
+this we will publish some of the code we
+
+00:00:33,699 --> 00:00:40,079
+have and seek comments
+
+00:00:37,350 --> 00:00:41,809
+so first of all I just want to quickly
+
+00:00:40,079 --> 00:00:43,920
+say you know what's driving
+
+00:00:41,809 --> 00:00:48,030
+virtualization in some of the embedded
+
+00:00:43,920 --> 00:00:50,450
+products that Qualcomm is with you know
+
+00:00:48,030 --> 00:00:53,930
+it's things like mobile phones
+
+00:00:50,450 --> 00:00:56,059
+automotive infotainment products
+
+00:00:53,930 --> 00:00:59,460
+the biggest reason is perhaps
+
+00:00:56,059 --> 00:01:02,239
+consolidation to save cost so earlier
+
+00:00:59,460 --> 00:01:04,559
+what we would see is you know
+
+00:01:02,239 --> 00:01:08,430
+applications running in silos on
+
+00:01:04,559 --> 00:01:09,960
+separate hardware units with modern SOC
+
+00:01:08,430 --> 00:01:12,300
+is becoming very powerful and more
+
+00:01:09,960 --> 00:01:16,229
+importantly supporting saw the required
+
+00:01:12,300 --> 00:01:18,720
+virtualization features it becomes easy
+
+00:01:16,229 --> 00:01:21,600
+to kind of consolidate on these
+
+00:01:18,720 --> 00:01:24,750
+applications on one hardware unit and
+
+00:01:21,600 --> 00:01:27,479
+reduce cost while we are consolidating
+
+00:01:24,750 --> 00:01:30,690
+the you know the we also want strong
+
+00:01:27,479 --> 00:01:33,390
+isolation between these applications you
+
+00:01:30,690 --> 00:01:35,429
+know so that if one of those operating
+
+00:01:33,390 --> 00:01:38,280
+systems crashes the mission-critical
+
+00:01:35,429 --> 00:01:42,689
+ones are not affected right so that's
+
+00:01:38,280 --> 00:01:48,180
+one reason the other reason is some of
+
+00:01:42,689 --> 00:01:50,310
+the security sensitive applications by
+
+00:01:48,180 --> 00:01:52,259
+moving it to run in the context of a
+
+00:01:50,310 --> 00:01:52,770
+different operating system we gain
+
+00:01:52,259 --> 00:01:56,369
+better
+
+00:01:52,770 --> 00:02:01,909
+isolation so that if for example if the
+
+00:01:56,369 --> 00:02:06,450
+Android OS is compromised it does not
+
+00:02:01,909 --> 00:02:08,670
+result in data leaks or in the security
+
+00:02:06,450 --> 00:02:11,459
+sensitive application being compromised
+
+00:02:08,670 --> 00:02:13,620
+as well so that's that's the reason why
+
+00:02:11,459 --> 00:02:16,530
+virtualization is gaining traction in
+
+00:02:13,620 --> 00:02:20,489
+some of the products for comics and
+
+00:02:16,530 --> 00:02:23,310
+while doing this we had to run we ran
+
+00:02:20,489 --> 00:02:28,829
+into how we can provide the abstraction
+
+00:02:23,310 --> 00:02:34,290
+of you know various devices like CPU
+
+00:02:28,829 --> 00:02:36,480
+memory and i/o so each operating system
+
+00:02:34,290 --> 00:02:38,850
+or application expects its own set of
+
+00:02:36,480 --> 00:02:40,590
+resources how do we provide the deletion
+
+00:02:38,850 --> 00:02:43,170
+it was the question we were trying to
+
+00:02:40,590 --> 00:02:47,280
+answer so this talk is more focused on
+
+00:02:43,170 --> 00:02:50,460
+IO device virtualization so by IO
+
+00:02:47,280 --> 00:02:54,540
+devices what I mean is
+
+00:02:50,460 --> 00:02:58,110
+beyond you know the typical IO devices
+
+00:02:54,540 --> 00:02:59,760
+like storage network console in case of
+
+00:02:58,110 --> 00:03:02,840
+immediate products we also are
+
+00:02:59,760 --> 00:03:06,420
+considering things like your sound card
+
+00:03:02,840 --> 00:03:08,700
+display GPU camera on touch screen so
+
+00:03:06,420 --> 00:03:11,460
+for example it might be possible to
+
+00:03:08,700 --> 00:03:13,110
+convert the display so that one
+
+00:03:11,460 --> 00:03:17,070
+operating system gets a part of the
+
+00:03:13,110 --> 00:03:18,930
+display to display some whatever it
+
+00:03:17,070 --> 00:03:20,400
+wants and another part of the display is
+
+00:03:18,930 --> 00:03:23,430
+available to the other operating system
+
+00:03:20,400 --> 00:03:25,260
+right so same thing for things like some
+
+00:03:23,430 --> 00:03:26,700
+hard right from so it's possible like
+
+00:03:25,260 --> 00:03:28,410
+you know in case of out of automotive
+
+00:03:26,700 --> 00:03:30,930
+infotainment unit
+
+00:03:28,410 --> 00:03:33,810
+well Android is having control of the
+
+00:03:30,930 --> 00:03:36,180
+song sound card for most of the time if
+
+00:03:33,810 --> 00:03:38,760
+the mission-critical orders wants to
+
+00:03:36,180 --> 00:03:40,380
+just alert that you know some sensory
+
+00:03:38,760 --> 00:03:43,260
+information it should be able to
+
+00:03:40,380 --> 00:03:48,330
+immediately you know use the sound card
+
+00:03:43,260 --> 00:03:52,620
+and you know output whatever it wants to
+
+00:03:48,330 --> 00:03:57,810
+right so so how do we achieve higher
+
+00:03:52,620 --> 00:04:01,980
+virtualization two approaches one is the
+
+00:03:57,810 --> 00:04:06,650
+full virtualization where the guest OS
+
+00:04:01,980 --> 00:04:09,330
+runs some unmodified driver and all the
+
+00:04:06,650 --> 00:04:13,050
+emulation of the device happens in the
+
+00:04:09,330 --> 00:04:15,570
+hypervisor and this could be potentially
+
+00:04:13,050 --> 00:04:17,730
+slow compared to para virtualization
+
+00:04:15,570 --> 00:04:21,410
+where the guest is aware that it's
+
+00:04:17,730 --> 00:04:25,140
+running in a virtual environment and it
+
+00:04:21,410 --> 00:04:29,580
+works cooperatively cooperates with the
+
+00:04:25,140 --> 00:04:30,270
+hypervisor for this new illusion to to
+
+00:04:29,580 --> 00:04:32,640
+be achieved
+
+00:04:30,270 --> 00:04:38,400
+right and it's potentially way faster in
+
+00:04:32,640 --> 00:04:40,380
+terms of performance so the the
+
+00:04:38,400 --> 00:04:43,050
+framework for para virtualization
+
+00:04:40,380 --> 00:04:45,570
+predominantly used in Linux and other
+
+00:04:43,050 --> 00:04:47,790
+operating system as well is water.you so
+
+00:04:45,570 --> 00:04:50,610
+we won't we started looking at what are
+
+00:04:47,790 --> 00:04:53,100
+you what it takes to run in the
+
+00:04:50,610 --> 00:04:54,840
+environment we had right so this is a
+
+00:04:53,100 --> 00:04:57,270
+first brief introduction to what what
+
+00:04:54,840 --> 00:04:59,700
+tell you is I'm sure most of you would
+
+00:04:57,270 --> 00:05:01,620
+be aware but I just want to summarize so
+
+00:04:59,700 --> 00:05:03,210
+these are the key components of the
+
+00:05:01,620 --> 00:05:03,719
+Vertigo so what I have shown in the
+
+00:05:03,210 --> 00:05:06,929
+green
+
+00:05:03,719 --> 00:05:09,239
+she's a guest operating system it has
+
+00:05:06,929 --> 00:05:11,399
+two layers one is the water your
+
+00:05:09,239 --> 00:05:13,019
+front-end driver so this could be your
+
+00:05:11,399 --> 00:05:15,959
+storage drive or network driver
+
+00:05:13,019 --> 00:05:18,269
+principal driver so the various drivers
+
+00:05:15,959 --> 00:05:21,239
+that knows how to drive a virtual device
+
+00:05:18,269 --> 00:05:24,569
+of the particular type and below that is
+
+00:05:21,239 --> 00:05:28,289
+a transport layer which knows how to
+
+00:05:24,569 --> 00:05:32,639
+communicate how to bridge the front-end
+
+00:05:28,289 --> 00:05:35,610
+and the backend drivers so and so that
+
+00:05:32,639 --> 00:05:38,699
+the backend driver runs in the context
+
+00:05:35,610 --> 00:05:41,389
+outside the guest operating system it
+
+00:05:38,699 --> 00:05:44,999
+could be in the hypervisor or in another
+
+00:05:41,389 --> 00:05:47,909
+operating system and what I have shown
+
+00:05:44,999 --> 00:05:51,029
+or these various I hope offers that need
+
+00:05:47,909 --> 00:05:53,610
+to be exchanged between the two sides
+
+00:05:51,029 --> 00:05:56,879
+between the front end and the back end
+
+00:05:53,610 --> 00:05:59,099
+right and there is a ring protocol that
+
+00:05:56,879 --> 00:06:01,979
+that kind of specifies wave the
+
+00:05:59,099 --> 00:06:04,649
+different i/o buffer sort the key thing
+
+00:06:01,979 --> 00:06:07,589
+that I want to point out here is these
+
+00:06:04,649 --> 00:06:10,379
+aquifers could be of varying sizes you
+
+00:06:07,589 --> 00:06:14,219
+know it would be less than it would be
+
+00:06:10,379 --> 00:06:16,829
+few bytes or multiple pages right and
+
+00:06:14,219 --> 00:06:21,709
+typically they are spread all all over
+
+00:06:16,829 --> 00:06:24,899
+the guest memory so you cannot we cannot
+
+00:06:21,709 --> 00:06:26,459
+enforce that these are buffers come from
+
+00:06:24,899 --> 00:06:30,439
+a particular section of memory it would
+
+00:06:26,459 --> 00:06:34,949
+be spread all over the guest memory and
+
+00:06:30,439 --> 00:06:42,949
+the back end typically needs to access
+
+00:06:34,949 --> 00:06:47,959
+these i/o buffers so this kind of
+
+00:06:42,949 --> 00:06:49,499
+summarizes the problems that we had when
+
+00:06:47,959 --> 00:06:52,559
+implementing what IO
+
+00:06:49,499 --> 00:06:55,319
+on a type 1 hypervisor so what I have
+
+00:06:52,559 --> 00:06:57,409
+shown on the left is the typical
+
+00:06:55,319 --> 00:07:00,239
+environment wave whatever is used to be
+
+00:06:57,409 --> 00:07:03,689
+which is let's say k vm a type 2
+
+00:07:00,239 --> 00:07:07,379
+hypervisor and this small box is the
+
+00:07:03,689 --> 00:07:10,169
+guest OS and the bigger one is the word
+
+00:07:07,379 --> 00:07:13,849
+you know some vm m like qmo or l k vm
+
+00:07:10,169 --> 00:07:16,420
+and and typically most of the backend
+
+00:07:13,849 --> 00:07:18,490
+drivers or part of this v
+
+00:07:16,420 --> 00:07:21,280
+right in some cases it could be part of
+
+00:07:18,490 --> 00:07:25,570
+the host hypervisor itself but but the
+
+00:07:21,280 --> 00:07:29,860
+key point is the back end to a large
+
+00:07:25,570 --> 00:07:34,810
+extent has access to the entire guest OS
+
+00:07:29,860 --> 00:07:36,490
+memory so accessing all these buffers is
+
+00:07:34,810 --> 00:07:40,810
+not a problem at all for the backend
+
+00:07:36,490 --> 00:07:43,120
+driver so the front end has just has to
+
+00:07:40,810 --> 00:07:46,630
+just place pointers to these buffers in
+
+00:07:43,120 --> 00:07:48,910
+the ring and ask the backend to perform
+
+00:07:46,630 --> 00:07:50,470
+the IU right and the back end is
+
+00:07:48,910 --> 00:07:55,540
+seamlessly able to access all the
+
+00:07:50,470 --> 00:07:57,760
+puffers so that is not a luxury we had
+
+00:07:55,540 --> 00:08:00,310
+in the kind of environment we were
+
+00:07:57,760 --> 00:08:03,310
+running in so what I've shown here it is
+
+00:08:00,310 --> 00:08:08,100
+a type 1 hypervisor it could be
+
+00:08:03,310 --> 00:08:13,210
+something like Zen for example so the
+
+00:08:08,100 --> 00:08:16,090
+way we wanted to place the backend is in
+
+00:08:13,210 --> 00:08:19,480
+another voice so for example this is the
+
+00:08:16,090 --> 00:08:22,050
+secondary OS having the front end
+
+00:08:19,480 --> 00:08:25,270
+portion of let's say the block driver
+
+00:08:22,050 --> 00:08:27,250
+the back end portion of the block driver
+
+00:08:25,270 --> 00:08:31,630
+will have to come from another operating
+
+00:08:27,250 --> 00:08:34,140
+system and in general the the type 1
+
+00:08:31,630 --> 00:08:39,790
+hypervisor that we are dealing with
+
+00:08:34,140 --> 00:08:44,530
+attempts to block access across less
+
+00:08:39,790 --> 00:08:47,410
+memory access so the primary OMS will
+
+00:08:44,530 --> 00:08:49,300
+not be able to access any part of the
+
+00:08:47,410 --> 00:08:51,820
+memory of the secondary voice right and
+
+00:08:49,300 --> 00:08:55,390
+that's required from a security and
+
+00:08:51,820 --> 00:08:57,160
+isolation perspective right so that was
+
+00:08:55,390 --> 00:09:01,000
+one of the big problems that we
+
+00:08:57,160 --> 00:09:02,950
+encountered so how do we deal with that
+
+00:09:01,000 --> 00:09:06,190
+problem so that the back end is still
+
+00:09:02,950 --> 00:09:08,470
+able to access all the i/o buffers that
+
+00:09:06,190 --> 00:09:10,990
+it needs to access right so that that
+
+00:09:08,470 --> 00:09:15,540
+was problem number one the problem
+
+00:09:10,990 --> 00:09:19,420
+number two that we had to deal with was
+
+00:09:15,540 --> 00:09:21,010
+something called the MMI or transport so
+
+00:09:19,420 --> 00:09:22,620
+remember this transport so there are
+
+00:09:21,010 --> 00:09:24,710
+various transport that
+
+00:09:22,620 --> 00:09:28,140
+Limited in Linux one of them is MMI you
+
+00:09:24,710 --> 00:09:33,410
+memory mapped i/o so typically what that
+
+00:09:28,140 --> 00:09:37,110
+does is it provides a region of memory
+
+00:09:33,410 --> 00:09:39,120
+which is a config space and the front
+
+00:09:37,110 --> 00:09:44,250
+end driver when it tries to access the
+
+00:09:39,120 --> 00:09:46,560
+config space it is trapped and the and
+
+00:09:44,250 --> 00:09:48,900
+it is handled the ungrate is handled in
+
+00:09:46,560 --> 00:09:52,950
+the backend driver so the hypervisor
+
+00:09:48,900 --> 00:09:55,310
+that we were dealing with so he was the
+
+00:09:52,950 --> 00:09:55,310
+question
+
+00:09:59,030 --> 00:10:05,040
+so the hypervisor we were dealing with
+
+00:10:01,550 --> 00:10:08,900
+did not offer that support so mm IO
+
+00:10:05,040 --> 00:10:13,850
+transport water um mio transport was not
+
+00:10:08,900 --> 00:10:15,960
+easily you know acceptable for our
+
+00:10:13,850 --> 00:10:18,510
+environment so the prophet's problem
+
+00:10:15,960 --> 00:10:21,420
+number two the problem number three that
+
+00:10:18,510 --> 00:10:24,540
+we had was there was no ready to use
+
+00:10:21,420 --> 00:10:28,260
+back-end that was out there that we
+
+00:10:24,540 --> 00:10:30,000
+could immediately use in this
+
+00:10:28,260 --> 00:10:31,800
+environment so typically all these
+
+00:10:30,000 --> 00:10:34,880
+backends are part of a bigger project
+
+00:10:31,800 --> 00:10:38,520
+like k mo mo or l k vm or cross vm
+
+00:10:34,880 --> 00:10:40,350
+taking out the backend and deploying it
+
+00:10:38,520 --> 00:10:43,770
+in this environment was not a
+
+00:10:40,350 --> 00:10:46,320
+straightforward task so we had to make
+
+00:10:43,770 --> 00:10:48,510
+considerable modifications to make it
+
+00:10:46,320 --> 00:10:51,270
+understand that it's not running in k mo
+
+00:10:48,510 --> 00:10:53,100
+or l k vm and all that so that's problem
+
+00:10:51,270 --> 00:10:57,570
+number three so these are the three big
+
+00:10:53,100 --> 00:11:00,090
+problems that we faced and we kind of
+
+00:10:57,570 --> 00:11:02,670
+have a handle on the first two I think
+
+00:11:00,090 --> 00:11:04,620
+the third one will probably need some
+
+00:11:02,670 --> 00:11:08,070
+considerable community effort so that
+
+00:11:04,620 --> 00:11:10,770
+the path you know the backends that are
+
+00:11:08,070 --> 00:11:14,100
+part of various projects k mu l k vm and
+
+00:11:10,770 --> 00:11:16,980
+on that can perhaps be consolidated and
+
+00:11:14,100 --> 00:11:19,950
+so that it makes it easy for you know
+
+00:11:16,980 --> 00:11:22,820
+for it to be used in any hypervisor
+
+00:11:19,950 --> 00:11:22,820
+environment
+
+00:11:23,180 --> 00:11:29,700
+so the these are some considerations of
+
+00:11:26,520 --> 00:11:32,250
+the hypervisor that we were dealing with
+
+00:11:29,700 --> 00:11:34,050
+I kind of summarized some of them the
+
+00:11:32,250 --> 00:11:37,260
+key thing is there is no support for mm
+
+00:11:34,050 --> 00:11:40,560
+IO transport for communication between
+
+00:11:37,260 --> 00:11:44,130
+VMs there is a provision for some
+
+00:11:40,560 --> 00:11:46,260
+message passing a PA and a doorbell
+
+00:11:44,130 --> 00:11:48,740
+mechanism so that you know you can send
+
+00:11:46,260 --> 00:11:55,890
+interrupts between between the two VMs
+
+00:11:48,740 --> 00:11:58,610
+and the primary OS is like Tom zero it
+
+00:11:55,890 --> 00:12:01,770
+has access to most of the i/o hardware
+
+00:11:58,610 --> 00:12:06,120
+and has all the i/o drivers required i/o
+
+00:12:01,770 --> 00:12:08,250
+drivers and in most cases secondary OS
+
+00:12:06,120 --> 00:12:10,890
+do not have access to any i/o hardware
+
+00:12:08,250 --> 00:12:13,440
+directly so they'll have to go through
+
+00:12:10,890 --> 00:12:15,980
+the IO drivers in the primary OS Y or
+
+00:12:13,440 --> 00:12:15,980
+something like
+
+00:12:19,490 --> 00:12:48,320
+so this I am not aware of the GPU this
+
+00:12:44,870 --> 00:12:55,550
+thing but the ring structure inverter
+
+00:12:48,320 --> 00:12:59,780
+you that I am shown here is very basic
+
+00:12:55,550 --> 00:13:03,710
+it has it's more than one during its the
+
+00:12:59,780 --> 00:13:07,580
+available ring and the you string it the
+
+00:13:03,710 --> 00:13:10,400
+the producer kind of adds buffers in the
+
+00:13:07,580 --> 00:13:12,830
+producer ring and the used ring kind of
+
+00:13:10,400 --> 00:13:16,220
+indicates you know when those IO
+
+00:13:12,830 --> 00:13:18,640
+transactions are complete so if that's a
+
+00:13:16,220 --> 00:13:18,640
+question
+
+00:13:19,920 --> 00:13:27,940
+right so so I'm kind of blowing up the
+
+00:13:26,110 --> 00:13:31,149
+memory access problem that's one of the
+
+00:13:27,940 --> 00:13:34,540
+key problems that we had to solve so
+
+00:13:31,149 --> 00:13:38,829
+this is the one with the primary VM and
+
+00:13:34,540 --> 00:13:41,260
+this is the secondary VM you know the
+
+00:13:38,829 --> 00:13:47,010
+private the white portion is the what is
+
+00:13:41,260 --> 00:13:49,930
+private to each VM right and and so
+
+00:13:47,010 --> 00:13:52,540
+there is some provision that our
+
+00:13:49,930 --> 00:13:55,360
+hypervisor provides so that a small
+
+00:13:52,540 --> 00:13:58,180
+fraction of the secondary VM can be
+
+00:13:55,360 --> 00:14:02,470
+shared with the primary VM now you know
+
+00:13:58,180 --> 00:14:05,410
+so there is mechanism where some amount
+
+00:14:02,470 --> 00:14:08,889
+of memory can be shared between the two
+
+00:14:05,410 --> 00:14:11,589
+VMs right now we don't want to extend
+
+00:14:08,889 --> 00:14:14,889
+that facility to share the complete
+
+00:14:11,589 --> 00:14:17,139
+address space because that beats the one
+
+00:14:14,889 --> 00:14:20,649
+of the important goals so that if the
+
+00:14:17,139 --> 00:14:23,500
+secondary VM is running some non
+
+00:14:20,649 --> 00:14:25,269
+security sensitive application its
+
+00:14:23,500 --> 00:14:27,819
+memory should not be made available to
+
+00:14:25,269 --> 00:14:30,220
+the primary VM right so we want a large
+
+00:14:27,819 --> 00:14:34,300
+portion of the secondary vm memory to be
+
+00:14:30,220 --> 00:14:37,240
+private to itself now we are okay to
+
+00:14:34,300 --> 00:14:44,649
+have some another small region of memory
+
+00:14:37,240 --> 00:14:49,959
+shared between the two VMs so this is
+
+00:14:44,649 --> 00:14:54,100
+the solution we came up with to overcome
+
+00:14:49,959 --> 00:14:56,560
+the memory access problem the first
+
+00:14:54,100 --> 00:15:00,339
+problem that we had so what we did was
+
+00:14:56,560 --> 00:15:03,480
+we made use of the small amount of
+
+00:15:00,339 --> 00:15:07,709
+memory that's shared between the two VMs
+
+00:15:03,480 --> 00:15:13,029
+to bounce buffers so what that means is
+
+00:15:07,709 --> 00:15:16,660
+when when there is an i/o buffer let's
+
+00:15:13,029 --> 00:15:20,709
+say be one that needs to be consumed on
+
+00:15:16,660 --> 00:15:24,279
+the other side we made some changes to
+
+00:15:20,709 --> 00:15:26,410
+the Vertigo stack on secondary vm side
+
+00:15:24,279 --> 00:15:29,680
+the front on the front hand side so that
+
+00:15:26,410 --> 00:15:31,540
+it is copied right we bounced it to the
+
+00:15:29,680 --> 00:15:33,399
+shared region
+
+00:15:31,540 --> 00:15:35,709
+and because the shaded region is
+
+00:15:33,399 --> 00:15:38,500
+accessible to the other side it makes it
+
+00:15:35,709 --> 00:15:42,639
+easy for the for the backend to consume
+
+00:15:38,500 --> 00:15:44,320
+it right so although it's not very good
+
+00:15:42,639 --> 00:15:47,380
+from a performance perspective but if
+
+00:15:44,320 --> 00:15:50,440
+this was kind of easy for us to get what
+
+00:15:47,380 --> 00:15:54,579
+are you going in the environment that we
+
+00:15:50,440 --> 00:15:57,310
+are running right so that the and you
+
+00:15:54,579 --> 00:16:01,329
+know there was minimal changes needed to
+
+00:15:57,310 --> 00:16:05,199
+achieve these bonds mostly through DMA
+
+00:16:01,329 --> 00:16:06,190
+ops we had to write some DMA you know
+
+00:16:05,199 --> 00:16:09,610
+yeah
+
+00:16:06,190 --> 00:16:11,740
+ops unique to this device which will do
+
+00:16:09,610 --> 00:16:16,720
+that phones and we made use of the east
+
+00:16:11,740 --> 00:16:18,910
+of SWI Oh TLB driver which which has lot
+
+00:16:16,720 --> 00:16:22,000
+of the core required code to bounce
+
+00:16:18,910 --> 00:16:25,690
+buffers right so that was the solution
+
+00:16:22,000 --> 00:16:27,940
+we have so we will shortly publish the
+
+00:16:25,690 --> 00:16:31,149
+changes we made to the voltage tag to
+
+00:16:27,940 --> 00:16:34,540
+achieve this bounds right so this yeah
+
+00:16:31,149 --> 00:16:37,899
+and the other thing we did was generally
+
+00:16:34,540 --> 00:16:42,190
+these ring block ring and the console
+
+00:16:37,899 --> 00:16:45,880
+during the rock which kind of has
+
+00:16:42,190 --> 00:16:48,399
+pointers to the various buffers these by
+
+00:16:45,880 --> 00:16:51,880
+default would get allocated from the
+
+00:16:48,399 --> 00:16:54,459
+private space so we made some changes to
+
+00:16:51,880 --> 00:16:57,930
+the voltage of front-end stack to make
+
+00:16:54,459 --> 00:17:01,630
+sure that these ring buffers these ring
+
+00:16:57,930 --> 00:17:05,020
+objects are allocated from the shared
+
+00:17:01,630 --> 00:17:07,809
+memory right so those this kind of
+
+00:17:05,020 --> 00:17:10,240
+summarizes the changes we had to do in
+
+00:17:07,809 --> 00:17:12,069
+the watery of front-end stack to
+
+00:17:10,240 --> 00:17:14,490
+overcome the memory access limitation
+
+00:17:12,069 --> 00:17:14,490
+problem
+
+00:17:15,320 --> 00:17:20,750
+there are some alternate solution that
+
+00:17:17,690 --> 00:17:22,280
+we want to explore in future too
+
+00:17:20,750 --> 00:17:26,120
+especially from a performance
+
+00:17:22,280 --> 00:17:29,260
+perspective you know also we want to
+
+00:17:26,120 --> 00:17:32,270
+explore whether we can achieve zero copy
+
+00:17:29,260 --> 00:17:36,010
+by you know something like a page flick
+
+00:17:32,270 --> 00:17:39,080
+for example right where and also
+
+00:17:36,010 --> 00:17:43,870
+dynamically you know we could open up
+
+00:17:39,080 --> 00:17:46,790
+access for the back end to the buffers
+
+00:17:43,870 --> 00:17:49,340
+to the buffers which are paid sized
+
+00:17:46,790 --> 00:17:52,370
+right I said this if there's a buffer
+
+00:17:49,340 --> 00:17:55,850
+which is at least a page size in I hold
+
+00:17:52,370 --> 00:17:58,640
+multiples of page size at runtime with
+
+00:17:55,850 --> 00:18:01,520
+some support from the hypervisor if we
+
+00:17:58,640 --> 00:18:04,490
+can open up access to the back end so
+
+00:18:01,520 --> 00:18:09,320
+that it can access b1 then perhaps that
+
+00:18:04,490 --> 00:18:11,240
+avoids the bounce operation right so but
+
+00:18:09,320 --> 00:18:13,640
+there are some concerns we have you know
+
+00:18:11,240 --> 00:18:16,520
+and this means you know at runtime we
+
+00:18:13,640 --> 00:18:18,830
+are making page table changes so what
+
+00:18:16,520 --> 00:18:23,800
+would be the cost of those changes
+
+00:18:18,830 --> 00:18:27,380
+whether it would you know dwarfed the
+
+00:18:23,800 --> 00:18:29,360
+benefits of zero copy right so so those
+
+00:18:27,380 --> 00:18:32,060
+are some questions we have so we we need
+
+00:18:29,360 --> 00:18:35,690
+to do some prototype and see whether it
+
+00:18:32,060 --> 00:18:40,790
+will actually you know be a win that we
+
+00:18:35,690 --> 00:18:43,220
+could commit right and the second I know
+
+00:18:40,790 --> 00:18:46,520
+the second solution we have in mind is
+
+00:18:43,220 --> 00:18:49,190
+again you know if you want to avoid this
+
+00:18:46,520 --> 00:18:51,530
+shared memory region totally maybe we
+
+00:18:49,190 --> 00:18:55,280
+are considering whether we can use some
+
+00:18:51,530 --> 00:18:58,400
+hypervisor interface to copy data so for
+
+00:18:55,280 --> 00:19:02,750
+example instead of copying b1 to this
+
+00:18:58,400 --> 00:19:05,690
+region can hypervisor copy this to a
+
+00:19:02,750 --> 00:19:08,920
+region that primary VM will decide right
+
+00:19:05,690 --> 00:19:11,750
+so so using some hypervisor support to
+
+00:19:08,920 --> 00:19:14,980
+copy move data between B and so that's
+
+00:19:11,750 --> 00:19:17,900
+one option that we want to explore and
+
+00:19:14,980 --> 00:19:21,410
+the third option that I think you know
+
+00:19:17,900 --> 00:19:25,290
+we someone from Leonardo pointed out to
+
+00:19:21,410 --> 00:19:28,920
+us was using a modified I you stack
+
+00:19:25,290 --> 00:19:32,850
+something like SPD game where we could
+
+00:19:28,920 --> 00:19:35,220
+control you know where I up offers are
+
+00:19:32,850 --> 00:19:37,230
+allocated in the first place right so
+
+00:19:35,220 --> 00:19:39,720
+the problem with using a journal you
+
+00:19:37,230 --> 00:19:43,230
+know the generic IO stack like you know
+
+00:19:39,720 --> 00:19:46,020
+in a file system is so these i/o buffers
+
+00:19:43,230 --> 00:19:47,400
+are allocated way above the volta your
+
+00:19:46,020 --> 00:19:50,990
+front end drivers so it could come
+
+00:19:47,400 --> 00:19:54,240
+anywhere from the guest address space
+
+00:19:50,990 --> 00:19:57,330
+the other option that you know we might
+
+00:19:54,240 --> 00:20:00,330
+consider is a specialized IU stack which
+
+00:19:57,330 --> 00:20:02,280
+moves lot of the your drivers into user
+
+00:20:00,330 --> 00:20:05,130
+space you know something like SP DK
+
+00:20:02,280 --> 00:20:06,660
+where we might have better control so
+
+00:20:05,130 --> 00:20:11,130
+that these are you buffers they are
+
+00:20:06,660 --> 00:20:13,970
+allocated from specific region right so
+
+00:20:11,130 --> 00:20:17,310
+and that might help us achieve zero copy
+
+00:20:13,970 --> 00:20:19,500
+so that we have to explore we have some
+
+00:20:17,310 --> 00:20:25,050
+concerns over but will I will probably
+
+00:20:19,500 --> 00:20:28,640
+skip those so this is a you know this is
+
+00:20:25,050 --> 00:20:28,640
+one part of the problem how we all can
+
+00:20:28,790 --> 00:20:33,930
+the memory access limitation problem the
+
+00:20:31,860 --> 00:20:37,830
+second of the problem that we had to
+
+00:20:33,930 --> 00:20:40,980
+deal with was lack of support for MMI
+
+00:20:37,830 --> 00:20:44,150
+you so the hypervisor that we are
+
+00:20:40,980 --> 00:20:48,450
+considering does not support wrapping
+
+00:20:44,150 --> 00:20:51,450
+config space access and delegating the
+
+00:20:48,450 --> 00:20:56,670
+handling of the other to the backend so
+
+00:20:51,450 --> 00:21:00,750
+in the absence of that right now we you
+
+00:20:56,670 --> 00:21:03,690
+know wherever there was a right now we
+
+00:21:00,750 --> 00:21:06,600
+have hacked-up MMO itself so that
+
+00:21:03,690 --> 00:21:10,200
+instead of reading and writing instead
+
+00:21:06,600 --> 00:21:12,600
+of using readin and writin directly we
+
+00:21:10,200 --> 00:21:15,990
+are using the message queue API that the
+
+00:21:12,600 --> 00:21:17,940
+hypervisor supports to send a message to
+
+00:21:15,990 --> 00:21:20,310
+the back end saying that I want to read
+
+00:21:17,940 --> 00:21:23,730
+to you know the front end wants to read
+
+00:21:20,310 --> 00:21:25,770
+or write this particular register you
+
+00:21:23,730 --> 00:21:27,960
+know can you respond is that okay or not
+
+00:21:25,770 --> 00:21:30,980
+right so so right now we have gone ahead
+
+00:21:27,960 --> 00:21:33,390
+and reused to put on um mio dot C itself
+
+00:21:30,980 --> 00:21:35,600
+converting Reidel Android to be a
+
+00:21:33,390 --> 00:21:39,620
+message queue and message
+
+00:21:35,600 --> 00:21:42,950
+and receive but the other option that we
+
+00:21:39,620 --> 00:21:45,020
+are also considering is using a totally
+
+00:21:42,950 --> 00:21:46,820
+new different transport I believe there
+
+00:21:45,020 --> 00:21:50,600
+is some work done in this regard by the
+
+00:21:46,820 --> 00:21:52,960
+IV SH mem project that we will also
+
+00:21:50,600 --> 00:21:52,960
+consider
+
+00:21:55,010 --> 00:22:02,000
+so finally the third problem that we had
+
+00:21:58,580 --> 00:22:07,310
+to deal with was there was no ready to
+
+00:22:02,000 --> 00:22:11,210
+use backends that would work in our in
+
+00:22:07,310 --> 00:22:14,720
+our case so we had to be started with
+
+00:22:11,210 --> 00:22:17,710
+something like lk BM which is you know
+
+00:22:14,720 --> 00:22:21,920
+very simple virtual machine monitor in
+
+00:22:17,710 --> 00:22:23,870
+that works for arm so we heavily
+
+00:22:21,920 --> 00:22:28,130
+modified it to serve the function of
+
+00:22:23,870 --> 00:22:32,510
+just the back end but you know long long
+
+00:22:28,130 --> 00:22:36,440
+term we think that it might help to come
+
+00:22:32,510 --> 00:22:38,510
+up with some you know from scratch new
+
+00:22:36,440 --> 00:22:40,880
+project for all the back end drivers
+
+00:22:38,510 --> 00:22:45,370
+that can potentially work across
+
+00:22:40,880 --> 00:22:45,370
+different hypervisors right you know KVM
+
+00:22:46,360 --> 00:22:52,400
+multiple hypervisors you know if if we
+
+00:22:49,850 --> 00:22:54,110
+can do that consolidation it will be a
+
+00:22:52,400 --> 00:22:55,640
+good thing I think so we have had some
+
+00:22:54,110 --> 00:22:56,750
+discussion on the water Yoda mailing
+
+00:22:55,640 --> 00:22:59,060
+list
+
+00:22:56,750 --> 00:23:00,440
+there were some concerns expressed where
+
+00:22:59,060 --> 00:23:02,870
+that consolidation may not be
+
+00:23:00,440 --> 00:23:07,960
+straightforward but nevertheless we want
+
+00:23:02,870 --> 00:23:07,960
+to give it some thought going forward
+
+00:23:12,120 --> 00:23:17,980
+so the future work is you know we will
+
+00:23:15,549 --> 00:23:19,840
+shortly be publishing the code the the
+
+00:23:17,980 --> 00:23:23,529
+changes we have done to the vertigo
+
+00:23:19,840 --> 00:23:26,499
+front-end to deal with the memory access
+
+00:23:23,529 --> 00:23:28,330
+limitation on type 1 hypervisor we we
+
+00:23:26,499 --> 00:23:31,539
+want to get some feedback and we are
+
+00:23:28,330 --> 00:23:35,529
+also seeing some performance issues part
+
+00:23:31,539 --> 00:23:37,419
+of it is because of bones we want to see
+
+00:23:35,529 --> 00:23:38,830
+if we can you know improve that
+
+00:23:37,419 --> 00:23:41,740
+performance
+
+00:23:38,830 --> 00:23:47,909
+Motty gradation in any way right so
+
+00:23:41,740 --> 00:23:51,730
+that's the summary of my work I believe
+
+00:23:47,909 --> 00:23:54,039
+two minutes early but if you have any
+
+00:23:51,730 --> 00:23:56,440
+queries my email id is listed so I'd be
+
+00:23:54,039 --> 00:23:58,869
+interested to collaborate with few of
+
+00:23:56,440 --> 00:24:02,200
+you who are trying to solve similar
+
+00:23:58,869 --> 00:24:05,200
+problems and and you know will have read
+
+00:24:02,200 --> 00:24:11,980
+on building a good solution for it that
+
+00:24:05,200 --> 00:24:14,049
+can be upstream thank you for that there
+
+00:24:11,980 --> 00:24:16,679
+are some questions in shirts if you can
+
+00:24:14,049 --> 00:24:16,679
+also
+
+00:24:21,410 --> 00:24:36,180
+mmm aiyoo is not same as a yo mmm you so
+
+00:24:33,150 --> 00:24:41,280
+this mmm is memory mapped i/o so
+
+00:24:36,180 --> 00:24:42,600
+basically typically this is one of the
+
+00:24:41,280 --> 00:24:46,290
+transports that
+
+00:24:42,600 --> 00:24:49,230
+what are you offers so essentially I
+
+00:24:46,290 --> 00:24:54,540
+probably don't have grams to illustrate
+
+00:24:49,230 --> 00:24:59,340
+mm are you but so this transport we have
+
+00:24:54,540 --> 00:25:02,070
+multiple options in vertigo so and what
+
+00:24:59,340 --> 00:25:05,130
+is used in arm in KBM an arm for example
+
+00:25:02,070 --> 00:25:07,680
+is the MMI yo transport so if the front
+
+00:25:05,130 --> 00:25:12,600
+end wants to read and write a particular
+
+00:25:07,680 --> 00:25:15,390
+register of the device it's like how you
+
+00:25:12,600 --> 00:25:16,980
+would memory map I register space of a
+
+00:25:15,390 --> 00:25:20,550
+real device and read and write to it
+
+00:25:16,980 --> 00:25:22,860
+using Gradle android l it's it's it's
+
+00:25:20,550 --> 00:25:25,230
+it's structured the same way except
+
+00:25:22,860 --> 00:25:28,550
+those reading and right hands are
+
+00:25:25,230 --> 00:25:31,680
+actually trapped by the hypervisor and
+
+00:25:28,550 --> 00:25:35,370
+and they are emulated by the backend
+
+00:25:31,680 --> 00:25:38,460
+driver so that's the mmm I know that I
+
+00:25:35,370 --> 00:25:40,830
+am referring to the bounds prefer the
+
+00:25:38,460 --> 00:25:46,530
+performance good we have seen a lot of
+
+00:25:40,830 --> 00:25:47,910
+performance drop so and and we don't
+
+00:25:46,530 --> 00:25:50,460
+know whether all of that is completely
+
+00:25:47,910 --> 00:25:52,050
+due to the bounds preferred or some
+
+00:25:50,460 --> 00:25:54,600
+songs and some and some other factors
+
+00:25:52,050 --> 00:25:57,150
+are in me we are doing more analysis so
+
+00:25:54,600 --> 00:26:00,530
+we know when we send some just will
+
+00:25:57,150 --> 00:26:04,410
+probably share the performance results
+
+00:26:00,530 --> 00:26:06,210
+or the type 1 hypervisor we have you
+
+00:26:04,410 --> 00:26:09,560
+ever consider playing with right now is
+
+00:26:06,210 --> 00:26:09,560
+a in-house hypervisor
+
+00:26:12,240 --> 00:26:20,010
+it's I mean it's it's being developed so
+
+00:26:17,640 --> 00:26:24,090
+I will probably avoid talking too much
+
+00:26:20,010 --> 00:26:27,680
+about the hypervisor that we are playing
+
+00:26:24,090 --> 00:26:30,080
+with you know going forward and I'm
+
+00:26:27,680 --> 00:26:32,520
+expecting Qualcomm will make more
+
+00:26:30,080 --> 00:26:40,260
+details available on the hypervisor that
+
+00:26:32,520 --> 00:26:42,270
+we are working on the sound card yeah so
+
+00:26:40,260 --> 00:26:46,170
+the although I talked about the sound
+
+00:26:42,270 --> 00:26:48,300
+card switch it just illustrates the
+
+00:26:46,170 --> 00:26:50,310
+breadth of the problem if the breadth of
+
+00:26:48,300 --> 00:26:51,420
+the devices that we are dealing with we
+
+00:26:50,310 --> 00:26:54,600
+have not yet
+
+00:26:51,420 --> 00:26:56,820
+you know played with sound card switch I
+
+00:26:54,600 --> 00:27:00,410
+believe there are other folks within
+
+00:26:56,820 --> 00:27:02,970
+Volcom who have played with sound card
+
+00:27:00,410 --> 00:27:05,670
+using the water you stack some of them
+
+00:27:02,970 --> 00:27:09,570
+are probably you know being discussed in
+
+00:27:05,670 --> 00:27:11,070
+the in the water your email list so we
+
+00:27:09,570 --> 00:27:13,920
+are working with partners like open
+
+00:27:11,070 --> 00:27:15,300
+synergy to achieve some sound card
+
+00:27:13,920 --> 00:27:19,020
+virtualization so I don't have too many
+
+00:27:15,300 --> 00:27:20,840
+details on that for GPU again I am
+
+00:27:19,020 --> 00:27:23,490
+probably not the best time so there are
+
+00:27:20,840 --> 00:27:25,980
+some some other groups within welcome
+
+00:27:23,490 --> 00:27:29,090
+are working on GPU virtualization I
+
+00:27:25,980 --> 00:27:36,499
+don't have too many details on that
+
+00:27:29,090 --> 00:27:41,659
+and right in so the Android we are
+
+00:27:36,499 --> 00:27:44,299
+considering in this environment for to
+
+00:27:41,659 --> 00:27:46,370
+the most part it's like running on bare
+
+00:27:44,299 --> 00:27:48,980
+metal there is no difference so it will
+
+00:27:46,370 --> 00:27:50,629
+have fast board it will have USB you
+
+00:27:48,980 --> 00:27:55,249
+know connections everything is available
+
+00:27:50,629 --> 00:27:57,409
+so to a large extent the Android here is
+
+00:27:55,249 --> 00:28:00,350
+running on bare metal and it should get
+
+00:27:57,409 --> 00:28:03,529
+near bare metal speeds right so the
+
+00:28:00,350 --> 00:28:06,320
+performance of Android is not influenced
+
+00:28:03,529 --> 00:28:09,590
+or is not impacted because of having a
+
+00:28:06,320 --> 00:28:13,820
+hypervisor it's only the secondary VM
+
+00:28:09,590 --> 00:28:16,299
+whose IO virtualization is which which
+
+00:28:13,820 --> 00:28:19,549
+does not have access to this IO devices
+
+00:28:16,299 --> 00:28:22,249
+will have some performance impact that
+
+00:28:19,549 --> 00:28:26,440
+it needs to consider when accessing IO
+
+00:28:22,249 --> 00:28:26,440
+
+YouTube URL: https://www.youtube.com/watch?v=oIjcZuUGwCM
+
+

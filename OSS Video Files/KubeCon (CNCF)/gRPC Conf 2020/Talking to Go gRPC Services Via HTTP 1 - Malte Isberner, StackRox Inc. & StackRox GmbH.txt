@@ -1,0 +1,2047 @@
+Title: Talking to Go gRPC Services Via HTTP 1 - Malte Isberner, StackRox Inc. & StackRox GmbH
+Publication date: 2020-08-01
+Playlist: gRPC Conf 2020
+Description: 
+	Talking to Go gRPC Services Via HTTP/1 - Malte Isberner, StackRox Inc. & StackRox GmbH 
+
+gRPC works perfectly for service-to-service communication in private networks, where a client talks to a server via a direct TCP connection. Things are more complicated if services, users, or CLI tools talk to gRPC servers exposed on the internet, as many of the commonly used application-level load balancers/reverse proxies only support gRPC with additional configuration (e.g., nginx) or not at all (e.g., AWS ELB). In this session, an approach for communicating with gRPC services through reverse proxies that only support HTTP/1.1 is presented. While the approach comes with some restrictions, it requires next to no changes to both the client and server code, no additional components to be deployed, and ensures maximum compatibility between different client and server setups. Along with the approach, a Go library implementing it will be introduced, demonstrating via code examples and a live demo how this technique can be used as a drop-in replacement in existing Go-based gRPC code.
+Captions: 
+	00:00:00,240 --> 00:00:03,439
+hi my name is malta i'm an engineer at
+
+00:00:02,399 --> 00:00:05,120
+stack rocks
+
+00:00:03,439 --> 00:00:08,720
+and today i'm going to talk about
+
+00:00:05,120 --> 00:00:10,400
+talking to go drpc services via http1
+
+00:00:08,720 --> 00:00:11,920
+that's a problem that i recently had to
+
+00:00:10,400 --> 00:00:14,480
+solve at stackrocks
+
+00:00:11,920 --> 00:00:16,240
+and i want to jump right in at
+
+00:00:14,480 --> 00:00:18,480
+stackrocks we're building an application
+
+00:00:16,240 --> 00:00:19,520
+which is deployed in the kubernetes
+
+00:00:18,480 --> 00:00:22,800
+cluster running
+
+00:00:19,520 --> 00:00:24,480
+um our customers and our application
+
+00:00:22,800 --> 00:00:26,160
+uh is based on a microservice
+
+00:00:24,480 --> 00:00:28,000
+architecture so we have a fleet of
+
+00:00:26,160 --> 00:00:28,720
+microservice deployed in the kubernetes
+
+00:00:28,000 --> 00:00:30,320
+cluster
+
+00:00:28,720 --> 00:00:32,719
+and those microservers talk to each
+
+00:00:30,320 --> 00:00:34,239
+other and we're using grpc for that
+
+00:00:32,719 --> 00:00:35,920
+communication
+
+00:00:34,239 --> 00:00:37,920
+this intra cluster service to service
+
+00:00:35,920 --> 00:00:41,440
+communication using grpc
+
+00:00:37,920 --> 00:00:42,480
+works great however we're also using
+
+00:00:41,440 --> 00:00:45,600
+grpc
+
+00:00:42,480 --> 00:00:47,039
+to communicate from uh entities outside
+
+00:00:45,600 --> 00:00:48,160
+of the cluster to services running
+
+00:00:47,039 --> 00:00:49,520
+inside the cluster
+
+00:00:48,160 --> 00:00:51,440
+for example we have a command line
+
+00:00:49,520 --> 00:00:53,280
+utility called drugscuttle
+
+00:00:51,440 --> 00:00:54,800
+and for this command line usability
+
+00:00:53,280 --> 00:00:57,039
+we're also using grpc
+
+00:00:54,800 --> 00:00:59,039
+to talk to our backend service and in
+
+00:00:57,039 --> 00:01:01,039
+such a setup the traffic from outside of
+
+00:00:59,039 --> 00:01:03,280
+the cluster has to enter
+
+00:01:01,039 --> 00:01:05,280
+the cluster and it typically does that
+
+00:01:03,280 --> 00:01:08,799
+by using a load balancer service
+
+00:01:05,280 --> 00:01:12,000
+or an ingress controller um
+
+00:01:08,799 --> 00:01:14,960
+the problem with such a setup is that
+
+00:01:12,000 --> 00:01:16,880
+basically it boils down to jrpc being
+
+00:01:14,960 --> 00:01:19,520
+based on http 2
+
+00:01:16,880 --> 00:01:21,920
+and a lot of load balancers don't like
+
+00:01:19,520 --> 00:01:24,240
+or don't support http 2.
+
+00:01:21,920 --> 00:01:26,240
+more precisely i'm talking about level 7
+
+00:01:24,240 --> 00:01:28,000
+or application level load balancers
+
+00:01:26,240 --> 00:01:29,360
+the most prominent example of such a low
+
+00:01:28,000 --> 00:01:32,400
+balancer is
+
+00:01:29,360 --> 00:01:34,240
+alb by aws but there are also like some
+
+00:01:32,400 --> 00:01:37,759
+other load balancers which have
+
+00:01:34,240 --> 00:01:41,040
+problem with http 2 and grpc such as
+
+00:01:37,759 --> 00:01:44,159
+nginx in older versions
+
+00:01:41,040 --> 00:01:45,759
+what can we do in such a scenario well
+
+00:01:44,159 --> 00:01:48,479
+there are a couple of options we could
+
+00:01:45,759 --> 00:01:50,479
+opt for tcp only load balancing
+
+00:01:48,479 --> 00:01:51,600
+for example if we use a tls encrypted
+
+00:01:50,479 --> 00:01:54,479
+connection we can
+
+00:01:51,600 --> 00:01:55,360
+configure it to use tls pass through in
+
+00:01:54,479 --> 00:01:57,360
+which case the
+
+00:01:55,360 --> 00:01:59,520
+um the load balancer would not terminate
+
+00:01:57,360 --> 00:02:01,840
+the tls connection but instead just
+
+00:01:59,520 --> 00:02:03,600
+uh forward the bytes one by one from the
+
+00:02:01,840 --> 00:02:05,200
+client to the server
+
+00:02:03,600 --> 00:02:07,520
+we could also use a load balancer that
+
+00:02:05,200 --> 00:02:08,879
+supports http 2 between the client and
+
+00:02:07,520 --> 00:02:11,200
+the server
+
+00:02:08,879 --> 00:02:13,120
+the l7 load balancer available at google
+
+00:02:11,200 --> 00:02:14,800
+cloud platform
+
+00:02:13,120 --> 00:02:17,040
+makes it possible for example but also
+
+00:02:14,800 --> 00:02:18,720
+sufficiently recent versions of nginx or
+
+00:02:17,040 --> 00:02:21,040
+h.a proxy
+
+00:02:18,720 --> 00:02:22,080
+there's also a module for envoy the
+
+00:02:21,040 --> 00:02:24,959
+android proxy
+
+00:02:22,080 --> 00:02:26,879
+which is called the grpc http 1.1 bridge
+
+00:02:24,959 --> 00:02:28,800
+this is actually pretty similar to the
+
+00:02:26,879 --> 00:02:31,360
+technique i'm going to present
+
+00:02:28,800 --> 00:02:32,000
+in this talk the main reason why we
+
+00:02:31,360 --> 00:02:36,239
+didn't
+
+00:02:32,000 --> 00:02:38,400
+up to use it was we felt it was to um
+
+00:02:36,239 --> 00:02:39,760
+too heavy way to kind of like spin up an
+
+00:02:38,400 --> 00:02:42,239
+envoy proxy
+
+00:02:39,760 --> 00:02:44,080
+sidecar for all of our services um we
+
+00:02:42,239 --> 00:02:44,720
+don't assume that we run in an issue
+
+00:02:44,080 --> 00:02:47,680
+environment
+
+00:02:44,720 --> 00:02:48,080
+necessarily and i also put an asterisk
+
+00:02:47,680 --> 00:02:51,040
+nest
+
+00:02:48,080 --> 00:02:52,640
+viable because those are the technical
+
+00:02:51,040 --> 00:02:54,400
+technically viable options
+
+00:02:52,640 --> 00:02:56,560
+that doesn't necessarily translate into
+
+00:02:54,400 --> 00:02:58,239
+practical viability
+
+00:02:56,560 --> 00:03:00,080
+our customers might be more or less
+
+00:02:58,239 --> 00:03:00,720
+opinionated on what technologies they
+
+00:03:00,080 --> 00:03:04,239
+want to use
+
+00:03:00,720 --> 00:03:05,920
+for exposing services and if we tell
+
+00:03:04,239 --> 00:03:08,720
+them they can't use
+
+00:03:05,920 --> 00:03:10,400
+alb which they use for everything else
+
+00:03:08,720 --> 00:03:12,000
+and that they need to use tls pass
+
+00:03:10,400 --> 00:03:13,599
+through and can't
+
+00:03:12,000 --> 00:03:15,440
+use managed certificates in their
+
+00:03:13,599 --> 00:03:16,560
+infrastructure provider they might be
+
+00:03:15,440 --> 00:03:19,840
+less enthusiastic
+
+00:03:16,560 --> 00:03:21,360
+about that so um the functional
+
+00:03:19,840 --> 00:03:23,680
+requirement for the solution
+
+00:03:21,360 --> 00:03:25,360
+uh that we are that we are looking for
+
+00:03:23,680 --> 00:03:27,599
+is to replace the grpc
+
+00:03:25,360 --> 00:03:28,400
+which is used in a rocks called cli with
+
+00:03:27,599 --> 00:03:32,799
+something
+
+00:03:28,400 --> 00:03:34,560
+like grpc that works via http http1
+
+00:03:32,799 --> 00:03:36,720
+preferably it would be something that's
+
+00:03:34,560 --> 00:03:38,480
+just as nice to use and just as reliable
+
+00:03:36,720 --> 00:03:40,159
+as grpc
+
+00:03:38,480 --> 00:03:42,480
+there are also some compatibility
+
+00:03:40,159 --> 00:03:44,400
+constraints obviously
+
+00:03:42,480 --> 00:03:46,239
+the new functionality of being able to
+
+00:03:44,400 --> 00:03:47,120
+work through a grpc incompatible load
+
+00:03:46,239 --> 00:03:48,879
+balancer
+
+00:03:47,120 --> 00:03:51,120
+only needs to be available when using
+
+00:03:48,879 --> 00:03:53,840
+new versions of both the cli
+
+00:03:51,120 --> 00:03:55,280
+and the server but we can't always
+
+00:03:53,840 --> 00:03:56,560
+expect our customers to upgrade the
+
+00:03:55,280 --> 00:03:58,319
+software in lockstep
+
+00:03:56,560 --> 00:04:01,760
+so if they use a combination of a new
+
+00:03:58,319 --> 00:04:03,760
+cli with an old service or vice versa
+
+00:04:01,760 --> 00:04:05,680
+this should at least preserve the
+
+00:04:03,760 --> 00:04:08,239
+existing functionality
+
+00:04:05,680 --> 00:04:09,280
+of working through a grpc compatible
+
+00:04:08,239 --> 00:04:11,680
+load balancer
+
+00:04:09,280 --> 00:04:13,280
+one thing that that for example
+
+00:04:11,680 --> 00:04:14,000
+precludes us from just switching to a
+
+00:04:13,280 --> 00:04:16,160
+different rpc
+
+00:04:14,000 --> 00:04:18,560
+protocol altogether because that would
+
+00:04:16,160 --> 00:04:20,639
+only be supported in the new software
+
+00:04:18,560 --> 00:04:23,120
+and not in the old software
+
+00:04:20,639 --> 00:04:24,320
+so the first idea we came up with was to
+
+00:04:23,120 --> 00:04:26,240
+use rest apis
+
+00:04:24,320 --> 00:04:27,840
+and that sounds a little bit like
+
+00:04:26,240 --> 00:04:29,600
+contradiction to what i just
+
+00:04:27,840 --> 00:04:30,960
+lined out as a compatibility requirement
+
+00:04:29,600 --> 00:04:32,800
+however we have
+
+00:04:30,960 --> 00:04:34,240
+rest equivalents for pretty much all our
+
+00:04:32,800 --> 00:04:35,600
+grpc apis
+
+00:04:34,240 --> 00:04:37,840
+throughout the product thanks to the
+
+00:04:35,600 --> 00:04:40,080
+grpc gateway which automatically
+
+00:04:37,840 --> 00:04:42,000
+takes care of the translation what it
+
+00:04:40,080 --> 00:04:44,080
+would look like on a technical level
+
+00:04:42,000 --> 00:04:45,280
+we have our cli and that cli makes a
+
+00:04:44,080 --> 00:04:47,680
+request
+
+00:04:45,280 --> 00:04:50,400
+a grpc request which technically is an
+
+00:04:47,680 --> 00:04:52,479
+http 2 post request
+
+00:04:50,400 --> 00:04:54,880
+to the server and we specify the
+
+00:04:52,479 --> 00:04:57,360
+respective jpc content type and
+
+00:04:54,880 --> 00:04:58,720
+encoding scheme usually protobuf and
+
+00:04:57,360 --> 00:05:01,759
+instead of doing such a
+
+00:04:58,720 --> 00:05:02,720
+grpc request we instead do a plain http
+
+00:05:01,759 --> 00:05:06,000
+1.1
+
+00:05:02,720 --> 00:05:07,280
+rest request for example to a v1
+
+00:05:06,000 --> 00:05:09,840
+metadata
+
+00:05:07,280 --> 00:05:12,240
+rest endpoint and using json as the
+
+00:05:09,840 --> 00:05:14,880
+encoding scheme for all our payloads
+
+00:05:12,240 --> 00:05:17,520
+um to use that on the code level our
+
+00:05:14,880 --> 00:05:19,600
+idea was to use protoc gen swagger to
+
+00:05:17,520 --> 00:05:21,520
+generate open api specifications from
+
+00:05:19,600 --> 00:05:24,800
+our jpc server subscriptions
+
+00:05:21,520 --> 00:05:26,080
+and then generate go bindings for these
+
+00:05:24,800 --> 00:05:29,600
+open apis back
+
+00:05:26,080 --> 00:05:31,360
+using swagger code gen we weren't really
+
+00:05:29,600 --> 00:05:33,520
+thrilled with the result it would have
+
+00:05:31,360 --> 00:05:35,199
+required lots of changes in our code
+
+00:05:33,520 --> 00:05:37,520
+it will also kind of has led to a
+
+00:05:35,199 --> 00:05:39,360
+duplication of our data structures
+
+00:05:37,520 --> 00:05:40,720
+instead of using protobufs everywhere
+
+00:05:39,360 --> 00:05:43,039
+we'd also be using
+
+00:05:40,720 --> 00:05:43,919
+the open api generated data structure
+
+00:05:43,039 --> 00:05:45,680
+somewhere
+
+00:05:43,919 --> 00:05:47,360
+we also found some bugs in the generated
+
+00:05:45,680 --> 00:05:50,000
+code in all fairness that
+
+00:05:47,360 --> 00:05:50,800
+might well have been due to user error i
+
+00:05:50,000 --> 00:05:53,360
+didn't dig
+
+00:05:50,800 --> 00:05:54,080
+too uh too deeply because it became
+
+00:05:53,360 --> 00:05:57,680
+apparent
+
+00:05:54,080 --> 00:05:58,479
+uh pretty early on that we should find a
+
+00:05:57,680 --> 00:06:00,160
+better option
+
+00:05:58,479 --> 00:06:01,520
+that the less invasive in the changes
+
+00:06:00,160 --> 00:06:05,199
+that require
+
+00:06:01,520 --> 00:06:07,120
+so for finding such a solution um
+
+00:06:05,199 --> 00:06:09,600
+an important first step would be to look
+
+00:06:07,120 --> 00:06:10,560
+at some background as to why jrpc uses
+
+00:06:09,600 --> 00:06:14,160
+http 2
+
+00:06:10,560 --> 00:06:17,360
+and what http 2 actually entails
+
+00:06:14,160 --> 00:06:18,319
+the difference between http 2 and http 1
+
+00:06:17,360 --> 00:06:20,560
+some of these differences are
+
+00:06:18,319 --> 00:06:22,160
+performance related for example http 2
+
+00:06:20,560 --> 00:06:23,840
+is based on a binary format
+
+00:06:22,160 --> 00:06:25,759
+and it also supports multiplexing of
+
+00:06:23,840 --> 00:06:27,680
+multiple streams onto a single tcp
+
+00:06:25,759 --> 00:06:29,520
+connection
+
+00:06:27,680 --> 00:06:31,520
+those are advantages for performance on
+
+00:06:29,520 --> 00:06:34,080
+the functionality side
+
+00:06:31,520 --> 00:06:34,639
+there is support for full duplex client
+
+00:06:34,080 --> 00:06:36,800
+streaming
+
+00:06:34,639 --> 00:06:38,880
+that's important for some rpg calls and
+
+00:06:36,800 --> 00:06:40,240
+there's also support for trailers in
+
+00:06:38,880 --> 00:06:43,600
+http 2.
+
+00:06:40,240 --> 00:06:46,000
+um and there are also some other aspects
+
+00:06:43,600 --> 00:06:47,440
+in http 2 such as server push
+
+00:06:46,000 --> 00:06:49,199
+it's really not relevant for this
+
+00:06:47,440 --> 00:06:52,720
+presentation or even for jrpc
+
+00:06:49,199 --> 00:06:53,360
+at all um so the first aspect we want to
+
+00:06:52,720 --> 00:06:55,120
+take a look
+
+00:06:53,360 --> 00:06:56,639
+at is client streaming client spring
+
+00:06:55,120 --> 00:06:58,720
+basically means we can interleave the
+
+00:06:56,639 --> 00:07:00,960
+request flow between server and client
+
+00:06:58,720 --> 00:07:02,960
+um http one the client talks and then
+
+00:07:00,960 --> 00:07:06,080
+finishes talking sends all the data
+
+00:07:02,960 --> 00:07:08,000
+and then the server responds in http 2
+
+00:07:06,080 --> 00:07:09,360
+the client starts talking by sending a
+
+00:07:08,000 --> 00:07:10,960
+request and request headers
+
+00:07:09,360 --> 00:07:12,720
+and the server may start responding at
+
+00:07:10,960 --> 00:07:14,720
+any time regardless of whether the
+
+00:07:12,720 --> 00:07:17,039
+client still has more data to send
+
+00:07:14,720 --> 00:07:18,400
+or not grpc uses this for client
+
+00:07:17,039 --> 00:07:20,960
+streaming rpc calls
+
+00:07:18,400 --> 00:07:23,039
+and bidirectional streaming rpc calls
+
+00:07:20,960 --> 00:07:25,199
+client streaming is actually a pretty
+
+00:07:23,039 --> 00:07:26,639
+significant step in terms of
+
+00:07:25,199 --> 00:07:29,520
+functionality
+
+00:07:26,639 --> 00:07:31,039
+over http one you cannot emulate client
+
+00:07:29,520 --> 00:07:32,880
+streaming in http one
+
+00:07:31,039 --> 00:07:34,639
+you would need to resort to a technique
+
+00:07:32,880 --> 00:07:37,039
+such as websockets in order to do
+
+00:07:34,639 --> 00:07:39,520
+something similar
+
+00:07:37,039 --> 00:07:41,759
+uh the good thing is rockstar cli only
+
+00:07:39,520 --> 00:07:42,840
+uses unary rpc calls so no client
+
+00:07:41,759 --> 00:07:45,280
+streaming
+
+00:07:42,840 --> 00:07:46,240
+required uh the second aspect is
+
+00:07:45,280 --> 00:07:48,960
+trailers
+
+00:07:46,240 --> 00:07:50,879
+trailer method is metadata sent by the
+
+00:07:48,960 --> 00:07:52,560
+server after the response body
+
+00:07:50,879 --> 00:07:54,000
+you can think of traders as kind of like
+
+00:07:52,560 --> 00:07:56,240
+deferred headers
+
+00:07:54,000 --> 00:07:57,120
+the typical use case for trailers is to
+
+00:07:56,240 --> 00:07:59,360
+calculate
+
+00:07:57,120 --> 00:08:00,319
+checksum on the fly of a response body
+
+00:07:59,360 --> 00:08:02,800
+without having to
+
+00:08:00,319 --> 00:08:04,879
+to buffer the entire response body on
+
+00:08:02,800 --> 00:08:07,360
+the server side before sending it back
+
+00:08:04,879 --> 00:08:08,639
+jpc uses trailers in order to
+
+00:08:07,360 --> 00:08:11,280
+communicate
+
+00:08:08,639 --> 00:08:13,360
+status information and error messages
+
+00:08:11,280 --> 00:08:15,759
+for example think of a server streaming
+
+00:08:13,360 --> 00:08:17,840
+rpc call the server sends a message
+
+00:08:15,759 --> 00:08:19,120
+message after message until eventually a
+
+00:08:17,840 --> 00:08:21,440
+deadline expires
+
+00:08:19,120 --> 00:08:23,039
+and then this deadline expires status
+
+00:08:21,440 --> 00:08:24,560
+should be transmitted to the client so
+
+00:08:23,039 --> 00:08:26,080
+even though the server has already sent
+
+00:08:24,560 --> 00:08:28,319
+data
+
+00:08:26,080 --> 00:08:29,599
+the the server can still indicate that
+
+00:08:28,319 --> 00:08:31,199
+the request failed
+
+00:08:29,599 --> 00:08:32,800
+and thus the status needs to be
+
+00:08:31,199 --> 00:08:33,360
+transmitted cannot be transmitted in the
+
+00:08:32,800 --> 00:08:34,880
+headers
+
+00:08:33,360 --> 00:08:36,959
+but needs to come after the response
+
+00:08:34,880 --> 00:08:40,000
+body
+
+00:08:36,959 --> 00:08:42,959
+the advantage here is that traders
+
+00:08:40,000 --> 00:08:45,040
+are not significantly different from
+
+00:08:42,959 --> 00:08:48,160
+http anything http one offers
+
+00:08:45,040 --> 00:08:50,640
+compared to client streaming
+
+00:08:48,160 --> 00:08:51,440
+they are on the hcpe protocol level but
+
+00:08:50,640 --> 00:08:52,720
+if we
+
+00:08:51,440 --> 00:08:54,240
+can assume that we can make
+
+00:08:52,720 --> 00:08:54,959
+modifications to the application level
+
+00:08:54,240 --> 00:08:57,519
+protocol
+
+00:08:54,959 --> 00:08:58,959
+we can just embed trailer information as
+
+00:08:57,519 --> 00:09:01,200
+part of the response buddy
+
+00:08:58,959 --> 00:09:04,240
+just conca like append it to the
+
+00:09:01,200 --> 00:09:06,880
+original response body
+
+00:09:04,240 --> 00:09:08,320
+and that brings us to jrpc web jpc web
+
+00:09:06,880 --> 00:09:10,160
+is an alternative transport
+
+00:09:08,320 --> 00:09:13,120
+specification for jpc
+
+00:09:10,160 --> 00:09:14,560
+um specifically uh targeting web clients
+
+00:09:13,120 --> 00:09:17,519
+such as browsers
+
+00:09:14,560 --> 00:09:17,839
+in a grpc web you can you have support
+
+00:09:17,519 --> 00:09:19,920
+for
+
+00:09:17,839 --> 00:09:21,519
+unary and server streaming rpcs so
+
+00:09:19,920 --> 00:09:22,480
+client or bi-directional streaming are
+
+00:09:21,519 --> 00:09:25,680
+not supported
+
+00:09:22,480 --> 00:09:28,640
+due to lack of http 2 features and
+
+00:09:25,680 --> 00:09:29,360
+in grpc web trailers are encoded as part
+
+00:09:28,640 --> 00:09:33,120
+of the
+
+00:09:29,360 --> 00:09:36,160
+response body so gpc response body is a
+
+00:09:33,120 --> 00:09:39,600
+sequence of messages and a jpc web
+
+00:09:36,160 --> 00:09:41,920
+the trailers are contained in a
+
+00:09:39,600 --> 00:09:43,360
+specifically designated message which is
+
+00:09:41,920 --> 00:09:45,040
+sent after the last message of the
+
+00:09:43,360 --> 00:09:47,040
+server response
+
+00:09:45,040 --> 00:09:48,480
+um that sounds like this is exactly what
+
+00:09:47,040 --> 00:09:49,440
+we're looking for and it would solve all
+
+00:09:48,480 --> 00:09:51,120
+our problems
+
+00:09:49,440 --> 00:09:53,839
+uh unfortunately it's not quite that
+
+00:09:51,120 --> 00:09:54,480
+easy um i wasn't able to find the golang
+
+00:09:53,839 --> 00:09:56,480
+based
+
+00:09:54,480 --> 00:09:58,240
+client library for grpc web which we
+
+00:09:56,480 --> 00:10:01,360
+would have needed to use
+
+00:09:58,240 --> 00:10:02,160
+on the on the cli side um their support
+
+00:10:01,360 --> 00:10:05,120
+for jpc
+
+00:10:02,160 --> 00:10:06,880
+web in the envoy proxy um but we cannot
+
+00:10:05,120 --> 00:10:08,240
+expect the onboard proxy to be present
+
+00:10:06,880 --> 00:10:10,320
+in our customer setups
+
+00:10:08,240 --> 00:10:12,079
+um there are also standalone proxies for
+
+00:10:10,320 --> 00:10:15,519
+jrpc web and translating
+
+00:10:12,079 --> 00:10:17,279
+between grpc web and grpc but
+
+00:10:15,519 --> 00:10:18,880
+deploying them in front of application
+
+00:10:17,279 --> 00:10:19,920
+breaks compatibility requirements
+
+00:10:18,880 --> 00:10:21,600
+because
+
+00:10:19,920 --> 00:10:23,519
+again it will require our client like
+
+00:10:21,600 --> 00:10:27,120
+all of our clients to use grpc
+
+00:10:23,519 --> 00:10:30,240
+web requests
+
+00:10:27,120 --> 00:10:32,000
+so the solution we came up with is
+
+00:10:30,240 --> 00:10:33,360
+what we call automatic jpc web
+
+00:10:32,000 --> 00:10:36,240
+downgrading
+
+00:10:33,360 --> 00:10:38,079
+and this is uh instead of just using jpc
+
+00:10:36,240 --> 00:10:40,959
+web for everything it's an adaptive
+
+00:10:38,079 --> 00:10:41,440
+technique um which works by the client
+
+00:10:40,959 --> 00:10:44,640
+sending
+
+00:10:41,440 --> 00:10:47,120
+a regular jrpc request to the server
+
+00:10:44,640 --> 00:10:48,160
+but also indicating that it is able to
+
+00:10:47,120 --> 00:10:50,880
+accept and process
+
+00:10:48,160 --> 00:10:51,680
+grpc web responses and we use the
+
+00:10:50,880 --> 00:10:54,640
+standard
+
+00:10:51,680 --> 00:10:55,519
+accept header to indicate our readiness
+
+00:10:54,640 --> 00:10:57,600
+for that
+
+00:10:55,519 --> 00:10:59,279
+and the server looks at an incoming
+
+00:10:57,600 --> 00:11:01,279
+request and
+
+00:10:59,279 --> 00:11:02,959
+if certain conditions are met it decides
+
+00:11:01,279 --> 00:11:06,320
+that the response will be sent
+
+00:11:02,959 --> 00:11:09,360
+uh as jrpc web and not just regular jrpc
+
+00:11:06,320 --> 00:11:11,920
+and those conditions are on one hand
+
+00:11:09,360 --> 00:11:13,839
+the ability of the client to accept grpc
+
+00:11:11,920 --> 00:11:15,680
+web responses that's communicated via
+
+00:11:13,839 --> 00:11:17,839
+the accept header
+
+00:11:15,680 --> 00:11:20,000
+we also look at the http protocol if the
+
+00:11:17,839 --> 00:11:21,680
+hp protocol major version is one
+
+00:11:20,000 --> 00:11:23,279
+then probably there's an incompatible
+
+00:11:21,680 --> 00:11:25,120
+proxy in between
+
+00:11:23,279 --> 00:11:27,120
+and the more reliable indicator is the
+
+00:11:25,120 --> 00:11:28,000
+te header te stands for transfer
+
+00:11:27,120 --> 00:11:30,560
+encoding
+
+00:11:28,000 --> 00:11:31,680
+and if the of all the proxies are
+
+00:11:30,560 --> 00:11:34,560
+compatible
+
+00:11:31,680 --> 00:11:35,519
+um the te header will have a value of
+
+00:11:34,560 --> 00:11:38,079
+trailers
+
+00:11:35,519 --> 00:11:39,200
+um if there's an incompatible proxy in
+
+00:11:38,079 --> 00:11:42,880
+between
+
+00:11:39,200 --> 00:11:45,360
+those this te header will be stripped
+
+00:11:42,880 --> 00:11:46,720
+so making a grpc request from our
+
+00:11:45,360 --> 00:11:49,839
+rockscaller cli
+
+00:11:46,720 --> 00:11:52,160
+to our backend servers we start the
+
+00:11:49,839 --> 00:11:54,959
+the regular jpc request as an http 2
+
+00:11:52,160 --> 00:11:57,600
+post request with the te trailers header
+
+00:11:54,959 --> 00:11:59,279
+assuming a compatible proxy this request
+
+00:11:57,600 --> 00:12:00,399
+gets forwarded as is to the backend
+
+00:11:59,279 --> 00:12:03,120
+servers
+
+00:12:00,399 --> 00:12:04,079
+we have http 2 we have te trailers
+
+00:12:03,120 --> 00:12:06,399
+everyone is happy
+
+00:12:04,079 --> 00:12:07,600
+the server is happy and can respond with
+
+00:12:06,399 --> 00:12:12,320
+the normal http
+
+00:12:07,600 --> 00:12:13,600
+to 200 okay jpc response
+
+00:12:12,320 --> 00:12:15,360
+what happens now if we have an
+
+00:12:13,600 --> 00:12:17,360
+incompatible proxy in between so
+
+00:12:15,360 --> 00:12:18,639
+if we have a proxy that drops the
+
+00:12:17,360 --> 00:12:21,760
+traders header
+
+00:12:18,639 --> 00:12:24,079
+well in that case um and also we
+
+00:12:21,760 --> 00:12:25,040
+assume it downgrades the connection to
+
+00:12:24,079 --> 00:12:26,800
+http one
+
+00:12:25,040 --> 00:12:29,120
+we don't have a traders header we don't
+
+00:12:26,800 --> 00:12:32,560
+have a http 2 request
+
+00:12:29,120 --> 00:12:34,880
+the server doesn't know it can't process
+
+00:12:32,560 --> 00:12:36,320
+this request in a normal grpc fashion
+
+00:12:34,880 --> 00:12:39,440
+the server is unhappy
+
+00:12:36,320 --> 00:12:41,279
+and it just will send back an error
+
+00:12:39,440 --> 00:12:44,399
+response
+
+00:12:41,279 --> 00:12:46,480
+now using our automatic downgrading
+
+00:12:44,399 --> 00:12:48,480
+we modify the client to inject the
+
+00:12:46,480 --> 00:12:51,279
+accept header on the client side
+
+00:12:48,480 --> 00:12:52,880
+we say accept application jrpc and also
+
+00:12:51,279 --> 00:12:55,200
+application jpc web
+
+00:12:52,880 --> 00:12:56,560
+accept as a standard request header and
+
+00:12:55,200 --> 00:12:59,360
+the product proxy
+
+00:12:56,560 --> 00:13:00,320
+will forward this header to the backend
+
+00:12:59,360 --> 00:13:02,480
+note that we still
+
+00:13:00,320 --> 00:13:05,200
+the backend still sees an http1 request
+
+00:13:02,480 --> 00:13:07,200
+incoming without te trailers header
+
+00:13:05,200 --> 00:13:10,320
+in that case however we see the client
+
+00:13:07,200 --> 00:13:12,560
+is able to accept a jfc web response
+
+00:13:10,320 --> 00:13:14,880
+server is happy again and it can send
+
+00:13:12,560 --> 00:13:17,680
+back a jrpc web response
+
+00:13:14,880 --> 00:13:20,320
+the client having indicated so can also
+
+00:13:17,680 --> 00:13:23,760
+process this grpc web response and the
+
+00:13:20,320 --> 00:13:23,760
+client is happy as well
+
+00:13:25,279 --> 00:13:28,880
+how did we go about implementing this
+
+00:13:27,839 --> 00:13:32,639
+functionality
+
+00:13:28,880 --> 00:13:34,480
+on the client side we spun up a local
+
+00:13:32,639 --> 00:13:36,399
+reverse proxy that's actually very
+
+00:13:34,480 --> 00:13:39,760
+simple to implement in go
+
+00:13:36,399 --> 00:13:41,600
+there's a reverse proxy utility type
+
+00:13:39,760 --> 00:13:43,760
+the reverse proxy modifies the outgoing
+
+00:13:41,600 --> 00:13:45,760
+request by injecting the accept header
+
+00:13:43,760 --> 00:13:47,760
+and it modifies the incoming responses
+
+00:13:45,760 --> 00:13:52,800
+by transcoding the grpc web
+
+00:13:47,760 --> 00:13:52,800
+payload to regular grpc over http 2
+
+00:13:52,880 --> 00:13:57,120
+traffic and it does so by by detecting
+
+00:13:55,199 --> 00:13:58,800
+jpc web payloads through the content
+
+00:13:57,120 --> 00:14:01,120
+type header sent by the server
+
+00:13:58,800 --> 00:14:03,120
+this transcoding effectively means we
+
+00:14:01,120 --> 00:14:05,040
+look at the last message in the stream
+
+00:14:03,120 --> 00:14:06,639
+we verify that there's a traders message
+
+00:14:05,040 --> 00:14:07,680
+we pass the traders from this message
+
+00:14:06,639 --> 00:14:10,480
+and we forward them
+
+00:14:07,680 --> 00:14:12,079
+to the client as actual native http 2
+
+00:14:10,480 --> 00:14:14,000
+trailers
+
+00:14:12,079 --> 00:14:15,279
+what's also relevant to consider in the
+
+00:14:14,000 --> 00:14:16,560
+setup is that
+
+00:14:15,279 --> 00:14:18,800
+the the connection between the
+
+00:14:16,560 --> 00:14:21,839
+application and the reverse proxy
+
+00:14:18,800 --> 00:14:22,880
+uses a local in-memory pipe so it's not
+
+00:14:21,839 --> 00:14:26,079
+hijackable
+
+00:14:22,880 --> 00:14:29,279
+and uh does we don't tls encrypt it
+
+00:14:26,079 --> 00:14:31,920
+um the reverse proxy needs to uh
+
+00:14:29,279 --> 00:14:32,560
+needs to uh intercept the request anyway
+
+00:14:31,920 --> 00:14:34,880
+and then
+
+00:14:32,560 --> 00:14:35,600
+the reverse proxy makes an outgoing tcp
+
+00:14:34,880 --> 00:14:38,399
+connection
+
+00:14:35,600 --> 00:14:40,079
+with tls encryption and that even allows
+
+00:14:38,399 --> 00:14:42,480
+us to if we have a direct connection to
+
+00:14:40,079 --> 00:14:44,800
+the remote pr to use client certificate
+
+00:14:42,480 --> 00:14:47,760
+authentication because tls really only
+
+00:14:44,800 --> 00:14:49,680
+starts at the reverse proxy and is not
+
+00:14:47,760 --> 00:14:52,079
+terminated or men in the middle in
+
+00:14:49,680 --> 00:14:52,079
+between
+
+00:14:52,160 --> 00:14:56,839
+on the server side we use a function a
+
+00:14:55,120 --> 00:14:58,000
+feature from the grpc server
+
+00:14:56,839 --> 00:15:00,720
+implementation
+
+00:14:58,000 --> 00:15:02,800
+which is that the jpc server supports or
+
+00:15:00,720 --> 00:15:05,199
+offers the serv http method
+
+00:15:02,800 --> 00:15:06,800
+that's a standardized go http server
+
+00:15:05,199 --> 00:15:08,880
+handler
+
+00:15:06,800 --> 00:15:10,000
+it it handles a request and it writes
+
+00:15:08,880 --> 00:15:12,880
+back a response
+
+00:15:10,000 --> 00:15:13,839
+and we wrap the server handler by um
+
+00:15:12,880 --> 00:15:16,160
+adding logic
+
+00:15:13,839 --> 00:15:17,279
+to to see if we need to do gfpc web
+
+00:15:16,160 --> 00:15:19,600
+downgrading
+
+00:15:17,279 --> 00:15:21,199
+um and if we can do jfc web downgrading
+
+00:15:19,600 --> 00:15:22,000
+so we look for we test for the presence
+
+00:15:21,199 --> 00:15:24,720
+of the accept
+
+00:15:22,000 --> 00:15:26,720
+gpc web header and for the absence of
+
+00:15:24,720 --> 00:15:29,759
+the te trailers header
+
+00:15:26,720 --> 00:15:32,880
+we modify the request to
+
+00:15:29,759 --> 00:15:35,600
+fake an http 2 protocol information
+
+00:15:32,880 --> 00:15:36,160
+and also to re-add the te trailers uh
+
+00:15:35,600 --> 00:15:38,240
+header
+
+00:15:36,160 --> 00:15:39,759
+and that is to kind of like prevent the
+
+00:15:38,240 --> 00:15:42,000
+grpc server implementation from
+
+00:15:39,759 --> 00:15:44,320
+complaining about the malformed or
+
+00:15:42,000 --> 00:15:46,240
+not processable request we also
+
+00:15:44,320 --> 00:15:48,639
+intercept the responsewriter for this
+
+00:15:46,240 --> 00:15:50,639
+server handler such that it will
+
+00:15:48,639 --> 00:15:53,360
+transcode http2 trailers
+
+00:15:50,639 --> 00:15:54,720
+into trailers sent as a message as part
+
+00:15:53,360 --> 00:15:56,320
+of the response body
+
+00:15:54,720 --> 00:15:58,160
+and then with this modified request we
+
+00:15:56,320 --> 00:16:01,759
+delegate we make a delegate call
+
+00:15:58,160 --> 00:16:05,040
+to the original grpc server serve http
+
+00:16:01,759 --> 00:16:07,440
+implementation so
+
+00:16:05,040 --> 00:16:08,480
+showing this in one picture i have to
+
+00:16:07,440 --> 00:16:10,160
+apologize for the
+
+00:16:08,480 --> 00:16:12,079
+low resolution of the picture i didn't
+
+00:16:10,160 --> 00:16:15,839
+have the raw materials anymore
+
+00:16:12,079 --> 00:16:16,480
+um the client makes a http 2 post
+
+00:16:15,839 --> 00:16:19,040
+request
+
+00:16:16,480 --> 00:16:21,199
+to the reverse proxy and again this is
+
+00:16:19,040 --> 00:16:24,000
+slightly outdated we no longer use a
+
+00:16:21,199 --> 00:16:25,839
+localhost tcp listen socket but just an
+
+00:16:24,000 --> 00:16:29,360
+in-memory pipe
+
+00:16:25,839 --> 00:16:32,240
+and local reverse proxy injects the
+
+00:16:29,360 --> 00:16:33,600
+accept jrpc web header it goes to the
+
+00:16:32,240 --> 00:16:36,000
+proxy
+
+00:16:33,600 --> 00:16:37,759
+the modified handler on the server side
+
+00:16:36,000 --> 00:16:39,920
+uh
+
+00:16:37,759 --> 00:16:42,240
+re uh basically replaces the protocol
+
+00:16:39,920 --> 00:16:44,480
+information http one to http two
+
+00:16:42,240 --> 00:16:46,320
+and strips the accept header the server
+
+00:16:44,480 --> 00:16:47,759
+is happy about the request um
+
+00:16:46,320 --> 00:16:50,079
+there's also the te trailers header
+
+00:16:47,759 --> 00:16:53,040
+which is injected and it sends back
+
+00:16:50,079 --> 00:16:55,279
+a normal grpc response which then gets
+
+00:16:53,040 --> 00:16:56,079
+transcoded by the handler to a jpc web
+
+00:16:55,279 --> 00:16:57,920
+response
+
+00:16:56,079 --> 00:16:59,360
+and the jpc web response reaches the
+
+00:16:57,920 --> 00:17:02,639
+local client proxy
+
+00:16:59,360 --> 00:17:05,120
+and again gets transcoded to a grpc over
+
+00:17:02,639 --> 00:17:08,240
+http 2 payload which the
+
+00:17:05,120 --> 00:17:11,679
+original vanilla grpc client can
+
+00:17:08,240 --> 00:17:14,000
+consume so if you think that's cool
+
+00:17:11,679 --> 00:17:15,039
+or think it could be potentially useful
+
+00:17:14,000 --> 00:17:17,120
+we decided to
+
+00:17:15,039 --> 00:17:19,360
+publish this code as an open source
+
+00:17:17,120 --> 00:17:22,240
+library hosted on github
+
+00:17:19,360 --> 00:17:24,079
+it's written in go so you will only be
+
+00:17:22,240 --> 00:17:25,520
+able to use if you use go for both your
+
+00:17:24,079 --> 00:17:27,039
+client and your server
+
+00:17:25,520 --> 00:17:28,640
+while it's not true you can use it on
+
+00:17:27,039 --> 00:17:30,320
+either the client or the server but you
+
+00:17:28,640 --> 00:17:32,480
+won't really get any benefit
+
+00:17:30,320 --> 00:17:33,600
+out of it if you're not using it on both
+
+00:17:32,480 --> 00:17:36,080
+sides but at least you also
+
+00:17:33,600 --> 00:17:37,919
+won't break any any compatibility if you
+
+00:17:36,080 --> 00:17:39,039
+use it only on the client or only on the
+
+00:17:37,919 --> 00:17:41,120
+server
+
+00:17:39,039 --> 00:17:42,080
+you can install it with a simple go get
+
+00:17:41,120 --> 00:17:44,240
+command
+
+00:17:42,080 --> 00:17:46,400
+and the source code is hosted as on
+
+00:17:44,240 --> 00:17:48,080
+github and published under the apache 2
+
+00:17:46,400 --> 00:17:49,520
+license
+
+00:17:48,080 --> 00:17:51,600
+now i want to give you a very brief
+
+00:17:49,520 --> 00:17:54,799
+overview on how it used the library
+
+00:17:51,600 --> 00:17:57,520
+so the first example is showing you
+
+00:17:54,799 --> 00:17:59,120
+how you would use grpc normally without
+
+00:17:57,520 --> 00:18:01,360
+our library
+
+00:17:59,120 --> 00:18:03,520
+you have a tls configuration you have
+
+00:18:01,360 --> 00:18:07,280
+some dial options for establishing
+
+00:18:03,520 --> 00:18:07,919
+connection you would call grpc dial
+
+00:18:07,280 --> 00:18:10,640
+context
+
+00:18:07,919 --> 00:18:12,799
+function you give it an endpoint
+
+00:18:10,640 --> 00:18:15,120
+transport credentials tls
+
+00:18:12,799 --> 00:18:16,480
+and connection options and then from
+
+00:18:15,120 --> 00:18:18,640
+this grpc
+
+00:18:16,480 --> 00:18:19,919
+client connections you can instantiate
+
+00:18:18,640 --> 00:18:22,640
+service clients
+
+00:18:19,919 --> 00:18:25,039
+do rpc calls on the server and
+
+00:18:22,640 --> 00:18:27,440
+eventually also close the connection
+
+00:18:25,039 --> 00:18:28,080
+now when using our library the code
+
+00:18:27,440 --> 00:18:31,120
+doesn't change
+
+00:18:28,080 --> 00:18:32,960
+all that match you you import the client
+
+00:18:31,120 --> 00:18:35,760
+package from a library
+
+00:18:32,960 --> 00:18:37,200
+and then instead of calling jrpc dial
+
+00:18:35,760 --> 00:18:40,559
+you call the function
+
+00:18:37,200 --> 00:18:42,559
+client connect via proxy you still pass
+
+00:18:40,559 --> 00:18:44,799
+it the connection context
+
+00:18:42,559 --> 00:18:45,600
+an endpoint the tls configuration
+
+00:18:44,799 --> 00:18:47,840
+becomes a first
+
+00:18:45,600 --> 00:18:49,120
+class configuration option it's not just
+
+00:18:47,840 --> 00:18:50,640
+another dial option
+
+00:18:49,120 --> 00:18:52,960
+but if you have other dial options you
+
+00:18:50,640 --> 00:18:56,000
+can also pass them to this function
+
+00:18:52,960 --> 00:18:58,000
+just as we pass them to grpc dial and
+
+00:18:56,000 --> 00:19:00,320
+the return value of this function
+
+00:18:58,000 --> 00:19:01,520
+is a normal grpc client connection you
+
+00:19:00,320 --> 00:19:04,240
+can use that in
+
+00:19:01,520 --> 00:19:06,160
+same way as you use the one obtained
+
+00:19:04,240 --> 00:19:08,320
+with grpc dial
+
+00:19:06,160 --> 00:19:09,280
+you can use it to instantiate a service
+
+00:19:08,320 --> 00:19:11,120
+client
+
+00:19:09,280 --> 00:19:12,960
+make rpc calls and you can also
+
+00:19:11,120 --> 00:19:14,799
+eventually close it in the same way
+
+00:19:12,960 --> 00:19:16,799
+and if you close this connection the
+
+00:19:14,799 --> 00:19:18,240
+reverse proxy which runs
+
+00:19:16,799 --> 00:19:20,320
+in the background will also get
+
+00:19:18,240 --> 00:19:23,600
+automatically shut down there's no need
+
+00:19:20,320 --> 00:19:26,640
+to do this explicitly
+
+00:19:23,600 --> 00:19:29,200
+on the server side uh the example
+
+00:19:26,640 --> 00:19:30,400
+i have is pretty simple um and then very
+
+00:19:29,200 --> 00:19:32,240
+stripped down and
+
+00:19:30,400 --> 00:19:33,679
+it actually won't work like that out of
+
+00:19:32,240 --> 00:19:36,240
+the box but yeah
+
+00:19:33,679 --> 00:19:38,720
+just to give you an idea um you create a
+
+00:19:36,240 --> 00:19:40,480
+new grpc server you register
+
+00:19:38,720 --> 00:19:42,240
+your service handlers to this like the
+
+00:19:40,480 --> 00:19:45,039
+echo server in this case
+
+00:19:42,240 --> 00:19:46,799
+and then you call grpc serve with a
+
+00:19:45,039 --> 00:19:48,880
+respective listener in this case we
+
+00:19:46,799 --> 00:19:52,480
+listen on port 843
+
+00:19:48,880 --> 00:19:53,120
+with the tls settings uh when using our
+
+00:19:52,480 --> 00:19:56,400
+library
+
+00:19:53,120 --> 00:19:57,520
+that injects your hpc web downgrading
+
+00:19:56,400 --> 00:20:01,200
+handler
+
+00:19:57,520 --> 00:20:03,039
+um you would start with creating the gpc
+
+00:20:01,200 --> 00:20:04,240
+server in the same way you register your
+
+00:20:03,039 --> 00:20:06,080
+service handlers
+
+00:20:04,240 --> 00:20:08,640
+but instead of having the jpc server
+
+00:20:06,080 --> 00:20:12,000
+directly serve network connections
+
+00:20:08,640 --> 00:20:14,960
+um you create a go http http
+
+00:20:12,000 --> 00:20:15,520
+server with respect with a handler which
+
+00:20:14,960 --> 00:20:18,400
+is
+
+00:20:15,520 --> 00:20:19,840
+populated by calling the create
+
+00:20:18,400 --> 00:20:21,600
+downgrading handler
+
+00:20:19,840 --> 00:20:22,960
+from our library and this create
+
+00:20:21,600 --> 00:20:26,240
+downgrading handler function
+
+00:20:22,960 --> 00:20:28,559
+returns an http handler which does the
+
+00:20:26,240 --> 00:20:29,840
+grpc web downgrading in an adapter
+
+00:20:28,559 --> 00:20:32,720
+fashion
+
+00:20:29,840 --> 00:20:33,600
+you pass this function the grpc server
+
+00:20:32,720 --> 00:20:37,039
+object
+
+00:20:33,600 --> 00:20:39,280
+and possibly also another http handler
+
+00:20:37,039 --> 00:20:40,799
+and it can be used to multiplex the same
+
+00:20:39,280 --> 00:20:43,840
+port for grpc
+
+00:20:40,799 --> 00:20:45,440
+and plain http traffic you don't need to
+
+00:20:43,840 --> 00:20:46,640
+use that you can also just pass nail
+
+00:20:45,440 --> 00:20:49,120
+here
+
+00:20:46,640 --> 00:20:50,960
+and then you have that http server serve
+
+00:20:49,120 --> 00:20:52,159
+network connections they can also be tls
+
+00:20:50,960 --> 00:20:53,440
+enabled
+
+00:20:52,159 --> 00:20:56,000
+and that's really it and then you're
+
+00:20:53,440 --> 00:20:58,559
+basically ready to go you won't be used
+
+00:20:56,000 --> 00:20:59,760
+be able to use client streaming calls
+
+00:20:58,559 --> 00:21:02,720
+but you can use
+
+00:20:59,760 --> 00:21:03,760
+unary and server streaming calls and no
+
+00:21:02,720 --> 00:21:07,679
+further
+
+00:21:03,760 --> 00:21:07,679
+changes required to the application code
+
+00:21:08,320 --> 00:21:11,679
+before i conclude i just want to talk
+
+00:21:11,039 --> 00:21:13,600
+about
+
+00:21:11,679 --> 00:21:14,799
+two lines of future work that we're
+
+00:21:13,600 --> 00:21:15,919
+planning
+
+00:21:14,799 --> 00:21:18,159
+the existing code is not really
+
+00:21:15,919 --> 00:21:18,720
+performance optimized because the usage
+
+00:21:18,159 --> 00:21:21,120
+is not
+
+00:21:18,720 --> 00:21:21,760
+performance sensitive at least not at a
+
+00:21:21,120 --> 00:21:24,640
+kind of like
+
+00:21:21,760 --> 00:21:26,000
+individual rpg call overhead uh we
+
+00:21:24,640 --> 00:21:27,280
+definitely want to do some performance
+
+00:21:26,000 --> 00:21:29,679
+optimizations and one
+
+00:21:27,280 --> 00:21:30,799
+idea that i have is to basically do an
+
+00:21:29,679 --> 00:21:34,240
+auto sensing request
+
+00:21:30,799 --> 00:21:37,840
+to determine if we actually need
+
+00:21:34,240 --> 00:21:39,840
+that proxy on the client side
+
+00:21:37,840 --> 00:21:41,679
+uh or we can just bypass it because we
+
+00:21:39,840 --> 00:21:43,760
+know that the connection is going
+
+00:21:41,679 --> 00:21:44,799
+either directly to the remote peer or
+
+00:21:43,760 --> 00:21:47,840
+only through
+
+00:21:44,799 --> 00:21:49,840
+compatible proxies in between
+
+00:21:47,840 --> 00:21:51,280
+the other line of work is to support
+
+00:21:49,840 --> 00:21:53,280
+client streaming and bi-directional
+
+00:21:51,280 --> 00:21:55,679
+streaming rpcs
+
+00:21:53,280 --> 00:21:57,280
+as i said earlier that is generally
+
+00:21:55,679 --> 00:21:58,320
+client streaming is not possible over
+
+00:21:57,280 --> 00:22:01,919
+http1
+
+00:21:58,320 --> 00:22:05,440
+but we could use websockets websockets
+
+00:22:01,919 --> 00:22:07,840
+are generally wider supported among
+
+00:22:05,440 --> 00:22:09,520
+proxies and reverse proxies for example
+
+00:22:07,840 --> 00:22:12,400
+aws's alb
+
+00:22:09,520 --> 00:22:14,720
+does in fact support websockets and by
+
+00:22:12,400 --> 00:22:17,120
+using web sockets for the connections
+
+00:22:14,720 --> 00:22:17,840
+and implementing a grpc over websocket
+
+00:22:17,120 --> 00:22:20,640
+logic
+
+00:22:17,840 --> 00:22:22,480
+we could actually also realize client
+
+00:22:20,640 --> 00:22:24,960
+streaming calls
+
+00:22:22,480 --> 00:22:26,480
+that's work that's actually actively
+
+00:22:24,960 --> 00:22:28,000
+ongoing and
+
+00:22:26,480 --> 00:22:29,919
+it's being implemented it's already
+
+00:22:28,000 --> 00:22:31,760
+implemented in our
+
+00:22:29,919 --> 00:22:34,240
+product offering and we are currently
+
+00:22:31,760 --> 00:22:34,720
+working on upstreaming this to the open
+
+00:22:34,240 --> 00:22:37,039
+source
+
+00:22:34,720 --> 00:22:39,039
+repository to make it available for
+
+00:22:37,039 --> 00:22:41,200
+everyone
+
+00:22:39,039 --> 00:22:42,720
+this concludes my talk i want to thank
+
+00:22:41,200 --> 00:22:44,720
+all of you for listening
+
+00:22:42,720 --> 00:22:46,640
+i've added here my email address in case
+
+00:22:44,720 --> 00:22:47,679
+you have any questions or feedback or
+
+00:22:46,640 --> 00:22:50,799
+comments or maybe
+
+00:22:47,679 --> 00:22:53,440
+ideas feature requests
+
+00:22:50,799 --> 00:22:54,480
+you're also welcome to use the github
+
+00:22:53,440 --> 00:22:57,360
+issue tracker
+
+00:22:54,480 --> 00:22:58,880
+for leaving this the url is i've printed
+
+00:22:57,360 --> 00:23:01,840
+here at the bottom of the slide
+
+00:22:58,880 --> 00:23:02,960
+just file a feature request or back or
+
+00:23:01,840 --> 00:23:05,919
+just drop a note
+
+00:23:02,960 --> 00:23:06,799
+to saying that you found it helpful and
+
+00:23:05,919 --> 00:23:08,400
+that's it
+
+00:23:06,799 --> 00:23:10,080
+i want to thank everyone for listening
+
+00:23:08,400 --> 00:23:15,280
+again
+
+00:23:10,080 --> 00:23:15,280
+
+YouTube URL: https://www.youtube.com/watch?v=Vbw8h0RCn2E
+
+

@@ -1,0 +1,4573 @@
+Title: DrupalCon Dublin 2016: Faster and More Scalable than Memcache Redis: Tiered Storage with LCache
+Publication date: 2016-09-27
+Playlist: DrupalCon Dublin 2016
+Description: 
+	Scalable caching in Drupal is broken. Once cache access saturates a network link, the main options are Memcache sharding (which has broken coherency during and after network splits) and Redis clustering (immature in multi-master and as complex as MySQL replication in master/replica modes).
+
+We can do better. We can have better performance, scale, and operational simplicity. We just need to take a lesson from multicore processor architectures and their use of L1/L2 caches. Drupal doesn't even need full-scale coherency management; it just needs the cache writes on an earlier request to be guaranteed readable on a later request.
+
+Inspired by how processors handle core-local caches and the design of Pantheon's Valhalla file system, I've written a library and module called LCache with the following properties:
+
+Uses the database for canonical cache storage and coherency management. This is the L2.
+Opportunistically uses APCu (which is local to each PHP-FPM pool and absent for CLI) as an L1.
+Before Drupal bootstraps, it freshens APCu (if present) using L2's causality and sequencing information.
+Falls back to just using the database cache if APCu isn't present or functional.
+There is nothing extra to deploy or configure, just enabling the APCu extension for PHP.
+Support for tag-based invalidation.
+Initial results show 20% less page-generation time than with datacenter-local (but not host-local) Redis access. This is primarily because there's only one round-trip to the cache for each request, and that request only returns data for cache updates.
+
+In this presentation, I will cover:
+
+The coherency protocol, including some discussion of vector clocks
+Benchmarks
+The unit testing model for the cache coherency implementation
+How fallback to pure database caching works
+Why core should adopt this as the default cache implementation in, say, Drupal 8.3 or 8.4.
+Captions: 
+	00:00:00,000 --> 00:00:04,290
+okay seeing as it's already a couple
+
+00:00:02,250 --> 00:00:06,509
+minutes past start I think I'll kick
+
+00:00:04,290 --> 00:00:09,990
+things off because I want to leave some
+
+00:00:06,509 --> 00:00:11,490
+time for questions so I recognize many
+
+00:00:09,990 --> 00:00:13,889
+faces in here but for the feet people
+
+00:00:11,490 --> 00:00:15,150
+like don't recognize I'm David Strauss I
+
+00:00:13,889 --> 00:00:17,490
+work on a lot of performance and
+
+00:00:15,150 --> 00:00:20,580
+scalability challenges with Drupal
+
+00:00:17,490 --> 00:00:23,699
+particularly on the Pantheon platform
+
+00:00:20,580 --> 00:00:26,130
+where we run a whole bunch of Drupal
+
+00:00:23,699 --> 00:00:28,859
+sites and so we get to run it all sorts
+
+00:00:26,130 --> 00:00:32,340
+of Education and scalability challenges
+
+00:00:28,859 --> 00:00:34,890
+and this is a caching model that has
+
+00:00:32,340 --> 00:00:37,050
+been born out of those so I just want to
+
+00:00:34,890 --> 00:00:38,879
+start off with what if the challenges
+
+00:00:37,050 --> 00:00:40,710
+that we're running into today and this
+
+00:00:38,879 --> 00:00:44,040
+is specifically for Drupal's object
+
+00:00:40,710 --> 00:00:47,940
+cache the object cache in Drupal is the
+
+00:00:44,040 --> 00:00:49,940
+API historically and say Drupal 7 and
+
+00:00:47,940 --> 00:00:54,210
+before with kind of cash set cash get
+
+00:00:49,940 --> 00:00:56,850
+and as we move into the Drupal 8 era
+
+00:00:54,210 --> 00:00:59,160
+increasingly more and more of an object
+
+00:00:56,850 --> 00:01:01,289
+model around cash assets this is
+
+00:00:59,160 --> 00:01:04,739
+catching everything from entities to
+
+00:01:01,289 --> 00:01:08,939
+fields to to various data related to
+
+00:01:04,739 --> 00:01:11,250
+users to views configurations so that
+
+00:01:08,939 --> 00:01:14,070
+the application has rapid access to the
+
+00:01:11,250 --> 00:01:16,530
+data that doesn't require going all the
+
+00:01:14,070 --> 00:01:19,290
+way to the database canonical data for
+
+00:01:16,530 --> 00:01:21,450
+everything and then re building it from
+
+00:01:19,290 --> 00:01:24,240
+scratch every time it needs it drupal
+
+00:01:21,450 --> 00:01:26,759
+uses the cash really heavily up to
+
+00:01:24,240 --> 00:01:30,020
+hundreds of times per page of reading
+
+00:01:26,759 --> 00:01:34,439
+out of the cash and on average on a page
+
+00:01:30,020 --> 00:01:36,990
+often 10 to even 40 cash rights so it's
+
+00:01:34,439 --> 00:01:39,570
+a very busy part of Drupal core and
+
+00:01:36,990 --> 00:01:42,869
+historically people have solved this
+
+00:01:39,570 --> 00:01:44,640
+problem in terms of scaling it getting
+
+00:01:42,869 --> 00:01:46,890
+it decouples from the database and its
+
+00:01:44,640 --> 00:01:49,590
+scalability issues by using things like
+
+00:01:46,890 --> 00:01:53,670
+memcache and Redis but these have their
+
+00:01:49,590 --> 00:01:56,369
+own issues this is the traditional
+
+00:01:53,670 --> 00:01:59,729
+answer for I want to scale up my drupal
+
+00:01:56,369 --> 00:02:01,049
+site I have multiple web servers I want
+
+00:01:59,729 --> 00:02:02,810
+to implement something like redness or
+
+00:02:01,049 --> 00:02:05,969
+memcache I use a module for that
+
+00:02:02,810 --> 00:02:08,099
+configure drupal's caches to use it this
+
+00:02:05,969 --> 00:02:10,440
+is mostly actually pretty good this has
+
+00:02:08,099 --> 00:02:12,780
+gotten us really far because this
+
+00:02:10,440 --> 00:02:13,620
+unlocked us from all these reads and
+
+00:02:12,780 --> 00:02:17,190
+writes happening on a day
+
+00:02:13,620 --> 00:02:19,830
+which the database treats data very very
+
+00:02:17,190 --> 00:02:22,170
+seriously it treats it in a way where
+
+00:02:19,830 --> 00:02:26,040
+when it says it's written something it's
+
+00:02:22,170 --> 00:02:28,980
+it it it's really written it like all
+
+00:02:26,040 --> 00:02:31,470
+the way to disk it's tried to sync out
+
+00:02:28,980 --> 00:02:33,690
+that data this means that the database
+
+00:02:31,470 --> 00:02:35,670
+is very reliable but it's not very
+
+00:02:33,690 --> 00:02:37,799
+performant for data that we don't care
+
+00:02:35,670 --> 00:02:41,430
+very much about or need or we can
+
+00:02:37,799 --> 00:02:43,890
+regenerate but the solution doesn't take
+
+00:02:41,430 --> 00:02:47,660
+us all that far because this creates a
+
+00:02:43,890 --> 00:02:51,450
+bottleneck the the bottleneck here is
+
+00:02:47,660 --> 00:02:54,840
+simply that the network link going to
+
+00:02:51,450 --> 00:02:58,400
+the caching box is just going to be
+
+00:02:54,840 --> 00:03:01,859
+capped out and we see this regularly on
+
+00:02:58,400 --> 00:03:05,519
+on Pantheon where even when we provided
+
+00:03:01,859 --> 00:03:07,140
+dedicated Redis instances to servers we
+
+00:03:05,519 --> 00:03:08,879
+sometimes see it max out the network
+
+00:03:07,140 --> 00:03:11,670
+link we're talking gigabits of traffic
+
+00:03:08,879 --> 00:03:14,220
+being read out of these caches here on
+
+00:03:11,670 --> 00:03:17,129
+the left these are in terms of megabytes
+
+00:03:14,220 --> 00:03:19,260
+per second so if you multiply that by
+
+00:03:17,129 --> 00:03:22,500
+eight you get some idea of the network
+
+00:03:19,260 --> 00:03:24,079
+links that are getting saturated a Redis
+
+00:03:22,500 --> 00:03:27,630
+isn't the only way to do this though um
+
+00:03:24,079 --> 00:03:31,470
+you can use other approaches to try and
+
+00:03:27,630 --> 00:03:33,780
+scale out this problem on aquia for
+
+00:03:31,470 --> 00:03:35,430
+example they use memcache which you can
+
+00:03:33,780 --> 00:03:37,980
+deploy multiple servers for then you're
+
+00:03:35,430 --> 00:03:40,799
+distributing some of the cash reads but
+
+00:03:37,980 --> 00:03:42,840
+these all have different issues like on
+
+00:03:40,799 --> 00:03:45,180
+the in the reddest world if you start
+
+00:03:42,840 --> 00:03:47,209
+using multiple boxes and replicating you
+
+00:03:45,180 --> 00:03:50,269
+have your own replication topology
+
+00:03:47,209 --> 00:03:52,260
+possibly avian multi master set up and
+
+00:03:50,269 --> 00:03:54,870
+anyone in this room has dealt with that
+
+00:03:52,260 --> 00:03:57,090
+for MySQL just multiply that problem
+
+00:03:54,870 --> 00:04:00,269
+over again you have your own kind of
+
+00:03:57,090 --> 00:04:02,400
+latency issues for that the connectivity
+
+00:04:00,269 --> 00:04:04,230
+between those boxes may may get severed
+
+00:04:02,400 --> 00:04:06,510
+you could also go with the memcache
+
+00:04:04,230 --> 00:04:08,639
+approach where the boxes don't talk to
+
+00:04:06,510 --> 00:04:11,639
+each other it shards out the cash but
+
+00:04:08,639 --> 00:04:14,699
+then as boxes appear or disappear which
+
+00:04:11,639 --> 00:04:16,889
+is what gives you the h.a for it you end
+
+00:04:14,699 --> 00:04:18,959
+up with consistency issues because even
+
+00:04:16,889 --> 00:04:22,019
+with modern consistent hashing with
+
+00:04:18,959 --> 00:04:24,659
+memcache it is still now choosing a new
+
+00:04:22,019 --> 00:04:26,820
+box to put a cache item on or taking a
+
+00:04:24,659 --> 00:04:29,190
+cache item away from that box as
+
+00:04:26,820 --> 00:04:31,020
+boxes appear to exist or not exist which
+
+00:04:29,190 --> 00:04:34,050
+the web servers may not even agree on
+
+00:04:31,020 --> 00:04:35,520
+which boxes exist so both of them have
+
+00:04:34,050 --> 00:04:38,670
+their issues for scaling whether it's
+
+00:04:35,520 --> 00:04:41,340
+administrative complexity or the actual
+
+00:04:38,670 --> 00:04:42,570
+consistency that they provide so I've
+
+00:04:41,340 --> 00:04:44,610
+never really found these to be
+
+00:04:42,570 --> 00:04:46,770
+particularly satisfying answers and
+
+00:04:44,610 --> 00:04:49,080
+ultimately these are all still network
+
+00:04:46,770 --> 00:04:51,180
+bound in the sense that all these cash
+
+00:04:49,080 --> 00:04:53,670
+litem every time that you read one is
+
+00:04:51,180 --> 00:04:55,980
+going over the network so if you're
+
+00:04:53,670 --> 00:04:57,690
+saturating those links you kind of are
+
+00:04:55,980 --> 00:05:00,150
+dividing the problem like you're
+
+00:04:57,690 --> 00:05:02,220
+increasing the denominator of how much
+
+00:05:00,150 --> 00:05:04,740
+network throughput is going to each box
+
+00:05:02,220 --> 00:05:07,590
+but you're not really changing the
+
+00:05:04,740 --> 00:05:12,150
+nature of of the fact that it's all
+
+00:05:07,590 --> 00:05:15,090
+shipping over the network uh so um I i
+
+00:05:12,150 --> 00:05:16,980
+I've looked at this problem and I wanted
+
+00:05:15,090 --> 00:05:20,270
+to find all the solutions that I could
+
+00:05:16,980 --> 00:05:23,010
+aggregate from other other
+
+00:05:20,270 --> 00:05:24,540
+implementations not necessarily using
+
+00:05:23,010 --> 00:05:28,200
+something that's actually implemented
+
+00:05:24,540 --> 00:05:31,550
+elsewhere directly but I'm trying crib
+
+00:05:28,200 --> 00:05:33,150
+from the solutions that I've seen work
+
+00:05:31,550 --> 00:05:35,910
+one of the things that I've learned
+
+00:05:33,150 --> 00:05:38,790
+about ever since undergrad is is
+
+00:05:35,910 --> 00:05:40,290
+processor architecture and this is not
+
+00:05:38,790 --> 00:05:42,020
+an uncommon problem when you're
+
+00:05:40,290 --> 00:05:44,070
+designing a multi-core processor where
+
+00:05:42,020 --> 00:05:46,080
+every time you add another core to the
+
+00:05:44,070 --> 00:05:49,170
+processor you're adding a whole bunch of
+
+00:05:46,080 --> 00:05:50,580
+local computational capacity but one of
+
+00:05:49,170 --> 00:05:52,980
+the biggest problems in scaling
+
+00:05:50,580 --> 00:05:55,500
+processors is that computational
+
+00:05:52,980 --> 00:05:57,180
+capacity isn't very worthwhile if it
+
+00:05:55,500 --> 00:05:58,500
+can't actually work on the data set so
+
+00:05:57,180 --> 00:06:01,770
+you have something known as a working
+
+00:05:58,500 --> 00:06:05,130
+set and when you're designing a
+
+00:06:01,770 --> 00:06:07,260
+processor the for the processor core to
+
+00:06:05,130 --> 00:06:10,260
+continue to be pumped full of data and
+
+00:06:07,260 --> 00:06:12,150
+to be able to really execute thing
+
+00:06:10,260 --> 00:06:15,060
+through things as fast as it really can
+
+00:06:12,150 --> 00:06:17,040
+in the actual core of it it needs the
+
+00:06:15,060 --> 00:06:19,110
+data to be local to it you really really
+
+00:06:17,040 --> 00:06:21,720
+want to bring that working set as close
+
+00:06:19,110 --> 00:06:23,460
+to the computation as possible so modern
+
+00:06:21,720 --> 00:06:27,600
+multi-core processors use what are
+
+00:06:23,460 --> 00:06:30,720
+called l1 l2 l3 you name it how many
+
+00:06:27,600 --> 00:06:33,450
+levels of caches this one here shows
+
+00:06:30,720 --> 00:06:36,840
+that where it's a local l1 and a shared
+
+00:06:33,450 --> 00:06:38,940
+l2 a lot of multi-core processors have a
+
+00:06:36,840 --> 00:06:40,169
+local l2 as well and then a shared l3
+
+00:06:38,940 --> 00:06:42,150
+but
+
+00:06:40,169 --> 00:06:44,189
+really the design is the same in the
+
+00:06:42,150 --> 00:06:46,650
+sense that there is some data that is
+
+00:06:44,189 --> 00:06:48,330
+cached locally and not shared and there
+
+00:06:46,650 --> 00:06:51,180
+is some data that's cashed in a way that
+
+00:06:48,330 --> 00:06:53,550
+is shared and the data that's close to
+
+00:06:51,180 --> 00:06:58,800
+the core is very fast to access but is
+
+00:06:53,550 --> 00:07:02,400
+not gay but is not distributed in the
+
+00:06:58,800 --> 00:07:06,060
+same way where it updating data in the
+
+00:07:02,400 --> 00:07:07,830
+local cache can require complex
+
+00:07:06,060 --> 00:07:09,479
+coherency management so that it's
+
+00:07:07,830 --> 00:07:11,580
+available in other cores if you have a
+
+00:07:09,479 --> 00:07:13,529
+say multi-threaded or multi process
+
+00:07:11,580 --> 00:07:14,939
+application because even though it's
+
+00:07:13,529 --> 00:07:18,659
+doing this it has to preserve the
+
+00:07:14,939 --> 00:07:20,849
+illusion of of all these caches being
+
+00:07:18,659 --> 00:07:22,589
+one main memory like when you're
+
+00:07:20,849 --> 00:07:24,300
+programming on these processors you're
+
+00:07:22,589 --> 00:07:26,610
+just addressing the memory as if it's
+
+00:07:24,300 --> 00:07:28,080
+just the whole set of RAM and then the
+
+00:07:26,610 --> 00:07:29,639
+processors themselves are actually
+
+00:07:28,080 --> 00:07:32,639
+juggling this data down into these
+
+00:07:29,639 --> 00:07:34,800
+different caches even this local l1 and
+
+00:07:32,639 --> 00:07:37,469
+then if you write data to the l1 and
+
+00:07:34,800 --> 00:07:39,599
+another core tries to read data from the
+
+00:07:37,469 --> 00:07:41,999
+same area of memory the processor still
+
+00:07:39,599 --> 00:07:43,919
+has to make it appear to actually be
+
+00:07:41,999 --> 00:07:45,300
+consistent you you pay a little
+
+00:07:43,919 --> 00:07:47,849
+performance penalty when that happens
+
+00:07:45,300 --> 00:07:49,529
+but it still works and so processors
+
+00:07:47,849 --> 00:07:52,919
+have developed these coherency
+
+00:07:49,529 --> 00:07:54,870
+management algorithms where they mark
+
+00:07:52,919 --> 00:07:57,810
+different regions of memory is owned by
+
+00:07:54,870 --> 00:08:00,210
+a certain processor core or they lock it
+
+00:07:57,810 --> 00:08:02,520
+in a certain way or they write through
+
+00:08:00,210 --> 00:08:05,189
+in a way where if the rights become more
+
+00:08:02,520 --> 00:08:07,259
+expensive so that if core 0 wants to
+
+00:08:05,189 --> 00:08:09,029
+write to its l1 for a particular thing
+
+00:08:07,259 --> 00:08:12,449
+it actually ends up writing to the other
+
+00:08:09,029 --> 00:08:15,360
+ones as well so there there's no one way
+
+00:08:12,449 --> 00:08:16,949
+this is done but but the the message
+
+00:08:15,360 --> 00:08:19,680
+from here is that bring the data close
+
+00:08:16,949 --> 00:08:22,050
+to the computation but preserve the
+
+00:08:19,680 --> 00:08:24,689
+illusion of consistency so that the
+
+00:08:22,050 --> 00:08:29,189
+developer doesn't have to care about all
+
+00:08:24,689 --> 00:08:30,870
+this juggling around I also pulled from
+
+00:08:29,189 --> 00:08:33,779
+of what we've done for the file system
+
+00:08:30,870 --> 00:08:36,899
+on Pantheon which is a system that we
+
+00:08:33,779 --> 00:08:39,050
+internally call Valhalla and one of the
+
+00:08:36,899 --> 00:08:42,029
+big aspects that this system does is
+
+00:08:39,050 --> 00:08:43,709
+it's it has that same kind of problem of
+
+00:08:42,029 --> 00:08:45,959
+trying to pull the data local to the web
+
+00:08:43,709 --> 00:08:48,600
+server but still managed coherency
+
+00:08:45,959 --> 00:08:51,839
+across the nodes and the real lesson
+
+00:08:48,600 --> 00:08:53,580
+from here is that we didn't just do a
+
+00:08:51,839 --> 00:08:54,930
+traditional file system where
+
+00:08:53,580 --> 00:08:57,210
+you have the rights and then you write
+
+00:08:54,930 --> 00:08:59,160
+the data and you invalidate we actually
+
+00:08:57,210 --> 00:09:01,770
+implemented a cache coherency algorithm
+
+00:08:59,160 --> 00:09:03,690
+where as you write data to the file
+
+00:09:01,770 --> 00:09:05,640
+system it actually sends those events
+
+00:09:03,690 --> 00:09:08,640
+back down to all the web servers so that
+
+00:09:05,640 --> 00:09:11,190
+the right propagates and eventually ends
+
+00:09:08,640 --> 00:09:13,830
+up consistently in all the caches and so
+
+00:09:11,190 --> 00:09:16,080
+what we have here is another model a
+
+00:09:13,830 --> 00:09:18,750
+little more relaxed than a multi-core
+
+00:09:16,080 --> 00:09:20,400
+processor and terms of consistency but
+
+00:09:18,750 --> 00:09:21,870
+ultimately achieving that goal of
+
+00:09:20,400 --> 00:09:25,670
+bringing the data close to the
+
+00:09:21,870 --> 00:09:28,440
+computation but still maintain coherency
+
+00:09:25,670 --> 00:09:30,860
+I'm going to put the stack online just
+
+00:09:28,440 --> 00:09:35,400
+in case if you want to take it but uh
+
+00:09:30,860 --> 00:09:36,810
+the so that's another lesson we've had a
+
+00:09:35,400 --> 00:09:37,860
+lot of experience developing this
+
+00:09:36,810 --> 00:09:39,480
+because we've been using it in
+
+00:09:37,860 --> 00:09:41,940
+production for years so we know some
+
+00:09:39,480 --> 00:09:45,360
+idea of what scales in terms like
+
+00:09:41,940 --> 00:09:48,390
+coherency management and what doesn't be
+
+00:09:45,360 --> 00:09:50,850
+another lesson that I pulled from is
+
+00:09:48,390 --> 00:09:54,540
+what my skew all does for its modern
+
+00:09:50,850 --> 00:09:56,280
+replication model traditionally MySQL
+
+00:09:54,540 --> 00:09:57,360
+has replicated to multiple servers using
+
+00:09:56,280 --> 00:10:00,000
+what's called statement based
+
+00:09:57,360 --> 00:10:02,790
+replication where what it does is you
+
+00:10:00,000 --> 00:10:05,370
+write some SQL to the map master server
+
+00:10:02,790 --> 00:10:08,370
+and then for the replicas it just sends
+
+00:10:05,370 --> 00:10:10,050
+that same SQL out to the replica this is
+
+00:10:08,370 --> 00:10:13,380
+actually not really the favored model
+
+00:10:10,050 --> 00:10:15,810
+anymore for mysql replication the modern
+
+00:10:13,380 --> 00:10:18,060
+method is either a hybrid of that with a
+
+00:10:15,810 --> 00:10:19,290
+new way or just purely the new way which
+
+00:10:18,060 --> 00:10:22,740
+is actually what we use at Pantheon
+
+00:10:19,290 --> 00:10:25,110
+which is when you send the SQL to the
+
+00:10:22,740 --> 00:10:27,450
+primary server it runs the query
+
+00:10:25,110 --> 00:10:29,490
+modifies the data and then figures that
+
+00:10:27,450 --> 00:10:32,130
+what rose am i changing and then it
+
+00:10:29,490 --> 00:10:35,610
+computes that into a change set that is
+
+00:10:32,130 --> 00:10:38,010
+very concrete in terms of saying this
+
+00:10:35,610 --> 00:10:39,690
+primary key has these columns update to
+
+00:10:38,010 --> 00:10:41,700
+this and this primary key has these
+
+00:10:39,690 --> 00:10:43,710
+columns update to this it always looks
+
+00:10:41,700 --> 00:10:47,850
+exactly the same way you can even see a
+
+00:10:43,710 --> 00:10:50,460
+sample of output from taking a bin log
+
+00:10:47,850 --> 00:10:54,030
+from this style of replication in it
+
+00:10:50,460 --> 00:10:56,880
+translating it into pseudo SQL basically
+
+00:10:54,030 --> 00:10:58,290
+saying four rows that match this set
+
+00:10:56,880 --> 00:10:59,760
+these values to this and that's what
+
+00:10:58,290 --> 00:11:02,250
+they all look like when they replicate
+
+00:10:59,760 --> 00:11:05,520
+the lesson here is that you can have
+
+00:11:02,250 --> 00:11:07,260
+complex models for altering the state of
+
+00:11:05,520 --> 00:11:09,390
+a system and replicas
+
+00:11:07,260 --> 00:11:11,100
+get out by materializing that so that
+
+00:11:09,390 --> 00:11:13,050
+the replication model itself doesn't
+
+00:11:11,100 --> 00:11:14,780
+have to be that complicated um this is
+
+00:11:13,050 --> 00:11:17,220
+actually what we do here as well where
+
+00:11:14,780 --> 00:11:18,900
+we have a very simple way that the
+
+00:11:17,220 --> 00:11:20,520
+events actually go back down to the
+
+00:11:18,900 --> 00:11:22,260
+client even though there are many ways
+
+00:11:20,520 --> 00:11:25,170
+you can minute manipulate the data on
+
+00:11:22,260 --> 00:11:28,770
+the server itself so all these have been
+
+00:11:25,170 --> 00:11:31,770
+kind of pulled into the model for el
+
+00:11:28,770 --> 00:11:33,510
+cash so it's inspired by multi-core
+
+00:11:31,770 --> 00:11:35,910
+processors to get the workings that
+
+00:11:33,510 --> 00:11:38,490
+close working set close to the actual
+
+00:11:35,910 --> 00:11:40,950
+work being done it's inspired by the
+
+00:11:38,490 --> 00:11:43,950
+file system we have in the sense that we
+
+00:11:40,950 --> 00:11:45,990
+do a right through cash where you update
+
+00:11:43,950 --> 00:11:47,760
+your local data and update the remote
+
+00:11:45,990 --> 00:11:50,490
+server and then have events that
+
+00:11:47,760 --> 00:11:53,670
+replicate back down and it's inspired by
+
+00:11:50,490 --> 00:11:55,620
+the mysql replication of handle all the
+
+00:11:53,670 --> 00:11:58,590
+complex stuff on the server and then
+
+00:11:55,620 --> 00:12:01,350
+just send a digested simple set of
+
+00:11:58,590 --> 00:12:03,990
+events back down to all the clients to
+
+00:12:01,350 --> 00:12:06,480
+simplify the coherency management so
+
+00:12:03,990 --> 00:12:10,080
+that's a lot of theory to dump but all
+
+00:12:06,480 --> 00:12:13,020
+the but I wanted to take known good
+
+00:12:10,080 --> 00:12:15,030
+designs and pull it into this and I
+
+00:12:13,020 --> 00:12:17,550
+wanted also contrast with what has
+
+00:12:15,030 --> 00:12:20,460
+landed in Drupal so far in terms of
+
+00:12:17,550 --> 00:12:21,960
+change fast back end there's a they're
+
+00:12:20,460 --> 00:12:24,240
+actually quite different in their design
+
+00:12:21,960 --> 00:12:27,780
+even though they both had the goal of
+
+00:12:24,240 --> 00:12:30,270
+bringing data close to the client one of
+
+00:12:27,780 --> 00:12:31,830
+the biggest differences is how it
+
+00:12:30,270 --> 00:12:35,040
+handles incremental changes to the cache
+
+00:12:31,830 --> 00:12:37,200
+where a change fast back-end has a very
+
+00:12:35,040 --> 00:12:39,000
+blunt approach to changes where you
+
+00:12:37,200 --> 00:12:42,000
+write one item the whole bin gets
+
+00:12:39,000 --> 00:12:44,070
+invalidated that works fine if you
+
+00:12:42,000 --> 00:12:46,710
+almost never right to have been but it's
+
+00:12:44,070 --> 00:12:48,360
+very hard and practice to to guarantee
+
+00:12:46,710 --> 00:12:49,320
+those kind of conditions and it
+
+00:12:48,360 --> 00:12:50,850
+certainly doesn't make for a
+
+00:12:49,320 --> 00:12:53,280
+general-purpose cash that we can use
+
+00:12:50,850 --> 00:12:57,360
+with more of Drupal core for things that
+
+00:12:53,280 --> 00:12:58,890
+might be changing fairly often the they
+
+00:12:57,360 --> 00:13:02,130
+also have a very different philosophy of
+
+00:12:58,890 --> 00:13:06,660
+how they work with the changes where L
+
+00:13:02,130 --> 00:13:09,030
+cash takes the changes and has these
+
+00:13:06,660 --> 00:13:12,660
+events that can alter individual items
+
+00:13:09,030 --> 00:13:14,910
+that replicate down to the local web
+
+00:13:12,660 --> 00:13:16,650
+head whereas change fast back end
+
+00:13:14,910 --> 00:13:20,010
+basically has these invalidation
+
+00:13:16,650 --> 00:13:21,089
+counters that provide a simple but blunt
+
+00:13:20,010 --> 00:13:23,009
+way to handle
+
+00:13:21,089 --> 00:13:24,449
+changes where basically it just puts
+
+00:13:23,009 --> 00:13:26,970
+down the hammer and says something has
+
+00:13:24,449 --> 00:13:29,730
+changed everything you know is wrong go
+
+00:13:26,970 --> 00:13:33,089
+back to the the database to figure out
+
+00:13:29,730 --> 00:13:34,470
+what is true how many people here have
+
+00:13:33,089 --> 00:13:37,319
+heard of change fast back in by the way
+
+00:13:34,470 --> 00:13:39,899
+okay so this is pretty new to a lot of
+
+00:13:37,319 --> 00:13:42,029
+people change fast back end is is in
+
+00:13:39,899 --> 00:13:44,519
+Drupal 8 core at this point and it's a
+
+00:13:42,029 --> 00:13:47,670
+cash you can use where you have a local
+
+00:13:44,519 --> 00:13:50,160
+storage which is often a PC you which is
+
+00:13:47,670 --> 00:13:52,740
+an in memory storage that is that is
+
+00:13:50,160 --> 00:13:55,860
+stored in a way that persists across PHP
+
+00:13:52,740 --> 00:13:58,379
+requests but doesn't actually replicate
+
+00:13:55,860 --> 00:14:00,629
+beyond your say php-fpm pool so if you
+
+00:13:58,379 --> 00:14:02,399
+have multiple web heads it's going to be
+
+00:14:00,629 --> 00:14:04,620
+fine for that local web head but it's
+
+00:14:02,399 --> 00:14:06,959
+not actually automatically shared in any
+
+00:14:04,620 --> 00:14:09,389
+way across a cluster and then change
+
+00:14:06,959 --> 00:14:13,110
+past back-end handles that by then back
+
+00:14:09,389 --> 00:14:14,670
+in the database to manage the coherency
+
+00:14:13,110 --> 00:14:16,980
+of that data where if you write dated to
+
+00:14:14,670 --> 00:14:18,509
+a bin it records that in the database it
+
+00:14:16,980 --> 00:14:22,290
+records the cache item you've written
+
+00:14:18,509 --> 00:14:25,649
+and then it just that every request
+
+00:14:22,290 --> 00:14:27,389
+checks against the database to see if a
+
+00:14:25,649 --> 00:14:29,189
+bin has changed and if it has then it
+
+00:14:27,389 --> 00:14:31,740
+treats everything it knows about that
+
+00:14:29,189 --> 00:14:35,610
+bin is wrong and then goes back to the
+
+00:14:31,740 --> 00:14:39,449
+origin l cash in contrast uses an event
+
+00:14:35,610 --> 00:14:41,790
+model for that where it it still uses a
+
+00:14:39,449 --> 00:14:43,800
+pc you and a database but instead of it
+
+00:14:41,790 --> 00:14:45,959
+basically having a thing where any right
+
+00:14:43,800 --> 00:14:47,970
+becomes a bin invalidation it actually
+
+00:14:45,959 --> 00:14:49,499
+keeps an event stream of these things
+
+00:14:47,970 --> 00:14:51,480
+that have changed where every time you
+
+00:14:49,499 --> 00:14:53,730
+write a cache item or delete a cache
+
+00:14:51,480 --> 00:14:58,439
+item or invalidate one or do anything
+
+00:14:53,730 --> 00:14:59,730
+with a tag or bin it records a set of
+
+00:14:58,439 --> 00:15:02,519
+events on the server side in the
+
+00:14:59,730 --> 00:15:04,860
+database that the client then pulls back
+
+00:15:02,519 --> 00:15:06,389
+down to fresh in its local cache so it
+
+00:15:04,860 --> 00:15:08,309
+takes this approach and this is
+
+00:15:06,389 --> 00:15:10,889
+something that we do with faux holla is
+
+00:15:08,309 --> 00:15:13,050
+it it freshens the local cache it
+
+00:15:10,889 --> 00:15:14,639
+doesn't just invalidate it and that
+
+00:15:13,050 --> 00:15:15,929
+means that the amount of network
+
+00:15:14,639 --> 00:15:18,779
+communication that occurs is
+
+00:15:15,929 --> 00:15:20,759
+proportional to the changes happening to
+
+00:15:18,779 --> 00:15:22,379
+the underlying data set not proportional
+
+00:15:20,759 --> 00:15:25,649
+to the size of the underlying data set
+
+00:15:22,379 --> 00:15:27,269
+and that means it works great even if
+
+00:15:25,649 --> 00:15:29,100
+you have a trickle of changes coming in
+
+00:15:27,269 --> 00:15:31,259
+even if you have a moderate number of
+
+00:15:29,100 --> 00:15:33,089
+changes coming in it works great about
+
+00:15:31,259 --> 00:15:34,769
+the only time it degrades as a model as
+
+00:15:33,089 --> 00:15:40,579
+if you are changing things more
+
+00:15:34,769 --> 00:15:43,980
+you really should for a cash um so um
+
+00:15:40,579 --> 00:15:46,769
+the the model that we implemented for
+
+00:15:43,980 --> 00:15:48,720
+this didn't solve everything out of the
+
+00:15:46,769 --> 00:15:50,429
+box of course like we've we've done a
+
+00:15:48,720 --> 00:15:53,189
+lot of production testing against this
+
+00:15:50,429 --> 00:15:55,230
+in terms of taking real-world drupal 7
+
+00:15:53,189 --> 00:15:57,980
+Drupal 8 and actually WordPress sites
+
+00:15:55,230 --> 00:16:01,049
+and putting this cash into them and
+
+00:15:57,980 --> 00:16:03,179
+checking our assumptions for with load
+
+00:16:01,049 --> 00:16:05,730
+tests and and click through tests where
+
+00:16:03,179 --> 00:16:07,199
+we were just hopping around the
+
+00:16:05,730 --> 00:16:11,790
+interface checking that things are
+
+00:16:07,199 --> 00:16:14,850
+working okay and that um that revealed a
+
+00:16:11,790 --> 00:16:16,410
+lot of misc found assumptions about how
+
+00:16:14,850 --> 00:16:18,540
+Drupal works with its cash even for
+
+00:16:16,410 --> 00:16:22,259
+someone who's worked with Drupal for
+
+00:16:18,540 --> 00:16:25,939
+basically ten years like I have so a
+
+00:16:22,259 --> 00:16:29,670
+Drupal rights to cash is very very often
+
+00:16:25,939 --> 00:16:32,730
+we often saw cases where on it would on
+
+00:16:29,670 --> 00:16:35,009
+average right 10 to 40 times per page
+
+00:16:32,730 --> 00:16:37,649
+two caches like doing calling the cash
+
+00:16:35,009 --> 00:16:39,869
+operation of course this is not evenly
+
+00:16:37,649 --> 00:16:42,779
+distributed among bends but this
+
+00:16:39,869 --> 00:16:44,490
+confirms our assumption that the kind of
+
+00:16:42,779 --> 00:16:49,829
+change fast back-end is not going to be
+
+00:16:44,490 --> 00:16:52,709
+a great general purpose cash el caches
+
+00:16:49,829 --> 00:16:55,379
+initial set model for processing a cash
+
+00:16:52,709 --> 00:16:57,779
+right turned out to not be ideal that
+
+00:16:55,379 --> 00:16:59,429
+way I had assumed going into this that I
+
+00:16:57,779 --> 00:17:01,170
+could make rights really expensive and
+
+00:16:59,429 --> 00:17:03,089
+it would be okay as long as right reads
+
+00:17:01,170 --> 00:17:04,829
+scaled out really really well but that's
+
+00:17:03,089 --> 00:17:08,069
+a pretty common assumption with caches
+
+00:17:04,829 --> 00:17:09,240
+but it ended up not being true and I'm
+
+00:17:08,069 --> 00:17:10,799
+going to show some benchmarks of
+
+00:17:09,240 --> 00:17:13,169
+different caching models we found in the
+
+00:17:10,799 --> 00:17:19,260
+database for actually storing the cache
+
+00:17:13,169 --> 00:17:21,720
+data we also found out that most modules
+
+00:17:19,260 --> 00:17:24,059
+assume that missing a cache item is a
+
+00:17:21,720 --> 00:17:26,220
+good reason to push the eventual thing
+
+00:17:24,059 --> 00:17:27,419
+it constructs into the cache that's
+
+00:17:26,220 --> 00:17:29,309
+actually not always a good assumption
+
+00:17:27,419 --> 00:17:31,380
+that modules make because a lot of times
+
+00:17:29,309 --> 00:17:32,669
+we see that happen where it writes the
+
+00:17:31,380 --> 00:17:36,809
+item and then it never gets read again
+
+00:17:32,669 --> 00:17:39,539
+and a lot of modules are overusing the
+
+00:17:36,809 --> 00:17:41,429
+cash in that sense where they are
+
+00:17:39,539 --> 00:17:44,100
+assuming that their path of code is a
+
+00:17:41,429 --> 00:17:45,840
+common case when it's not always and
+
+00:17:44,100 --> 00:17:47,549
+also some cash items even worse than
+
+00:17:45,840 --> 00:17:48,060
+that are actually set more often than
+
+00:17:47,549 --> 00:17:50,310
+their
+
+00:17:48,060 --> 00:17:52,470
+then they actually get them which means
+
+00:17:50,310 --> 00:17:54,090
+that there gets there are sets for those
+
+00:17:52,470 --> 00:17:56,100
+cash items that have literally never
+
+00:17:54,090 --> 00:18:00,300
+been read before it actually sets it
+
+00:17:56,100 --> 00:18:02,760
+again um we also initially implemented
+
+00:18:00,300 --> 00:18:04,980
+this where we used cash tags for bins
+
+00:18:02,760 --> 00:18:07,440
+where there's kind of in the relational
+
+00:18:04,980 --> 00:18:09,390
+model it has like a tag table that
+
+00:18:07,440 --> 00:18:11,250
+basically tracks what tags are on what
+
+00:18:09,390 --> 00:18:13,740
+cash items and then we initially use
+
+00:18:11,250 --> 00:18:15,290
+this for implementing bends but we found
+
+00:18:13,740 --> 00:18:17,580
+that that didn't work either because
+
+00:18:15,290 --> 00:18:21,090
+clearing full bins and Drupal turned out
+
+00:18:17,580 --> 00:18:26,580
+to be quite common and I we needed been
+
+00:18:21,090 --> 00:18:27,990
+clearing to be really cheap so those
+
+00:18:26,580 --> 00:18:30,210
+were things that caused us to modify the
+
+00:18:27,990 --> 00:18:33,600
+design but this was one of the most
+
+00:18:30,210 --> 00:18:36,900
+surprising things in the database itself
+
+00:18:33,600 --> 00:18:40,110
+for processing rights and insert focused
+
+00:18:36,900 --> 00:18:43,470
+model was actually the the serious
+
+00:18:40,110 --> 00:18:45,870
+winner here by default Drupal with its
+
+00:18:43,470 --> 00:18:48,510
+cache uses a more updater insert model
+
+00:18:45,870 --> 00:18:49,980
+where it tries to insert the item or
+
+00:18:48,510 --> 00:18:52,410
+update the item and then falls back to
+
+00:18:49,980 --> 00:18:55,170
+the other one if it needs to which is
+
+00:18:52,410 --> 00:18:57,120
+basically a at best that is the
+
+00:18:55,170 --> 00:18:59,490
+equivalent of on duplicate key update
+
+00:18:57,120 --> 00:19:03,660
+which you can see on the right hand side
+
+00:18:59,490 --> 00:19:06,210
+of both of these graphs and the original
+
+00:19:03,660 --> 00:19:08,730
+model for el cash was the idea of will
+
+00:19:06,210 --> 00:19:10,890
+insert the new event for what's changed
+
+00:19:08,730 --> 00:19:13,290
+with the cash item and then delete the
+
+00:19:10,890 --> 00:19:16,190
+obsolete ones right after inserting it
+
+00:19:13,290 --> 00:19:19,410
+so if I said I've set kashki a two
+
+00:19:16,190 --> 00:19:21,980
+number three I would basically delete
+
+00:19:19,410 --> 00:19:24,900
+any prior events that that were
+
+00:19:21,980 --> 00:19:26,340
+involving cash key a because the latest
+
+00:19:24,900 --> 00:19:28,740
+thing that I've done to cache key a
+
+00:19:26,340 --> 00:19:31,920
+supersedes every previous thing that's
+
+00:19:28,740 --> 00:19:33,960
+ever been done to that cash key so what
+
+00:19:31,920 --> 00:19:35,520
+we ultimately ended up moving to is a
+
+00:19:33,960 --> 00:19:38,840
+model where we would insert the new
+
+00:19:35,520 --> 00:19:41,910
+event of what's changed for say kashki a
+
+00:19:38,840 --> 00:19:44,040
+record that we had changed cash PA and
+
+00:19:41,910 --> 00:19:46,620
+then do a batch to delete in the
+
+00:19:44,040 --> 00:19:49,470
+destruct ur of the caching system which
+
+00:19:46,620 --> 00:19:51,810
+caused it to happen not only in a way
+
+00:19:49,470 --> 00:19:54,480
+that aggregated the deletions of the
+
+00:19:51,810 --> 00:19:57,480
+obsolete events but also ran after it
+
+00:19:54,480 --> 00:19:59,160
+would close the request in php-fpm for
+
+00:19:57,480 --> 00:20:02,100
+the user so the user doesn't actually
+
+00:19:59,160 --> 00:20:04,860
+wait on this to happen either the
+
+00:20:02,100 --> 00:20:07,110
+I tested this in two different very
+
+00:20:04,860 --> 00:20:09,900
+different scenarios um Lohse playing in
+
+00:20:07,110 --> 00:20:13,380
+high splay louis play was a case where i
+
+00:20:09,900 --> 00:20:15,870
+had 64 possible cash keys and the PHP
+
+00:20:13,380 --> 00:20:18,600
+would reach right randomly choose one of
+
+00:20:15,870 --> 00:20:20,730
+the 64 for its 40 rights and then it
+
+00:20:18,600 --> 00:20:22,980
+would write those and then it would exit
+
+00:20:20,730 --> 00:20:24,900
+each of the ten processes and I ran this
+
+00:20:22,980 --> 00:20:27,750
+quite a few times the results were very
+
+00:20:24,900 --> 00:20:29,880
+similar no matter what what combination
+
+00:20:27,750 --> 00:20:32,280
+it seemed to choose because it was
+
+00:20:29,880 --> 00:20:33,929
+sufficiently random and then there's
+
+00:20:32,280 --> 00:20:36,570
+also a case where I chose hice play
+
+00:20:33,929 --> 00:20:39,450
+which of the 40 writes it randomly chose
+
+00:20:36,570 --> 00:20:41,070
+among over 4000 cash keys which
+
+00:20:39,450 --> 00:20:44,130
+basically meant that it's very unlikely
+
+00:20:41,070 --> 00:20:46,080
+to stomp on an existing cash right so
+
+00:20:44,130 --> 00:20:48,090
+this would be the left hand side as a
+
+00:20:46,080 --> 00:20:50,159
+case where you have a cash item that is
+
+00:20:48,090 --> 00:20:51,960
+frequently being updated and the right
+
+00:20:50,159 --> 00:20:53,460
+hand side is a case where you have a
+
+00:20:51,960 --> 00:20:57,299
+whole bunch of cash items that are being
+
+00:20:53,460 --> 00:20:59,610
+basically written once and so it's not a
+
+00:20:57,299 --> 00:21:01,380
+huge surprise that in the high splay one
+
+00:20:59,610 --> 00:21:03,450
+we didn't see much variation between the
+
+00:21:01,380 --> 00:21:05,309
+different models because I'm duplicate
+
+00:21:03,450 --> 00:21:06,809
+key update insert and batch delete and
+
+00:21:05,309 --> 00:21:09,900
+insert and delete almost all of them
+
+00:21:06,809 --> 00:21:11,130
+just inserted in effect at the cash
+
+00:21:09,900 --> 00:21:13,409
+right time because there wasn't much
+
+00:21:11,130 --> 00:21:15,270
+overlap that you were very unlikely to
+
+00:21:13,409 --> 00:21:17,490
+do a right to a cache key that had
+
+00:21:15,270 --> 00:21:19,860
+already been written to but that's not
+
+00:21:17,490 --> 00:21:21,299
+actually um the case for a lot of cash
+
+00:21:19,860 --> 00:21:23,669
+he's in Drupal a lot of them are like
+
+00:21:21,299 --> 00:21:25,919
+the left hand side where you actually
+
+00:21:23,669 --> 00:21:28,409
+have a cache key that is continually
+
+00:21:25,919 --> 00:21:31,140
+being rewritten and updated and it
+
+00:21:28,409 --> 00:21:32,850
+turned out that our standard approach of
+
+00:21:31,140 --> 00:21:35,309
+basically on duplicate key update
+
+00:21:32,850 --> 00:21:37,740
+actually a little worse than that is not
+
+00:21:35,309 --> 00:21:39,120
+actually that great so one thing we
+
+00:21:37,740 --> 00:21:41,909
+discovered is we could also just
+
+00:21:39,120 --> 00:21:45,350
+optimize the data model for our our
+
+00:21:41,909 --> 00:21:48,900
+cache storage just in the database um
+
+00:21:45,350 --> 00:21:50,490
+the other thing that we did to confront
+
+00:21:48,900 --> 00:21:52,710
+the case of cash keys that were
+
+00:21:50,490 --> 00:21:54,990
+constantly written but not actually read
+
+00:21:52,710 --> 00:21:59,220
+by the way these these particular cache
+
+00:21:54,990 --> 00:22:01,679
+keys don't treat them as like actual
+
+00:21:59,220 --> 00:22:03,440
+data about the CTools thing because this
+
+00:22:01,679 --> 00:22:08,190
+is just this is an old snapshot of it
+
+00:22:03,440 --> 00:22:10,890
+but the this was basically a tracking
+
+00:22:08,190 --> 00:22:13,260
+system that I implemented in here to
+
+00:22:10,890 --> 00:22:15,340
+track the concept of how many times does
+
+00:22:13,260 --> 00:22:16,540
+the cache key being written versus red
+
+00:22:15,340 --> 00:22:18,970
+which would normally be way too
+
+00:22:16,540 --> 00:22:22,000
+expensive to do in the database but if
+
+00:22:18,970 --> 00:22:23,350
+you do it in the local APC you you end
+
+00:22:22,000 --> 00:22:25,510
+up actually being able to track that
+
+00:22:23,350 --> 00:22:27,400
+pretty cheaply which just counters so
+
+00:22:25,510 --> 00:22:29,830
+each of these snapshots would only be
+
+00:22:27,400 --> 00:22:31,360
+for the data from one webhead but if web
+
+00:22:29,830 --> 00:22:32,790
+heads are getting all random requests
+
+00:22:31,360 --> 00:22:37,180
+then it's a good sampling of your data
+
+00:22:32,790 --> 00:22:43,570
+so one of the things that we added to el
+
+00:22:37,180 --> 00:22:45,280
+cash is the concept of its it tracking
+
+00:22:43,570 --> 00:22:47,470
+this data and then eventually coming to
+
+00:22:45,280 --> 00:22:51,400
+the conclusion for some cash keys that
+
+00:22:47,470 --> 00:22:53,140
+they are that they're too expensive that
+
+00:22:51,400 --> 00:22:54,550
+they're basically being written more
+
+00:22:53,140 --> 00:22:57,580
+than they're being read at a very high
+
+00:22:54,550 --> 00:23:00,250
+ratio and they're worth ignoring so at a
+
+00:22:57,580 --> 00:23:03,220
+certain threshold it decides enough of
+
+00:23:00,250 --> 00:23:05,110
+this cache key I'm going to delete all
+
+00:23:03,220 --> 00:23:07,150
+existing copies of this cache key and
+
+00:23:05,110 --> 00:23:09,970
+then basically put a moratorium at least
+
+00:23:07,150 --> 00:23:11,260
+temporarily on further rights to it so
+
+00:23:09,970 --> 00:23:13,450
+it will black hole the rights to the
+
+00:23:11,260 --> 00:23:15,490
+cache key and the reeds to it will miss
+
+00:23:13,450 --> 00:23:17,350
+but it's already know it already knows
+
+00:23:15,490 --> 00:23:20,680
+the reeds to it are vastly outweighed by
+
+00:23:17,350 --> 00:23:24,610
+the rights to it for those keys so in
+
+00:23:20,680 --> 00:23:26,890
+practice this identifies it this
+
+00:23:24,610 --> 00:23:29,590
+identifies a decent number of keys on a
+
+00:23:26,890 --> 00:23:30,700
+typical production Drupal site that are
+
+00:23:29,590 --> 00:23:32,140
+actually just getting written more than
+
+00:23:30,700 --> 00:23:34,450
+they're being read and then it just kind
+
+00:23:32,140 --> 00:23:36,550
+of pushes them aside which is very nice
+
+00:23:34,450 --> 00:23:38,680
+when you have an expensive right path
+
+00:23:36,550 --> 00:23:42,030
+like writing it to the database and then
+
+00:23:38,680 --> 00:23:48,010
+replicating out to the web nodes um
+
+00:23:42,030 --> 00:23:53,140
+pardon oh okay yeah there's a lot of
+
+00:23:48,010 --> 00:23:54,760
+material so I did I want to leave a lot
+
+00:23:53,140 --> 00:23:56,110
+of time for questions because we also
+
+00:23:54,760 --> 00:24:00,430
+have a lot of like core maintain errs
+
+00:23:56,110 --> 00:24:02,500
+and stuff in the room the so uh even
+
+00:24:00,430 --> 00:24:05,800
+with all these optimizations that we did
+
+00:24:02,500 --> 00:24:08,560
+for el cash there are certain cases that
+
+00:24:05,800 --> 00:24:10,960
+works better for its really really good
+
+00:24:08,560 --> 00:24:12,520
+for things that are frequently read I'm
+
+00:24:10,960 --> 00:24:14,380
+talking about these like one megabyte
+
+00:24:12,520 --> 00:24:15,790
+used cash objects that are constantly
+
+00:24:14,380 --> 00:24:17,950
+being pulled down from something like
+
+00:24:15,790 --> 00:24:21,160
+Redis or memcache in a lot of people set
+
+00:24:17,950 --> 00:24:23,290
+ups today these these sorts of items get
+
+00:24:21,160 --> 00:24:25,240
+replicated to a PC you they get read
+
+00:24:23,290 --> 00:24:27,130
+from local PHP memory it doesn't even
+
+00:24:25,240 --> 00:24:29,059
+have a network round trip to read these
+
+00:24:27,130 --> 00:24:30,830
+cash items so it
+
+00:24:29,059 --> 00:24:33,529
+wheatley gets rid of the idea of network
+
+00:24:30,830 --> 00:24:35,360
+saturation as a bottleneck when you have
+
+00:24:33,529 --> 00:24:38,659
+really heavy traffic that is reading
+
+00:24:35,360 --> 00:24:40,340
+cash items on a website and that's why
+
+00:24:38,659 --> 00:24:42,740
+it's also really good for items that are
+
+00:24:40,340 --> 00:24:44,659
+rarely written or large because you're
+
+00:24:42,740 --> 00:24:46,580
+basically multiplying your benefit in
+
+00:24:44,659 --> 00:24:50,749
+terms of not having those items ship
+
+00:24:46,580 --> 00:24:51,889
+over the network what there are cases
+
+00:24:50,749 --> 00:24:54,259
+though that don't make a lot of sense
+
+00:24:51,889 --> 00:24:56,690
+for it like at least didn't say the
+
+00:24:54,259 --> 00:24:58,100
+Drupal 7 world things like the forum
+
+00:24:56,690 --> 00:25:00,080
+cash don't make a lot of sense to put on
+
+00:24:58,100 --> 00:25:01,999
+it because those items pretty much get
+
+00:25:00,080 --> 00:25:03,980
+written once and then read once in a
+
+00:25:01,999 --> 00:25:05,450
+typical scenario and actually a lot of
+
+00:25:03,980 --> 00:25:07,669
+them on a real production site get
+
+00:25:05,450 --> 00:25:09,200
+written once and then never read because
+
+00:25:07,669 --> 00:25:12,080
+you're displaying a form to a user that
+
+00:25:09,200 --> 00:25:14,590
+they never submit fortunately in Drupal
+
+00:25:12,080 --> 00:25:17,629
+8 that is not treated as a cash anymore
+
+00:25:14,590 --> 00:25:21,559
+because it isn't it actually breaks your
+
+00:25:17,629 --> 00:25:23,600
+site if you clear it the thing is
+
+00:25:21,559 --> 00:25:25,669
+handleable earlier in the stack like the
+
+00:25:23,600 --> 00:25:27,259
+page cache don't make sense to put this
+
+00:25:25,669 --> 00:25:29,659
+sort of thing it'll just clog up your
+
+00:25:27,259 --> 00:25:31,309
+cache data I think almost anyone here
+
+00:25:29,659 --> 00:25:35,059
+who's running major production sites is
+
+00:25:31,309 --> 00:25:36,619
+probably already pushing cache data for
+
+00:25:35,059 --> 00:25:39,679
+things like pages to something like
+
+00:25:36,619 --> 00:25:41,240
+varnish or CD in any way in the case of
+
+00:25:39,679 --> 00:25:43,429
+using a cache like this you probably
+
+00:25:41,240 --> 00:25:45,289
+would want to entirely turn off Drupal's
+
+00:25:43,429 --> 00:25:48,649
+internal page cache have it black hole
+
+00:25:45,289 --> 00:25:50,029
+that and you can even do further
+
+00:25:48,649 --> 00:25:52,399
+optimizations with the Drupal at that
+
+00:25:50,029 --> 00:25:53,869
+point like telling it not to not to
+
+00:25:52,399 --> 00:25:55,429
+expect that it has a page cache that
+
+00:25:53,869 --> 00:25:57,679
+requires a database connection for
+
+00:25:55,429 --> 00:26:01,580
+example because if it uses a null cash
+
+00:25:57,679 --> 00:26:03,919
+doesn't it we also found that a lot of
+
+00:26:01,580 --> 00:26:06,710
+keys that update often just cause a lot
+
+00:26:03,919 --> 00:26:08,149
+of overhead for replication and clearing
+
+00:26:06,710 --> 00:26:10,730
+a lot of keys at a time with something
+
+00:26:08,149 --> 00:26:12,529
+like a tag also puts a lot of burden on
+
+00:26:10,730 --> 00:26:15,950
+replication like in this new Drupal 8
+
+00:26:12,529 --> 00:26:18,019
+era of being able to tag every like
+
+00:26:15,950 --> 00:26:20,749
+hundreds of items with something like
+
+00:26:18,019 --> 00:26:22,460
+the node list untag and then clearing
+
+00:26:20,749 --> 00:26:25,070
+that can be a little expensive in a
+
+00:26:22,460 --> 00:26:29,990
+system like this but I'm working on that
+
+00:26:25,070 --> 00:26:32,320
+as well we've taken a very serious
+
+00:26:29,990 --> 00:26:37,940
+approach to the implementation of this
+
+00:26:32,320 --> 00:26:42,310
+every literally every single line of el
+
+00:26:37,940 --> 00:26:46,810
+cash is unit tested as a library
+
+00:26:42,310 --> 00:26:49,570
+it is tested in both against mock and
+
+00:26:46,810 --> 00:26:52,510
+production configurations for both of
+
+00:26:49,570 --> 00:26:54,580
+the l1 and the l2 caches with all of
+
+00:26:52,510 --> 00:26:57,490
+which ship with it you'll notice here
+
+00:26:54,580 --> 00:27:00,250
+that the structure of it is that there
+
+00:26:57,490 --> 00:27:02,320
+is an APC you implementation of l1 which
+
+00:27:00,250 --> 00:27:05,440
+is local to the data to the webhead
+
+00:27:02,320 --> 00:27:08,080
+there is a database implementation of
+
+00:27:05,440 --> 00:27:10,120
+the l2 which is used for coherency
+
+00:27:08,080 --> 00:27:13,330
+across the cluster those are the primary
+
+00:27:10,120 --> 00:27:15,730
+production configurations for it and
+
+00:27:13,330 --> 00:27:17,680
+then also there is a null l1 in here
+
+00:27:15,730 --> 00:27:19,780
+which it actually uses when you invoke
+
+00:27:17,680 --> 00:27:22,900
+it in a sort of a CLI configuration
+
+00:27:19,780 --> 00:27:25,810
+where there's not a useful APC you and
+
+00:27:22,900 --> 00:27:28,600
+what that does is it it just bypasses
+
+00:27:25,810 --> 00:27:30,400
+the l1 and just uses the l2 I have
+
+00:27:28,600 --> 00:27:34,030
+reason to believe this is still faster
+
+00:27:30,400 --> 00:27:36,850
+than using Drupal's cash because the the
+
+00:27:34,030 --> 00:27:38,980
+l2 with its batch deletes and insert
+
+00:27:36,850 --> 00:27:41,020
+always model is actually faster still in
+
+00:27:38,980 --> 00:27:43,570
+terms of the data model on the server
+
+00:27:41,020 --> 00:27:46,480
+side than Drupal's built in cash so
+
+00:27:43,570 --> 00:27:48,550
+there's some interesting opportunity to
+
+00:27:46,480 --> 00:27:51,700
+explore this even without the need to
+
+00:27:48,550 --> 00:27:53,560
+replicate to local web nodes and then
+
+00:27:51,700 --> 00:27:56,230
+mostly for testing purposes there is a
+
+00:27:53,560 --> 00:27:58,750
+static l1 in static l2 which literally
+
+00:27:56,230 --> 00:28:00,250
+just use static variables in PHP they're
+
+00:27:58,750 --> 00:28:02,980
+mostly used for testing to make sure
+
+00:28:00,250 --> 00:28:05,170
+that the data models work out and that
+
+00:28:02,980 --> 00:28:08,970
+you can mix and match so that it can
+
+00:28:05,170 --> 00:28:12,550
+test say a PC ul-1 against static l2 or
+
+00:28:08,970 --> 00:28:14,680
+a static l1 against the database l too
+
+00:28:12,550 --> 00:28:16,810
+so it basically tries almost every
+
+00:28:14,680 --> 00:28:19,470
+permutation in the test suite of
+
+00:28:16,810 --> 00:28:21,790
+combining production and mock
+
+00:28:19,470 --> 00:28:24,280
+implementations with each other and they
+
+00:28:21,790 --> 00:28:28,960
+should all work and they do so so that
+
+00:28:24,280 --> 00:28:31,180
+that's good the actually the the model
+
+00:28:28,960 --> 00:28:34,360
+that uses in terms of the data model is
+
+00:28:31,180 --> 00:28:37,330
+fairly similar to PS r6 the author of
+
+00:28:34,360 --> 00:28:39,610
+which is in this room the Larry Garfield
+
+00:28:37,330 --> 00:28:41,920
+in the sense that it basically has an
+
+00:28:39,610 --> 00:28:45,190
+object that gets returned as an entry
+
+00:28:41,920 --> 00:28:48,760
+from the cache and it the cache itself
+
+00:28:45,190 --> 00:28:50,650
+is its own object that is um is
+
+00:28:48,760 --> 00:28:52,810
+something you interact with it doesn't
+
+00:28:50,650 --> 00:28:55,330
+quite use PSR six though for reasons
+
+00:28:52,810 --> 00:28:56,110
+I'll explain in a moment it's also a
+
+00:28:55,330 --> 00:28:59,260
+composer baseline
+
+00:28:56,110 --> 00:29:01,990
+Murray so of the Drupal 7 and Drupal 8
+
+00:28:59,260 --> 00:29:05,140
+modules and the wordpress plugin we
+
+00:29:01,990 --> 00:29:06,610
+wrote all pull in this composer library
+
+00:29:05,140 --> 00:29:07,900
+which provides a high level cache
+
+00:29:06,610 --> 00:29:09,820
+interface supporting everything
+
+00:29:07,900 --> 00:29:13,059
+necessary for each of those to implement
+
+00:29:09,820 --> 00:29:17,140
+the framework local versions of their
+
+00:29:13,059 --> 00:29:18,940
+caches to bridge it over um and we went
+
+00:29:17,140 --> 00:29:20,950
+with these lightweight adapters for each
+
+00:29:18,940 --> 00:29:23,020
+of these frameworks the Drupal one has
+
+00:29:20,950 --> 00:29:25,299
+zero data that it actually tracks it
+
+00:29:23,020 --> 00:29:28,390
+only is a wrapper around the l cash
+
+00:29:25,299 --> 00:29:30,190
+library and then we've published modules
+
+00:29:28,390 --> 00:29:33,520
+and extensions for drupal 7 and drupal 8
+
+00:29:30,190 --> 00:29:36,549
+i have ambitions for getting this into
+
+00:29:33,520 --> 00:29:39,040
+core possibly as a default cash because
+
+00:29:36,549 --> 00:29:42,010
+it can fall back to not using any local
+
+00:29:39,040 --> 00:29:44,140
+data at all it's still faster and we've
+
+00:29:42,010 --> 00:29:46,120
+gotten amazing results so I've kind of
+
+00:29:44,140 --> 00:29:50,590
+held saved the best for nearly last up
+
+00:29:46,120 --> 00:29:54,220
+so this is a major production site
+
+00:29:50,590 --> 00:29:56,169
+running on Pantheon and what we did this
+
+00:29:54,220 --> 00:29:58,990
+is from a load test I'll also go to the
+
+00:29:56,169 --> 00:30:00,520
+production data you'll see before here
+
+00:29:58,990 --> 00:30:03,910
+what we did is we flush the entire cache
+
+00:30:00,520 --> 00:30:06,100
+we worms up Redis which you can see red
+
+00:30:03,910 --> 00:30:10,270
+is cold there Josh Koenig ran these
+
+00:30:06,100 --> 00:30:12,820
+these benchmarks and you can see red is
+
+00:30:10,270 --> 00:30:15,160
+cold on the far left and then on the
+
+00:30:12,820 --> 00:30:17,440
+left middle you can see red us warm you
+
+00:30:15,160 --> 00:30:19,240
+can see that with Redis the cold things
+
+00:30:17,440 --> 00:30:21,490
+don't matter that much those are pretty
+
+00:30:19,240 --> 00:30:24,700
+initial cases and that doesn't reflect
+
+00:30:21,490 --> 00:30:26,290
+the common case you you really only want
+
+00:30:24,700 --> 00:30:27,760
+to care about the cold case from the
+
+00:30:26,290 --> 00:30:30,760
+perspective of it shouldn't be terrible
+
+00:30:27,760 --> 00:30:32,230
+or or infrastructure breaking but here
+
+00:30:30,760 --> 00:30:34,270
+you can see on there on the right-hand
+
+00:30:32,230 --> 00:30:36,460
+side of the reddest case it's averaging
+
+00:30:34,270 --> 00:30:41,860
+about 300 milliseconds a little under
+
+00:30:36,460 --> 00:30:44,470
+300 milliseconds per request and on the
+
+00:30:41,860 --> 00:30:45,850
+right hand side we have el cash there's
+
+00:30:44,470 --> 00:30:47,320
+a little bit of a spike here from a web
+
+00:30:45,850 --> 00:30:49,120
+external thing probably something that
+
+00:30:47,320 --> 00:30:51,250
+gets missed in the cache and inserted
+
+00:30:49,120 --> 00:30:54,429
+into it that's that's specific to that
+
+00:30:51,250 --> 00:30:56,860
+particular site but you can see it warms
+
+00:30:54,429 --> 00:30:59,350
+up and then it's actually hovering at
+
+00:30:56,860 --> 00:31:01,360
+just above 200 milliseconds once L cash
+
+00:30:59,350 --> 00:31:03,100
+is warm and this is because it's no
+
+00:31:01,360 --> 00:31:04,780
+longer even making the network trips to
+
+00:31:03,100 --> 00:31:06,610
+read us to fetch its cache objects it's
+
+00:31:04,780 --> 00:31:07,929
+just talking to the database at the
+
+00:31:06,610 --> 00:31:10,179
+beginning of the request synchronized
+
+00:31:07,929 --> 00:31:12,490
+local cache and then you
+
+00:31:10,179 --> 00:31:14,679
+you'll also notice that this dark yellow
+
+00:31:12,490 --> 00:31:16,509
+color if you can kind of see the tiny
+
+00:31:14,679 --> 00:31:18,580
+text at the bottom is Redis and you can
+
+00:31:16,509 --> 00:31:20,440
+see that just disappears basically as
+
+00:31:18,580 --> 00:31:21,940
+time spent in the request any of the
+
+00:31:20,440 --> 00:31:23,529
+time it was spending on the network
+
+00:31:21,940 --> 00:31:25,600
+waiting for Redis fetching items from
+
+00:31:23,529 --> 00:31:28,149
+rattus writing the Redis etcetera and
+
+00:31:25,600 --> 00:31:31,330
+you and you can also see the database
+
+00:31:28,149 --> 00:31:33,940
+time has not gone up um that much from
+
+00:31:31,330 --> 00:31:35,259
+from before when it was heavily relying
+
+00:31:33,940 --> 00:31:37,330
+on Redis even though it's using the
+
+00:31:35,259 --> 00:31:39,369
+database for all of its cache
+
+00:31:37,330 --> 00:31:42,129
+synchronization because it only makes
+
+00:31:39,369 --> 00:31:43,960
+trips to the database of to handle its
+
+00:31:42,129 --> 00:31:45,070
+rights and a very very quick
+
+00:31:43,960 --> 00:31:46,720
+synchronization the beginning of
+
+00:31:45,070 --> 00:31:48,909
+requests which if there are no cash
+
+00:31:46,720 --> 00:31:51,429
+items to replicate the select return 0
+
+00:31:48,909 --> 00:31:55,240
+rows from a cached query that takes like
+
+00:31:51,429 --> 00:31:57,429
+a millisecond the concurrency also went
+
+00:31:55,240 --> 00:32:02,379
+far up because these were actually time
+
+00:31:57,429 --> 00:32:05,049
+boxed load tests not concurrency set
+
+00:32:02,379 --> 00:32:08,529
+load tests and here we see that we were
+
+00:32:05,049 --> 00:32:11,559
+only able to manage 225 concurrence once
+
+00:32:08,529 --> 00:32:14,830
+Redis was warm and we easily made it up
+
+00:32:11,559 --> 00:32:17,470
+to over 350 concurrence once L cash was
+
+00:32:14,830 --> 00:32:19,570
+warm and that's because um it scales
+
+00:32:17,470 --> 00:32:22,769
+better horizontally it's since the cash
+
+00:32:19,570 --> 00:32:25,899
+items are being stored on the local node
+
+00:32:22,769 --> 00:32:29,289
+it's able to to handle a lot more
+
+00:32:25,899 --> 00:32:31,899
+traffic and data on each web head
+
+00:32:29,289 --> 00:32:37,990
+without having to be bottlenecked by any
+
+00:32:31,899 --> 00:32:41,889
+central cash um we went live um late
+
+00:32:37,990 --> 00:32:44,200
+last night with this same site you can
+
+00:32:41,889 --> 00:32:48,970
+see when L cash got enabled for the site
+
+00:32:44,200 --> 00:32:51,159
+by when the light the kind of tan color
+
+00:32:48,970 --> 00:32:54,159
+is red us when that goes away that's
+
+00:32:51,159 --> 00:32:57,700
+when L cash got deployed and you can see
+
+00:32:54,159 --> 00:33:00,009
+that it had a more stable and faster
+
+00:32:57,700 --> 00:33:01,899
+performance by not having to make those
+
+00:33:00,009 --> 00:33:06,159
+network round trips for accessing cache
+
+00:33:01,899 --> 00:33:08,200
+objects um and it didn't even really hit
+
+00:33:06,159 --> 00:33:09,850
+the database very hard this is uh this
+
+00:33:08,200 --> 00:33:13,809
+this thing here is the last 24 hours
+
+00:33:09,850 --> 00:33:17,039
+from the side of New Relic this is from
+
+00:33:13,809 --> 00:33:19,960
+the actual host machine that is running
+
+00:33:17,039 --> 00:33:21,730
+the database for this website and you
+
+00:33:19,960 --> 00:33:23,600
+can see that it's not really even
+
+00:33:21,730 --> 00:33:26,809
+possible to distinguish in here
+
+00:33:23,600 --> 00:33:28,490
+when L cash got deployed even though it
+
+00:33:26,809 --> 00:33:33,440
+started relying on it for managing cache
+
+00:33:28,490 --> 00:33:35,210
+coherence but this isn't this obviously
+
+00:33:33,440 --> 00:33:39,020
+isn't the end it's still in the early
+
+00:33:35,210 --> 00:33:43,750
+stages of production use I've gotten
+
+00:33:39,020 --> 00:33:46,700
+some pretty awesome suggestions the and
+
+00:33:43,750 --> 00:33:48,590
+some of them are things like I'm trying
+
+00:33:46,700 --> 00:33:50,000
+to use MySQL I with the asynchronous
+
+00:33:48,590 --> 00:33:51,350
+mode to fetch all these events to
+
+00:33:50,000 --> 00:33:53,179
+synchronize down so at the very
+
+00:33:51,350 --> 00:33:54,710
+beginning of the request basically say
+
+00:33:53,179 --> 00:33:55,940
+give me all the events that have
+
+00:33:54,710 --> 00:33:58,640
+happened since the last time I looked
+
+00:33:55,940 --> 00:33:59,900
+and then letting the query run and come
+
+00:33:58,640 --> 00:34:03,530
+back and then when you actually try to
+
+00:33:59,900 --> 00:34:06,500
+access the cache then actually block on
+
+00:34:03,530 --> 00:34:08,179
+processing those cash events and then
+
+00:34:06,500 --> 00:34:10,010
+basically that means that assuming the
+
+00:34:08,179 --> 00:34:11,960
+query has come back and shipped its data
+
+00:34:10,010 --> 00:34:14,810
+before you actually do your first cash
+
+00:34:11,960 --> 00:34:17,629
+read which it's probably a little bit of
+
+00:34:14,810 --> 00:34:18,710
+PHP before that really happens um you
+
+00:34:17,629 --> 00:34:21,139
+probably already have the query data
+
+00:34:18,710 --> 00:34:24,109
+local to the machine ready for you to
+
+00:34:21,139 --> 00:34:25,159
+read into the local cache and the upside
+
+00:34:24,109 --> 00:34:26,899
+of that is you don't have any
+
+00:34:25,159 --> 00:34:28,250
+synchronous wait on obtaining events
+
+00:34:26,899 --> 00:34:31,159
+because if we have a lot of events
+
+00:34:28,250 --> 00:34:33,350
+synchronized then it'll take a little
+
+00:34:31,159 --> 00:34:36,260
+while before say Drupal can actually get
+
+00:34:33,350 --> 00:34:37,609
+into bootstrapping but it would require
+
+00:34:36,260 --> 00:34:38,840
+you get another database connection
+
+00:34:37,609 --> 00:34:41,000
+because everything for El cash is
+
+00:34:38,840 --> 00:34:43,340
+written with PDO right now and it uses
+
+00:34:41,000 --> 00:34:44,570
+its own connection which as my
+
+00:34:43,340 --> 00:34:46,220
+understanding is that Drupal wants to
+
+00:34:44,570 --> 00:34:47,960
+move toward that direction for cash
+
+00:34:46,220 --> 00:34:50,929
+management in a way to take it outside
+
+00:34:47,960 --> 00:34:53,899
+the bounds of the transaction layer in
+
+00:34:50,929 --> 00:34:55,369
+terms of having arbitrary items roll
+
+00:34:53,899 --> 00:34:57,890
+back in a way that people wouldn't
+
+00:34:55,369 --> 00:34:59,660
+necessarily expect because a lot of our
+
+00:34:57,890 --> 00:35:01,520
+cache implementations already exist
+
+00:34:59,660 --> 00:35:04,250
+outside the transaction layer and things
+
+00:35:01,520 --> 00:35:06,020
+like memcache and Redis and since so
+
+00:35:04,250 --> 00:35:08,090
+many production sites use those external
+
+00:35:06,020 --> 00:35:10,040
+caches it probably doesn't make sense
+
+00:35:08,090 --> 00:35:13,880
+for us to assume the cache operates in a
+
+00:35:10,040 --> 00:35:15,530
+transactional fashion the it also
+
+00:35:13,880 --> 00:35:17,840
+creates a lot of deadlocks on sites to
+
+00:35:15,530 --> 00:35:19,160
+where they don't carefully order the
+
+00:35:17,840 --> 00:35:20,840
+locks in the database and when you have
+
+00:35:19,160 --> 00:35:23,859
+the cash running in the transaction
+
+00:35:20,840 --> 00:35:27,859
+layer I've seen it take down sites
+
+00:35:23,859 --> 00:35:30,260
+another suggestion was to synchronize
+
+00:35:27,859 --> 00:35:32,420
+again with the central cash at the end
+
+00:35:30,260 --> 00:35:34,339
+of requests in the destruct ER or in a
+
+00:35:32,420 --> 00:35:36,020
+shutdown function so that after the
+
+00:35:34,339 --> 00:35:37,010
+request has closed and since its
+
+00:35:36,020 --> 00:35:38,990
+symptoms it's or
+
+00:35:37,010 --> 00:35:40,670
+once it takes care of any additional
+
+00:35:38,990 --> 00:35:43,670
+rights that are possible to process them
+
+00:35:40,670 --> 00:35:46,340
+thereby saving someone else's request
+
+00:35:43,670 --> 00:35:47,960
+from having to process those and then
+
+00:35:46,340 --> 00:35:49,940
+I'm also looking at doing sequel light
+
+00:35:47,960 --> 00:35:52,400
+instead of a pc you as an l1 cache
+
+00:35:49,940 --> 00:35:56,630
+because the new locking systems that are
+
+00:35:52,400 --> 00:35:59,030
+in a PC are not in in sequel light are
+
+00:35:56,630 --> 00:36:01,010
+granular enough that it might actually
+
+00:35:59,030 --> 00:36:03,650
+be totally viable to use that as a node
+
+00:36:01,010 --> 00:36:05,660
+local cache for a web server and then
+
+00:36:03,650 --> 00:36:07,280
+that would actually even allow the CLI
+
+00:36:05,660 --> 00:36:10,220
+to take advantage of the local cache as
+
+00:36:07,280 --> 00:36:13,550
+well which I feel like we're probably
+
+00:36:10,220 --> 00:36:16,040
+going to need a future where we
+
+00:36:13,550 --> 00:36:18,230
+configure sites to have some local node
+
+00:36:16,040 --> 00:36:20,870
+local persistence data especially since
+
+00:36:18,230 --> 00:36:23,120
+now PHP 7 has the ability with its op
+
+00:36:20,870 --> 00:36:25,370
+cash to store the opcode caches on disk
+
+00:36:23,120 --> 00:36:28,460
+as well which would then accelerate CLI
+
+00:36:25,370 --> 00:36:30,050
+of as well so we we have a few
+
+00:36:28,460 --> 00:36:32,540
+opportunities here to make the
+
+00:36:30,050 --> 00:36:34,940
+command-line experience with Drupal a
+
+00:36:32,540 --> 00:36:37,550
+lot better in terms of performance both
+
+00:36:34,940 --> 00:36:42,050
+in terms of caching objects and caching
+
+00:36:37,550 --> 00:36:44,390
+up goods um I would really like to get
+
+00:36:42,050 --> 00:36:45,680
+this in core uh because I think it
+
+00:36:44,390 --> 00:36:48,260
+actually functions quite well as a
+
+00:36:45,680 --> 00:36:50,330
+general-purpose cash and our existing
+
+00:36:48,260 --> 00:36:52,490
+option for handling this sort of case of
+
+00:36:50,330 --> 00:36:55,730
+pulling the data local to a web head is
+
+00:36:52,490 --> 00:36:57,620
+just not a bat viable for most admins
+
+00:36:55,730 --> 00:36:59,090
+because most admins actually wouldn't
+
+00:36:57,620 --> 00:37:01,640
+even know how to make the decision of
+
+00:36:59,090 --> 00:37:03,560
+whether a bin is a good candidate for
+
+00:37:01,640 --> 00:37:06,040
+change fast back end because the cost is
+
+00:37:03,560 --> 00:37:09,470
+so high on a cash right for change fast
+
+00:37:06,040 --> 00:37:11,300
+back-end that you basically have to be
+
+00:37:09,470 --> 00:37:13,130
+perfectly sure that almost no rights
+
+00:37:11,300 --> 00:37:14,900
+that been happen before you deploy that
+
+00:37:13,130 --> 00:37:16,850
+and we don't really have any good tools
+
+00:37:14,900 --> 00:37:20,300
+for admins to realize when that's the
+
+00:37:16,850 --> 00:37:21,860
+case and I and even I was fooled early
+
+00:37:20,300 --> 00:37:24,770
+on in this process of thinking a lot of
+
+00:37:21,860 --> 00:37:26,420
+Ben's would be more stable in terms of
+
+00:37:24,770 --> 00:37:30,470
+not being not receiving lots of rights
+
+00:37:26,420 --> 00:37:32,660
+than I thought um and I was also
+
+00:37:30,470 --> 00:37:34,430
+mentioning earlier how even given the
+
+00:37:32,660 --> 00:37:37,190
+benchmarks of the kind of insert only
+
+00:37:34,430 --> 00:37:38,870
+batch delete event model is actually
+
+00:37:37,190 --> 00:37:40,580
+faster than Drupal's built in cash I
+
+00:37:38,870 --> 00:37:43,010
+think there's some potential to use this
+
+00:37:40,580 --> 00:37:45,650
+in a way where even if a PC you is not
+
+00:37:43,010 --> 00:37:47,660
+available in a robust way in terms of
+
+00:37:45,650 --> 00:37:49,730
+the size of it or whether it's even
+
+00:37:47,660 --> 00:37:50,840
+available as an extension I still think
+
+00:37:49,730 --> 00:37:52,880
+it makes sense to use the
+
+00:37:50,840 --> 00:37:56,570
+model and then use something like a null
+
+00:37:52,880 --> 00:37:58,190
+l1 or sequel light l1 because then you
+
+00:37:56,570 --> 00:38:01,160
+still get the benefit of the database
+
+00:37:58,190 --> 00:38:02,450
+performance at the central cash even if
+
+00:38:01,160 --> 00:38:04,490
+you don't get to take the advantage of
+
+00:38:02,450 --> 00:38:08,090
+bringing the data local to the actual
+
+00:38:04,490 --> 00:38:09,410
+web head and we're already relying on
+
+00:38:08,090 --> 00:38:13,250
+composer based libraries for a lot of
+
+00:38:09,410 --> 00:38:15,950
+Drupal 8 so it's not that weird I looked
+
+00:38:13,250 --> 00:38:20,690
+into doing this with PS are 6 and PS are
+
+00:38:15,950 --> 00:38:22,550
+16 which are kind of from the framework
+
+00:38:20,690 --> 00:38:25,510
+interoperability group of PHP that
+
+00:38:22,550 --> 00:38:28,190
+defend PS are six is a cache interface
+
+00:38:25,510 --> 00:38:30,080
+or a cache object model and then PS are
+
+00:38:28,190 --> 00:38:35,360
+16 is more of a higher level cache
+
+00:38:30,080 --> 00:38:36,740
+interface and okay so you can follow
+
+00:38:35,360 --> 00:38:39,020
+Larry after this if you want to learn
+
+00:38:36,740 --> 00:38:44,900
+more about these PS are six has been
+
+00:38:39,020 --> 00:38:46,460
+formerly ratified 16 has not but they I
+
+00:38:44,900 --> 00:38:48,110
+don't really feel like they're quite in
+
+00:38:46,460 --> 00:38:50,720
+the right spot that I want to use this
+
+00:38:48,110 --> 00:38:54,650
+as the backbone of how this gets
+
+00:38:50,720 --> 00:38:57,950
+implemented because on Drupal 8 heavily
+
+00:38:54,650 --> 00:39:00,320
+relies on two concepts cash tags and
+
+00:38:57,950 --> 00:39:02,060
+retrieving already invalidated items
+
+00:39:00,320 --> 00:39:05,540
+briefly while they're possibly being
+
+00:39:02,060 --> 00:39:07,700
+regenerated and PS r6 doesn't yet have
+
+00:39:05,540 --> 00:39:09,500
+any kind of concept of those interfaces
+
+00:39:07,700 --> 00:39:11,360
+even though they could get bolted on in
+
+00:39:09,500 --> 00:39:15,350
+a way I would really like to standardize
+
+00:39:11,360 --> 00:39:19,010
+more of that before rolling it out and
+
+00:39:15,350 --> 00:39:20,480
+also I do like the concept of the
+
+00:39:19,010 --> 00:39:23,180
+deferred persistence because there are a
+
+00:39:20,480 --> 00:39:25,340
+lot of cash rights where I could decide
+
+00:39:23,180 --> 00:39:26,900
+as a developer I'm not going to rely on
+
+00:39:25,340 --> 00:39:29,240
+a rereading this from the cash during
+
+00:39:26,900 --> 00:39:31,070
+this request and as long as you can
+
+00:39:29,240 --> 00:39:33,470
+defer the request the right you could
+
+00:39:31,070 --> 00:39:36,200
+batch them and a batch insert is better
+
+00:39:33,470 --> 00:39:38,230
+than multiple inserts because you just
+
+00:39:36,200 --> 00:39:41,270
+have fewer round trips to the database
+
+00:39:38,230 --> 00:39:45,950
+and then 16 is sort of like almost a
+
+00:39:41,270 --> 00:39:47,720
+superset of 66 but it largely seems to
+
+00:39:45,950 --> 00:39:49,340
+provide a counter interface which would
+
+00:39:47,720 --> 00:39:52,280
+be useful to WordPress but not
+
+00:39:49,340 --> 00:39:54,320
+necessarily Drupal so with that I will
+
+00:39:52,280 --> 00:39:56,180
+open the floor we have a microphone for
+
+00:39:54,320 --> 00:39:59,200
+questions if you can use it otherwise it
+
+00:39:56,180 --> 00:39:59,200
+can repeat them if it's too difficult
+
+00:40:03,740 --> 00:40:09,990
+hey you said that the problem that you
+
+00:40:07,950 --> 00:40:12,150
+face one of the problems we face is that
+
+00:40:09,990 --> 00:40:15,510
+there are a lot more right than you
+
+00:40:12,150 --> 00:40:19,109
+expected but we just say that the
+
+00:40:15,510 --> 00:40:21,420
+majority of the data of the natural
+
+00:40:19,109 --> 00:40:24,810
+childhood is still generated by reads
+
+00:40:21,420 --> 00:40:27,030
+absolutely um when we look at the data
+
+00:40:24,810 --> 00:40:35,640
+links um let me actually pull up the
+
+00:40:27,030 --> 00:40:37,710
+graph for that you can see the purple
+
+00:40:35,640 --> 00:40:40,260
+line um the distance from the purple
+
+00:40:37,710 --> 00:40:42,990
+line below the red line is is inbound
+
+00:40:40,260 --> 00:40:46,200
+traffic to the node and the Green Line
+
+00:40:42,990 --> 00:40:49,200
+is outbound traffic so you can see that
+
+00:40:46,200 --> 00:40:52,859
+the cash reads which is the green area
+
+00:40:49,200 --> 00:40:54,900
+is massively massively outstripping the
+
+00:40:52,859 --> 00:40:58,380
+cash rights for something like Redis
+
+00:40:54,900 --> 00:41:01,700
+okay so is the bottleneck on the
+
+00:40:58,380 --> 00:41:06,060
+machines network cards or on the router
+
+00:41:01,700 --> 00:41:07,890
+doesn't either way we we see this for
+
+00:41:06,060 --> 00:41:10,410
+large sites with lots of containers or
+
+00:41:07,890 --> 00:41:14,160
+web heads hitting two even three
+
+00:41:10,410 --> 00:41:17,160
+gigabits of traffic yeah but only one of
+
+00:41:14,160 --> 00:41:19,710
+those we actually generate a bottleneck
+
+00:41:17,160 --> 00:41:22,680
+either the router or the network cards
+
+00:41:19,710 --> 00:41:24,000
+on the ready sort of yeah whatever a lot
+
+00:41:22,680 --> 00:41:26,690
+of these are deployed in cloud systems
+
+00:41:24,000 --> 00:41:29,369
+anyway so they're using their using a
+
+00:41:26,690 --> 00:41:31,380
+virtualized network equipment okay so so
+
+00:41:29,369 --> 00:41:38,130
+it's in the network cards and that leads
+
+00:41:31,380 --> 00:41:39,750
+to something I wanted to ask for for
+
+00:41:38,130 --> 00:41:43,380
+instance the way that you said that this
+
+00:41:39,750 --> 00:41:47,520
+is solved at least partially in mysql is
+
+00:41:43,380 --> 00:41:51,420
+that you generate you use a generate
+
+00:41:47,520 --> 00:41:57,450
+right to a master and you you send reads
+
+00:41:51,420 --> 00:42:00,390
+to some slaves right correct and what
+
+00:41:57,450 --> 00:42:05,540
+part of the solution wouldn't be solved
+
+00:42:00,390 --> 00:42:08,640
+if let's say we would have a separate
+
+00:42:05,540 --> 00:42:11,390
+modified Redis library for instance that
+
+00:42:08,640 --> 00:42:14,730
+would communicate with the master or
+
+00:42:11,390 --> 00:42:18,030
+let's say a proxy a proxy and
+
+00:42:14,730 --> 00:42:21,150
+it right sends rights to that proxy and
+
+00:42:18,030 --> 00:42:23,310
+but it when you need to read something
+
+00:42:21,150 --> 00:42:25,650
+or establish a connection it would ask
+
+00:42:23,310 --> 00:42:28,290
+that proxy hey where do I need to read
+
+00:42:25,650 --> 00:42:30,540
+from yeah you could implement somewhat a
+
+00:42:28,290 --> 00:42:32,400
+similar model by having a primary
+
+00:42:30,540 --> 00:42:33,810
+reticence tins and then replicating it
+
+00:42:32,400 --> 00:42:36,060
+onto each of the nodes and then talking
+
+00:42:33,810 --> 00:42:38,070
+to the replica the biggest issues you'd
+
+00:42:36,060 --> 00:42:39,810
+run into is just the complexity of that
+
+00:42:38,070 --> 00:42:42,150
+setup you're having another Damon that
+
+00:42:39,810 --> 00:42:44,730
+you're running both in terms of the
+
+00:42:42,150 --> 00:42:47,310
+central instance and terms of on each of
+
+00:42:44,730 --> 00:42:49,770
+those local servers but more concerning
+
+00:42:47,310 --> 00:42:51,660
+is the consistency issue where Redis
+
+00:42:49,770 --> 00:42:53,190
+replication is asynchronous Drupal
+
+00:42:51,660 --> 00:42:54,900
+assumes that you get read after right
+
+00:42:53,190 --> 00:42:57,660
+consistency for captions at least
+
+00:42:54,900 --> 00:43:00,300
+between page loads l cash guarantees
+
+00:42:57,660 --> 00:43:03,210
+that a right that occurred on a page
+
+00:43:00,300 --> 00:43:05,190
+load will will be visible on any
+
+00:43:03,210 --> 00:43:06,510
+subsequent page load after the
+
+00:43:05,190 --> 00:43:09,090
+completion of that first after the
+
+00:43:06,510 --> 00:43:10,530
+completion of that right we're
+
+00:43:09,090 --> 00:43:11,730
+regardless of whether that page load
+
+00:43:10,530 --> 00:43:14,640
+occurs in the same web head or a
+
+00:43:11,730 --> 00:43:16,440
+different one whereas Redis your
+
+00:43:14,640 --> 00:43:19,680
+replication latency could go up and down
+
+00:43:16,440 --> 00:43:21,359
+with the volume of rights and of the
+
+00:43:19,680 --> 00:43:23,280
+only way to fix that would be something
+
+00:43:21,359 --> 00:43:26,070
+where you're checking again against the
+
+00:43:23,280 --> 00:43:29,359
+of the primary reticence tins gold so
+
+00:43:26,070 --> 00:43:32,160
+but you're talking about rattus
+
+00:43:29,359 --> 00:43:35,430
+replication what I'm trying to suggest
+
+00:43:32,160 --> 00:43:38,130
+is if you were using let's say a proxy
+
+00:43:35,430 --> 00:43:43,470
+then when you write something you would
+
+00:43:38,130 --> 00:43:45,690
+be moderately sure that the rights would
+
+00:43:43,470 --> 00:43:48,510
+happen on all the instances because
+
+00:43:45,690 --> 00:43:50,790
+you're only right into the proxy if you
+
+00:43:48,510 --> 00:43:53,250
+well that gets into overhead for rights
+
+00:43:50,790 --> 00:43:54,600
+then because now if you have a proxy
+
+00:43:53,250 --> 00:43:57,900
+that guarantee is that it rights to all
+
+00:43:54,600 --> 00:44:00,119
+the local Redis instances your time for
+
+00:43:57,900 --> 00:44:02,490
+writing is proportional to the number of
+
+00:44:00,119 --> 00:44:04,859
+web heads you have and then let's say
+
+00:44:02,490 --> 00:44:06,420
+one of your web heads goes offline then
+
+00:44:04,859 --> 00:44:08,880
+you have a complicated issue of handling
+
+00:44:06,420 --> 00:44:10,260
+the partition where what do you do do
+
+00:44:08,880 --> 00:44:11,520
+you fail the right because one of your
+
+00:44:10,260 --> 00:44:13,800
+web heads is failed and you can't
+
+00:44:11,520 --> 00:44:15,690
+guarantee that you replicate to it do
+
+00:44:13,800 --> 00:44:17,490
+you black list that web head and have to
+
+00:44:15,690 --> 00:44:19,680
+have a special reintegration protocol
+
+00:44:17,490 --> 00:44:22,710
+for it like you have a lot of topology
+
+00:44:19,680 --> 00:44:25,440
+and administrative issues when you have
+
+00:44:22,710 --> 00:44:27,859
+to have rights actually reach all other
+
+00:44:25,440 --> 00:44:30,680
+systems yeah but they
+
+00:44:27,859 --> 00:44:32,630
+you're only writing to one of the place
+
+00:44:30,680 --> 00:44:35,480
+it doesn't doesn't matter what the web
+
+00:44:32,630 --> 00:44:37,880
+heads are doing because either way even
+
+00:44:35,480 --> 00:44:43,339
+with Al cash when they are writing to
+
+00:44:37,880 --> 00:44:45,829
+the l2 they could possibly run into this
+
+00:44:43,339 --> 00:44:48,289
+problem except that it also has the l1
+
+00:44:45,829 --> 00:44:49,759
+right well the the l2 happens to just be
+
+00:44:48,289 --> 00:44:52,480
+the database server as well and you
+
+00:44:49,759 --> 00:44:55,039
+already have to keep that online so the
+
+00:44:52,480 --> 00:44:57,289
+wallets relying on something that could
+
+00:44:55,039 --> 00:45:01,220
+fail it's something we already have to
+
+00:44:57,289 --> 00:45:03,410
+manage and maintain yeah so yeah so what
+
+00:45:01,220 --> 00:45:05,960
+I'm suggesting is do you do you mind if
+
+00:45:03,410 --> 00:45:06,769
+we take this offline yeah okay I just
+
+00:45:05,960 --> 00:45:11,720
+want to make sure we get there other
+
+00:45:06,769 --> 00:45:15,819
+questions Damon Kenya two quick
+
+00:45:11,720 --> 00:45:18,319
+questions have you given different
+
+00:45:15,819 --> 00:45:20,210
+hosting platform support of different
+
+00:45:18,319 --> 00:45:23,059
+options have you looked at trying out
+
+00:45:20,210 --> 00:45:25,099
+register memcache as the l1 cache option
+
+00:45:23,059 --> 00:45:26,690
+I haven't it would be totally possible
+
+00:45:25,099 --> 00:45:30,140
+but I'm not sure whether it would
+
+00:45:26,690 --> 00:45:33,170
+benefit because with a PC you you
+
+00:45:30,140 --> 00:45:36,319
+actually store it in process of with or
+
+00:45:33,170 --> 00:45:39,739
+in memorable in local memory without any
+
+00:45:36,319 --> 00:45:41,720
+sockets to go over however accessing
+
+00:45:39,739 --> 00:45:45,680
+Redis or memcache over a eunuch socket
+
+00:45:41,720 --> 00:45:48,980
+is very low overhead the only benefit
+
+00:45:45,680 --> 00:45:51,829
+really would be though is a smarter say
+
+00:45:48,980 --> 00:45:53,869
+LRU algorithms like better handling when
+
+00:45:51,829 --> 00:45:57,019
+there's memory pressure because APC you
+
+00:45:53,869 --> 00:45:59,809
+is fairly famous even excuse me today
+
+00:45:57,019 --> 00:46:01,489
+with not having the finest behavior when
+
+00:45:59,809 --> 00:46:03,680
+it's under memory pressure with its
+
+00:46:01,489 --> 00:46:05,480
+allocated cache size but it would
+
+00:46:03,680 --> 00:46:07,489
+literally take like an hour to to write
+
+00:46:05,480 --> 00:46:11,420
+an L one that you works that way because
+
+00:46:07,489 --> 00:46:13,670
+it's a fairly simple interface for the
+
+00:46:11,420 --> 00:46:19,099
+l1 just because this is kind of
+
+00:46:13,670 --> 00:46:23,509
+interesting the so the l1 interface just
+
+00:46:19,099 --> 00:46:25,640
+looks like this you have to have it has
+
+00:46:23,509 --> 00:46:27,200
+to get a pool ID so it identifies which
+
+00:46:25,640 --> 00:46:28,940
+node originated the events so that
+
+00:46:27,200 --> 00:46:31,940
+doesn't rear up like eight events back
+
+00:46:28,940 --> 00:46:35,630
+to the back to the kind of php-fpm pool
+
+00:46:31,940 --> 00:46:37,579
+that ordinated it and then it has to be
+
+00:46:35,630 --> 00:46:39,230
+able to manage where the high-water mark
+
+00:46:37,579 --> 00:46:41,130
+is in terms of replicating events from
+
+00:46:39,230 --> 00:46:42,869
+the central system
+
+00:46:41,130 --> 00:46:45,000
+yeah which is what the gat last applied
+
+00:46:42,869 --> 00:46:47,549
+of an ID and set last applied of an ID
+
+00:46:45,000 --> 00:46:50,099
+is and then it has to have a set
+
+00:46:47,549 --> 00:46:51,660
+function it has to have a function to
+
+00:46:50,099 --> 00:46:54,269
+check whether that item was negatively
+
+00:46:51,660 --> 00:46:57,089
+cached like it has a concept of negative
+
+00:46:54,269 --> 00:46:58,829
+caching we're basically if it verified
+
+00:46:57,089 --> 00:47:00,990
+that an item doesn't exist it actually
+
+00:46:58,829 --> 00:47:02,309
+caches the fact that doesn't exist this
+
+00:47:00,990 --> 00:47:04,680
+is more of a problem on the WordPress
+
+00:47:02,309 --> 00:47:06,180
+side than Drupal but WordPress has all
+
+00:47:04,680 --> 00:47:08,069
+sorts of configurations where it's
+
+00:47:06,180 --> 00:47:12,779
+configured by virtue of the cache item
+
+00:47:08,069 --> 00:47:17,730
+not existing the they get heat overhead
+
+00:47:12,779 --> 00:47:19,680
+um provides the kind of subtracted kind
+
+00:47:17,730 --> 00:47:22,039
+of almost ratio of reads versus writes
+
+00:47:19,680 --> 00:47:24,359
+the l1 is responsible for tracking that
+
+00:47:22,039 --> 00:47:28,079
+and then it is responsible for having
+
+00:47:24,359 --> 00:47:29,130
+set with expiration and glee and so like
+
+00:47:28,079 --> 00:47:33,390
+this is the only stuff you have to
+
+00:47:29,130 --> 00:47:35,549
+implement for an l1 the like the static
+
+00:47:33,390 --> 00:47:37,349
+l1 isn't much more complicated than that
+
+00:47:35,549 --> 00:47:42,329
+it basically just works with a local
+
+00:47:37,349 --> 00:47:46,349
+array other quick question do you have
+
+00:47:42,329 --> 00:47:49,410
+you seen any pattern to code or country
+
+00:47:46,349 --> 00:47:56,819
+or core issues that led to high writes
+
+00:47:49,410 --> 00:47:58,680
+that shouldn't have been um the the the
+
+00:47:56,819 --> 00:48:01,230
+most common issue I see is just that
+
+00:47:58,680 --> 00:48:02,940
+assumption of because you've because you
+
+00:48:01,230 --> 00:48:05,160
+missed with your cache access that you
+
+00:48:02,940 --> 00:48:06,869
+should write the item back and I don't
+
+00:48:05,160 --> 00:48:09,000
+think a lot of things think about
+
+00:48:06,869 --> 00:48:10,500
+caching beyond that and so when I've
+
+00:48:09,000 --> 00:48:12,450
+looked at the analysis of production
+
+00:48:10,500 --> 00:48:13,980
+sites with the overhead data which is
+
+00:48:12,450 --> 00:48:15,750
+how it tracks that ratio and then
+
+00:48:13,980 --> 00:48:18,000
+eventually decides with the learning
+
+00:48:15,750 --> 00:48:21,660
+that it's done to not continue accepting
+
+00:48:18,000 --> 00:48:24,210
+writes the majority of the ones that are
+
+00:48:21,660 --> 00:48:27,150
+not while performing cash items don't
+
+00:48:24,210 --> 00:48:28,890
+get that high of ratio of overhead like
+
+00:48:27,150 --> 00:48:32,910
+they're not terrible but they're mostly
+
+00:48:28,890 --> 00:48:35,640
+like written written once after being
+
+00:48:32,910 --> 00:48:37,650
+after one miss and so they have an
+
+00:48:35,640 --> 00:48:40,109
+overhead of like zero in that case which
+
+00:48:37,650 --> 00:48:43,140
+means they've never been they've never
+
+00:48:40,109 --> 00:48:44,549
+provided any benefit to the site so a
+
+00:48:43,140 --> 00:48:46,950
+lot of them also have an overhead of one
+
+00:48:44,549 --> 00:48:49,920
+which means they've been written without
+
+00:48:46,950 --> 00:48:53,549
+anything ever reading them or at least
+
+00:48:49,920 --> 00:48:54,750
+an equivalent ratio so like the only
+
+00:48:53,549 --> 00:48:58,020
+advice I'd have module
+
+00:48:54,750 --> 00:49:00,240
+authors is is to not necessarily assume
+
+00:48:58,020 --> 00:49:04,230
+that a cache miss makes a right
+
+00:49:00,240 --> 00:49:07,320
+worthwhile okay any ID on an ETA for the
+
+00:49:04,230 --> 00:49:09,090
+one point no release um we're pretty
+
+00:49:07,320 --> 00:49:11,040
+good well I'm being very conservative
+
+00:49:09,090 --> 00:49:12,660
+I'm going with like you know the Google
+
+00:49:11,040 --> 00:49:15,720
+beta kind of thing of like you know
+
+00:49:12,660 --> 00:49:19,770
+gmail is beta for years I want it to be
+
+00:49:15,720 --> 00:49:21,390
+like this is mostly because when this
+
+00:49:19,770 --> 00:49:24,300
+sort of system breaks it can be
+
+00:49:21,390 --> 00:49:25,920
+extremely confusing because you end up
+
+00:49:24,300 --> 00:49:28,650
+with like something like inconsistent
+
+00:49:25,920 --> 00:49:31,160
+data or something but i will say that in
+
+00:49:28,650 --> 00:49:33,990
+our load tests against drupal 7 and
+
+00:49:31,160 --> 00:49:37,920
+wordpress implementations of this up and
+
+00:49:33,990 --> 00:49:41,130
+some drupal 8 ones we haven't seen a
+
+00:49:37,920 --> 00:49:43,560
+site breaking issue in weeks and weeks
+
+00:49:41,130 --> 00:49:45,840
+of testing and mostly what we've been
+
+00:49:43,560 --> 00:49:47,610
+doing over that time before deploying it
+
+00:49:45,840 --> 00:49:50,100
+to production is just optimizing the
+
+00:49:47,610 --> 00:49:55,230
+code paths that we found were more
+
+00:49:50,100 --> 00:49:59,630
+heavily used than we expected hi so in
+
+00:49:55,230 --> 00:50:02,460
+the l2 implementation that you have
+
+00:49:59,630 --> 00:50:04,530
+you're doing insert all the new cache
+
+00:50:02,460 --> 00:50:08,220
+stuff and then bulk both delete the old
+
+00:50:04,530 --> 00:50:11,910
+ones at the end yes but and at least
+
+00:50:08,220 --> 00:50:14,610
+this the default database scheme of the
+
+00:50:11,910 --> 00:50:16,680
+chips with drupal the cache key is the
+
+00:50:14,610 --> 00:50:18,900
+primary key so you can't actually it's
+
+00:50:16,680 --> 00:50:20,880
+not using that okay it implements its
+
+00:50:18,900 --> 00:50:23,490
+own tables okay that so you are just
+
+00:50:20,880 --> 00:50:26,070
+doing like the you like have an extra
+
+00:50:23,490 --> 00:50:29,400
+index or a counter columns that the idea
+
+00:50:26,070 --> 00:50:34,430
+I'll just pull it up okay then so
+
+00:50:29,400 --> 00:50:36,900
+because it is it doesn't actually use
+
+00:50:34,430 --> 00:50:38,910
+Drupal zone database obstruction layer
+
+00:50:36,900 --> 00:50:41,520
+because it runs on a separate connection
+
+00:50:38,910 --> 00:50:43,980
+it uses the traditional like a schema
+
+00:50:41,520 --> 00:50:45,450
+installation method but basically the
+
+00:50:43,980 --> 00:50:47,640
+main thing is this cache events table
+
+00:50:45,450 --> 00:50:50,400
+and it just has an auto increment event
+
+00:50:47,640 --> 00:50:52,230
+ID column so it also the database
+
+00:50:50,400 --> 00:50:54,840
+doesn't even have to check the primary
+
+00:50:52,230 --> 00:50:56,610
+key is unique at insert time because it
+
+00:50:54,840 --> 00:51:00,720
+knows the primary key is unique because
+
+00:50:56,610 --> 00:51:04,260
+it's a it's not an increment key the it
+
+00:51:00,720 --> 00:51:06,740
+only has two other indexes it has an
+
+00:51:04,260 --> 00:51:07,890
+expiration index for doing cleanup and
+
+00:51:06,740 --> 00:51:09,779
+it
+
+00:51:07,890 --> 00:51:13,109
+as a lookup miss index which basically
+
+00:51:09,779 --> 00:51:17,579
+allows it to find let me blow this up
+
+00:51:13,109 --> 00:51:19,079
+it's not nearly as visible on there it
+
+00:51:17,579 --> 00:51:20,670
+has a lookup miss index which basically
+
+00:51:19,079 --> 00:51:24,769
+has the address of the cache item which
+
+00:51:20,670 --> 00:51:28,619
+is a packed structure of the bin and key
+
+00:51:24,769 --> 00:51:30,960
+or in the case of drupal bin and cid and
+
+00:51:28,619 --> 00:51:32,970
+then the event ID to basically say in
+
+00:51:30,960 --> 00:51:36,450
+the query give me the latest event
+
+00:51:32,970 --> 00:51:39,390
+that's affected this bin in CID and then
+
+00:51:36,450 --> 00:51:41,369
+and because indexes are handled as these
+
+00:51:39,390 --> 00:51:42,930
+tree structures it's an extremely
+
+00:51:41,369 --> 00:51:45,089
+efficient query for to find the latest
+
+00:51:42,930 --> 00:51:46,650
+event that's affected a cache item so
+
+00:51:45,089 --> 00:51:48,420
+that when it misses on the l1 and goes
+
+00:51:46,650 --> 00:51:51,210
+to the database to say do you have
+
+00:51:48,420 --> 00:51:52,769
+anything about this key it's it's able
+
+00:51:51,210 --> 00:51:54,720
+to use this index to pull it very
+
+00:51:52,769 --> 00:51:56,339
+quickly and ignore the older events
+
+00:51:54,720 --> 00:51:58,470
+related to the item so and so that's
+
+00:51:56,339 --> 00:51:59,970
+just doing a you know selects we are you
+
+00:51:58,470 --> 00:52:02,849
+know order by max limit one kind of
+
+00:51:59,970 --> 00:52:09,990
+trick is that bad yeah um I'll just pull
+
+00:52:02,849 --> 00:52:22,279
+it up the so it's in the database l2 on
+
+00:52:09,990 --> 00:52:25,589
+get country so there's the query and
+
+00:52:22,279 --> 00:52:27,119
+actually before even reading PSR six it
+
+00:52:25,589 --> 00:52:28,559
+already implements the concept of the
+
+00:52:27,119 --> 00:52:31,349
+cash should never fail even if the
+
+00:52:28,559 --> 00:52:33,750
+scheme is broken so i'm already down
+
+00:52:31,349 --> 00:52:35,910
+with that you'll notice on here that it
+
+00:52:33,750 --> 00:52:37,170
+like catches this exception and there's
+
+00:52:35,910 --> 00:52:39,839
+a whole thing in here to like test
+
+00:52:37,170 --> 00:52:41,789
+whether the actual exception is schema
+
+00:52:39,839 --> 00:52:44,400
+related or real more fundamental and
+
+00:52:41,789 --> 00:52:46,349
+then if it's just kind of schema related
+
+00:52:44,400 --> 00:52:48,750
+then it throws a warning and otherwise
+
+00:52:46,349 --> 00:52:50,400
+it will re throw the exception so like
+
+00:52:48,750 --> 00:52:51,660
+if it's actually a syntax error with the
+
+00:52:50,400 --> 00:52:55,019
+query then that's a different type of
+
+00:52:51,660 --> 00:52:56,759
+thing then over the tables missing so
+
+00:52:55,019 --> 00:53:00,329
+there's sort of a white list of certain
+
+00:52:56,759 --> 00:53:02,970
+types of exceptions PDO may throw that
+
+00:53:00,329 --> 00:53:04,859
+are considered to be acceptable to to
+
+00:53:02,970 --> 00:53:08,039
+gloss over and then just kind of miss in
+
+00:53:04,859 --> 00:53:10,349
+silent and semi silently handle but
+
+00:53:08,039 --> 00:53:13,109
+basically does this the Select of those
+
+00:53:10,349 --> 00:53:15,420
+values from the events table where the
+
+00:53:13,109 --> 00:53:17,759
+address is right and the expiration
+
+00:53:15,420 --> 00:53:19,980
+hasn't passed yet it orders by the event
+
+00:53:17,759 --> 00:53:21,310
+98 and then picks the first one okay
+
+00:53:19,980 --> 00:53:23,440
+cool
+
+00:53:21,310 --> 00:53:26,970
+and then on the PS are six front let's
+
+00:53:23,440 --> 00:53:26,970
+talk I've got some ideas for you okay
+
+00:53:28,320 --> 00:53:36,400
+you make sure that I'm not going over
+
+00:53:31,000 --> 00:53:55,330
+time okay that is actually time uh yeah
+
+00:53:36,400 --> 00:54:20,620
+I Larry auditorium in 35 minutes okay
+
+00:53:55,330 --> 00:54:22,660
+thank you thank you thank you Thanks no
+
+00:54:20,620 --> 00:54:25,830
+I I'm actually flying out tonight to get
+
+00:54:22,660 --> 00:54:30,150
+to Berlin for the systemd conference
+
+00:54:25,830 --> 00:54:35,020
+sorry systemd conference this is be okay
+
+00:54:30,150 --> 00:54:38,200
+for the secret I work on last time slot
+
+00:54:35,020 --> 00:54:41,380
+today um no I'm actually because I need
+
+00:54:38,200 --> 00:54:44,620
+to be there to give a tutorial tomorrow
+
+00:54:41,380 --> 00:54:46,810
+in like the morning I'm actually flying
+
+00:54:44,620 --> 00:54:48,430
+to Frankfurt in about an hour and then
+
+00:54:46,810 --> 00:54:51,850
+I'm flying tomorrow morning from
+
+00:54:48,430 --> 00:54:53,650
+Frankfurt to Berlin about this ok we can
+
+00:54:51,850 --> 00:54:54,640
+solve your piss or six issues it was
+
+00:54:53,650 --> 00:54:56,950
+designed to handle the kind of stuff
+
+00:54:54,640 --> 00:54:58,480
+you're talking about there and we have a
+
+00:54:56,950 --> 00:55:00,700
+lot of discussions about this deal beta
+
+00:54:58,480 --> 00:55:02,880
+question yeah so let's talk online about
+
+00:55:00,700 --> 00:55:05,110
+that and make that happen yeah I also
+
+00:55:02,880 --> 00:55:07,270
+with respect to that I think one of the
+
+00:55:05,110 --> 00:55:08,950
+most important things to address is what
+
+00:55:07,270 --> 00:55:11,020
+tags are supposed to mean for caches in
+
+00:55:08,950 --> 00:55:14,380
+the sense of is supposed to be for batch
+
+00:55:11,020 --> 00:55:16,150
+and validation or as Fabian has kind of
+
+00:55:14,380 --> 00:55:17,890
+put it in some of my discussions with
+
+00:55:16,150 --> 00:55:19,870
+him who he actually had a lot of the
+
+00:55:17,890 --> 00:55:25,260
+recommendations that I talked about here
+
+00:55:19,870 --> 00:55:27,640
+it is the is it a isn't an issue of
+
+00:55:25,260 --> 00:55:29,860
+causality management as well where say
+
+00:55:27,640 --> 00:55:32,350
+and you have one cache item derived from
+
+00:55:29,860 --> 00:55:33,940
+another you invalidate the tag if you if
+
+00:55:32,350 --> 00:55:35,040
+you derive a cache item from a now
+
+00:55:33,940 --> 00:55:37,240
+obsolete
+
+00:55:35,040 --> 00:55:40,740
+how do we make sure that that doesn't
+
+00:55:37,240 --> 00:55:43,090
+stick around and I would propose
+
+00:55:40,740 --> 00:55:44,700
+possibly handling at a different level
+
+00:55:43,090 --> 00:55:47,200
+with something called vector clocks
+
+00:55:44,700 --> 00:55:51,540
+which basically track causality among
+
+00:55:47,200 --> 00:55:53,770
+items but uh if PSR six actually or a
+
+00:55:51,540 --> 00:55:55,780
+successor start supporting the idea of
+
+00:55:53,770 --> 00:55:59,680
+cash tags than we actually need to know
+
+00:55:55,780 --> 00:56:01,270
+how extensive what tags mean like oh PS
+
+00:55:59,680 --> 00:56:05,470
+or six doesn't support I know it does
+
+00:56:01,270 --> 00:56:09,010
+but a mechanism to make that an
+
+00:56:05,470 --> 00:56:10,300
+extension it is is built in and the way
+
+00:56:09,010 --> 00:56:12,130
+we designed it is specifically to do
+
+00:56:10,300 --> 00:56:15,130
+that Pierce are 16 is going to be
+
+00:56:12,130 --> 00:56:17,020
+totally useless for you okay might be
+
+00:56:15,130 --> 00:56:20,740
+worthwhile for our WordPress support but
+
+00:56:17,020 --> 00:56:23,140
+Danny 16 is specifically for I don't
+
+00:56:20,740 --> 00:56:26,260
+want to deal with complexity of peers 46
+
+00:56:23,140 --> 00:56:28,090
+I just want a donkey value okay and so I
+
+00:56:26,260 --> 00:56:30,580
+get a simplified interface for that oh
+
+00:56:28,090 --> 00:56:32,590
+ok I misinterpreted the relationship
+
+00:56:30,580 --> 00:56:34,990
+between them yeah it's simply a utility
+
+00:56:32,590 --> 00:56:37,930
+wrapper for people from 4-6 is too
+
+00:56:34,990 --> 00:56:42,310
+complicated hmm no this needs to operate
+
+00:56:37,930 --> 00:56:44,500
+at the PSR six-level talk to you how to
+
+00:56:42,310 --> 00:56:46,860
+deal with is there any discussion of
+
+00:56:44,500 --> 00:56:49,470
+supporting PSR six natively in drupal
+
+00:56:46,860 --> 00:56:51,580
+until tagging happens i don't see that
+
+00:56:49,470 --> 00:56:52,960
+captures very against its marks on
+
+00:56:51,580 --> 00:56:56,080
+Rome's or against it so I didn't bother
+
+00:56:52,960 --> 00:57:09,720
+pushing it okay yeah I feel like I would
+
+00:56:56,080 --> 00:57:16,000
+love to okay oh thank you Thanks okay
+
+00:57:09,720 --> 00:57:19,150
+thanks I was thinking about the size of
+
+00:57:16,000 --> 00:57:20,830
+the overhead that it is imposing on a
+
+00:57:19,150 --> 00:57:22,600
+database it is going to be a small one
+
+00:57:20,830 --> 00:57:23,950
+but it is going to be a present and you
+
+00:57:22,600 --> 00:57:26,040
+mentioned that they are still going to
+
+00:57:23,950 --> 00:57:29,620
+be some logs because you're writing
+
+00:57:26,040 --> 00:57:31,900
+correct and you could implement an l2
+
+00:57:29,620 --> 00:57:35,710
+something yes yes I what I was thinking
+
+00:57:31,900 --> 00:57:37,900
+just alternative L seconds okay if if if
+
+00:57:35,710 --> 00:57:41,350
+even that amount of database overhead is
+
+00:57:37,900 --> 00:57:42,790
+concern for you then any you you want to
+
+00:57:41,350 --> 00:57:43,690
+get rid of that database overhead so
+
+00:57:42,790 --> 00:57:45,610
+much that you're willing to run a
+
+00:57:43,690 --> 00:57:47,530
+separate system then yes that totally
+
+00:57:45,610 --> 00:57:48,190
+makes sense and I would be happy to take
+
+00:57:47,530 --> 00:57:51,730
+a poor
+
+00:57:48,190 --> 00:57:54,430
+West that implements a cam on go l2 or
+
+00:57:51,730 --> 00:57:58,510
+read a cell to memcache would not be
+
+00:57:54,430 --> 00:58:05,500
+able to support the necessary it has
+
+00:57:58,510 --> 00:58:07,720
+struck it has the concept of yes you
+
+00:58:05,500 --> 00:58:08,859
+would probably want to imaging there you
+
+00:58:07,720 --> 00:58:10,780
+don't really need to search you just
+
+00:58:08,859 --> 00:58:24,490
+need to pull a range until like you get
+
+00:58:10,780 --> 00:58:28,060
+to the item that is older than or a
+
+00:58:24,490 --> 00:58:40,869
+notion of even a sequence that you can
+
+00:58:28,060 --> 00:58:45,060
+easily iterate through okay yeah you
+
+00:58:40,869 --> 00:58:45,060
+cannot have items go missing from the l2
+
+00:58:49,950 --> 00:58:55,599
+communication with a particular instance
+
+00:58:52,560 --> 00:58:58,089
+actually only single key might be the
+
+00:58:55,599 --> 00:59:00,220
+cause of a bottleneck the hot key issue
+
+00:58:58,089 --> 00:59:02,140
+for caches that's true too not the whole
+
+00:59:00,220 --> 00:59:03,849
+communication but a single key to
+
+00:59:02,140 --> 00:59:06,250
+actually cause and this handles the hot
+
+00:59:03,849 --> 00:59:08,619
+key problem quite well exactly for
+
+00:59:06,250 --> 00:59:11,920
+example I had this exact same issue and
+
+00:59:08,619 --> 00:59:15,030
+I was thinking to solve it with also
+
+00:59:11,920 --> 00:59:17,829
+that actually suggested with the
+
+00:59:15,030 --> 00:59:22,960
+intermediary proxy if you have heard
+
+00:59:17,829 --> 00:59:24,810
+about this Facebook's RC Rooter yep so
+
+00:59:22,960 --> 00:59:27,790
+that were supreme cache oblivious
+
+00:59:24,810 --> 00:59:29,920
+fermentation you can set it to actually
+
+00:59:27,790 --> 00:59:31,990
+write everywhere and three from the
+
+00:59:29,920 --> 00:59:35,730
+local one so it's a work around the
+
+00:59:31,990 --> 00:59:35,730
+problem is you ran into the can see
+
+00:59:37,380 --> 00:59:43,839
+example just a single big key might
+
+00:59:40,359 --> 00:59:45,700
+cause the photonic oh yeah and I often
+
+00:59:43,839 --> 00:59:47,859
+see that the case on Drupal sites where
+
+00:59:45,700 --> 00:59:50,920
+they have cash cash values that are
+
+00:59:47,859 --> 00:59:54,430
+literally a megabyte or two in its kima
+
+00:59:50,920 --> 00:59:57,180
+yeah yeah schema cash or cash I see a
+
+00:59:54,430 --> 00:59:57,180
+lot of them for views
+
+00:59:59,400 --> 01:00:03,750
+yeah and those get so big that you don't
+
+01:00:02,339 --> 01:00:05,910
+even have to have that many requests to
+
+01:00:03,750 --> 01:00:08,369
+a single cash to get a hotkey for that
+
+01:00:05,910 --> 01:00:10,559
+in terms of bandwidth yeah they can I
+
+01:00:08,369 --> 01:00:12,150
+mean like when it's four megabytes like
+
+01:00:10,559 --> 01:00:14,250
+I would need to pull out a calculator
+
+01:00:12,150 --> 01:00:15,569
+but like how many concurrent page
+
+01:00:14,250 --> 01:00:18,569
+requests do you have to have before you
+
+01:00:15,569 --> 01:00:21,329
+start saturating a few gigabits of
+
+01:00:18,569 --> 01:00:23,130
+network it's not that many especially if
+
+01:00:21,329 --> 01:00:30,390
+you read multiple multi megabyte cash
+
+01:00:23,130 --> 01:00:33,000
+items on a request yep there alpha
+
+01:00:30,390 --> 01:00:34,410
+releases but they mostly work like I
+
+01:00:33,000 --> 01:00:36,539
+mean mostly like I'm not aware of any
+
+01:00:34,410 --> 01:00:39,510
+open bugs on them in terms of like well
+
+01:00:36,539 --> 01:00:41,309
+shoes where everyone that has code key
+
+01:00:39,510 --> 01:00:44,069
+issues or whatever can actually open
+
+01:00:41,309 --> 01:00:48,539
+your books yes I would love to have
+
+01:00:44,069 --> 01:00:53,940
+people try this out and yeah well well
+
+01:00:48,539 --> 01:00:56,490
+the I'm sorry yeah the only issue I'm
+
+01:00:53,940 --> 01:00:58,319
+aware of that Fabian's raised which Mary
+
+01:00:56,490 --> 01:01:00,690
+not actually affect your site is the
+
+01:00:58,319 --> 01:01:03,869
+issue with tag clearing where it doesn't
+
+01:01:00,690 --> 01:01:07,289
+quite do the same kind of concept of tag
+
+01:01:03,869 --> 01:01:10,049
+versioning that Drupal core may expect I
+
+01:01:07,289 --> 01:01:12,930
+haven't seen any issues with this get on
+
+01:01:10,049 --> 01:01:14,789
+sites that we've tried it on but for
+
+01:01:12,930 --> 01:01:17,940
+extremely nuanced things like if you
+
+01:01:14,789 --> 01:01:20,789
+were say doing e-commerce uh then I
+
+01:01:17,940 --> 01:01:22,559
+might hold off right now on the Drupal 8
+
+01:01:20,789 --> 01:01:23,819
+version but if you're mostly managing
+
+01:01:22,559 --> 01:01:27,270
+content you're going to be pro finding
+
+01:01:23,819 --> 01:01:40,529
+my drupal 7 is fine drupal 7 doesn't
+
+01:01:27,270 --> 01:01:42,420
+have a concept of tags yeah they
+
+01:01:40,529 --> 01:01:44,730
+actually they're only caveat I would
+
+01:01:42,420 --> 01:01:46,920
+mention for Drupal 7 which only would
+
+01:01:44,730 --> 01:01:48,480
+require a tiny tiny patch is that it
+
+01:01:46,920 --> 01:01:51,000
+looks for the database connection
+
+01:01:48,480 --> 01:01:53,970
+information in the environment the way
+
+01:01:51,000 --> 01:01:55,319
+that we do it on pantheon but it like
+
+01:01:53,970 --> 01:01:59,460
+it's just looking for some server
+
+01:01:55,319 --> 01:02:02,910
+environment variables it like you can
+
+01:01:59,460 --> 01:02:04,500
+either export it or I would I would or I
+
+01:02:02,910 --> 01:02:05,910
+would just take a patch that like
+
+01:02:04,500 --> 01:02:07,200
+changes it to look for the same place
+
+01:02:05,910 --> 01:02:10,570
+Drupal those or something I was just
+
+01:02:07,200 --> 01:02:13,420
+getting it done it was but there's a no
+
+01:02:10,570 --> 01:02:15,040
+on the the page but other than that one
+
+01:02:13,420 --> 01:02:16,930
+thing I think it should it's pretty much
+
+01:02:15,040 --> 01:02:58,840
+just drop in and run it like there's
+
+01:02:16,930 --> 01:03:02,530
+configuration for it yeah they need I've
+
+01:02:58,840 --> 01:03:04,540
+tested this with Drupal 7 and 8 as the
+
+01:03:02,530 --> 01:03:07,060
+only cash it works with for all bins so
+
+01:03:04,540 --> 01:03:08,740
+it's not like it will break your site if
+
+01:03:07,060 --> 01:03:11,650
+you used for every single bin it's just
+
+01:03:08,740 --> 01:03:14,710
+that there might be a been like form
+
+01:03:11,650 --> 01:03:16,390
+cash or page cache that you don't want
+
+01:03:14,710 --> 01:03:20,590
+to put into it that would be better to
+
+01:03:16,390 --> 01:03:23,980
+not put into l cash I have seen eating
+
+01:03:20,590 --> 01:03:25,380
+memcache very nice it's okay you're
+
+01:03:23,980 --> 01:03:28,510
+welcome to put it in whatever you want
+
+01:03:25,380 --> 01:03:30,820
+like it's just that the the benefit of
+
+01:03:28,510 --> 01:03:33,730
+replicating out the cached form data to
+
+01:03:30,820 --> 01:03:41,950
+all of your web heads is no because it's
+
+01:03:33,730 --> 01:03:46,840
+only going to get read like once the
+
+01:03:41,950 --> 01:03:49,270
+problem from a platform yes yeah and
+
+01:03:46,840 --> 01:04:04,020
+this is why I was talking about my
+
+01:03:49,270 --> 01:04:04,020
+suggestion which is why I questioned if
+
+01:04:04,590 --> 01:04:09,970
+we have network we have network caps
+
+01:04:08,230 --> 01:04:13,120
+between nodes that are based on the
+
+01:04:09,970 --> 01:04:14,470
+clouds that we deployed you and those
+
+01:04:13,120 --> 01:04:16,330
+are going to be at some level they're
+
+01:04:14,470 --> 01:04:17,980
+going to be either like 1.5 gigabits
+
+01:04:16,330 --> 01:04:21,130
+they're going to be like the most we've
+
+01:04:17,980 --> 01:04:24,400
+ever seen is 10 between nodes on a cloud
+
+01:04:21,130 --> 01:04:27,549
+and eventually you saturate it
+
+01:04:24,400 --> 01:04:29,829
+like the we already have site saturating
+
+01:04:27,549 --> 01:04:37,569
+you know three gigabit for gigabit lan
+
+01:04:29,829 --> 01:04:38,890
+links to a cash it's not saturated on
+
+01:04:37,569 --> 01:05:06,279
+the web head because it saturates on a
+
+01:04:38,890 --> 01:05:08,380
+Redis like the same machine having to
+
+01:05:06,279 --> 01:05:11,970
+maintain a different side of having to
+
+01:05:08,380 --> 01:05:11,970
+maintain still something different
+
+01:05:16,020 --> 01:05:21,069
+replacement is a drop-in replacement is
+
+01:05:18,970 --> 01:05:25,619
+no configuration needed it's like same
+
+01:05:21,069 --> 01:05:25,619
+path it just recently for change fast
+
+01:05:26,640 --> 01:05:42,849
+also available with it also just replace
+
+01:05:30,940 --> 01:05:44,910
+its yeah what I'm in trouble I was
+
+01:05:42,849 --> 01:05:48,400
+trying to say that it wasn't a drop-in
+
+01:05:44,910 --> 01:05:52,750
+replacement until you develop it was a
+
+01:05:48,400 --> 01:05:55,630
+really smart solution that you developed
+
+01:05:52,750 --> 01:05:59,410
+I think it would be helpful flora not
+
+01:05:55,630 --> 01:06:00,760
+just know it that was my point of like
+
+01:05:59,410 --> 01:06:02,859
+showing the performance graphs of an
+
+01:06:00,760 --> 01:06:04,839
+improving versus Redis that even when
+
+01:06:02,859 --> 01:06:08,770
+you're not saturating Redis it still is
+
+01:06:04,839 --> 01:06:11,410
+faster so and I have evidence to believe
+
+01:06:08,770 --> 01:06:13,720
+based on the database schema tests that
+
+01:06:11,410 --> 01:06:16,619
+even without the l1 it's still faster
+
+01:06:13,720 --> 01:06:16,619
+than the built in cash
+
+01:06:36,509 --> 01:07:00,789
+that's something that your proxy
+
+01:06:39,369 --> 01:07:01,930
+solution wouldn't help yeah the my
+
+01:07:00,789 --> 01:07:03,819
+ultimate goal for this would be
+
+01:07:01,930 --> 01:07:06,220
+something where it installs a triple
+
+01:07:03,819 --> 01:07:23,289
+core if you have a PC you it uses it if
+
+01:07:06,220 --> 01:07:26,049
+you don't use it well if you run it on a
+
+01:07:23,289 --> 01:07:42,369
+single node server then it has no events
+
+01:07:26,049 --> 01:07:43,690
+to synchronize if you wanted to be that
+
+01:07:42,369 --> 01:07:47,559
+it's yet is a separate database
+
+01:07:43,690 --> 01:07:50,759
+connection and really modern versions of
+
+01:07:47,559 --> 01:07:59,079
+MySQL are highly competitive with Redis
+
+01:07:50,759 --> 01:08:01,299
+in terms of performance I haven't i've
+
+01:07:59,079 --> 01:08:02,650
+looked at it a little bit but that it
+
+01:08:01,299 --> 01:08:05,470
+would be interesting to write in l2
+
+01:08:02,650 --> 01:08:07,749
+against that but the the problem is is
+
+01:08:05,470 --> 01:08:10,989
+that almost all the cloud database stuff
+
+01:08:07,749 --> 01:08:15,430
+now only opens up the mysql protocol
+
+01:08:10,989 --> 01:08:17,069
+socket so like it would only be useful
+
+01:08:15,430 --> 01:08:19,029
+for you to play your own database and
+
+01:08:17,069 --> 01:08:21,549
+wanted to maintain that additional thing
+
+01:08:19,029 --> 01:08:23,589
+but i would rather build it against
+
+01:08:21,549 --> 01:08:32,529
+something like Redis than against this
+
+01:08:23,589 --> 01:08:34,420
+special socket on MySQL thank you Matt
+
+01:08:32,529 --> 01:08:38,259
+nice to meet you too my name is Philippe
+
+01:08:34,420 --> 01:08:40,839
+Bhavani ok where are you based London ok
+
+01:08:38,259 --> 01:08:44,250
+I'm actually gonna meet in London early
+
+01:08:40,839 --> 01:08:44,250
+next week yeah
+
+01:08:46,350 --> 01:08:52,200
+Thanks yeah it's a lot of material
+
+01:09:49,920 --> 01:09:51,980
+
+YouTube URL: https://www.youtube.com/watch?v=rezn59U9CAk
+
+
