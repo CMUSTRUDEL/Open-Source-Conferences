@@ -2,8 +2,12 @@
 A dataset of transcripts and descriptions from most OSS conferences after 2013.
 
 ## Method
-1. Searched for list of conferences through previous knowledge, Wikipedia (https://en.wikipedia.org/wiki/List_of_free-software_events), and several calendars tracking FOSS events (https://calendify.com/@blinkenweb/foss-events and https://lwn.net/Calendar/Monthly/cfp/).
-2. Searched for each conference on YouTube and found their channels.
+1. Searched for list of conferences through previous knowledge, [Wikipedia](https://en.wikipedia.org/wiki/List_of_free-software_events), and several calendars tracking FOSS events(like [this](https://calendify.com/@blinkenweb/foss-events) and [this](https://lwn.net/Calendar/Monthly/cfp/)).
+2. Searched for each conference from [this list](https://docs.google.com/spreadsheets/d/1XPNv2uBbE6VW9QJpgdRfOCMHoDkbYsRkd6rJVHt6mo0/edit?usp=sharing) on YouTube and found their channels.
 3. Collected the channel IDs from their links if labeled as a channel. Else, used one of the playlists and my Python script to find the channel ID.
+<<<<<<< HEAD
 4. Plugged in the list of channel IDs to the Python script parse_through_playlists.py which creates a directory for every channel and its playlists, then writes each video to its own file with title, publication date, playlist title, description, captions, and YouTube URL.
 
+=======
+4. Plugged in the list of channel IDs to the Python script parse_through_playlists.py which creates a directory for every channel and its playlists, then writes each video to its own file with title, publication date, playlist title, description, captions, and YouTube URL. (This can also be done with singular playlists or videos).
+>>>>>>> 4f3fdf6f672d4019397f194ebb50677b32ff3f84
