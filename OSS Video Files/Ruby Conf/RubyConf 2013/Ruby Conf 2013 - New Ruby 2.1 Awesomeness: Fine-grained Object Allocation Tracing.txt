@@ -1,0 +1,2025 @@
+Title: Ruby Conf 2013 - New Ruby 2.1 Awesomeness: Fine-grained Object Allocation Tracing
+Publication date: 2020-01-27
+Playlist: RubyConf 2013
+Description: 
+	By Sam Rawlins
+
+Ruby 2.1 is coming out soon with an amazing new feature under ObjectSpace: #trace_object_allocations. We are now able to trace the file and line number (as well as method) where any Ruby object is allocated from. This is a very welcome feature, as object-level tracing has been very difficult in Ruby, especially since the memprof gem could not support Ruby past 1.8.x.
+
+This new Ruby 2.1 feature is really just exposing some raw (and vast) data, so it can be difficult to tease out meaningful information. Two gems are introduced in this talk to solve just that problem. The objspace-stats gem allows us to view and summarize new object allocations in meaningful ways. We'll look at how to filter, group, and sort new object allocations. The second gem is rack-objspace-stats. We'll see how this tool can intercept requests to a Rack stack, and measure new object allocations taking place during the request. (For those familiar, this works very similar to the rack-perftools_profiler gem.)
+
+We'll look at various examples of how this new Ruby 2.1 feature, and these tools can help an organization reduce unnecessary memory allocations, and speed up their code, especially mature Rack applications.
+
+Help us caption & translate this video!
+
+http://amara.org/v/FG54/
+Captions: 
+	00:00:16,000 --> 00:00:18,400
+SAM RAWLINS: Thanks everybody for staying for a late
+
+00:00:18,400 --> 00:00:23,640
+afternoon talk. So I'm gonna talk today on Ruby 2 point 1,
+
+00:00:23,640 --> 00:00:26,859
+a new feature in Ruby 2.1 called it's all about,
+
+00:00:26,859 --> 00:00:29,109
+it's about tracing object allocations.
+
+00:00:29,109 --> 00:00:33,100
+My name is Sam Rawlins and on the internet I'm srawlins.
+
+00:00:33,100 --> 00:00:37,149
+The slides are on my GitHub if you look at GitHub srawlins.
+
+00:00:37,149 --> 00:00:39,870
+So Ruby 2 point 1 o preview 1 is
+
+00:00:39,870 --> 00:00:42,420
+out. This is exciting. You can grab it with
+
+00:00:42,420 --> 00:00:46,140
+RVM. You can grab it with RVM. This is
+
+00:00:46,140 --> 00:00:50,059
+the Ruby 2.1 news file. If anybody saw Koichi's
+
+00:00:50,059 --> 00:00:52,980
+talk, he, he stole this from me. It's actually,
+
+00:00:52,980 --> 00:00:55,249
+I stole it from earlier talks of his where
+
+00:00:55,249 --> 00:00:58,429
+he does this, and the gag is that this
+
+00:00:58,429 --> 00:01:00,940
+is much smaller than the news file for 2.0.
+
+00:01:00,940 --> 00:01:02,649
+So the feature that I'm gonna talk about is
+
+00:01:02,649 --> 00:01:08,680
+way in the corner there. It's ObjectSpace dot trace_object_allocations.
+
+00:01:08,680 --> 00:01:12,290
+So ObjectSpace isn't new. This module has been around.
+
+00:01:12,290 --> 00:01:14,680
+People may have used it for things like count.objects
+
+00:01:14,680 --> 00:01:19,980
+or each.object. What's new in 2.1 is the ObectSpace
+
+00:01:19,980 --> 00:01:24,120
+dot trace_object_allocations method, and then some sibling methods. You
+
+00:01:24,120 --> 00:01:27,820
+have trace_object_allocations_start, stop, clear, and a few others that
+
+00:01:27,820 --> 00:01:29,750
+they're, like, each day when you check the change
+
+00:01:29,750 --> 00:01:31,680
+log they've added a few more.
+
+00:01:31,680 --> 00:01:34,190
+So the ones in asterisks are not available yet.
+
+00:01:34,190 --> 00:01:36,890
+They will be available in 2.1.0 preview two. I
+
+00:01:36,890 --> 00:01:38,910
+was hoping that would be released by RubyConf and
+
+00:01:38,910 --> 00:01:41,850
+it has not. So you can't get it with
+
+00:01:41,850 --> 00:01:44,970
+Ruby 2.1.0 preview one. You'll have to get head.
+
+00:01:44,970 --> 00:01:47,280
+And I'll, I'll show that later.
+
+00:01:47,280 --> 00:01:49,900
+So let's start out with an anecdote from GitHub.
+
+00:01:49,900 --> 00:01:52,350
+They have a blog post called Hey Judy, Don't
+
+00:01:52,350 --> 00:01:56,290
+Make a Bad that kind of details this. So
+
+00:01:56,290 --> 00:01:58,970
+they looked and they saw, when they fire up
+
+00:01:58,970 --> 00:02:01,950
+the GitHub application, and immediately count how many objects
+
+00:02:01,950 --> 00:02:04,120
+it has just right after firing it up, it
+
+00:02:04,120 --> 00:02:06,810
+has more than six-hundred thousand objects. And they thought,
+
+00:02:06,810 --> 00:02:11,360
+this is crazy and unexpected. Why is this?
+
+00:02:11,360 --> 00:02:14,040
+So they wanted to explore why this happens. Where
+
+00:02:14,040 --> 00:02:16,030
+am I supposedly hogging all this memory? Where am
+
+00:02:16,030 --> 00:02:20,020
+I, where, what Ruby files and what classes are
+
+00:02:20,020 --> 00:02:23,370
+allocating all this memory? So this was a really
+
+00:02:23,370 --> 00:02:26,480
+hard problem to solve until Ruby, this new feature
+
+00:02:26,480 --> 00:02:30,400
+in Ruby 2.1.0, trace_object_allocations, we have lots of CPU
+
+00:02:30,400 --> 00:02:36,050
+profilers and other various tools, SQLing profilers. But until
+
+00:02:36,050 --> 00:02:37,810
+this tool, this, that was a really hard question
+
+00:02:37,810 --> 00:02:40,550
+to answer. So let's look at an example. Hopefully
+
+00:02:40,550 --> 00:02:42,910
+there's enough contrast and you can, you can read
+
+00:02:42,910 --> 00:02:43,319
+this.
+
+00:02:43,319 --> 00:02:45,390
+So I, I'm gonna, I have a class called
+
+00:02:45,390 --> 00:02:49,140
+myClass. It has two methods: an_array returns an array,
+
+00:02:49,140 --> 00:02:52,670
+so therefore it allocates an array and returns it,
+
+00:02:52,670 --> 00:02:56,280
+and then a_string returns a string after allocating it.
+
+00:02:56,280 --> 00:02:58,290
+So let's look at an example of how we
+
+00:02:58,290 --> 00:03:01,569
+can trace that code. So what we can do
+
+00:03:01,569 --> 00:03:02,950
+is we have some code that we want to
+
+00:03:02,950 --> 00:03:05,410
+trace. It's allocating memory and we want to see
+
+00:03:05,410 --> 00:03:08,459
+where. So that's gonna be the two lines in
+
+00:03:08,459 --> 00:03:12,030
+the middle of there. A equals myClass.new an_array. So
+
+00:03:12,030 --> 00:03:15,840
+we're saving that array variable. And myClass.new a_string. We
+
+00:03:15,840 --> 00:03:18,100
+save that s. And we want to trace this.
+
+00:03:18,100 --> 00:03:20,190
+So to trace it, you wrap your code in
+
+00:03:20,190 --> 00:03:24,240
+a block and pass it to trace_object_allocations. And then
+
+00:03:24,240 --> 00:03:27,700
+afterwards you have these methods available to you. You
+
+00:03:27,700 --> 00:03:31,410
+can call ObjectSpace dot allocation_source_file and pass it in
+
+00:03:31,410 --> 00:03:34,060
+you object. And that's gonna give you back example
+
+00:03:34,060 --> 00:03:36,090
+dot rb, the file that it was, that it
+
+00:03:36,090 --> 00:03:39,790
+came from. And you can say allocation_source_line that tells
+
+00:03:39,790 --> 00:03:42,630
+you line three. So back up there, the return
+
+00:03:42,630 --> 00:03:44,870
+that the array is on line three. You can
+
+00:03:44,870 --> 00:03:46,790
+also ask for the class path and the method
+
+00:03:46,790 --> 00:03:50,150
+ID that allocated your object.
+
+00:03:50,150 --> 00:03:54,310
+So another way to invoke this, if you, if
+
+00:03:54,310 --> 00:03:56,390
+it's maybe a little bit cloodgy or hard to
+
+00:03:56,390 --> 00:03:57,660
+wrap the code that you want to trace in
+
+00:03:57,660 --> 00:04:02,060
+a block, you can instead call trace_object_allocation_start and then
+
+00:04:02,060 --> 00:04:03,800
+run the code that you want to trace and
+
+00:04:03,800 --> 00:04:06,180
+then call trace_object_allocation_stop.
+
+00:04:06,180 --> 00:04:09,220
+That is, again, not available in preview one. That's
+
+00:04:09,220 --> 00:04:11,610
+in the trunk.
+
+00:04:11,610 --> 00:04:12,840
+So why are we doing this? Why is this
+
+00:04:12,840 --> 00:04:19,699
+a useful feature. In general, you, many, many product
+
+00:04:19,699 --> 00:04:21,840
+companies are, are in the position where they want
+
+00:04:21,840 --> 00:04:24,330
+to reduce their memory footprint. You have a large,
+
+00:04:24,330 --> 00:04:26,930
+maybe a Rails app that's using a lot of
+
+00:04:26,930 --> 00:04:29,509
+memory and you want to reduce that. I think,
+
+00:04:29,509 --> 00:04:33,379
+more commonly, or, yeah, more commonly, people want to
+
+00:04:33,379 --> 00:04:36,159
+reduce garbage collection time. So this is, of course,
+
+00:04:36,159 --> 00:04:40,009
+like theme for the conference. Each iteration of Ruby
+
+00:04:40,009 --> 00:04:42,830
+has an improved garbage collector. If you, if you
+
+00:04:42,830 --> 00:04:45,580
+do profiling for a large Rails app, you might
+
+00:04:45,580 --> 00:04:48,819
+see that you're spending some large num- amount of
+
+00:04:48,819 --> 00:04:50,490
+time in garbage collection.
+
+00:04:50,490 --> 00:04:54,740
+So if you can manage to allocate fewer objects,
+
+00:04:54,740 --> 00:04:57,520
+then you're gonna reduce time in marking objects and
+
+00:04:57,520 --> 00:05:00,669
+in sweeping those objects. If you were in on
+
+00:05:00,669 --> 00:05:04,740
+Koichi's talk, he, he mentioned that, especially in Ruby,
+
+00:05:04,740 --> 00:05:08,629
+he, he showed an excellent graph, most objects are
+
+00:05:08,629 --> 00:05:11,419
+young objects, so they are created, and then on
+
+00:05:11,419 --> 00:05:13,990
+the next garbage collection cycle, they're pronounced dead and
+
+00:05:13,990 --> 00:05:16,680
+are collected. And then more objects are created and
+
+00:05:16,680 --> 00:05:19,219
+they're, they're, and they die.
+
+00:05:19,219 --> 00:05:21,979
+So if you can reduce, somehow, if there are
+
+00:05:21,979 --> 00:05:25,300
+accidental allocations of young objects, if you can reduce
+
+00:05:25,300 --> 00:05:27,699
+that, you can really improve garbage collection time in
+
+00:05:27,699 --> 00:05:28,259
+your app.
+
+00:05:28,259 --> 00:05:30,629
+But you say, well, my Rub- my application isn't
+
+00:05:30,629 --> 00:05:32,669
+on Ruby 2.1, like, I don't, I don't think
+
+00:05:32,669 --> 00:05:35,669
+it's compatible. If your Ruby application is running on
+
+00:05:35,669 --> 00:05:38,490
+Ruby 2, it should be compatible. I think there
+
+00:05:38,490 --> 00:05:41,839
+are very few incompatibilities, and what you can do
+
+00:05:41,839 --> 00:05:44,449
+is, if you can get, just on your one
+
+00:05:44,449 --> 00:05:46,809
+machine, if you can get your application running on
+
+00:05:46,809 --> 00:05:50,319
+2.1, then you can use the trace_allocations feature as
+
+00:05:50,319 --> 00:05:52,229
+a diagnostics tool and you don't have to go
+
+00:05:52,229 --> 00:05:55,869
+through the whole production whatever to get your production
+
+00:05:55,869 --> 00:05:58,289
+app on 2.1, if you want to just use
+
+00:05:58,289 --> 00:06:01,099
+this locally on your box.
+
+00:06:01,099 --> 00:06:04,210
+So that feature seems neat. But it's pretty, it's
+
+00:06:04,210 --> 00:06:06,479
+pretty limited. I had to have a handle on
+
+00:06:06,479 --> 00:06:09,169
+an object and say, hey Ruby, what file allocated
+
+00:06:09,169 --> 00:06:11,990
+this? And what line number. And you have to,
+
+00:06:11,990 --> 00:06:14,089
+like, have your hands on these objects if you
+
+00:06:14,089 --> 00:06:15,409
+want to ask about, if you want to find
+
+00:06:15,409 --> 00:06:18,539
+out where they were allocated. And it's really fine-grained.
+
+00:06:18,539 --> 00:06:22,949
+It's, it's telling us information about each single allocation.
+
+00:06:22,949 --> 00:06:26,659
+So this isn't terribly useful without some more, some
+
+00:06:26,659 --> 00:06:28,339
+more work ahead of us.
+
+00:06:28,339 --> 00:06:30,710
+So it's just the start. This feature allows us
+
+00:06:30,710 --> 00:06:34,349
+to write better tooling on top of Ruby that
+
+00:06:34,349 --> 00:06:38,960
+can help us find where we're allocating objects. So
+
+00:06:38,960 --> 00:06:40,969
+the next step is gonna be aggregation. You want
+
+00:06:40,969 --> 00:06:43,830
+to be able to aggregate these statistics, these, this
+
+00:06:43,830 --> 00:06:47,490
+information about your allocations and find what, what are
+
+00:06:47,490 --> 00:06:50,599
+the worst offenders in terms of files or classes
+
+00:06:50,599 --> 00:06:52,809
+that are allocating objects.
+
+00:06:52,809 --> 00:06:56,899
+So we've, I've got a gem out, AllocationStats, that
+
+00:06:56,899 --> 00:07:00,589
+is gonna help us do this. Unfortunately, it requires
+
+00:07:00,589 --> 00:07:04,189
+at least an unreleased Ruby 2.1.0 preview two. Hopefully,
+
+00:07:04,189 --> 00:07:07,460
+I, I honestly think within the week, Koichi said
+
+00:07:07,460 --> 00:07:09,149
+within a few days they want to release preview
+
+00:07:09,149 --> 00:07:09,819
+two.
+
+00:07:09,819 --> 00:07:13,759
+For now, you can still in, install RubyTrunk with
+
+00:07:13,759 --> 00:07:16,729
+rbenv or RVM. They both have commands available for
+
+00:07:16,729 --> 00:07:18,279
+you to do that.
+
+00:07:18,279 --> 00:07:20,270
+So let's look at a low-level example of how
+
+00:07:20,270 --> 00:07:22,789
+this library's gonna work. We again have a class
+
+00:07:22,789 --> 00:07:26,270
+and a method inside that class, and the method
+
+00:07:26,270 --> 00:07:29,020
+on line three is gonna create a hash, and
+
+00:07:29,020 --> 00:07:31,430
+on line four it's gonna create a string.
+
+00:07:31,430 --> 00:07:34,669
+So we can require the allocation to that gem,
+
+00:07:34,669 --> 00:07:37,759
+and then the code that we want to trace
+
+00:07:37,759 --> 00:07:39,659
+is gonna be there on line ten. myClass dot
+
+00:07:39,659 --> 00:07:41,469
+new dot my_method - we want to run this
+
+00:07:41,469 --> 00:07:44,369
+code and see, see where allocations happen.
+
+00:07:44,369 --> 00:07:46,039
+So you take that, you wrap it in a
+
+00:07:46,039 --> 00:07:49,490
+block, pass it to allocations_stats dot trace and you'll
+
+00:07:49,490 --> 00:07:52,199
+get back an object. So you get back, you
+
+00:07:52,199 --> 00:07:54,919
+get back this allocation_stats object, and you can call
+
+00:07:54,919 --> 00:07:57,229
+allocations dot to_text on it to get you this
+
+00:07:57,229 --> 00:08:00,619
+tabular output. Oh, and it doesn't show too well.
+
+00:08:00,619 --> 00:08:01,349
+All right.
+
+00:08:01,349 --> 00:08:04,469
+So what it's showing us there is that, let's
+
+00:08:04,469 --> 00:08:10,179
+look, on line four of trace_my_class_raw dot rb, we
+
+00:08:10,179 --> 00:08:13,110
+have allocated a string. And you can see the,
+
+00:08:13,110 --> 00:08:14,949
+the class path and the method id that allocated
+
+00:08:14,949 --> 00:08:17,789
+it are myClass and my_method. It also shows you
+
+00:08:17,789 --> 00:08:20,020
+on line three, we allocated - it's cut off
+
+00:08:20,020 --> 00:08:21,729
+at the end - we allocated a hash and
+
+00:08:21,729 --> 00:08:24,550
+three strings. So those were all on line three.
+
+00:08:24,550 --> 00:08:26,589
+And you see the three strings are the values,
+
+00:08:26,589 --> 00:08:29,360
+the, the three values for the hash. And on
+
+00:08:29,360 --> 00:08:33,849
+line ten we allocated an instance of myClass, so
+
+00:08:33,849 --> 00:08:37,469
+myClass dot new is what allocated that.
+
+00:08:37,469 --> 00:08:41,240
+That's not powerful enough, yet. We're still just looking
+
+00:08:41,240 --> 00:08:43,919
+at a tabular output of individual allocations. So let's
+
+00:08:43,919 --> 00:08:46,120
+try and group our allocations. You have the same
+
+00:08:46,120 --> 00:08:48,600
+code up at the top, same code all the
+
+00:08:48,600 --> 00:08:50,610
+way down through line eleven. We're gonna trace a
+
+00:08:50,610 --> 00:08:54,550
+call to myClass dot new dot my_method.
+
+00:08:54,550 --> 00:08:57,490
+This time, though, we're gonna call allocations dot group_by,
+
+00:08:57,490 --> 00:08:59,790
+and we're gonna pass in, we want to group
+
+00:08:59,790 --> 00:09:03,240
+by the file, the line number, and the class
+
+00:09:03,240 --> 00:09:05,589
+of the object being allocated. So we're gonna create
+
+00:09:05,589 --> 00:09:08,589
+groups of these and output that to a tabular
+
+00:09:08,589 --> 00:09:10,579
+output again. And this time we have something more
+
+00:09:10,579 --> 00:09:14,180
+useful. We can see that we allocated three strings
+
+00:09:14,180 --> 00:09:17,029
+on line three of the file. We allocated one
+
+00:09:17,029 --> 00:09:19,730
+hash on line three. One more string on line
+
+00:09:19,730 --> 00:09:23,980
+four and one instance of myClass on line ten.
+
+00:09:23,980 --> 00:09:25,490
+Let's look at a more complicated example. We can
+
+00:09:25,490 --> 00:09:29,170
+look, we can look at where the psych library
+
+00:09:29,170 --> 00:09:32,880
+allocates. So this is the built-in yaml library in
+
+00:09:32,880 --> 00:09:36,300
+Ruby. So let's do the simplest thing we can
+
+00:09:36,300 --> 00:09:38,350
+think of when we want to generate a yaml
+
+00:09:38,350 --> 00:09:41,060
+string - almost the simplest. We're gonna take an
+
+00:09:41,060 --> 00:09:43,540
+array of two strings, and I want to conver
+
+00:09:43,540 --> 00:09:47,769
+that to yaml. Seems like a pretty trivial example.
+
+00:09:47,769 --> 00:09:50,190
+So here we're gonna call allocations. We're gonna pass
+
+00:09:50,190 --> 00:09:52,459
+in alias_paths true, and I'll show you what that
+
+00:09:52,459 --> 00:09:56,600
+does. And we, I'm gonna group_by the source file
+
+00:09:56,600 --> 00:09:58,529
+and the class of the object and get us
+
+00:09:58,529 --> 00:10:00,110
+some tabular output.
+
+00:10:00,110 --> 00:10:02,629
+So here we see, at the top there, there
+
+00:10:02,629 --> 00:10:05,879
+were thirty-eight instances of a string being allocated in
+
+00:10:05,879 --> 00:10:10,410
+visitor dot rb. And we also see five instances
+
+00:10:10,410 --> 00:10:13,399
+of a matchdata, so a result from a regular
+
+00:10:13,399 --> 00:10:16,209
+expression execution in visitor dot rb.
+
+00:10:16,209 --> 00:10:19,759
+And the, the allcaps Ruby libdr on the left
+
+00:10:19,759 --> 00:10:23,089
+there, that's the alias_paths bit that's built in. So
+
+00:10:23,089 --> 00:10:27,930
+half the time, you're rbenv or RVM class paths
+
+00:10:27,930 --> 00:10:31,339
+for these, for gems or Ruby libdr would, that
+
+00:10:31,339 --> 00:10:33,730
+wouldn't even fit on the slide itself. So to
+
+00:10:33,730 --> 00:10:36,110
+make it easier for everybody, we can alias_paths so
+
+00:10:36,110 --> 00:10:41,009
+Ruby lib files will be prefixed with Ruby libdr,
+
+00:10:41,009 --> 00:10:44,420
+and then there's gemdr and dot for anything in
+
+00:10:44,420 --> 00:10:46,769
+your current working directory.
+
+00:10:46,769 --> 00:10:51,040
+Let's sort those allocation count, let's sort those groups
+
+00:10:51,040 --> 00:10:53,930
+by how many were allocated in each group, so
+
+00:10:53,930 --> 00:10:56,259
+by the count column. So here we're gonna group
+
+00:10:56,259 --> 00:10:58,940
+by source file and class again. We're gonna sort
+
+00:10:58,940 --> 00:11:01,810
+by count this time, for something more useful. And
+
+00:11:01,810 --> 00:11:03,819
+now this is something that's getting much more, much
+
+00:11:03,819 --> 00:11:06,480
+more interesting, right. So now we have the top
+
+00:11:06,480 --> 00:11:10,649
+three offenders in yaml, in psych. We have thirty-eight
+
+00:11:10,649 --> 00:11:13,089
+strings being allocated on visitor. Again, this is just
+
+00:11:13,089 --> 00:11:17,110
+to convert an array with two strings into yaml.
+
+00:11:17,110 --> 00:11:19,050
+So this gets kind of interesting. You kind of
+
+00:11:19,050 --> 00:11:20,529
+want to go into visitor dot rb now and
+
+00:11:20,529 --> 00:11:21,889
+see what's going on.
+
+00:11:21,889 --> 00:11:24,259
+There's twenty-one strings in yaml tree. Twelve arrays in
+
+00:11:24,259 --> 00:11:28,690
+yaml tree and on and on. So class plus
+
+00:11:28,690 --> 00:11:32,170
+is a feature I added, as well. So for
+
+00:11:32,170 --> 00:11:36,500
+this example, we're gonna use the hike gem. So
+
+00:11:36,500 --> 00:11:38,910
+hike is, is kind of the core of sprockets.
+
+00:11:38,910 --> 00:11:42,060
+It allows you to take a subdirectory somewhere and
+
+00:11:42,060 --> 00:11:44,540
+say give, find me all the files that match
+
+00:11:44,540 --> 00:11:45,440
+this filter.
+
+00:11:45,440 --> 00:11:48,279
+So here we're gonna look at the hike direc-
+
+00:11:48,279 --> 00:11:51,449
+library tree itself. And find me all the, all
+
+00:11:51,449 --> 00:11:54,209
+the rb files that have hike in them. So
+
+00:11:54,209 --> 00:11:57,500
+pretty simple hike example. Here, this time, I'm gonna
+
+00:11:57,500 --> 00:12:00,029
+group by the source file and class plus, which'll
+
+00:12:00,029 --> 00:12:03,110
+give us some more information other than class. So
+
+00:12:03,110 --> 00:12:06,009
+here we see, let, if you look at the
+
+00:12:06,009 --> 00:12:10,009
+class plus column, it's, it's telling us that in
+
+00:12:10,009 --> 00:12:12,829
+kernel require dot rb, there were a hundred and
+
+00:12:12,829 --> 00:12:16,250
+thirty-four allocations for an array and for all of
+
+00:12:16,250 --> 00:12:20,579
+those allocations, the members were fixnum or false class.
+
+00:12:20,579 --> 00:12:22,939
+So they were all integers or false.
+
+00:12:22,939 --> 00:12:25,550
+The next highlighted one down says that all the
+
+00:12:25,550 --> 00:12:27,709
+allocations in path name of an array for all
+
+00:12:27,709 --> 00:12:31,949
+of them, the members were strings. So that's pretty
+
+00:12:31,949 --> 00:12:34,569
+cool. What might seem a little weird about this
+
+00:12:34,569 --> 00:12:38,560
+list is that there are a ton of allocations
+
+00:12:38,560 --> 00:12:40,889
+here. Four-hundred thirty-eight. One fifty-two. Why is this so
+
+00:12:40,889 --> 00:12:41,750
+expensive?
+
+00:12:41,750 --> 00:12:43,810
+And then the directories are weird, too. These are
+
+00:12:43,810 --> 00:12:46,839
+all, these all come from the RubyGems directory. And
+
+00:12:46,839 --> 00:12:48,810
+it's kernel require dot rb and we have some
+
+00:12:48,810 --> 00:12:53,750
+Ruby VM instruction sequences. So what's actually happening here
+
+00:12:53,750 --> 00:12:55,500
+is that the first time I use the hike
+
+00:12:55,500 --> 00:12:58,240
+library, that's when it loads all the, that's when
+
+00:12:58,240 --> 00:13:01,379
+Ruby loads all the files, or RubyGems, I guess,
+
+00:13:01,379 --> 00:13:04,089
+loads all the files. And so the loading process
+
+00:13:04,089 --> 00:13:06,870
+is allocating strings left and right, Ruby VM instruction
+
+00:13:06,870 --> 00:13:08,149
+sequences.
+
+00:13:08,149 --> 00:13:09,970
+So this is not useful. We need to filter
+
+00:13:09,970 --> 00:13:14,759
+this out. So we got another option, burn. So
+
+00:13:14,759 --> 00:13:16,860
+burn is like burning in poker. We can burn
+
+00:13:16,860 --> 00:13:21,050
+one when we trace a block of code. So
+
+00:13:21,050 --> 00:13:23,540
+what burn one is gonna do is it's gonna
+
+00:13:23,540 --> 00:13:26,829
+run our block once, without tracing anything. And throw
+
+00:13:26,829 --> 00:13:29,300
+away whatever happened. And then it's gonna run again
+
+00:13:29,300 --> 00:13:33,810
+while, with object allocation tracing turned on.
+
+00:13:33,810 --> 00:13:35,899
+So now we get much more useful results. So
+
+00:13:35,899 --> 00:13:38,240
+that was the same hike code. Now we see
+
+00:13:38,240 --> 00:13:40,560
+that all the allocations are happening in the hike
+
+00:13:40,560 --> 00:13:43,610
+gem or in Ruby's pathname dot rb. That seems
+
+00:13:43,610 --> 00:13:46,569
+to make more sense.
+
+00:13:46,569 --> 00:13:49,709
+So object churn is kind of the next subset
+
+00:13:49,709 --> 00:13:53,040
+of, of problems in, in expensive garbage collection. This
+
+00:13:53,040 --> 00:13:55,709
+is kind of the idea of young objects. One
+
+00:13:55,709 --> 00:13:58,379
+specific instance of this that hits a lot of
+
+00:13:58,379 --> 00:14:02,779
+us, I'm sure, is per-Rack::Request allocations. So this is
+
+00:14:02,779 --> 00:14:05,879
+where, for the sake of an example, let's say
+
+00:14:05,879 --> 00:14:08,589
+this is a Rails, we have a Rails app,
+
+00:14:08,589 --> 00:14:11,029
+and you have a request coming through. It's gonna
+
+00:14:11,029 --> 00:14:12,980
+have to go through all your Rack middleware, all
+
+00:14:12,980 --> 00:14:16,620
+your, the, the routes, into a controller, action, your
+
+00:14:16,620 --> 00:14:20,790
+views, your helpers. It's, it's generating, it's pulling out
+
+00:14:20,790 --> 00:14:22,790
+objects from the databases, it's generating lots and lots
+
+00:14:22,790 --> 00:14:25,069
+of objects. And as soon as a response has
+
+00:14:25,069 --> 00:14:27,360
+been generated, it's gonna throw away - how much
+
+00:14:27,360 --> 00:14:29,560
+of that? Like most of that, right.
+
+00:14:29,560 --> 00:14:31,740
+And so every single request, every single user that's
+
+00:14:31,740 --> 00:14:34,810
+hitting a rack app like this is, is generating
+
+00:14:34,810 --> 00:14:36,879
+all these young objects and they're immediately being swept
+
+00:14:36,879 --> 00:14:41,089
+away on the next garbage collection. So a great
+
+00:14:41,089 --> 00:14:44,749
+way to see how your Rack app is allocating
+
+00:14:44,749 --> 00:14:48,490
+objects, there's another gem I have called Rack AllocationStats.
+
+00:14:48,490 --> 00:14:50,689
+So this is a Rack middleware. Let's say you
+
+00:14:50,689 --> 00:14:53,129
+have a Rack app sitting at my dot rack
+
+00:14:53,129 --> 00:14:56,269
+dot app on port 9292, and you want to
+
+00:14:56,269 --> 00:14:59,730
+send, you have some viewer resource sitting at slash
+
+00:14:59,730 --> 00:15:03,149
+path with parameters foo equals bar.
+
+00:15:03,149 --> 00:15:07,790
+You can just append and ras[trace] equals true, and
+
+00:15:07,790 --> 00:15:11,699
+that will kick off Rack allocation stats. So ras
+
+00:15:11,699 --> 00:15:13,850
+there stands for Rack allocation stats. We'll see lots
+
+00:15:13,850 --> 00:15:16,139
+of ras parameters.
+
+00:15:16,139 --> 00:15:18,370
+So let's look at a simple Sinatra app. I
+
+00:15:18,370 --> 00:15:20,360
+believe we can see most of this. This is
+
+00:15:20,360 --> 00:15:23,339
+very simple. At slash erb, all we're gonna do
+
+00:15:23,339 --> 00:15:25,519
+is we're gonna parse an erb template. It's sitting
+
+00:15:25,519 --> 00:15:28,220
+down here. All it does is it creates a
+
+00:15:28,220 --> 00:15:31,259
+list of helloworld in with hello in these six
+
+00:15:31,259 --> 00:15:33,059
+different languages.
+
+00:15:33,059 --> 00:15:35,879
+So here's that app sitting at, we're looking at
+
+00:15:35,879 --> 00:15:39,480
+slash erb. When I take an, when I take
+
+00:15:39,480 --> 00:15:42,959
+question ras trace equals true on the end, I
+
+00:15:42,959 --> 00:15:46,079
+now have a tabular listing - it's sorted -
+
+00:15:46,079 --> 00:15:48,660
+of all the allocations that are happening. SO this
+
+00:15:48,660 --> 00:15:52,480
+is the default grouping is by file and line
+
+00:15:52,480 --> 00:15:54,879
+number and the class of the object. So you
+
+00:15:54,879 --> 00:15:57,399
+can see at the top there, we've got -
+
+00:15:57,399 --> 00:15:59,930
+I'm not gonna do it.
+
+00:15:59,930 --> 00:16:03,249
+WE've got forty-six strings being allocated on line four
+
+00:16:03,249 --> 00:16:07,300
+hundred and forty-five or erb dot rb.
+
+00:16:07,300 --> 00:16:10,379
+And so that's, that's your sorting. So there's lots
+
+00:16:10,379 --> 00:16:12,809
+of different options that ras accepts, and I'm adding
+
+00:16:12,809 --> 00:16:15,540
+a lot cause I'm actively working on this. So
+
+00:16:15,540 --> 00:16:18,949
+ras[help] will give you a, will respond a man
+
+00:16:18,949 --> 00:16:24,100
+page-style help. [alias_paths] equals true will, again, alias those
+
+00:16:24,100 --> 00:16:25,930
+paths at the front so you can see, at
+
+00:16:25,930 --> 00:16:28,579
+the top, erb is in Ruby libdr. A couple
+
+00:16:28,579 --> 00:16:30,930
+lines down we are doing a lot of string
+
+00:16:30,930 --> 00:16:36,069
+allocations in, in gem colon Sinatra 1.3.3.
+
+00:16:36,069 --> 00:16:41,649
+ras[times] is, will pass the request down into your
+
+00:16:41,649 --> 00:16:44,279
+Rack app n number of times. So for this
+
+00:16:44,279 --> 00:16:46,449
+it would be ten number of times. So if
+
+00:16:46,449 --> 00:16:50,519
+your application maybe has some variability in the path
+
+00:16:50,519 --> 00:16:53,259
+that takes or the objects that it's allocating, you
+
+00:16:53,259 --> 00:16:54,589
+can do ten times and then you'll see like
+
+00:16:54,589 --> 00:16:56,769
+a sum of what happens, what happens over ten
+
+00:16:56,769 --> 00:17:00,410
+requests. Where, where, where are the big offenders in
+
+00:17:00,410 --> 00:17:03,120
+allocating objects.
+
+00:17:03,120 --> 00:17:05,010
+You can also [output] to JSON, so there's a
+
+00:17:05,010 --> 00:17:08,020
+little snippet of some JSON. If you predify it
+
+00:17:08,020 --> 00:17:10,320
+it looks like this. So it's an array of
+
+00:17:10,320 --> 00:17:12,780
+groups - so you've got the group key there.
+
+00:17:12,780 --> 00:17:15,580
+We're grouping by that file, that line number, and
+
+00:17:15,580 --> 00:17:17,750
+string objects. And then you get a list of
+
+00:17:17,750 --> 00:17:20,140
+all the allocations that happen there. You can do
+
+00:17:20,140 --> 00:17:21,839
+fun things with that.
+
+00:17:21,839 --> 00:17:26,670
+[output] interact, [output] equals interactive is another fun way
+
+00:17:26,670 --> 00:17:30,440
+to, way to use this tool. So, let's actually
+
+00:17:30,440 --> 00:17:32,640
+demo that. I can demo all that.
+
+00:17:32,640 --> 00:17:36,750
+So here's my Rack app again. I'm gonna say
+
+00:17:36,750 --> 00:17:40,210
+ras[trace] equals true. OK, so now I get -
+
+00:17:40,210 --> 00:17:43,000
+these are, this is the sorted list. You can't
+
+00:17:43,000 --> 00:17:45,960
+tell, cause it's like the tiniest monitor. So I'm
+
+00:17:45,960 --> 00:17:50,570
+gonna and ras[alias- oh, it's already there - paths]
+
+00:17:50,570 --> 00:17:51,660
+equals true.
+
+00:17:51,660 --> 00:17:53,070
+Now it's a little more readable cause I've shortened
+
+00:17:53,070 --> 00:17:59,710
+my file names. If I, instead, go interactive, [output]
+
+00:17:59,710 --> 00:18:04,260
+equals interactive, let's see what we get. So it's
+
+00:18:04,260 --> 00:18:09,160
+mostly visible. It's, we get this JavaScript application, this
+
+00:18:09,160 --> 00:18:11,510
+interactive application where we can kind of poke around
+
+00:18:11,510 --> 00:18:13,940
+and see where we're allocating objects.
+
+00:18:13,940 --> 00:18:16,770
+So, right now, by default, it groups by file
+
+00:18:16,770 --> 00:18:19,500
+and line and the class, and class plus. I
+
+00:18:19,500 --> 00:18:21,820
+can take off line and say, OK, so this,
+
+00:18:21,820 --> 00:18:25,620
+the erb file is allocating a lot. Sinatra base
+
+00:18:25,620 --> 00:18:29,900
+dot rb. I can filter out Ruby and say
+
+00:18:29,900 --> 00:18:32,170
+I just want to look at gems. I'm, I'm
+
+00:18:32,170 --> 00:18:36,210
+interested in where the gems are allocating objects.
+
+00:18:36,210 --> 00:18:39,000
+And there's, most often there's a long tail of
+
+00:18:39,000 --> 00:18:41,670
+allocations. So here, most of the page is filled
+
+00:18:41,670 --> 00:18:43,580
+with like, oh this file allocated one of these
+
+00:18:43,580 --> 00:18:45,020
+and one of these and two of these. Which
+
+00:18:45,020 --> 00:18:47,150
+is not terribly interesting to you, so you can
+
+00:18:47,150 --> 00:18:49,290
+shorten it and say, just show me the interesting
+
+00:18:49,290 --> 00:18:52,160
+ones. So now, if I go one more, now
+
+00:18:52,160 --> 00:18:54,310
+we're looking at - this is a nice little
+
+00:18:54,310 --> 00:18:58,220
+compact list of all the, of all the offenders,
+
+00:18:58,220 --> 00:19:01,300
+of all the combinations of file, line, and class
+
+00:19:01,300 --> 00:19:03,840
+that are using, they're allocating more than, they kind
+
+00:19:03,840 --> 00:19:06,330
+of account for more than one percent of the
+
+00:19:06,330 --> 00:19:06,650
+allocations.
+
+00:19:06,650 --> 00:19:08,470
+So you might want to look in here and
+
+00:19:08,470 --> 00:19:10,860
+see, like, why is, first of all, why does
+
+00:19:10,860 --> 00:19:12,650
+it have fifteen hundred lines? And then why is
+
+00:19:12,650 --> 00:19:15,090
+base dot rb, why is that line allocating so
+
+00:19:15,090 --> 00:19:17,910
+much, like, this was a pretty simple application. Maybe
+
+00:19:17,910 --> 00:19:20,530
+this can be reduced.
+
+00:19:20,530 --> 00:19:22,500
+So that's interactive.
+
+00:19:22,500 --> 00:19:25,560
+So you're saying, OK, what do I do? You've
+
+00:19:25,560 --> 00:19:28,710
+shown me how to look at where my, my
+
+00:19:28,710 --> 00:19:32,660
+applications, my Ruby code is allocating objects. What do
+
+00:19:32,660 --> 00:19:34,560
+I do about that? Well, you want to allocate
+
+00:19:34,560 --> 00:19:35,680
+less. That's the goal here.
+
+00:19:35,680 --> 00:19:38,270
+How do I allocate less, you say. OK, that
+
+00:19:38,270 --> 00:19:41,680
+depends. This can be pretty tricky actually. I think
+
+00:19:41,680 --> 00:19:43,720
+a lot of times - this is, Koichi's observation
+
+00:19:43,720 --> 00:19:46,160
+is not terribly new. This is true in the
+
+00:19:46,160 --> 00:19:50,640
+Java world when people do garbage collection, academic papers
+
+00:19:50,640 --> 00:19:53,430
+and such, they, they see that most objects are
+
+00:19:53,430 --> 00:19:55,710
+young objects. They die when they're young.
+
+00:19:55,710 --> 00:19:59,330
+So there's, there's maybe not a lot you can
+
+00:19:59,330 --> 00:20:01,790
+do. But let's see what you can do. OK,
+
+00:20:01,790 --> 00:20:03,990
+if this is readable - the red might not
+
+00:20:03,990 --> 00:20:08,220
+be. This was a very simple pull request I
+
+00:20:08,220 --> 00:20:11,900
+sent to the temple gem, where, on, on that,
+
+00:20:11,900 --> 00:20:14,090
+on that Sinatra app, if you use a slim
+
+00:20:14,090 --> 00:20:17,250
+template instead of erb, the biggest offender is this
+
+00:20:17,250 --> 00:20:20,920
+line in temple, where they're saying keys plus equals
+
+00:20:20,920 --> 00:20:21,780
+h dot keys.
+
+00:20:21,780 --> 00:20:25,260
+If anybody knows, let's say keys is an array.
+
+00:20:25,260 --> 00:20:28,400
+Plus equals is gonna allocate a new array. And
+
+00:20:28,400 --> 00:20:30,300
+Ruby documentation is actually really good about this so
+
+00:20:30,300 --> 00:20:32,740
+I have some links to the documentation there. Ruby's
+
+00:20:32,740 --> 00:20:36,450
+documentation says plus will allocate a new array and
+
+00:20:36,450 --> 00:20:39,190
+fill it with the contents of keys and h
+
+00:20:39,190 --> 00:20:42,070
+dot keys. So that's allocating a new object right
+
+00:20:42,070 --> 00:20:42,420
+there.
+
+00:20:42,420 --> 00:20:44,110
+In this case, we don't need to allocate a
+
+00:20:44,110 --> 00:20:47,030
+new object. We can use the concat method instead,
+
+00:20:47,030 --> 00:20:50,690
+which will concatenate the second array onto the first
+
+00:20:50,690 --> 00:20:54,240
+array and reduce our allocations.
+
+00:20:54,240 --> 00:20:57,300
+Memoization is a good technique for reducing this. I'm,
+
+00:20:57,300 --> 00:21:01,030
+I'm not advocating premature optimizations. You should kind of
+
+00:21:01,030 --> 00:21:03,220
+see where your offenders are and then see if
+
+00:21:03,220 --> 00:21:05,920
+you want to memoize those, those spots. So we'll
+
+00:21:05,920 --> 00:21:07,440
+look at some examples of these.
+
+00:21:07,440 --> 00:21:09,890
+A big one is string building, where you might
+
+00:21:09,890 --> 00:21:13,990
+be concatenating strings, you might be using some metaprogramming
+
+00:21:13,990 --> 00:21:17,200
+and building a method name that you're gonna just
+
+00:21:17,200 --> 00:21:19,590
+pass to send and then throw away the method
+
+00:21:19,590 --> 00:21:22,010
+name that you've just built up. So we can
+
+00:21:22,010 --> 00:21:24,300
+look at a few examples of what we can
+
+00:21:24,300 --> 00:21:25,160
+fix there.
+
+00:21:25,160 --> 00:21:28,540
+let's look at Rails 3.2.15, from the latest Rails,
+
+00:21:28,540 --> 00:21:32,380
+3.2. So here I've got a very, very, very
+
+00:21:32,380 --> 00:21:34,230
+simple Rails app. It has two models. It has
+
+00:21:34,230 --> 00:21:37,990
+projects and tasks. And projects have many tasks. And
+
+00:21:37,990 --> 00:21:41,430
+on this page, we have a few with ten
+
+00:21:41,430 --> 00:21:44,200
+projects, and each project has, I think it's four
+
+00:21:44,200 --> 00:21:48,030
+tasks. And, and we're displaying these various fields of
+
+00:21:48,030 --> 00:21:48,640
+them.
+
+00:21:48,640 --> 00:21:52,750
+So, theoretically for this page, we are retrieving about
+
+00:21:52,750 --> 00:21:57,140
+one hundred stringy fields from the database. SO that's
+
+00:21:57,140 --> 00:21:59,470
+like some context of what, what work maybe should
+
+00:21:59,470 --> 00:22:02,510
+have been done for this. When I add ras[trace]
+
+00:22:02,510 --> 00:22:04,980
+equals true and let's look at it interactively, we
+
+00:22:04,980 --> 00:22:05,990
+get these results.
+
+00:22:05,990 --> 00:22:11,660
+So we can see at the top here, ActiveRecord::Relation
+
+00:22:11,660 --> 00:22:16,220
+allocated seven hundred and fifty-six strings. So that's pretty
+
+00:22:16,220 --> 00:22:18,820
+wild. It doesn't, I mean, I showed you it.
+
+00:22:18,820 --> 00:22:21,590
+Project has many tasks. That was the only relation
+
+00:22:21,590 --> 00:22:23,350
+that we have here. I didn't do anything fancy
+
+00:22:23,350 --> 00:22:25,750
+in the controller. I literally - Rails new, and
+
+00:22:25,750 --> 00:22:27,680
+then I created those two models and we have
+
+00:22:27,680 --> 00:22:28,050
+this.
+
+00:22:28,050 --> 00:22:31,020
+So something's a little fishy here. We also have
+
+00:22:31,020 --> 00:22:35,640
+ActiveSupport::Callbacks generating seven hundred and seven strings. And then
+
+00:22:35,640 --> 00:22:38,100
+the next one is SQLite3 statement is generating a
+
+00:22:38,100 --> 00:22:40,300
+lot of strings - only three hundred thirty-two strings,
+
+00:22:40,300 --> 00:22:40,780
+actually.
+
+00:22:40,780 --> 00:22:44,800
+And, and SQLite3 is, is, is where I'm pulling
+
+00:22:44,800 --> 00:22:47,840
+those supposed, you know, one-hundred stringy fields out of
+
+00:22:47,840 --> 00:22:50,100
+the database. So this maybe isn't a huge offender.
+
+00:22:50,100 --> 00:22:53,170
+We're allocating three times as many strings as we
+
+00:22:53,170 --> 00:22:56,240
+were expecting. If you dig into the code, you
+
+00:22:56,240 --> 00:23:00,120
+know, it's possible that a lot of that's unavoidable.
+
+00:23:00,120 --> 00:23:01,550
+So let's look at some of these, some of
+
+00:23:01,550 --> 00:23:06,000
+these big offenders. Active_support/callbacks dot rb. So here, any
+
+00:23:06,000 --> 00:23:08,610
+time you have a call back, I think this
+
+00:23:08,610 --> 00:23:09,910
+is ActiveSupport, so this is gonna be for your
+
+00:23:09,910 --> 00:23:13,610
+callbacks in your models and callbacks in your controllers.
+
+00:23:13,610 --> 00:23:16,440
+It has to build the names for the callbacks,
+
+00:23:16,440 --> 00:23:18,470
+and it does this every single time so that
+
+00:23:18,470 --> 00:23:21,200
+it can send on line eighty-one there.
+
+00:23:21,200 --> 00:23:23,740
+And so this is crazy expensive. Every single time
+
+00:23:23,740 --> 00:23:26,070
+you, you want to call methods, you just want
+
+00:23:26,070 --> 00:23:29,970
+to call your callbacks in a response, Rails is,
+
+00:23:29,970 --> 00:23:32,500
+is building these methods each time, and if it
+
+00:23:32,500 --> 00:23:34,470
+doesn't, as if it's never built them before and
+
+00:23:34,470 --> 00:23:36,520
+as if they're gonna change from time to time,
+
+00:23:36,520 --> 00:23:38,420
+right, these callback method names.
+
+00:23:38,420 --> 00:23:42,100
+So this is pretty ridiculous. Luckily, in Rails 4
+
+00:23:42,100 --> 00:23:45,870
+this is all fixed. You can see now we
+
+00:23:45,870 --> 00:23:49,320
+are caching the, the callback runner names in a
+
+00:23:49,320 --> 00:23:51,880
+thread-safe cache, so that's pretty excellent, that'll reduce the
+
+00:23:51,880 --> 00:23:55,260
+allocations in a Rails 4 app. If we look
+
+00:23:55,260 --> 00:23:59,160
+at active_record/relation, this class is pretty wild.
+
+00:23:59,160 --> 00:24:04,220
+So it starts with these three constants with lots
+
+00:24:04,220 --> 00:24:07,250
+of, with lots of symbols in them. And these
+
+00:24:07,250 --> 00:24:10,110
+symbols are basically going to be instance meth- or
+
+00:24:10,110 --> 00:24:14,270
+instance variables. So as soon as we initialize a
+
+00:24:14,270 --> 00:24:17,360
+new active_record/relation, so like, you're chaining relations or pulling
+
+00:24:17,360 --> 00:24:20,910
+things out of the database, you're initializing new relations,
+
+00:24:20,910 --> 00:24:23,210
+it takes each of these and it's gonna do
+
+00:24:23,210 --> 00:24:25,820
+instance variable set and then build a string with
+
+00:24:25,820 --> 00:24:27,690
+what it wants to set, right, because it's, it's
+
+00:24:27,690 --> 00:24:29,520
+gonna append this value at the end and it's
+
+00:24:29,520 --> 00:24:31,880
+gonna put an app in front. And every single
+
+00:24:31,880 --> 00:24:36,030
+time you create a new active_record/relation, it's building this
+
+00:24:36,030 --> 00:24:40,200
+string and throwing it away for like, thirty-odd attributes
+
+00:24:40,200 --> 00:24:41,670
+that it's doing this for.
+
+00:24:41,670 --> 00:24:44,690
+So this was pretty wild and inefficient, and this
+
+00:24:44,690 --> 00:24:47,130
+code has just been totally rewritten for Rails 4,
+
+00:24:47,130 --> 00:24:49,470
+so it, it doesn't apply anymore. But this is
+
+00:24:49,470 --> 00:24:50,850
+why that was such a huge offender in a
+
+00:24:50,850 --> 00:24:53,370
+Rails 3.2 app.
+
+00:24:53,370 --> 00:24:55,390
+It's not always easy to fix these things. So
+
+00:24:55,390 --> 00:24:57,420
+there are some - I think I - I
+
+00:24:57,420 --> 00:24:59,100
+think these links are actually to the Rails 4
+
+00:24:59,100 --> 00:25:01,460
+version to show you that, like, there are some
+
+00:25:01,460 --> 00:25:03,360
+that still exist, and I'm not sure how they
+
+00:25:03,360 --> 00:25:07,690
+should be fixed. So if we look at ActiveSupport's
+
+00:25:07,690 --> 00:25:09,980
+output safety, which is where you get HTML safe
+
+00:25:09,980 --> 00:25:12,680
+and some methods like that, we see that, at
+
+00:25:12,680 --> 00:25:15,150
+the very end of the, the file, it puts
+
+00:25:15,150 --> 00:25:19,450
+this HTML_safe method onto string, and all that does
+
+00:25:19,450 --> 00:25:21,780
+is it creates a new safe_buffer instance, passing in
+
+00:25:21,780 --> 00:25:23,320
+the string.
+
+00:25:23,320 --> 00:25:26,680
+And safe_buffer inherits from string so that immediately allocates
+
+00:25:26,680 --> 00:25:28,710
+a new string with that, because we're, we're creating
+
+00:25:28,710 --> 00:25:31,760
+a new one. And so this isn't, it's not
+
+00:25:31,760 --> 00:25:34,490
+terribly obvious how you could solve this anytime you
+
+00:25:34,490 --> 00:25:38,150
+want to HTML_safe something that, you know, the idea,
+
+00:25:38,150 --> 00:25:40,250
+the ActiveSupport idea is to create this new class,
+
+00:25:40,250 --> 00:25:43,260
+this safe_buffer class and put your string in there.
+
+00:25:43,260 --> 00:25:45,920
+And so you can, you can theorize a bunch
+
+00:25:45,920 --> 00:25:48,340
+of different ways that this might be solved, but
+
+00:25:48,340 --> 00:25:49,910
+I don't think it's obvious how - there's no
+
+00:25:49,910 --> 00:25:53,480
+quick solution, I think, that this maybe should be
+
+00:25:53,480 --> 00:25:55,330
+done with care if, if this is gonna be
+
+00:25:55,330 --> 00:25:57,370
+fixed.
+
+00:25:57,370 --> 00:25:58,790
+We have the tag helper here - this one's
+
+00:25:58,790 --> 00:26:01,240
+a big one. SO any time you're using a
+
+00:26:01,240 --> 00:26:05,290
+form helper in Rails, so - or, I'm sorry,
+
+00:26:05,290 --> 00:26:09,780
+a view helper, so form helpers, the JavaScript helper
+
+00:26:09,780 --> 00:26:12,690
+tags, all these, you know, link_for, they all kind
+
+00:26:12,690 --> 00:26:15,300
+of boil down to a call to the tag
+
+00:26:15,300 --> 00:26:18,150
+method, which is going to have an open bracket
+
+00:26:18,150 --> 00:26:19,500
+and then a bunch of string interpolation with the
+
+00:26:19,500 --> 00:26:21,670
+things that are passed into it, and then it
+
+00:26:21,670 --> 00:26:24,140
+has to decide whether to open or close, or,
+
+00:26:24,140 --> 00:26:26,140
+to leave the tag open or close it. So
+
+00:26:26,140 --> 00:26:27,500
+over on the right you see it's either a
+
+00:26:27,500 --> 00:26:29,830
+right bracket or slash right bracket.
+
+00:26:29,830 --> 00:26:32,970
+So all of those are strings that every single
+
+00:26:32,970 --> 00:26:36,570
+time tag is called, those strings have to be
+
+00:26:36,570 --> 00:26:40,280
+allocated again. Every single time. And so this is,
+
+00:26:40,280 --> 00:26:42,840
+again, not - it's not easy how to solve
+
+00:26:42,840 --> 00:26:44,740
+this. like, all of your tags are gonna be
+
+00:26:44,740 --> 00:26:47,290
+different. If you have some view with table with
+
+00:26:47,290 --> 00:26:50,060
+hundreds of cells in it or something, they're probably
+
+00:26:50,060 --> 00:26:52,590
+all different. It's, there's, memoizing is not a good
+
+00:26:52,590 --> 00:26:56,860
+idea here, right. This one's kind of tough how,
+
+00:26:56,860 --> 00:27:00,270
+how we can reduce allocations in that one.
+
+00:27:00,270 --> 00:27:05,170
+The SQLite3 offense that we saw was, it happens
+
+00:27:05,170 --> 00:27:08,250
+right here on line 108 of statement dot rb.
+
+00:27:08,250 --> 00:27:11,660
+It's val equals step. So why is this allocating
+
+00:27:11,660 --> 00:27:13,510
+so many strings? It's, it doesn't appear to allocate
+
+00:27:13,510 --> 00:27:15,270
+any strings.
+
+00:27:15,270 --> 00:27:17,320
+It presumably calls this step method. So where is
+
+00:27:17,320 --> 00:27:19,850
+that? And you search for it in statement dot
+
+00:27:19,850 --> 00:27:22,490
+rb and it's not there. And that's because it's
+
+00:27:22,490 --> 00:27:26,140
+a C function in statement dot C. So the
+
+00:27:26,140 --> 00:27:29,420
+SQLite gem is part C extension and part Ruby.
+
+00:27:29,420 --> 00:27:31,880
+So if you want to fix those string allocations,
+
+00:27:31,880 --> 00:27:34,460
+you have to now, like, know the C API
+
+00:27:34,460 --> 00:27:36,710
+for Ruby and go in and see which methods
+
+00:27:36,710 --> 00:27:37,610
+are, are allocating strings.
+
+00:27:37,610 --> 00:27:39,070
+So that's not impossible to fix, but it's a
+
+00:27:39,070 --> 00:27:42,660
+little, little more tricky to fix that one.
+
+00:27:42,660 --> 00:27:45,380
+But, in general, I think that we should be
+
+00:27:45,380 --> 00:27:48,310
+excited. I think that these are really new, really
+
+00:27:48,310 --> 00:27:52,480
+exciting features to add to our, our performance tool
+
+00:27:52,480 --> 00:27:54,380
+chest, so we have a bunch of different gems
+
+00:27:54,380 --> 00:27:56,540
+out there already. This thing is new, though, provides
+
+00:27:56,540 --> 00:28:01,490
+new functionality. I think that it's important for us
+
+00:28:01,490 --> 00:28:05,040
+to be aware that Ruby allocates objects, because we
+
+00:28:05,040 --> 00:28:07,990
+have a garbage collector - it's hidden from us.
+
+00:28:07,990 --> 00:28:10,150
+Every Ruby implementation hides this from us, that we
+
+00:28:10,150 --> 00:28:12,480
+allocate objects, and we don't know that we're programming
+
+00:28:12,480 --> 00:28:15,400
+badly until our app is suddenly hundreds of megabytes
+
+00:28:15,400 --> 00:28:17,490
+and we have, like, all these unicorns on one
+
+00:28:17,490 --> 00:28:19,000
+server, and each of them is three hundred meg
+
+00:28:19,000 --> 00:28:22,350
+and we've got just a mess on our hands.
+
+00:28:22,350 --> 00:28:25,400
+So I think it's important to think about how,
+
+00:28:25,400 --> 00:28:27,870
+when you're, when you're appending, when you're chaining methods
+
+00:28:27,870 --> 00:28:30,250
+in a collection - so chaining hash methods or
+
+00:28:30,250 --> 00:28:33,080
+array methods or string methods, that you could be
+
+00:28:33,080 --> 00:28:35,890
+instantiating new objects and that you may not need
+
+00:28:35,890 --> 00:28:37,940
+to.
+
+00:28:37,940 --> 00:28:39,980
+Be aware of how much garbage collection costs you.
+
+00:28:39,980 --> 00:28:41,180
+So this one's kind of a fun test to
+
+00:28:41,180 --> 00:28:45,020
+do if you haven't used perftools dot rb or,
+
+00:28:45,020 --> 00:28:48,160
+I think it's, is it rackperftools? There's, there's a
+
+00:28:48,160 --> 00:28:52,320
+Rack gem. It is amazing to see, you know,
+
+00:28:52,320 --> 00:28:56,000
+in a big application, how frequently we're object, we're
+
+00:28:56,000 --> 00:28:59,290
+garbage collecting, and how much time it takes. Especially
+
+00:28:59,290 --> 00:29:01,390
+in a Ruby 1.9 app.
+
+00:29:01,390 --> 00:29:03,850
+So, I think that that's really important, to be
+
+00:29:03,850 --> 00:29:06,300
+aware of that and, if you're having performance problems,
+
+00:29:06,300 --> 00:29:08,560
+there's a good chance that it's garbage collection. If
+
+00:29:08,560 --> 00:29:11,990
+you, if you cruise around the internet for people
+
+00:29:11,990 --> 00:29:15,000
+fixing their own perf, Ruby performance problems, a lot
+
+00:29:15,000 --> 00:29:18,640
+of it is tuning the garbage collector. I think
+
+00:29:18,640 --> 00:29:22,120
+GitHub, Twitter, oh there's another one - I think
+
+00:29:22,120 --> 00:29:24,960
+AirB and B all have articles on how they've
+
+00:29:24,960 --> 00:29:27,710
+tuned the garbage collection, the garbage collector, for their
+
+00:29:27,710 --> 00:29:29,980
+own purposes.
+
+00:29:29,980 --> 00:29:31,330
+And I think it's important to add this, this
+
+00:29:31,330 --> 00:29:35,220
+tool to your toolbox. So what this space. This
+
+00:29:35,220 --> 00:29:39,280
+tool is actually the trace_object_allocations functionality is still being
+
+00:29:39,280 --> 00:29:43,380
+written. Aman Gupta committed something, I think yesterday morning,
+
+00:29:43,380 --> 00:29:46,080
+to this. So like, it's changing every - I,
+
+00:29:46,080 --> 00:29:48,310
+I have to constantly rewrite my slides as I'm
+
+00:29:48,310 --> 00:29:49,840
+doing this.
+
+00:29:49,840 --> 00:29:52,690
+And, and I think, also, so I've written a
+
+00:29:52,690 --> 00:29:55,780
+few gems that I just showed, but I think
+
+00:29:55,780 --> 00:29:58,930
+what this tool does is what the, what the
+
+00:29:58,930 --> 00:30:01,280
+new Ruby functionality does, is it's gonna allow us
+
+00:30:01,280 --> 00:30:03,600
+to build really great tools and more tools around
+
+00:30:03,600 --> 00:30:06,470
+this. So I think we should be cognizant of
+
+00:30:06,470 --> 00:30:08,370
+that, of how we can, we can reduce our
+
+00:30:08,370 --> 00:30:11,970
+object allocations by using different tools.
+
+00:30:11,970 --> 00:30:13,390
+So things to Google if you're interested in this
+
+00:30:13,390 --> 00:30:15,360
+talk. First of all, now that I've been here
+
+00:30:15,360 --> 00:30:17,030
+a few days, a bunch of the talks here
+
+00:30:17,030 --> 00:30:20,230
+- so Koichi's talk, Pat Shaughnessy's talk was really
+
+00:30:20,230 --> 00:30:24,950
+excellent, on the garbage collector in different implementations, Koichi's
+
+00:30:24,950 --> 00:30:29,920
+previous talks. So you should read GitHub's blog post,
+
+00:30:29,920 --> 00:30:31,760
+Hey Judy, Don't Make a Bad. This is a
+
+00:30:31,760 --> 00:30:35,600
+really interesting read. It actually, so, it starts out
+
+00:30:35,600 --> 00:30:38,200
+telling the story that GitHub wanted to solve that
+
+00:30:38,200 --> 00:30:42,330
+problem of 600,000 objects. So they have a fork
+
+00:30:42,330 --> 00:30:45,350
+of Ruby. Aman Gupta writes this feature into Ruby
+
+00:30:45,350 --> 00:30:48,610
+to see what files and lines are allocating objects,
+
+00:30:48,610 --> 00:30:50,850
+and they kind of find where the problem is.
+
+00:30:50,850 --> 00:30:52,660
+It's an interesting read.
+
+00:30:52,660 --> 00:30:54,440
+So then Aman opens up a feature request at
+
+00:30:54,440 --> 00:30:57,620
+RubyCore and Koichi adopts it into Ruby 2 point
+
+00:30:57,620 --> 00:30:59,240
+1. So that's kind of the, the back story
+
+00:30:59,240 --> 00:31:02,290
+of how that feature got put in here.
+
+00:31:02,290 --> 00:31:05,980
+You can search for the two gems, allocation_stats and
+
+00:31:05,980 --> 00:31:09,130
+rack-allocation_stats. And I would definitely search for, especially if
+
+00:31:09,130 --> 00:31:12,600
+you saw Koichi Sasada's talk, I would definitely search
+
+00:31:12,600 --> 00:31:15,150
+for his other talks. I think it's called Building
+
+00:31:15,150 --> 00:31:17,210
+a more efficient Ruby 2 point 1. So he
+
+00:31:17,210 --> 00:31:20,820
+gave one at RubyKaigi and one at Euroku. And
+
+00:31:20,820 --> 00:31:23,410
+there should be videos of both of those, and
+
+00:31:23,410 --> 00:31:25,420
+he changes his talk each time. So he kind
+
+00:31:25,420 --> 00:31:27,900
+of gave the same talk at, at RubyConf, but,
+
+00:31:27,900 --> 00:31:31,630
+you know, it evolves cause he's, he's writing these
+
+00:31:31,630 --> 00:31:31,800
+features.
+
+00:31:31,800 --> 00:31:33,500
+As a matter of fact, like, his talk yesterday
+
+00:31:33,500 --> 00:31:34,850
+had a bunch of features that I think he
+
+00:31:34,850 --> 00:31:39,880
+committed yesterday or the day before. So pretty goofy.
+
+00:31:39,880 --> 00:31:41,890
+And I need to thank Aman Gupta for writing
+
+00:31:41,890 --> 00:31:45,210
+this initially. GitHub for everything that GitHub ever does.
+
+00:31:45,210 --> 00:31:46,640
+Matt Brooks is a coworker of mine who helps
+
+00:31:46,640 --> 00:31:50,000
+me with the slides. Ruby Central, for putting on
+
+00:31:50,000 --> 00:31:53,250
+this incredible conference, and then Hakim for reveal dot
+
+00:31:53,250 --> 00:31:55,990
+js, which is what this talk is written in.
+
+00:31:55,990 --> 00:32:00,390
+
+YouTube URL: https://www.youtube.com/watch?v=qzNNH2mnp08
+
+
