@@ -1,0 +1,1032 @@
+Title: E. Choroba - Schema Updates and How to Make Them Zero Downtime
+Publication date: 2020-06-25
+Playlist: TPC 2020 in the Cloud
+Description: 
+	Your fantastic application is online and it started attracting users. Suddenly, you realise you need to change the schema of the data. How to do it properly for both the running system and possible future deployments? How to do it without crashing the running application?
+
+If we imagine a database powering our application, each schema change comes in two forms: one is the actual ALTER TABLE, the other one is the updated CREATE TABLE that will be used in future deployments. Blindly applying the former might break the application for users that are using it at the moment of the change. If your application is more complex, it might have several components with their own schemas. How can we change the user without breaking the whole application? Perl will be used in the examples, but the findings are valid in general.
+
+Slides: https://e-choroba.eu/20-updates
+Captions: 
+	00:00:00,030 --> 00:00:08,849
+okay hello I am Carrabba from Prague I
+
+00:00:06,529 --> 00:00:12,120
+work at codata
+
+00:00:08,849 --> 00:00:13,740
+and I'm going to tell you about scheme
+
+00:00:12,120 --> 00:00:19,289
+updates and how to make them zero
+
+00:00:13,740 --> 00:00:22,830
+downtime so first the plan of the talk
+
+00:00:19,289 --> 00:00:26,820
+I'll start with a story then I will
+
+00:00:22,830 --> 00:00:29,730
+describe problems of scheme updates I'll
+
+00:00:26,820 --> 00:00:33,059
+define downtime and and what I mean by
+
+00:00:29,730 --> 00:00:38,190
+zero downtime and I'll show a more
+
+00:00:33,059 --> 00:00:43,110
+complex example to illustrate the
+
+00:00:38,190 --> 00:00:48,420
+solution and the details of it so a
+
+00:00:43,110 --> 00:00:52,410
+story there was a recent lightning talk
+
+00:00:48,420 --> 00:00:56,640
+by Mikey bunch about perico's Club so
+
+00:00:52,410 --> 00:00:59,370
+this is about the pure equus Club which
+
+00:00:56,640 --> 00:01:02,129
+was a successor to the c-pen pure
+
+00:00:59,370 --> 00:01:06,840
+request challenge and when I join it
+
+00:01:02,129 --> 00:01:09,119
+joined it in the very first month I was
+
+00:01:06,840 --> 00:01:15,390
+assigned the pool request challenge the
+
+00:01:09,119 --> 00:01:21,439
+app itself and there were several open
+
+00:01:15,390 --> 00:01:25,860
+issues there and I selected the one that
+
+00:01:21,439 --> 00:01:28,920
+concerned this page which lists your
+
+00:01:25,860 --> 00:01:32,600
+github repositories and you can select
+
+00:01:28,920 --> 00:01:35,189
+which of them to offer to other
+
+00:01:32,600 --> 00:01:38,750
+participants of the challenge so they
+
+00:01:35,189 --> 00:01:48,240
+can open pull requests against them
+
+00:01:38,750 --> 00:01:50,610
+and this page this is the issue so the
+
+00:01:48,240 --> 00:01:53,790
+problem was that this this page talks to
+
+00:01:50,610 --> 00:01:56,520
+github every time you open it and when
+
+00:01:53,790 --> 00:01:59,130
+you did that it took several seconds
+
+00:01:56,520 --> 00:02:01,409
+even for for me and I only have like 20
+
+00:01:59,130 --> 00:02:03,030
+repositories for people having hundreds
+
+00:02:01,409 --> 00:02:07,399
+of repositories is probably took even
+
+00:02:03,030 --> 00:02:10,890
+longer so there was a issue to limit
+
+00:02:07,399 --> 00:02:12,790
+this to only talking to github once a
+
+00:02:10,890 --> 00:02:16,989
+day and to
+
+00:02:12,790 --> 00:02:18,939
+the response and to add a pool or
+
+00:02:16,989 --> 00:02:22,239
+refresh button if you add a new
+
+00:02:18,939 --> 00:02:25,180
+repository want to immediately share it
+
+00:02:22,239 --> 00:02:31,690
+with other people and not wait one more
+
+00:02:25,180 --> 00:02:34,780
+day to appear in in the list so I looked
+
+00:02:31,690 --> 00:02:37,150
+into the implementation of the
+
+00:02:34,780 --> 00:02:40,420
+application of the poor request club
+
+00:02:37,150 --> 00:02:43,599
+application and it was written in in
+
+00:02:40,420 --> 00:02:47,409
+catalyst and for the database it used DB
+
+00:02:43,599 --> 00:02:50,920
+IX class call and you can see that this
+
+00:02:47,409 --> 00:02:57,129
+is the user table and it contains
+
+00:02:50,920 --> 00:02:59,980
+various columns and we want to add the
+
+00:02:57,129 --> 00:03:07,180
+time of the last fetch from github there
+
+00:02:59,980 --> 00:03:11,769
+to to this table so the batch is shown
+
+00:03:07,180 --> 00:03:14,739
+here it's it's pretty easy the first
+
+00:03:11,769 --> 00:03:18,280
+block shows the the last repo saying
+
+00:03:14,739 --> 00:03:23,849
+which is the time of the last sync with
+
+00:03:18,280 --> 00:03:30,310
+github and underneath you can see in the
+
+00:03:23,849 --> 00:03:36,849
+fetch repos subroutine we skip fetching
+
+00:03:30,310 --> 00:03:41,169
+the repos if the time is not one day or
+
+00:03:36,849 --> 00:03:43,329
+more and what's also important at the
+
+00:03:41,169 --> 00:03:46,180
+end we have to after we've actually
+
+00:03:43,329 --> 00:03:52,239
+fetch the repos we have to update the
+
+00:03:46,180 --> 00:03:57,849
+last time in the database I also had to
+
+00:03:52,239 --> 00:04:01,269
+change the sequel command itself I'm not
+
+00:03:57,849 --> 00:04:04,329
+sure whether it's needed when you use DB
+
+00:04:01,269 --> 00:04:05,349
+IX I think it's it's like doing the same
+
+00:04:04,329 --> 00:04:10,389
+thing twice
+
+00:04:05,349 --> 00:04:16,000
+but maybe it's needed I don't know so
+
+00:04:10,389 --> 00:04:18,280
+the problem is that creating a new new
+
+00:04:16,000 --> 00:04:20,950
+table with with the colonists ok but
+
+00:04:18,280 --> 00:04:25,000
+it's not what we need for the already
+
+00:04:20,950 --> 00:04:26,389
+running app because it runs we don't
+
+00:04:25,000 --> 00:04:28,789
+want to create a new table
+
+00:04:26,389 --> 00:04:32,479
+we want to change the existing one we
+
+00:04:28,789 --> 00:04:35,689
+want to alter the table so we need this
+
+00:04:32,479 --> 00:04:39,860
+sequel command in fact but there was no
+
+00:04:35,689 --> 00:04:44,960
+place to insert it in so I put it into
+
+00:04:39,860 --> 00:04:47,090
+the commit message and I also
+
+00:04:44,960 --> 00:04:51,259
+implemented the reload button but it's
+
+00:04:47,090 --> 00:04:53,389
+not important for this talk so this is
+
+00:04:51,259 --> 00:04:57,229
+something that that happens quite often
+
+00:04:53,389 --> 00:05:01,460
+if you work with with databases so there
+
+00:04:57,229 --> 00:05:05,090
+exist tools to help you with that
+
+00:05:01,460 --> 00:05:08,479
+one example is ask which it's written in
+
+00:05:05,090 --> 00:05:12,020
+Perl it will store the initial state of
+
+00:05:08,479 --> 00:05:15,610
+the database and then a sequence of
+
+00:05:12,020 --> 00:05:18,889
+these outer tables or other statements
+
+00:05:15,610 --> 00:05:23,770
+that must run to like bring the app up
+
+00:05:18,889 --> 00:05:26,240
+to date and you can also like have
+
+00:05:23,770 --> 00:05:30,830
+different databases in in different
+
+00:05:26,240 --> 00:05:33,919
+phases and it knows what outer tables to
+
+00:05:30,830 --> 00:05:36,430
+run and what to skip and so on so it
+
+00:05:33,919 --> 00:05:38,930
+helps a lot and in fact
+
+00:05:36,430 --> 00:05:42,469
+pukas club was migrated to it for
+
+00:05:38,930 --> 00:05:47,330
+commits later I have a question here for
+
+00:05:42,469 --> 00:05:49,159
+squidge users but it's not so important
+
+00:05:47,330 --> 00:05:53,330
+so if someone knows please let me know
+
+00:05:49,159 --> 00:05:56,569
+later that whether you really keep the
+
+00:05:53,330 --> 00:05:59,569
+initial state forever and just make a
+
+00:05:56,569 --> 00:06:01,789
+list of ultra tables and sequel
+
+00:05:59,569 --> 00:06:04,159
+statements longer and longer or whether
+
+00:06:01,789 --> 00:06:09,919
+it's possible or whether there is
+
+00:06:04,159 --> 00:06:12,169
+tooling for saying okay the actual state
+
+00:06:09,919 --> 00:06:14,089
+will be the initial one and I'll like
+
+00:06:12,169 --> 00:06:18,379
+throw away all the outer tables and
+
+00:06:14,089 --> 00:06:21,680
+we'll run again from okay I see the
+
+00:06:18,379 --> 00:06:25,219
+message thank you and there are probably
+
+00:06:21,680 --> 00:06:26,199
+many more similar tools I just know this
+
+00:06:25,219 --> 00:06:30,830
+one
+
+00:06:26,199 --> 00:06:32,779
+so what happens when we alter a table
+
+00:06:30,830 --> 00:06:37,099
+while the app is running so there are
+
+00:06:32,779 --> 00:06:38,930
+many possibilities some of them are bad
+
+00:06:37,099 --> 00:06:39,979
+so for example the application might
+
+00:06:38,930 --> 00:06:42,229
+crash
+
+00:06:39,979 --> 00:06:43,789
+the front end is not ready for what's
+
+00:06:42,229 --> 00:06:48,410
+coming from the back end or vice-versa
+
+00:06:43,789 --> 00:06:51,350
+but there are even worse scenarios like
+
+00:06:48,410 --> 00:06:55,030
+we might corrupt the database or me we
+
+00:06:51,350 --> 00:06:57,979
+might lure some data might get lost
+
+00:06:55,030 --> 00:07:01,190
+without notice so we don't know what was
+
+00:06:57,979 --> 00:07:04,490
+in fact lost and there is the happy
+
+00:07:01,190 --> 00:07:09,440
+scenario as well that everything just
+
+00:07:04,490 --> 00:07:13,280
+works sometimes it happens so and this
+
+00:07:09,440 --> 00:07:17,180
+this is the general problem there might
+
+00:07:13,280 --> 00:07:20,120
+be different changes than an altar table
+
+00:07:17,180 --> 00:07:22,400
+you might like assign a new permissions
+
+00:07:20,120 --> 00:07:25,610
+to users or something
+
+00:07:22,400 --> 00:07:31,039
+and in fact database doesn't have to be
+
+00:07:25,610 --> 00:07:34,990
+involved at all so the easiest solution
+
+00:07:31,039 --> 00:07:41,000
+is is downtime which means we want the
+
+00:07:34,990 --> 00:07:45,800
+old and new code to never meet live so
+
+00:07:41,000 --> 00:07:47,930
+we just switch everything off and then
+
+00:07:45,800 --> 00:07:51,169
+we apply the changes and then when we
+
+00:07:47,930 --> 00:07:54,070
+switch everything on again if everything
+
+00:07:51,169 --> 00:07:59,120
+runs the new code and everything is okay
+
+00:07:54,070 --> 00:08:02,389
+but it's not always possible to switch
+
+00:07:59,120 --> 00:08:04,820
+off an application there are services
+
+00:08:02,389 --> 00:08:07,789
+that that can be switched off because
+
+00:08:04,820 --> 00:08:09,650
+they are critical or because the
+
+00:08:07,789 --> 00:08:14,000
+customer just thinks they are critical
+
+00:08:09,650 --> 00:08:19,389
+thing of some Hospital software or
+
+00:08:14,000 --> 00:08:23,870
+something so there is way how to do it
+
+00:08:19,389 --> 00:08:28,460
+zero downtime which means without Turing
+
+00:08:23,870 --> 00:08:34,190
+the application of in fact so there are
+
+00:08:28,460 --> 00:08:36,680
+some conditions we must stick to in
+
+00:08:34,190 --> 00:08:38,479
+order to be able to do that so one of
+
+00:08:36,680 --> 00:08:41,120
+them is that all changes must be
+
+00:08:38,479 --> 00:08:43,430
+backward compatible you can also make
+
+00:08:41,120 --> 00:08:48,200
+all changes forward comfortable but it's
+
+00:08:43,430 --> 00:08:51,760
+a bit harder to achieve and you proceed
+
+00:08:48,200 --> 00:08:53,329
+in in steps where by steps I mean
+
+00:08:51,760 --> 00:08:58,790
+releases of
+
+00:08:53,329 --> 00:09:03,290
+of new code so what are the steps so the
+
+00:08:58,790 --> 00:09:05,779
+first step is the code that we release
+
+00:09:03,290 --> 00:09:09,439
+will accept data conforming to both the
+
+00:09:05,779 --> 00:09:12,290
+old and new schema we don't have any
+
+00:09:09,439 --> 00:09:14,629
+data confirming to the new schema but
+
+00:09:12,290 --> 00:09:18,679
+the code is already able to handle it
+
+00:09:14,629 --> 00:09:22,699
+and then once we are sure this code is
+
+00:09:18,679 --> 00:09:25,339
+everywhere there is no old code anywhere
+
+00:09:22,699 --> 00:09:28,309
+anymore we can start producing so this
+
+00:09:25,339 --> 00:09:31,100
+is the second release that that releases
+
+00:09:28,309 --> 00:09:35,869
+code that really uses the the new schema
+
+00:09:31,100 --> 00:09:37,879
+and any other part of the application
+
+00:09:35,869 --> 00:09:41,149
+already knows how to how to handle that
+
+00:09:37,879 --> 00:09:44,269
+so there is no problem and then there is
+
+00:09:41,149 --> 00:09:46,699
+the third step which means which is a
+
+00:09:44,269 --> 00:09:49,999
+cleanup we just removed support for the
+
+00:09:46,699 --> 00:09:54,189
+old schema and this is a bit problematic
+
+00:09:49,999 --> 00:09:58,249
+again because we must be again 100% sure
+
+00:09:54,189 --> 00:10:01,220
+that there's no instance of the code of
+
+00:09:58,249 --> 00:10:03,829
+the old code running so for example if
+
+00:10:01,220 --> 00:10:07,009
+there if you have a session that lasts
+
+00:10:03,829 --> 00:10:11,600
+for one day there can be a user who
+
+00:10:07,009 --> 00:10:14,839
+keeps a page open opened and he clicks
+
+00:10:11,600 --> 00:10:17,989
+on safe the next day so you have to wait
+
+00:10:14,839 --> 00:10:28,449
+really the 24 hours or whatever your
+
+00:10:17,989 --> 00:10:32,179
+your session whatever the time of of the
+
+00:10:28,449 --> 00:10:35,869
+session is before removing the code so
+
+00:10:32,179 --> 00:10:42,379
+you don't break the the application for
+
+00:10:35,869 --> 00:10:44,809
+them so I'll be talking about this from
+
+00:10:42,379 --> 00:10:47,119
+the point of view of of a contract
+
+00:10:44,809 --> 00:10:53,350
+between internal components but but
+
+00:10:47,119 --> 00:11:01,869
+changing a public API is quite similar
+
+00:10:53,350 --> 00:11:05,749
+but it's it's usually more explicit we
+
+00:11:01,869 --> 00:11:07,070
+usually use versioning there is like
+
+00:11:05,749 --> 00:11:09,140
+some kind of a duplication
+
+00:11:07,070 --> 00:11:11,690
+process which means we announce to our
+
+00:11:09,140 --> 00:11:14,900
+customers who are going to change the
+
+00:11:11,690 --> 00:11:18,710
+API you have I don't know three months
+
+00:11:14,900 --> 00:11:21,080
+to adjust the availability is probably
+
+00:11:18,710 --> 00:11:25,790
+specified in in the contract so we have
+
+00:11:21,080 --> 00:11:29,240
+to we can't use the downtime as we would
+
+00:11:25,790 --> 00:11:31,670
+like because it might break the contract
+
+00:11:29,240 --> 00:11:34,610
+and it involves a lot of communication
+
+00:11:31,670 --> 00:11:38,150
+because cost customer is some some times
+
+00:11:34,610 --> 00:11:40,700
+will say well okay just keep it a bit
+
+00:11:38,150 --> 00:11:43,760
+longer for us we don't have time to fix
+
+00:11:40,700 --> 00:11:46,060
+it now and will they use some money to
+
+00:11:43,760 --> 00:11:52,810
+keep it the old way and stuff like that
+
+00:11:46,060 --> 00:11:55,880
+so now I'll show you a more complex case
+
+00:11:52,810 --> 00:12:00,410
+which is what we do that at good data so
+
+00:11:55,880 --> 00:12:05,980
+we store our customers data and they
+
+00:12:00,410 --> 00:12:09,530
+have so it's this database on the top
+
+00:12:05,980 --> 00:12:12,020
+stores the data and we store the schema
+
+00:12:09,530 --> 00:12:15,980
+of the data in another database it's
+
+00:12:12,020 --> 00:12:18,740
+this metadata storage and we have
+
+00:12:15,980 --> 00:12:20,900
+several different virtual machines all
+
+00:12:18,740 --> 00:12:22,760
+of them with with different purposes and
+
+00:12:20,900 --> 00:12:26,540
+with different parts of the code
+
+00:12:22,760 --> 00:12:28,600
+available and what will be important
+
+00:12:26,540 --> 00:12:34,190
+here is the metadata object which is
+
+00:12:28,600 --> 00:12:36,440
+basically a perl object that corresponds
+
+00:12:34,190 --> 00:12:39,470
+to the schema stored in the metadata
+
+00:12:36,440 --> 00:12:44,960
+storage we also have backups which are
+
+00:12:39,470 --> 00:12:46,940
+just some kind of files somewhere and we
+
+00:12:44,960 --> 00:12:49,370
+have a validator which is code
+
+00:12:46,940 --> 00:12:57,230
+responsible for validating the objects
+
+00:12:49,370 --> 00:13:00,590
+coming from outside each update of the
+
+00:12:57,230 --> 00:13:02,840
+scheme our of metadata as we call it has
+
+00:13:00,590 --> 00:13:05,150
+three components
+
+00:13:02,840 --> 00:13:09,740
+one is the code change which changes the
+
+00:13:05,150 --> 00:13:12,200
+code in the in the metadata object there
+
+00:13:09,740 --> 00:13:14,630
+is something called offline update which
+
+00:13:12,200 --> 00:13:17,870
+is which is code which updates the
+
+00:13:14,630 --> 00:13:20,000
+metadata backup because we stored the
+
+00:13:17,870 --> 00:13:20,710
+backups and when you want to restore a
+
+00:13:20,000 --> 00:13:23,140
+backup
+
+00:13:20,710 --> 00:13:26,680
+from like I don't know three months ago
+
+00:13:23,140 --> 00:13:29,170
+you can't just take it and load it into
+
+00:13:26,680 --> 00:13:30,970
+it into the database because the schema
+
+00:13:29,170 --> 00:13:34,810
+might have changed in between so you
+
+00:13:30,970 --> 00:13:36,880
+have to upgrade the the metadata in the
+
+00:13:34,810 --> 00:13:39,430
+backup so that's the offline update and
+
+00:13:36,880 --> 00:13:42,160
+then there is live update which updates
+
+00:13:39,430 --> 00:13:46,090
+the actual data in the in the metadata
+
+00:13:42,160 --> 00:13:48,880
+storage and it in in the simple cases it
+
+00:13:46,090 --> 00:13:50,980
+just runs the offline update on the
+
+00:13:48,880 --> 00:13:56,260
+start structures in the database so so
+
+00:13:50,980 --> 00:13:59,950
+they can be quite similar these two okay
+
+00:13:56,260 --> 00:14:02,080
+so in this case when we want to for
+
+00:13:59,950 --> 00:14:07,420
+example add a new columnar or do some
+
+00:14:02,080 --> 00:14:12,130
+other schema change we start with actual
+
+00:14:07,420 --> 00:14:14,020
+change in in the data database here the
+
+00:14:12,130 --> 00:14:17,140
+backward compatibility is crucial
+
+00:14:14,020 --> 00:14:20,080
+because if we change the schema but but
+
+00:14:17,140 --> 00:14:22,420
+everything works as it worked before no
+
+00:14:20,080 --> 00:14:24,880
+one notices the change okay so this
+
+00:14:22,420 --> 00:14:27,400
+that's the first release another one
+
+00:14:24,880 --> 00:14:29,770
+code change and release is we start
+
+00:14:27,400 --> 00:14:32,950
+accepting the metadata conforming to the
+
+00:14:29,770 --> 00:14:36,970
+new schema in the object but still no
+
+00:14:32,950 --> 00:14:40,650
+one produces these objects so these
+
+00:14:36,970 --> 00:14:45,580
+structures so it's okay for us nothing
+
+00:14:40,650 --> 00:14:48,340
+happens then we have to update the
+
+00:14:45,580 --> 00:14:51,040
+validator to do tree the new scheme as
+
+00:14:48,340 --> 00:14:54,000
+valid this is needed for integration
+
+00:14:51,040 --> 00:14:56,440
+deaths of the next step to to pass
+
+00:14:54,000 --> 00:14:59,080
+because in the next step we'll start
+
+00:14:56,440 --> 00:15:01,780
+producing the metadata conforming to the
+
+00:14:59,080 --> 00:15:06,010
+new schema actually so in the metadata
+
+00:15:01,780 --> 00:15:08,710
+storage we now have a mix of both old
+
+00:15:06,010 --> 00:15:16,230
+and new objects confirming to the old
+
+00:15:08,710 --> 00:15:20,650
+and the new schema and once we are sure
+
+00:15:16,230 --> 00:15:24,250
+that this code is everywhere we can run
+
+00:15:20,650 --> 00:15:27,520
+the live update which updates all the
+
+00:15:24,250 --> 00:15:31,350
+remaining data we haven't touched yet to
+
+00:15:27,520 --> 00:15:34,390
+the new schema in the metadata storage
+
+00:15:31,350 --> 00:15:38,620
+this step doesn't require
+
+00:15:34,390 --> 00:15:41,020
+I release it you just run it and the
+
+00:15:38,620 --> 00:15:45,940
+last step is is clean up which removed
+
+00:15:41,020 --> 00:15:49,750
+the support for the old schema okay so
+
+00:15:45,940 --> 00:15:52,360
+how is this done the metadata object is
+
+00:15:49,750 --> 00:15:56,500
+is a mousse class and among other things
+
+00:15:52,360 --> 00:15:59,350
+it has it always has these two methods
+
+00:15:56,500 --> 00:16:05,100
+to serialize and deserialize the
+
+00:15:59,350 --> 00:16:10,270
+structure so what we did we created a
+
+00:16:05,100 --> 00:16:14,620
+role but you apply to the metadata
+
+00:16:10,270 --> 00:16:17,190
+object and you specify instead of the
+
+00:16:14,620 --> 00:16:21,010
+serialize and deserialize methods use
+
+00:16:17,190 --> 00:16:23,620
+specify these for where two of them are
+
+00:16:21,010 --> 00:16:26,680
+the original ones and two of them are
+
+00:16:23,620 --> 00:16:29,170
+the new ones which handled the old and
+
+00:16:26,680 --> 00:16:31,900
+the new schema usually they have like a
+
+00:16:29,170 --> 00:16:34,750
+common code that doesn't change at all
+
+00:16:31,900 --> 00:16:37,660
+and you just change one small thing
+
+00:16:34,750 --> 00:16:41,650
+somewhere but the important thing is
+
+00:16:37,660 --> 00:16:46,960
+that we have both these both both these
+
+00:16:41,650 --> 00:16:49,930
+in the first face already and then the
+
+00:16:46,960 --> 00:16:54,250
+second phase which starts producing the
+
+00:16:49,930 --> 00:17:01,510
+the changed data in fact or metadata you
+
+00:16:54,250 --> 00:17:07,300
+just change this one digit and that's
+
+00:17:01,510 --> 00:17:11,730
+all so how does the role look like so in
+
+00:17:07,300 --> 00:17:18,250
+in face one you can see that the role
+
+00:17:11,730 --> 00:17:20,850
+requires these four methods and somehow
+
+00:17:18,250 --> 00:17:24,630
+provides the serialize and deserialize
+
+00:17:20,850 --> 00:17:29,530
+methods that were there all originally
+
+00:17:24,630 --> 00:17:33,060
+by deciding which one to call there is
+
+00:17:29,530 --> 00:17:37,180
+also this is updated it's a method that
+
+00:17:33,060 --> 00:17:41,100
+that tell us the object whether the
+
+00:17:37,180 --> 00:17:43,990
+structure retrieved from the database is
+
+00:17:41,100 --> 00:17:46,000
+using the old or the new schema that the
+
+00:17:43,990 --> 00:17:47,530
+easiest way how to implement it is to
+
+00:17:46,000 --> 00:17:49,690
+just use versions but
+
+00:17:47,530 --> 00:17:53,289
+we originally use something else it's
+
+00:17:49,690 --> 00:17:55,929
+not so important and we have this
+
+00:17:53,289 --> 00:17:58,960
+should use update it which defaults to
+
+00:17:55,929 --> 00:18:02,770
+zero which means if we serialize the
+
+00:17:58,960 --> 00:18:05,909
+object if we didn't update it the
+
+00:18:02,770 --> 00:18:10,620
+default issues so we use the original
+
+00:18:05,909 --> 00:18:14,980
+serialization but if we should use
+
+00:18:10,620 --> 00:18:16,809
+updated object we can store the updated
+
+00:18:14,980 --> 00:18:18,070
+object this doesn't happen interface one
+
+00:18:16,809 --> 00:18:21,309
+but we are ready for that
+
+00:18:18,070 --> 00:18:23,289
+and when deserializing the object we
+
+00:18:21,309 --> 00:18:28,169
+check the structure whether it's in the
+
+00:18:23,289 --> 00:18:34,780
+old or the new schema if it's the new we
+
+00:18:28,169 --> 00:18:39,190
+set the object to use the updated schema
+
+00:18:34,780 --> 00:18:42,820
+and again use the correct method to
+
+00:18:39,190 --> 00:18:46,539
+deserialize the structure or to inflate
+
+00:18:42,820 --> 00:18:49,750
+the object and the second role is is
+
+00:18:46,539 --> 00:18:54,039
+even simpler somehow one would think
+
+00:18:49,750 --> 00:19:01,590
+that we will take this and put one here
+
+00:18:54,039 --> 00:19:04,120
+which which we originally did but then
+
+00:19:01,590 --> 00:19:06,460
+it's easier to just like omit it
+
+00:19:04,120 --> 00:19:10,299
+completely because we always use the
+
+00:19:06,460 --> 00:19:12,730
+updated method here and the
+
+00:19:10,299 --> 00:19:18,190
+serialization is is similar to the old
+
+00:19:12,730 --> 00:19:22,809
+one we use the method appropriate for
+
+00:19:18,190 --> 00:19:23,610
+the structure we are dis realizing which
+
+00:19:22,809 --> 00:19:27,760
+means
+
+00:19:23,610 --> 00:19:31,480
+we need five releases to deliver a
+
+00:19:27,760 --> 00:19:33,669
+single schema change but everything
+
+00:19:31,480 --> 00:19:36,610
+happens while the application is running
+
+00:19:33,669 --> 00:19:39,250
+so customers don't notice anything and
+
+00:19:36,610 --> 00:19:43,570
+we have a process called feature hotfix
+
+00:19:39,250 --> 00:19:48,340
+which makes this possible and it usually
+
+00:19:43,570 --> 00:19:50,890
+takes a day to do it because of test
+
+00:19:48,340 --> 00:19:54,700
+Suites and integration tests and bla bla
+
+00:19:50,890 --> 00:20:01,179
+so in fact it it takes about a week to
+
+00:19:54,700 --> 00:20:04,539
+deliver such a change ok that's it
+
+00:20:01,179 --> 00:20:09,279
+the slides are not there yet
+
+00:20:04,539 --> 00:20:15,659
+but I'll try to make them appear at this
+
+00:20:09,279 --> 00:20:15,659
+
+YouTube URL: https://www.youtube.com/watch?v=oseyOt6AFYQ
+
+

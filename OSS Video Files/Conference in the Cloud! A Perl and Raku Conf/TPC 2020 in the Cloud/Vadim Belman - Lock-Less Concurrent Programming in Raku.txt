@@ -1,0 +1,2172 @@
+Title: Vadim Belman - Lock-Less Concurrent Programming in Raku
+Publication date: 2020-06-26
+Playlist: TPC 2020 in the Cloud
+Description: 
+	This talk is about sharing techniques used by implementation of Concurrent::PChannel module. As the name suggests, the module implements a channel object for organizing data passing between different components of the same application including concurrently running threads. What makes the module different from the core Channel is support for prioritization of items sent over it. In other words, if two items are being sent simultaneously the one with higher priority will most likely be pulled out first even if in fact it was submitted second.
+
+I was facing two challenges in module implementation. First, it must depend as little as possible on the number of priorities used by an application. Second, it had to be fast. Ideally, as fast as the core Channel. The first challenge wasn’t that hard to accomplish. But the implementation used lock protection around the most performance-critical parts of the code resulting in certain degradation under heavily-concurrent item submissions. And so I went onto the hunt for a solution which wouldn’t use locking.
+
+The result? My benchmarks show median loss of 20-30% of performance compared to the core Channel. Is it much? I’d say it’s definitely not considering that the benchmark is run over 1000 different priorities! Think of it as of managing 1000 individual queues compared to a single one maintained by Channel. Moreover, it doesn’t really matter whether it’s 10, or 100, or 1000 priorities, the time it takes to send same number of items will always be the same.
+Captions: 
+	00:00:02,960 --> 00:00:08,730
+okay welcome everybody thank you for
+
+00:00:06,240 --> 00:00:11,099
+coming to the conference in the talk I'd
+
+00:00:08,730 --> 00:00:12,840
+like to introduce Vadim bellman he'll be
+
+00:00:11,099 --> 00:00:20,490
+talking about luckless concurrency in
+
+00:00:12,840 --> 00:00:22,400
+rock you ready yes okay hello everybody
+
+00:00:20,490 --> 00:00:27,119
+and hello again to those who've been
+
+00:00:22,400 --> 00:00:31,109
+visiting my previous talk talking when I
+
+00:00:27,119 --> 00:00:34,829
+was talking about Vietnam work last hour
+
+00:00:31,109 --> 00:00:37,170
+I mentioned concurrently which
+
+00:00:34,829 --> 00:00:41,280
+channelled module which implemented to
+
+00:00:37,170 --> 00:00:45,600
+support Vietnam and in this talk I'm
+
+00:00:41,280 --> 00:00:47,520
+gonna tell you about echo markets and
+
+00:00:45,600 --> 00:00:50,670
+complications they might well develop in
+
+00:00:47,520 --> 00:00:52,920
+it and how all those were resolved to
+
+00:00:50,670 --> 00:00:55,020
+English and what they can promise you
+
+00:00:52,920 --> 00:00:56,910
+from the start is that it's not going to
+
+00:00:55,020 --> 00:01:00,000
+be easy to understand from them because
+
+00:00:56,910 --> 00:01:01,920
+there are a lot of minor details which
+
+00:01:00,000 --> 00:01:05,880
+are not apparent from the first glance
+
+00:01:01,920 --> 00:01:07,530
+and that's why I actually had also speak
+
+00:01:05,880 --> 00:01:13,080
+a very physical problems and had to
+
+00:01:07,530 --> 00:01:16,200
+resolve them so the first requirement oh
+
+00:01:13,080 --> 00:01:18,330
+I'm sorry for those who haven't been on
+
+00:01:16,200 --> 00:01:22,470
+the pre no stock pitch channel stands
+
+00:01:18,330 --> 00:01:24,450
+for prioritized channel the purpose of
+
+00:01:22,470 --> 00:01:27,570
+this model the first requirement was to
+
+00:01:24,450 --> 00:01:30,659
+the module is it had to be as to be
+
+00:01:27,570 --> 00:01:35,820
+fully concurrent absolutely fully concur
+
+00:01:30,659 --> 00:01:37,530
+I mean it can it must handle any number
+
+00:01:35,820 --> 00:01:40,229
+of requests from any number of threads
+
+00:01:37,530 --> 00:01:42,420
+concurrently without the problem and it
+
+00:01:40,229 --> 00:01:45,450
+has to be fast because it's heavily
+
+00:01:42,420 --> 00:01:48,479
+involved into in implementing user
+
+00:01:45,450 --> 00:01:51,180
+interface text road user interface and
+
+00:01:48,479 --> 00:01:54,899
+user interface has to be responsive and
+
+00:01:51,180 --> 00:01:57,170
+fast so what does it mean
+
+00:01:54,899 --> 00:02:01,439
+characterization
+
+00:01:57,170 --> 00:02:09,229
+let's say we have a number of items I'm
+
+00:02:01,439 --> 00:02:15,060
+sorry so let's we have a number of items
+
+00:02:09,229 --> 00:02:15,780
+with priorities assigned to them so like
+
+00:02:15,060 --> 00:02:20,640
+we have
+
+00:02:15,780 --> 00:02:24,750
+for example with priorities item 1 2 3 4
+
+00:02:20,640 --> 00:02:30,800
+5 6 with priorities from low to high
+
+00:02:24,750 --> 00:02:35,640
+long middle and say they submitted
+
+00:02:30,800 --> 00:02:37,640
+simultaneously which means nobody got
+
+00:02:35,640 --> 00:02:41,850
+time to pull them out of the channel and
+
+00:02:37,640 --> 00:02:44,040
+when somebody starts pulling them out is
+
+00:02:41,850 --> 00:02:46,760
+they going to come out or direct by
+
+00:02:44,040 --> 00:02:54,150
+priority so high priority comes first
+
+00:02:46,760 --> 00:02:55,320
+medium and then go it's the only example
+
+00:02:54,150 --> 00:02:56,730
+of how to use it
+
+00:02:55,320 --> 00:02:59,580
+I'm going to show because there is
+
+00:02:56,730 --> 00:03:02,069
+really nothing interesting you send this
+
+00:02:59,580 --> 00:03:04,110
+to different period is and on the output
+
+00:03:02,069 --> 00:03:05,989
+you get them in the right order that's
+
+00:03:04,110 --> 00:03:08,459
+it
+
+00:03:05,989 --> 00:03:15,269
+let's get to the implementation which is
+
+00:03:08,459 --> 00:03:18,360
+really interesting internally the
+
+00:03:15,269 --> 00:03:21,900
+channel is implemented as an area of
+
+00:03:18,360 --> 00:03:25,470
+priority queues each priority queue it
+
+00:03:21,900 --> 00:03:27,690
+could be anything it could be a proper
+
+00:03:25,470 --> 00:03:32,579
+channel object it could be concurrent
+
+00:03:27,690 --> 00:03:36,450
+queue module or whatever it doesn't
+
+00:03:32,579 --> 00:03:38,310
+matter what most important is if it's
+
+00:03:36,450 --> 00:03:40,590
+something where I would push things and
+
+00:03:38,310 --> 00:03:44,120
+pull them out of them again in
+
+00:03:40,590 --> 00:03:46,440
+concurrent manner we can do so
+
+00:03:44,120 --> 00:03:49,980
+prioritization is implemented by the
+
+00:03:46,440 --> 00:03:52,650
+order of reading from those cues so that
+
+00:03:49,980 --> 00:03:54,959
+we start with the high priority and we
+
+00:03:52,650 --> 00:03:57,390
+read down to the lower priority the
+
+00:03:54,959 --> 00:03:59,730
+first item we manage to pull out of the
+
+00:03:57,390 --> 00:04:04,200
+queue is the one we need and this is
+
+00:03:59,730 --> 00:04:08,090
+what we return to the consumer simple
+
+00:04:04,200 --> 00:04:11,100
+but what if we have many priorities
+
+00:04:08,090 --> 00:04:13,829
+it's going to be small because each time
+
+00:04:11,100 --> 00:04:17,250
+on each full request we iterate over
+
+00:04:13,829 --> 00:04:20,430
+thousand of them for example this is the
+
+00:04:17,250 --> 00:04:23,960
+problem I'm gonna solve with concurrency
+
+00:04:20,430 --> 00:04:28,810
+and the problem is about optimizing
+
+00:04:23,960 --> 00:04:32,509
+things but before we get there
+
+00:04:28,810 --> 00:04:34,009
+please raise your hand someone who
+
+00:04:32,509 --> 00:04:35,990
+doesn't know what comprehends for
+
+00:04:34,009 --> 00:04:39,650
+preparations because if there is any
+
+00:04:35,990 --> 00:04:41,949
+person not knowing it I need to tell
+
+00:04:39,650 --> 00:04:41,949
+about it
+
+00:04:42,820 --> 00:04:48,669
+so I guess everybody knows what
+
+00:04:46,820 --> 00:04:53,180
+compare-and-swap
+
+00:04:48,669 --> 00:04:55,120
+okay oh yes at least one person so I
+
+00:04:53,180 --> 00:04:58,220
+better tell about it
+
+00:04:55,120 --> 00:05:02,150
+compare-and-swap is it is an atomic
+
+00:04:58,220 --> 00:05:05,660
+operation atomic means that it operates
+
+00:05:02,150 --> 00:05:08,300
+on one object in memory and when it
+
+00:05:05,660 --> 00:05:11,180
+operates it know a separation with the
+
+00:05:08,300 --> 00:05:14,150
+subject is possible so that the
+
+00:05:11,180 --> 00:05:17,590
+resultant separation is guaranteed
+
+00:05:14,150 --> 00:05:21,560
+what comparing and does and slope does
+
+00:05:17,590 --> 00:05:24,440
+is shown in this example
+
+00:05:21,560 --> 00:05:29,210
+the whole kit takes our target which to
+
+00:05:24,440 --> 00:05:31,460
+pay rates upon it takes a value which we
+
+00:05:29,210 --> 00:05:35,389
+expect to see in this target and we take
+
+00:05:31,460 --> 00:05:37,699
+a value which we want to swap the
+
+00:05:35,389 --> 00:05:40,789
+violent target with and in the value we
+
+00:05:37,699 --> 00:05:44,630
+want to see in the target eventually and
+
+00:05:40,789 --> 00:05:48,740
+if target contains what we expect the
+
+00:05:44,630 --> 00:05:54,919
+operation is successful value goes into
+
+00:05:48,740 --> 00:05:58,940
+target and cash return such the old
+
+00:05:54,919 --> 00:06:02,449
+value which was in the target while it
+
+00:05:58,940 --> 00:06:05,840
+is important is for example we have a
+
+00:06:02,449 --> 00:06:08,990
+situational exists we update variable we
+
+00:06:05,840 --> 00:06:11,960
+expect it to be 42 and bring it right so
+
+00:06:08,990 --> 00:06:16,580
+given to it and it works
+
+00:06:11,960 --> 00:06:19,460
+but what if another threat same thing
+
+00:06:16,580 --> 00:06:23,449
+happen but its variable is set to a
+
+00:06:19,460 --> 00:06:27,110
+different value so when things come to
+
+00:06:23,449 --> 00:06:31,009
+our code we expect 42 but variable
+
+00:06:27,110 --> 00:06:33,310
+contains 41 and we fail and it's loop
+
+00:06:31,009 --> 00:06:40,340
+situation and it means we didn't succeed
+
+00:06:33,310 --> 00:06:42,080
+so we lost we lost concurrency and we
+
+00:06:40,340 --> 00:06:45,410
+need to
+
+00:06:42,080 --> 00:06:48,700
+and because we get it the old way you
+
+00:06:45,410 --> 00:06:53,740
+return this check allows us to know that
+
+00:06:48,700 --> 00:06:53,740
+we failed in this situation or Behcet's
+
+00:06:53,770 --> 00:07:01,820
+another form of compare-and-swap
+
+00:06:56,360 --> 00:07:05,960
+operation is this one which uses a block
+
+00:07:01,820 --> 00:07:08,810
+or a code reference operation and this
+
+00:07:05,960 --> 00:07:13,490
+one actually guarantees the target would
+
+00:07:08,810 --> 00:07:18,860
+be updated with value which is returned
+
+00:07:13,490 --> 00:07:21,860
+by desperation 3 this form rocks a value
+
+00:07:18,860 --> 00:07:24,830
+from target is submitted to this code
+
+00:07:21,860 --> 00:07:26,870
+the operation we can do whatever we want
+
+00:07:24,830 --> 00:07:30,200
+with this value inside the operation and
+
+00:07:26,870 --> 00:07:32,200
+then return some value and this value is
+
+00:07:30,200 --> 00:07:36,680
+going to be stored into the target and
+
+00:07:32,200 --> 00:07:39,050
+if target did not change while we're
+
+00:07:36,680 --> 00:07:44,110
+doing calculations inside of operation
+
+00:07:39,050 --> 00:07:49,720
+then the valuable point will be stored
+
+00:07:44,110 --> 00:07:53,930
+into the target but if target did change
+
+00:07:49,720 --> 00:07:56,330
+then we repeat all these things again we
+
+00:07:53,930 --> 00:07:58,160
+take the new value from the target we
+
+00:07:56,330 --> 00:08:01,160
+submitted we calculated will get the
+
+00:07:58,160 --> 00:08:03,770
+value and we try to story and we loop
+
+00:08:01,160 --> 00:08:05,600
+over it until we succeed so this way
+
+00:08:03,770 --> 00:08:07,850
+would guarantee the target will be
+
+00:08:05,600 --> 00:08:15,340
+updated and it will be updated in the
+
+00:08:07,850 --> 00:08:21,400
+most safe manner so that we don't sorry
+
+00:08:15,340 --> 00:08:24,800
+so that we don't corrupt it in this way
+
+00:08:21,400 --> 00:08:30,770
+now back to our problem the way to
+
+00:08:24,800 --> 00:08:34,640
+optimize the retro optimize the speed is
+
+00:08:30,770 --> 00:08:38,390
+to start scanning our priority queues
+
+00:08:34,640 --> 00:08:43,250
+from the point where we expect to see a
+
+00:08:38,390 --> 00:08:45,320
+value meaning that for example we have a
+
+00:08:43,250 --> 00:08:49,190
+number of items coming with different
+
+00:08:45,320 --> 00:08:53,589
+priorities and we know that the highest
+
+00:08:49,190 --> 00:08:55,020
+priority with god was 6 and so we start
+
+00:08:53,589 --> 00:08:57,450
+it
+
+00:08:55,020 --> 00:09:00,180
+all the Krannert rheticus starting with
+
+00:08:57,450 --> 00:09:04,290
+six when they pull item south of route
+
+00:09:00,180 --> 00:09:09,000
+and we go down the priority to lower
+
+00:09:04,290 --> 00:09:13,230
+levels low level queues so if we call
+
+00:09:09,000 --> 00:09:15,300
+pole method make at this point it won't
+
+00:09:13,230 --> 00:09:18,480
+be scanning the full queue it would it
+
+00:09:15,300 --> 00:09:22,200
+would go directly to the zero and that's
+
+00:09:18,480 --> 00:09:25,170
+much faster and say we got another item
+
+00:09:22,200 --> 00:09:30,320
+okay it means we have to start scanning
+
+00:09:25,170 --> 00:09:34,200
+from primary key for ends and random and
+
+00:09:30,320 --> 00:09:36,540
+well I simply record the maximum
+
+00:09:34,200 --> 00:09:38,149
+priority I need to start with in some
+
+00:09:36,540 --> 00:09:41,160
+kind of activity
+
+00:09:38,149 --> 00:09:42,870
+the first problem we get if we don't do
+
+00:09:41,160 --> 00:09:44,670
+it concurrently and just want to show
+
+00:09:42,870 --> 00:09:48,320
+you what happens if we do things in
+
+00:09:44,670 --> 00:09:51,450
+property here we have two threats sent
+
+00:09:48,320 --> 00:09:54,089
+one sends with priority fruity to one
+
+00:09:51,450 --> 00:09:57,450
+sense whispering or disagreeing both do
+
+00:09:54,089 --> 00:09:59,760
+the same things they check if the player
+
+00:09:57,450 --> 00:10:02,700
+is a good disguise and the maximum one
+
+00:09:59,760 --> 00:10:04,950
+well it is high in both cases because
+
+00:10:02,700 --> 00:10:07,920
+it's zero and we don't know about the
+
+00:10:04,950 --> 00:10:11,040
+other strap so one thinks it's going to
+
+00:10:07,920 --> 00:10:13,709
+be $4200 simplest is going to be 13 and
+
+00:10:11,040 --> 00:10:16,740
+eventually second one wins because it's
+
+00:10:13,709 --> 00:10:19,950
+a little bit lagging behind it was
+
+00:10:16,740 --> 00:10:22,649
+caught a little bit later and instead of
+
+00:10:19,950 --> 00:10:24,600
+having 42 in the maximum priority to
+
+00:10:22,649 --> 00:10:27,180
+start scanning from 42 we're gonna start
+
+00:10:24,600 --> 00:10:30,510
+from 13 which is definitely not what we
+
+00:10:27,180 --> 00:10:33,420
+want we miss a high priority at and at
+
+00:10:30,510 --> 00:10:38,360
+the best will get it some next room run
+
+00:10:33,420 --> 00:10:42,089
+maybe or maybe we just simply lost it
+
+00:10:38,360 --> 00:10:45,510
+more appropriate way to do it is with
+
+00:10:42,089 --> 00:10:48,240
+second form of case operation where I
+
+00:10:45,510 --> 00:10:51,029
+would simply update maximum priority
+
+00:10:48,240 --> 00:10:54,540
+atomically which means for example if
+
+00:10:51,029 --> 00:10:58,680
+thread two wins it will choose maximum
+
+00:10:54,540 --> 00:11:01,260
+value zero so Phoenix City knits we get
+
+00:10:58,680 --> 00:11:04,410
+to kill min max priorities and straight
+
+00:11:01,260 --> 00:11:06,990
+one it gets sitting here and it compares
+
+00:11:04,410 --> 00:11:08,870
+to 42 and we have 42 eventually right
+
+00:11:06,990 --> 00:11:13,820
+right
+
+00:11:08,870 --> 00:11:16,670
+what if said one wins okay we get 42 we
+
+00:11:13,820 --> 00:11:19,370
+get zero here we get 42 here we end up
+
+00:11:16,670 --> 00:11:24,220
+with 32 here we come here - straight -
+
+00:11:19,370 --> 00:11:26,779
+because it was it gets 42 here it gets
+
+00:11:24,220 --> 00:11:30,440
+sodium here and the particle wind up is
+
+00:11:26,779 --> 00:11:32,300
+critical so no matter which way those
+
+00:11:30,440 --> 00:11:33,680
+operations are going to be executed it
+
+00:11:32,300 --> 00:11:38,779
+is guaranteed that we get the correct
+
+00:11:33,680 --> 00:11:43,580
+value in max priority safe now because
+
+00:11:38,779 --> 00:11:46,100
+then we get into another problem say we
+
+00:11:43,580 --> 00:11:49,370
+got the data to be sent and we have two
+
+00:11:46,100 --> 00:11:53,540
+foreign threats and they simultaneous
+
+00:11:49,370 --> 00:11:55,430
+totally and they start scanning they get
+
+00:11:53,540 --> 00:11:59,149
+the maximum priority and they know where
+
+00:11:55,430 --> 00:12:02,149
+to start and they start scan and one
+
+00:11:59,149 --> 00:12:04,310
+succeeds it finds the item was priority
+
+00:12:02,149 --> 00:12:09,940
+42 it pulls it and the queue is now
+
+00:12:04,310 --> 00:12:13,279
+empty the other thread loss and Kosovo's
+
+00:12:09,940 --> 00:12:16,100
+it knows that let's say there were no
+
+00:12:13,279 --> 00:12:20,390
+other items sent previously it knows it
+
+00:12:16,100 --> 00:12:23,870
+is no data what happens next and next
+
+00:12:20,390 --> 00:12:28,339
+our self method get another data with
+
+00:12:23,870 --> 00:12:30,740
+the same 42 priority but our all threads
+
+00:12:28,339 --> 00:12:35,810
+doesn't know about it and what they know
+
+00:12:30,740 --> 00:12:38,180
+about is thread pool said - it found
+
+00:12:35,810 --> 00:12:40,100
+some data and it doesn't know if there
+
+00:12:38,180 --> 00:12:43,760
+is any other data in the priority queue
+
+00:12:40,100 --> 00:12:44,420
+42 and for this reason it records for
+
+00:12:43,760 --> 00:12:47,450
+itself
+
+00:12:44,420 --> 00:12:52,040
+I found data here and I'm gonna keep it
+
+00:12:47,450 --> 00:12:54,680
+this plane and thread 3 knows that there
+
+00:12:52,040 --> 00:12:57,410
+is no data so it fall backs down to the
+
+00:12:54,680 --> 00:13:00,829
+lowest possible priority to 0 and they
+
+00:12:57,410 --> 00:13:08,890
+don't both do this case operation as I
+
+00:13:00,829 --> 00:13:13,160
+shown previously and oops excuse me now
+
+00:13:08,890 --> 00:13:15,829
+it's different it's different so at some
+
+00:13:13,160 --> 00:13:21,040
+point I changed the form of cut
+
+00:13:15,829 --> 00:13:23,619
+separation to this one for particular
+
+00:13:21,040 --> 00:13:27,999
+so this is the right way to do things I
+
+00:13:23,619 --> 00:13:32,589
+mean the law but still the situation is
+
+00:13:27,999 --> 00:13:37,209
+problematic because look if two wins we
+
+00:13:32,589 --> 00:13:39,720
+have maximum priority footy to here from
+
+00:13:37,209 --> 00:13:43,300
+here and
+
+00:13:39,720 --> 00:13:47,170
+foul priority is also 42 and this is
+
+00:13:43,300 --> 00:13:49,089
+what we want to left for the next pole
+
+00:13:47,170 --> 00:13:52,720
+operation because we think there might
+
+00:13:49,089 --> 00:13:55,449
+be some data left and because we started
+
+00:13:52,720 --> 00:13:59,589
+with 42 the operation is gonna succeed
+
+00:13:55,449 --> 00:14:02,889
+and Rivlin the end up with 42 here in
+
+00:13:59,589 --> 00:14:06,579
+maximum penalty but three three dozen
+
+00:14:02,889 --> 00:14:09,220
+differently it also started with trailer
+
+00:14:06,579 --> 00:14:13,420
+braking 42 in start and this is what it
+
+00:14:09,220 --> 00:14:17,170
+expect to find them but it knows that
+
+00:14:13,420 --> 00:14:20,170
+there is no data and it wants to try to
+
+00:14:17,170 --> 00:14:22,720
+zero to maximum free energy and no
+
+00:14:20,170 --> 00:14:27,129
+matter which order those operations are
+
+00:14:22,720 --> 00:14:30,819
+executed three three wins always zero
+
+00:14:27,129 --> 00:14:33,009
+will end up in maximum priority say if
+
+00:14:30,819 --> 00:14:37,449
+it started a little bit early and
+
+00:14:33,009 --> 00:14:41,079
+managed to write zero here 23 second
+
+00:14:37,449 --> 00:14:45,279
+threat comes to this point we have zero
+
+00:14:41,079 --> 00:14:48,160
+here and we have 42 here and all the
+
+00:14:45,279 --> 00:14:50,620
+whole operation is lost and so no update
+
+00:14:48,160 --> 00:14:54,009
+from max priority and it stands was
+
+00:14:50,620 --> 00:14:56,499
+pretty - in copying swap it's called a
+
+00:14:54,009 --> 00:14:59,589
+be a problem you can find it on
+
+00:14:56,499 --> 00:15:02,050
+Wikipedia the fastest play and read more
+
+00:14:59,589 --> 00:15:05,499
+about it but we have to solve this
+
+00:15:02,050 --> 00:15:09,839
+problem in the way to solve it I simply
+
+00:15:05,499 --> 00:15:14,019
+split maximum clarity in two attributes
+
+00:15:09,839 --> 00:15:16,569
+one is said by sent operation and it has
+
+00:15:14,019 --> 00:15:19,679
+recommendation of value I mean cell can
+
+00:15:16,569 --> 00:15:23,709
+recommend where to start the second one
+
+00:15:19,679 --> 00:15:28,480
+receiver it's the one which knows
+
+00:15:23,709 --> 00:15:34,470
+exactly he's the one who is instruction
+
+00:15:28,480 --> 00:15:34,470
+and he would ask our one
+
+00:15:34,779 --> 00:15:41,649
+when Paul method method starts it
+
+00:15:37,329 --> 00:15:47,470
+consults with sent will there it where
+
+00:15:41,649 --> 00:15:53,439
+send things that we should start with so
+
+00:15:47,470 --> 00:15:59,490
+it does come to look at this and when we
+
+00:15:53,439 --> 00:16:04,930
+got value from sent no we reset to zero
+
+00:15:59,490 --> 00:16:06,910
+this is because we are the one where the
+
+00:16:04,930 --> 00:16:09,519
+street which going to be calculating the
+
+00:16:06,910 --> 00:16:13,149
+next maximum priority for other public
+
+00:16:09,519 --> 00:16:20,290
+or other poll methods which cannot be
+
+00:16:13,149 --> 00:16:23,800
+called later then Paul have to decide
+
+00:16:20,290 --> 00:16:25,749
+which to you it has to start with well
+
+00:16:23,800 --> 00:16:33,100
+this is pretty much simple again
+
+00:16:25,749 --> 00:16:36,459
+atomically which is maximum off makes
+
+00:16:33,100 --> 00:16:40,480
+our receiving priority where we think we
+
+00:16:36,459 --> 00:16:46,389
+should start with with send the primary
+
+00:16:40,480 --> 00:16:53,110
+point of this moment is that our maximum
+
+00:16:46,389 --> 00:16:55,769
+pointer must always go higher in the
+
+00:16:53,110 --> 00:16:59,800
+beginning it must not go down
+
+00:16:55,769 --> 00:17:03,069
+for example sent maximum priority can
+
+00:16:59,800 --> 00:17:06,610
+change in two ways only it can either go
+
+00:17:03,069 --> 00:17:13,199
+higher or it goes straight to the zero
+
+00:17:06,610 --> 00:17:13,199
+to zero no other way this is consistent
+
+00:17:16,709 --> 00:17:23,829
+well pole operation finished searching
+
+00:17:20,799 --> 00:17:27,039
+for an item there could be three
+
+00:17:23,829 --> 00:17:33,460
+possible outcomes apparent ones we
+
+00:17:27,039 --> 00:17:36,580
+probably found a value in the highest in
+
+00:17:33,460 --> 00:17:39,850
+the maximum priority we start I mean it
+
+00:17:36,580 --> 00:17:42,880
+was immediately we calculated new
+
+00:17:39,850 --> 00:17:44,289
+maximum priority we try it this priority
+
+00:17:42,880 --> 00:17:47,470
+queue and voila
+
+00:17:44,289 --> 00:17:52,450
+we have an item there this is
+
+00:17:47,470 --> 00:17:57,759
+based the fastest case we have two other
+
+00:17:52,450 --> 00:17:59,190
+cases we have we found item in Cuba's
+
+00:17:57,759 --> 00:18:02,559
+low priority
+
+00:17:59,190 --> 00:18:05,919
+this is this might happen if previous
+
+00:18:02,559 --> 00:18:09,759
+poll operation put an item it left
+
+00:18:05,919 --> 00:18:12,250
+maximum priority some higher-level but
+
+00:18:09,759 --> 00:18:14,740
+in fact there were no more data and so
+
+00:18:12,250 --> 00:18:17,049
+when we come asking for data in this
+
+00:18:14,740 --> 00:18:19,840
+high priority there is no data and we
+
+00:18:17,049 --> 00:18:23,139
+start picking down and we find finally
+
+00:18:19,840 --> 00:18:25,659
+an item somewhere in lower priority this
+
+00:18:23,139 --> 00:18:28,929
+is another outcome or we found nothing
+
+00:18:25,659 --> 00:18:33,509
+in this case we end up with minus one is
+
+00:18:28,929 --> 00:18:35,529
+the latest priority very relevant right
+
+00:18:33,509 --> 00:18:38,769
+those two are basically identical
+
+00:18:35,529 --> 00:18:42,700
+because this is the only case where our
+
+00:18:38,769 --> 00:18:45,490
+maximum priority can go down not up but
+
+00:18:42,700 --> 00:18:49,240
+my down and we're actually very much
+
+00:18:45,490 --> 00:18:52,509
+reluctant to go down because going down
+
+00:18:49,240 --> 00:18:55,840
+means we could lose data
+
+00:18:52,509 --> 00:18:58,899
+we could miss data in higher level in
+
+00:18:55,840 --> 00:19:02,169
+high priorities so we're a lot and we do
+
+00:18:58,899 --> 00:19:06,820
+it only only when we absolutely 100%
+
+00:19:02,169 --> 00:19:12,549
+sure it's safe and we do it was one
+
+00:19:06,820 --> 00:19:15,399
+single get separation again with we use
+
+00:19:12,549 --> 00:19:18,580
+case everywhere because this is the way
+
+00:19:15,399 --> 00:19:23,259
+we do concurrency real concurrency
+
+00:19:18,580 --> 00:19:28,240
+without working so the idea of this
+
+00:19:23,259 --> 00:19:30,549
+operation is that if the currently
+
+00:19:28,240 --> 00:19:34,230
+recorded maximum priority in the
+
+00:19:30,549 --> 00:19:38,230
+attribute is what we calculated to be
+
+00:19:34,230 --> 00:19:41,620
+then we are okay to go down it means
+
+00:19:38,230 --> 00:19:45,039
+there was no changes and even if there
+
+00:19:41,620 --> 00:19:47,830
+was changes and even if maximum
+
+00:19:45,039 --> 00:19:50,769
+receiving priority was set to higher
+
+00:19:47,830 --> 00:19:53,649
+value at some point and then was reduced
+
+00:19:50,769 --> 00:19:57,490
+down to what we calculated it's still
+
+00:19:53,649 --> 00:19:59,950
+safe it's super safe I mean some other
+
+00:19:57,490 --> 00:20:01,420
+poll could have calculated properly and
+
+00:19:59,950 --> 00:20:03,880
+some merciful mouse
+
+00:20:01,420 --> 00:20:10,180
+there is no dating high priorities so we
+
+00:20:03,880 --> 00:20:13,930
+can safely boom down but pole operation
+
+00:20:10,180 --> 00:20:16,750
+is actually it's non-working operation I
+
+00:20:13,930 --> 00:20:20,080
+mean it's speaking whether you get data
+
+00:20:16,750 --> 00:20:24,760
+or you don't get date but it's you know
+
+00:20:20,080 --> 00:20:28,450
+like little bit a no okay but most the
+
+00:20:24,760 --> 00:20:31,270
+time of course we need to wait for the
+
+00:20:28,450 --> 00:20:33,880
+data to arrive and so we need to know
+
+00:20:31,270 --> 00:20:43,660
+the method and traditionally it's called
+
+00:20:33,880 --> 00:20:50,770
+received receive traps around pool and
+
+00:20:43,660 --> 00:20:52,600
+it must wait and also those who was
+
+00:20:50,770 --> 00:20:56,890
+listening to my witness och knows that
+
+00:20:52,600 --> 00:21:00,130
+I'm reluctant to block strengths if it
+
+00:20:56,890 --> 00:21:03,010
+whenever possible release the strip give
+
+00:21:00,130 --> 00:21:07,360
+it back the thread scheduler so the best
+
+00:21:03,010 --> 00:21:10,960
+way to do so is to wait for a promise so
+
+00:21:07,360 --> 00:21:14,110
+we need the promise and if we get any
+
+00:21:10,960 --> 00:21:17,590
+data sank would keep this promise for us
+
+00:21:14,110 --> 00:21:23,110
+and we wake up and we try to fetch an
+
+00:21:17,590 --> 00:21:25,210
+item which was some just recently the
+
+00:21:23,110 --> 00:21:29,710
+problem here is that if we do it
+
+00:21:25,210 --> 00:21:34,750
+mindlessly and signal on each and every
+
+00:21:29,710 --> 00:21:37,300
+item sent to the to the channel that
+
+00:21:34,750 --> 00:21:39,930
+connecting performance because we're
+
+00:21:37,300 --> 00:21:43,660
+gonna be waking up receivers too fast
+
+00:21:39,930 --> 00:21:45,370
+trying to wake concept of trust so we
+
+00:21:43,660 --> 00:21:48,970
+need to optimize this as well
+
+00:21:45,370 --> 00:21:55,860
+st. must know where to signal and where
+
+00:21:48,970 --> 00:22:02,560
+not to signal this is the first approach
+
+00:21:55,860 --> 00:22:04,600
+the parent 153rd tries to pull to find
+
+00:22:02,560 --> 00:22:08,410
+you know to pull an item through the
+
+00:22:04,600 --> 00:22:12,490
+channels at this moment we get sent call
+
+00:22:08,410 --> 00:22:14,640
+and we'll go tonight on receive set ups
+
+00:22:12,490 --> 00:22:18,060
+a promise but now it's too late
+
+00:22:14,640 --> 00:22:20,550
+spent his bill has been cold and we have
+
+00:22:18,060 --> 00:22:22,260
+no data but we are waiting for our
+
+00:22:20,550 --> 00:22:24,260
+promise but then it didn't close it
+
+00:22:22,260 --> 00:22:29,510
+there is a promise to be awaited
+
+00:22:24,260 --> 00:22:33,450
+so we're stuck okay
+
+00:22:29,510 --> 00:22:35,640
+the right weight of things first we set
+
+00:22:33,450 --> 00:22:38,730
+up drums we don't know yet if they're
+
+00:22:35,640 --> 00:22:42,810
+gonna be late or not but we set up good
+
+00:22:38,730 --> 00:22:45,600
+promise upfront honest I will ask for
+
+00:22:42,810 --> 00:22:49,890
+take and if there is no data but central
+
+00:22:45,600 --> 00:22:53,370
+scope in meanwhile send knows that it
+
+00:22:49,890 --> 00:22:55,350
+has to awake us and when we started we
+
+00:22:53,370 --> 00:22:58,800
+confirm promise soon our waited with
+
+00:22:55,350 --> 00:23:03,960
+we're gonna be awakened and not gonna
+
+00:22:58,800 --> 00:23:07,830
+wait forever on the same side sings a
+
+00:23:03,960 --> 00:23:12,920
+pretty much simple first we'll make sure
+
+00:23:07,830 --> 00:23:16,470
+that awaking is really require easy if
+
+00:23:12,920 --> 00:23:19,890
+when we start we check if we have any
+
+00:23:16,470 --> 00:23:22,020
+elements currently in the channel if
+
+00:23:19,890 --> 00:23:24,390
+there are no elements and we've got one
+
+00:23:22,020 --> 00:23:26,220
+most likely there will be a receive
+
+00:23:24,390 --> 00:23:31,670
+operation and waiting for this element
+
+00:23:26,220 --> 00:23:36,110
+so yes only when we have zero simple
+
+00:23:31,670 --> 00:23:39,540
+then we put this item onto the peel but
+
+00:23:36,110 --> 00:23:42,210
+thin which I forgot to write in here is
+
+00:23:39,540 --> 00:23:45,630
+that before portions there item onto the
+
+00:23:42,210 --> 00:23:48,420
+queue we actually increase increase the
+
+00:23:45,630 --> 00:23:50,160
+number of elements in the queue and by
+
+00:23:48,420 --> 00:23:55,650
+the way we do it atomically number of
+
+00:23:50,160 --> 00:23:59,880
+elements is an atomic int data type you
+
+00:23:55,650 --> 00:24:04,410
+can find about it why we do so the
+
+00:23:59,880 --> 00:24:08,220
+reason is logical since the item was
+
+00:24:04,410 --> 00:24:11,160
+pressed to self matter the item belonged
+
+00:24:08,220 --> 00:24:13,530
+to the channel so we have the same time
+
+00:24:11,160 --> 00:24:17,790
+in the channel and even though it's not
+
+00:24:13,530 --> 00:24:22,020
+pushed into any priority two year we
+
+00:24:17,790 --> 00:24:26,120
+have it and also it helps later to
+
+00:24:22,020 --> 00:24:26,120
+synchronize things with receiver
+
+00:24:26,550 --> 00:24:34,410
+when item pushed we take special
+
+00:24:29,600 --> 00:24:35,910
+attribute array promise and we'll set it
+
+00:24:34,410 --> 00:24:38,970
+to mean unconditionally
+
+00:24:35,910 --> 00:24:41,540
+we are always receptive and resetting to
+
+00:24:38,970 --> 00:24:46,770
+you it you know in our five which means
+
+00:24:41,540 --> 00:24:49,320
+set it make it undefined and apparently
+
+00:24:46,770 --> 00:24:53,480
+yes we do case again I didn't want to
+
+00:24:49,320 --> 00:25:01,370
+overwhelm you with high separations and
+
+00:24:53,480 --> 00:25:04,200
+now actually the attribute can have a
+
+00:25:01,370 --> 00:25:08,730
+defined value in it it can contain a
+
+00:25:04,200 --> 00:25:11,610
+promise or it may not since we reset it
+
+00:25:08,730 --> 00:25:13,050
+and conditionally at this moment it
+
+00:25:11,610 --> 00:25:15,960
+doesn't matter whether it has a value or
+
+00:25:13,050 --> 00:25:18,840
+not but later we check if you got
+
+00:25:15,960 --> 00:25:21,300
+anything if you got any promise and only
+
+00:25:18,840 --> 00:25:24,420
+then we keep this promise and this is
+
+00:25:21,300 --> 00:25:30,000
+waving from the receiver said okay you
+
+00:25:24,420 --> 00:25:33,960
+are good to go try again to fully
+
+00:25:30,000 --> 00:25:37,800
+support this way of operations I needed
+
+00:25:33,960 --> 00:25:40,470
+to modify for a little bit and remember
+
+00:25:37,800 --> 00:25:42,960
+I told you that number of elements has
+
+00:25:40,470 --> 00:25:46,110
+to be increased before pushing an
+
+00:25:42,960 --> 00:25:51,030
+element into the queue technically here
+
+00:25:46,110 --> 00:25:54,870
+is the reason why what Paul does now
+
+00:25:51,030 --> 00:25:59,490
+it gets the number of elements and it
+
+00:25:54,870 --> 00:26:04,290
+atomically reduces reduces it by one if
+
+00:25:59,490 --> 00:26:07,950
+possible meaning read it like this if
+
+00:26:04,290 --> 00:26:11,030
+there is any item available in a claim
+
+00:26:07,950 --> 00:26:15,360
+for it no more as a poor Ghana health
+
+00:26:11,030 --> 00:26:18,960
+because the operation is atomic again if
+
+00:26:15,360 --> 00:26:22,320
+you win the race and Elam's for example
+
+00:26:18,960 --> 00:26:24,120
+it's one we're gonna get one we know
+
+00:26:22,320 --> 00:26:26,670
+that there is an element and we set
+
+00:26:24,120 --> 00:26:29,100
+Elam's to zero any other poll at this
+
+00:26:26,670 --> 00:26:33,590
+moment will get zero elements and it
+
+00:26:29,100 --> 00:26:36,870
+will no there is no data I'm free and
+
+00:26:33,590 --> 00:26:38,390
+from this moment we know that there is
+
+00:26:36,870 --> 00:26:41,180
+an item awakened
+
+00:26:38,390 --> 00:26:41,870
+for our collaboration we absolutely sure
+
+00:26:41,180 --> 00:26:44,030
+about it
+
+00:26:41,870 --> 00:26:46,070
+you know the good thing in concurrent
+
+00:26:44,030 --> 00:26:49,460
+program don't do things if you are not
+
+00:26:46,070 --> 00:26:55,000
+sure you have to be sure make sure
+
+00:26:49,460 --> 00:26:59,090
+whatever way through the keyboard so
+
+00:26:55,000 --> 00:27:00,850
+Lulu in collaboration will loop and kill
+
+00:26:59,090 --> 00:27:04,310
+the friends I don't be expecting fun
+
+00:27:00,850 --> 00:27:06,740
+because there could be more than one
+
+00:27:04,310 --> 00:27:10,330
+look because this woman sent could be
+
+00:27:06,740 --> 00:27:12,320
+skin pushes the item and the channel
+
+00:27:10,330 --> 00:27:14,330
+responsible for this priority if you
+
+00:27:12,320 --> 00:27:19,030
+could be purchasing this item so we
+
+00:27:14,330 --> 00:27:19,030
+probably could need to wait for a people
+
+00:27:20,890 --> 00:27:29,300
+now Paul is ready
+
+00:27:24,130 --> 00:27:31,840
+call our received rocks we invoke
+
+00:27:29,300 --> 00:27:35,000
+receive matter
+
+00:27:31,840 --> 00:27:41,840
+the first thing them does it takes a
+
+00:27:35,000 --> 00:27:44,750
+fresh promise for the future it has to
+
+00:27:41,840 --> 00:27:48,230
+be there this point we need a fresh
+
+00:27:44,750 --> 00:27:50,030
+promise from Nasik and not it doesn't
+
+00:27:48,230 --> 00:27:56,750
+matter whether we'll need it later or
+
+00:27:50,030 --> 00:28:00,200
+not we must carry its money then we try
+
+00:27:56,750 --> 00:28:02,750
+to update an r/a promise attribute this
+
+00:28:00,200 --> 00:28:05,450
+point is a little bit tricky because if
+
+00:28:02,750 --> 00:28:09,230
+array promise already contains a promise
+
+00:28:05,450 --> 00:28:11,960
+then we have to take this contained
+
+00:28:09,230 --> 00:28:13,790
+promised object because this is going to
+
+00:28:11,960 --> 00:28:17,390
+be the one which is going to be kept by
+
+00:28:13,790 --> 00:28:19,130
+scent and if it's not defined if there
+
+00:28:17,390 --> 00:28:21,980
+is no problem subject in this attribute
+
+00:28:19,130 --> 00:28:25,490
+then we have to set it to the promise we
+
+00:28:21,980 --> 00:28:29,600
+just prepared the fresh one this is also
+
+00:28:25,490 --> 00:28:31,970
+could be called claim some one of the
+
+00:28:29,600 --> 00:28:34,400
+receive states claims that he is
+
+00:28:31,970 --> 00:28:36,920
+responsible for this promise he is
+
+00:28:34,400 --> 00:28:41,000
+actually and not a kiss the first one
+
+00:28:36,920 --> 00:28:43,460
+for sensor and this is the promise this
+
+00:28:41,000 --> 00:28:47,420
+is the polish which is going to be kept
+
+00:28:43,460 --> 00:28:50,330
+by sank when data is available and we
+
+00:28:47,420 --> 00:28:51,730
+must take care not to lost because one
+
+00:28:50,330 --> 00:28:57,040
+of the box
+
+00:28:51,730 --> 00:28:59,200
+I was heavily hunting for is that you
+
+00:28:57,040 --> 00:29:01,480
+know it was funny there was assignment
+
+00:28:59,200 --> 00:29:03,370
+and binding I used binding because it
+
+00:29:01,480 --> 00:29:05,470
+did little bit more performant but it
+
+00:29:03,370 --> 00:29:06,250
+turns out to be wrong and I was losing
+
+00:29:05,470 --> 00:29:09,400
+the promise
+
+00:29:06,250 --> 00:29:13,240
+incidentally and apparently few receive
+
+00:29:09,400 --> 00:29:16,570
+Jets was locked in waiting without any
+
+00:29:13,240 --> 00:29:21,810
+chance to be ever and worked so take
+
+00:29:16,570 --> 00:29:24,790
+care of this promise be careful
+
+00:29:21,810 --> 00:29:28,600
+only when we have this promise setup the
+
+00:29:24,790 --> 00:29:29,350
+cocoa and only then if we get no data
+
+00:29:28,600 --> 00:29:32,440
+from home
+
+00:29:29,350 --> 00:29:35,110
+we await we wait until data arrives
+
+00:29:32,440 --> 00:29:39,610
+we're waiting consent reports was you
+
+00:29:35,110 --> 00:29:42,100
+can try again and concurrent program in
+
+00:29:39,610 --> 00:29:45,060
+the order of things is really really
+
+00:29:42,100 --> 00:29:47,590
+important if you do something too late
+
+00:29:45,060 --> 00:29:49,900
+you will not be in the big trouble
+
+00:29:47,590 --> 00:29:56,110
+because it's too late you gonna be self
+
+00:29:49,900 --> 00:29:57,910
+locked problem again you see receive is
+
+00:29:56,110 --> 00:30:00,730
+actually gone must be very fast
+
+00:29:57,910 --> 00:30:02,850
+operation but we everytime we invoke
+
+00:30:00,730 --> 00:30:06,790
+receive a allocate a new promise order
+
+00:30:02,850 --> 00:30:09,340
+which invokes a number of routine calls
+
+00:30:06,790 --> 00:30:13,510
+memory allocations mesquite-smoked
+
+00:30:09,340 --> 00:30:19,990
+memory allocations of course so we have
+
+00:30:13,510 --> 00:30:22,240
+to solve you know I was actually redoing
+
+00:30:19,990 --> 00:30:24,250
+this module right before the conference
+
+00:30:22,240 --> 00:30:25,840
+because there was a serious but was
+
+00:30:24,250 --> 00:30:27,760
+previous implementation there was a
+
+00:30:25,840 --> 00:30:29,860
+serious race condition which I ever
+
+00:30:27,760 --> 00:30:35,350
+looked and we actually found well
+
+00:30:29,860 --> 00:30:39,430
+started writing these slides and still
+
+00:30:35,350 --> 00:30:43,320
+it took me several days to do things
+
+00:30:39,430 --> 00:30:46,810
+properly here to re-implement things and
+
+00:30:43,320 --> 00:30:49,000
+eventually I ended up with receive a
+
+00:30:46,810 --> 00:30:50,560
+little bit cheating still cheating
+
+00:30:49,000 --> 00:30:51,420
+remember I promised you hopeless
+
+00:30:50,560 --> 00:30:56,500
+programming
+
+00:30:51,420 --> 00:30:59,020
+look this is almost the final count of
+
+00:30:56,500 --> 00:31:02,620
+receive accepted to just one branch of
+
+00:30:59,020 --> 00:31:04,270
+it the two branches and the condition
+
+00:31:02,620 --> 00:31:05,530
+looks differently but this is the branch
+
+00:31:04,270 --> 00:31:08,950
+which which is important
+
+00:31:05,530 --> 00:31:12,220
+and why is it important this is the real
+
+00:31:08,950 --> 00:31:15,280
+case operation I could home okay and
+
+00:31:12,220 --> 00:31:21,790
+this is how I set up there a tribute to
+
+00:31:15,280 --> 00:31:25,450
+fresh new promise to speed things up
+
+00:31:21,790 --> 00:31:29,260
+I don't allocate this freshly promise
+
+00:31:25,450 --> 00:31:32,080
+always I do it only when necessary and I
+
+00:31:29,260 --> 00:31:37,570
+do it as you can see only when it's get
+
+00:31:32,080 --> 00:31:41,080
+get consumed and when it consumed we
+
+00:31:37,570 --> 00:31:44,590
+said we started for ourselves we started
+
+00:31:41,080 --> 00:31:48,220
+into the attribute one is there we
+
+00:31:44,590 --> 00:31:51,160
+create a new fresh one and they seem to
+
+00:31:48,220 --> 00:31:56,050
+mean a few the problem is apparent this
+
+00:31:51,160 --> 00:31:58,960
+block is not a tonic and race conditions
+
+00:31:56,050 --> 00:32:02,170
+are possible and and the certain city
+
+00:31:58,960 --> 00:32:04,570
+under certain conditions are a new
+
+00:32:02,170 --> 00:32:07,900
+attribute could be updated in properly
+
+00:32:04,570 --> 00:32:11,800
+and most importantly great promise could
+
+00:32:07,900 --> 00:32:15,760
+be updated properly and we get the wrong
+
+00:32:11,800 --> 00:32:17,860
+promise to wait for and unfortunately I
+
+00:32:15,760 --> 00:32:20,290
+found no solution for this race
+
+00:32:17,860 --> 00:32:24,400
+condition no clear solution
+
+00:32:20,290 --> 00:32:26,610
+Sam's instance has so-called double
+
+00:32:24,400 --> 00:32:29,530
+compare-and-swap operation where two
+
+00:32:26,610 --> 00:32:32,700
+objects in memory are swapped instantly
+
+00:32:29,530 --> 00:32:35,190
+but they depend on single vein as far as
+
+00:32:32,700 --> 00:32:37,600
+any way it's possible
+
+00:32:35,190 --> 00:32:42,610
+unfortunately rocket doesn't have this
+
+00:32:37,600 --> 00:32:46,750
+kind of double CS and so I have to deal
+
+00:32:42,610 --> 00:32:50,440
+with what I have but I promised you I
+
+00:32:46,750 --> 00:32:56,250
+use no luck and for money I still don't
+
+00:32:50,440 --> 00:32:57,370
+use it oops excuse me I'm too fast and
+
+00:32:56,250 --> 00:33:00,430
+firmly
+
+00:32:57,370 --> 00:33:06,610
+I still don't use it do you see any work
+
+00:33:00,430 --> 00:33:09,510
+here now this is a spin work it's also
+
+00:33:06,610 --> 00:33:13,540
+implemented using compare-and-swap and
+
+00:33:09,510 --> 00:33:17,520
+the way it works we have kind of a
+
+00:33:13,540 --> 00:33:21,990
+working attribute
+
+00:33:17,520 --> 00:33:24,420
+and if it's zero it means the code block
+
+00:33:21,990 --> 00:33:28,470
+we are protecting is not locked at the
+
+00:33:24,420 --> 00:33:34,050
+moment if we need to lock okay
+
+00:33:28,470 --> 00:33:36,720
+we try to set it to one if we fail it
+
+00:33:34,050 --> 00:33:41,310
+means that it's already set to 1 and the
+
+00:33:36,720 --> 00:33:44,000
+block is locked and we go back to and
+
+00:33:41,310 --> 00:33:50,220
+we'll loop again and try to do it again
+
+00:33:44,000 --> 00:33:56,670
+if we succeed we exit the room because
+
+00:33:50,220 --> 00:34:03,090
+she is return zero sorry
+
+00:33:56,670 --> 00:34:04,980
+ah yes yes yes return zero sorry second
+
+00:34:03,090 --> 00:34:08,970
+token arrow it's little bit exhausted
+
+00:34:04,980 --> 00:34:11,850
+anyway so the whole thing is called spin
+
+00:34:08,970 --> 00:34:15,540
+lock and the only problem about this
+
+00:34:11,850 --> 00:34:18,899
+kind of approach is that it's CP you can
+
+00:34:15,540 --> 00:34:22,350
+see because we loop you simply
+
+00:34:18,899 --> 00:34:24,960
+permanently we consume CP what kind of
+
+00:34:22,350 --> 00:34:26,190
+good luckily the block and protected is
+
+00:34:24,960 --> 00:34:29,909
+small one
+
+00:34:26,190 --> 00:34:34,770
+week one so it doesn't look really long
+
+00:34:29,909 --> 00:34:36,690
+and why I choose this approach you know
+
+00:34:34,770 --> 00:34:39,270
+chuckling really is because they promise
+
+00:34:36,690 --> 00:34:42,600
+to novels but seriously when they run
+
+00:34:39,270 --> 00:34:46,050
+benchmarks ah it's like you know about
+
+00:34:42,600 --> 00:34:49,080
+three 5% of performance in favor of a
+
+00:34:46,050 --> 00:34:51,990
+spin lock something how it looked like a
+
+00:34:49,080 --> 00:34:55,890
+little bit faster so I ended up with
+
+00:34:51,990 --> 00:34:59,190
+this solution but it's basically only
+
+00:34:55,890 --> 00:35:02,190
+the second clock in the whole module the
+
+00:34:59,190 --> 00:35:04,440
+first one is around allocation of
+
+00:35:02,190 --> 00:35:08,720
+priority queues which gets booked
+
+00:35:04,440 --> 00:35:12,710
+normally you know just once that's it
+
+00:35:08,720 --> 00:35:16,020
+and believe me or not but we are done
+
+00:35:12,710 --> 00:35:19,350
+because the last step of receive method
+
+00:35:16,020 --> 00:35:25,920
+is we wait for the promises we wait for
+
+00:35:19,350 --> 00:35:28,980
+our receive awaiting promise and if we
+
+00:35:25,920 --> 00:35:31,170
+get data it invokes us or we wait for
+
+00:35:28,980 --> 00:35:35,160
+closed or drains from
+
+00:35:31,170 --> 00:35:37,200
+actually cost is enough the difference
+
+00:35:35,160 --> 00:35:41,099
+between closed and drain I think is
+
+00:35:37,200 --> 00:35:44,430
+apart we can close the channel but there
+
+00:35:41,099 --> 00:35:47,569
+might be still some dating and before we
+
+00:35:44,430 --> 00:35:51,869
+pull all this data out of the channel
+
+00:35:47,569 --> 00:35:54,359
+it's still valid and only when we drain
+
+00:35:51,869 --> 00:35:57,960
+it out that the moment where channel
+
+00:35:54,359 --> 00:36:06,260
+cannot be used in that's it we are free
+
+00:35:57,960 --> 00:36:06,260
+to release it now your Foreman's wife
+
+00:36:07,190 --> 00:36:15,809
+would in weakness lights I mentioned
+
+00:36:11,609 --> 00:36:18,960
+that priority channel is just twenty
+
+00:36:15,809 --> 00:36:22,740
+thirty percent slower than the core
+
+00:36:18,960 --> 00:36:26,640
+channel but it's not true anymore
+
+00:36:22,740 --> 00:36:29,279
+because those who numbers for the buggy
+
+00:36:26,640 --> 00:36:32,369
+implementation and frisky now the
+
+00:36:29,279 --> 00:36:34,079
+numbers vary from one point two to six
+
+00:36:32,369 --> 00:36:36,869
+times slower depending on which
+
+00:36:34,079 --> 00:36:39,210
+configuration of century six tracks like
+
+00:36:36,869 --> 00:36:40,920
+we have many receives one think it's
+
+00:36:39,210 --> 00:36:42,839
+going to be one speed one sent one
+
+00:36:40,920 --> 00:36:45,569
+receives the worst-case scenario because
+
+00:36:42,839 --> 00:36:48,480
+in this case we have to allocate a lot
+
+00:36:45,569 --> 00:36:51,240
+of promises to be awaited and kept by
+
+00:36:48,480 --> 00:36:54,170
+some memory allocation mainly takes time
+
+00:36:51,240 --> 00:36:57,150
+in this kind of things because you know
+
+00:36:54,170 --> 00:37:00,869
+there is a little cold overall it's
+
+00:36:57,150 --> 00:37:02,549
+pretty much fast the whole module is
+
+00:37:00,869 --> 00:37:07,770
+like four hundred lines with
+
+00:37:02,549 --> 00:37:10,349
+documentation it's fast but because we
+
+00:37:07,770 --> 00:37:15,150
+have to allocate a lot of memory once in
+
+00:37:10,349 --> 00:37:17,190
+while it's slower than I would like it
+
+00:37:15,150 --> 00:37:20,160
+to be in some certain scenarios but
+
+00:37:17,190 --> 00:37:23,579
+still sometimes I see it in the even
+
+00:37:20,160 --> 00:37:26,369
+fastest in channel a little bit faster
+
+00:37:23,579 --> 00:37:31,309
+you know like two three person normal
+
+00:37:26,369 --> 00:37:31,309
+but still it's it's possible it happens
+
+00:37:31,630 --> 00:37:37,079
+[Music]
+
+00:37:33,230 --> 00:37:40,260
+something else tell you ah
+
+00:37:37,079 --> 00:37:42,299
+CPU consumption you know when I was
+
+00:37:40,260 --> 00:37:43,780
+talking about this spinlock and I
+
+00:37:42,299 --> 00:37:47,710
+mentioned
+
+00:37:43,780 --> 00:37:52,330
+it's about CPU consumption keep in mind
+
+00:37:47,710 --> 00:37:54,369
+that comparable relations are always
+
+00:37:52,330 --> 00:37:56,770
+about a little bit of CPU consumption
+
+00:37:54,369 --> 00:38:00,730
+you always going to waste a little bit
+
+00:37:56,770 --> 00:38:03,970
+of sipping sipping cycles because the
+
+00:38:00,730 --> 00:38:09,760
+idea behind those fully concurrent
+
+00:38:03,970 --> 00:38:14,349
+operations is we try and if you don't if
+
+00:38:09,760 --> 00:38:16,240
+we fail we repeat and try again and you
+
+00:38:14,349 --> 00:38:19,390
+know when you have many many concurrent
+
+00:38:16,240 --> 00:38:21,190
+threads fighting for the same resource
+
+00:38:19,390 --> 00:38:27,400
+it's possible that you're going to be
+
+00:38:21,190 --> 00:38:29,920
+waiting longer than expected so in some
+
+00:38:27,400 --> 00:38:33,369
+really heavy heavy heavy load
+
+00:38:29,920 --> 00:38:41,050
+configurations it might happen that it
+
+00:38:33,369 --> 00:38:43,570
+would be cheaper to use work so be
+
+00:38:41,050 --> 00:38:46,869
+careful with this and think about it but
+
+00:38:43,570 --> 00:38:50,530
+in situation s indications is simple
+
+00:38:46,869 --> 00:38:53,920
+it's whispering priority channel with my
+
+00:38:50,530 --> 00:38:57,160
+limitation full concurrences through
+
+00:38:53,920 --> 00:39:10,560
+comparing swap and promises are really
+
+00:38:57,160 --> 00:39:13,780
+crazy and really helpful so yes I think
+
+00:39:10,560 --> 00:39:16,140
+so if you have any questions you're
+
+00:39:13,780 --> 00:39:16,140
+welcome
+
+00:39:27,109 --> 00:39:30,910
+okay probably no questions
+
+00:39:35,920 --> 00:39:42,259
+actually I got a question I think can
+
+00:39:38,990 --> 00:39:43,849
+you hear me mm-hmm yes you said
+
+00:39:42,259 --> 00:39:46,490
+something interesting in passing I
+
+00:39:43,849 --> 00:39:50,420
+thought about how you'd made a mistake
+
+00:39:46,490 --> 00:39:59,259
+by using binding with a promise and you
+
+00:39:50,420 --> 00:40:02,329
+somehow lost the promise that way no yes
+
+00:39:59,259 --> 00:40:08,420
+yes I would like to elaborate on this
+
+00:40:02,329 --> 00:40:10,809
+but I I didn't understood what happened
+
+00:40:08,420 --> 00:40:10,809
+exactly
+
+00:40:11,109 --> 00:40:18,019
+and I didn't have time to debug it so I
+
+00:40:15,440 --> 00:40:20,660
+guess you know it's it was simply like
+
+00:40:18,019 --> 00:40:30,680
+when there was debugging jack part of
+
+00:40:20,660 --> 00:40:34,910
+code I just realized that my slide yes
+
+00:40:30,680 --> 00:40:39,259
+exactly I just realized that somehow I
+
+00:40:34,910 --> 00:40:42,019
+get this promise which I'm actually a
+
+00:40:39,259 --> 00:40:46,249
+waiting for different from what gets
+
+00:40:42,019 --> 00:40:48,140
+stored into the attribute and when I
+
+00:40:46,249 --> 00:41:20,839
+started looking for it
+
+00:40:48,140 --> 00:41:22,430
+the only suspicious line was okay you
+
+00:41:20,839 --> 00:41:23,569
+see and also cheated a little bit
+
+00:41:22,430 --> 00:41:26,180
+because skill walk is actually
+
+00:41:23,569 --> 00:41:30,140
+implemented in the most performant way
+
+00:41:26,180 --> 00:41:32,210
+using new people okay here it goes
+
+00:41:30,140 --> 00:41:38,720
+this is the condition which was
+
+00:41:32,210 --> 00:41:41,480
+suspicious this one very shame and it
+
+00:41:38,720 --> 00:41:43,099
+was binding used here and I don't know
+
+00:41:41,480 --> 00:41:46,430
+how did it happen
+
+00:41:43,099 --> 00:41:47,059
+but eventually I was getting wrong from
+
+00:41:46,430 --> 00:41:48,650
+here
+
+00:41:47,059 --> 00:41:50,810
+one error place don't
+
+00:41:48,650 --> 00:41:53,470
+Dahlia placed binding with Simon and
+
+00:41:50,810 --> 00:41:57,890
+started working properly
+
+00:41:53,470 --> 00:42:00,020
+I just yeah and wonder myself I wonder
+
+00:41:57,890 --> 00:42:01,910
+myself but because conference was too
+
+00:42:00,020 --> 00:42:04,400
+close and they had to finish my slides I
+
+00:42:01,910 --> 00:42:11,830
+got no time to enjoy it
+
+00:42:04,400 --> 00:42:11,830
+
+YouTube URL: https://www.youtube.com/watch?v=HIJ3TrWsLTM
+
+

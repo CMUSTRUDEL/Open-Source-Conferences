@@ -1,0 +1,2407 @@
+Title: RustConf 2019 - Rust for Weld, a High Performance Parallell JIT Compiler by Shoumik Palkar
+Publication date: 2019-09-16
+Playlist: RustConf 2019
+Description: 
+	RustConf 2019 - Rust for Weld, a High Performance Parallell JIT Compiler by Shoumik Palkar
+
+Weld is an open source Rust project that accelerates data-intensive libraries and frameworks by as much as 100x. It does so by JIT-compiling a custom parallel intermediate representation and optimizing across functions within a single library as well as across different libraries, so developers can write modular code and still get close to bare metal performance without incurring expensive data movement costs. We first describe our use of Rust to build an extensible, performance sensitive compiler for Weld. In particular, we discuss challenges in writing a native code generator with LLVM in Rust, challenges in reducing JIT compilation times within our compiler, and architecting the compiler for both extensibility using Rust's powerful trait system, but also portability of our library across other languages, such as Python and C. Finally, we discuss our experiences with building a parallel runtime in Rust, and the unique challenges associated with calling unsafe Rust from JIT'd code.
+Captions: 
+	00:00:08,770 --> 00:00:15,680
+[Music]
+
+00:00:16,790 --> 00:00:22,280
+all right thanks yeah so my name is Cho
+
+00:00:20,090 --> 00:00:24,500
+Makai man anthea graduate student now at
+
+00:00:22,280 --> 00:00:25,610
+Stanford and I'm gonna talk about using
+
+00:00:24,500 --> 00:00:27,560
+rust for weld which is a
+
+00:00:25,610 --> 00:00:28,820
+high-performance parallel JIT compiler
+
+00:00:27,560 --> 00:00:31,760
+that we've been developing over the last
+
+00:00:28,820 --> 00:00:33,620
+few years so just to provide an agenda
+
+00:00:31,760 --> 00:00:35,059
+for the talk I'll first talk a little
+
+00:00:33,620 --> 00:00:37,400
+bit about what weld is and what its
+
+00:00:35,059 --> 00:00:39,050
+motivations are followed by the path
+
+00:00:37,400 --> 00:00:41,030
+that we kind of took that you know
+
+00:00:39,050 --> 00:00:42,379
+landed us at rust and then finally I'll
+
+00:00:41,030 --> 00:00:44,720
+talk about some of the features of rust
+
+00:00:42,379 --> 00:00:47,629
+that we use in weld and also where we
+
+00:00:44,720 --> 00:00:49,159
+hope to take the project from here so
+
+00:00:47,629 --> 00:00:50,800
+jumping right in the motivation for the
+
+00:00:49,159 --> 00:00:53,030
+weld project is that modern data
+
+00:00:50,800 --> 00:00:54,739
+analytics applications combine many
+
+00:00:53,030 --> 00:00:57,800
+disjoint processing libraries and
+
+00:00:54,739 --> 00:01:00,019
+functions so taking the Panda or say the
+
+00:00:57,800 --> 00:01:02,150
+Python ecosystem as an example a typical
+
+00:01:00,019 --> 00:01:04,250
+Python data science application may you
+
+00:01:02,150 --> 00:01:05,990
+know load some data and pandas and do
+
+00:01:04,250 --> 00:01:07,460
+some pre-processing maybe train a
+
+00:01:05,990 --> 00:01:08,900
+machine learning model and scikit-learn
+
+00:01:07,460 --> 00:01:12,110
+and then maybe do some statistical
+
+00:01:08,900 --> 00:01:13,250
+analysis in numpy so this is good
+
+00:01:12,110 --> 00:01:14,990
+because on one hand you get great
+
+00:01:13,250 --> 00:01:15,979
+results kind of leveraging the work of
+
+00:01:14,990 --> 00:01:17,570
+thousands of authors who are
+
+00:01:15,979 --> 00:01:20,240
+implementing the best algorithms in each
+
+00:01:17,570 --> 00:01:21,770
+domain but on the other hand in these
+
+00:01:20,240 --> 00:01:23,930
+kinds of libraries you generally don't
+
+00:01:21,770 --> 00:01:27,260
+get any optimization across individually
+
+00:01:23,930 --> 00:01:28,580
+written and optimized functions so how
+
+00:01:27,260 --> 00:01:30,920
+bad is this problem that we don't get
+
+00:01:28,580 --> 00:01:32,540
+any cross function optimization it turns
+
+00:01:30,920 --> 00:01:35,060
+out that the growing gap between memory
+
+00:01:32,540 --> 00:01:36,950
+speeds on newer hardware and processing
+
+00:01:35,060 --> 00:01:38,960
+speed on new hardware it's kind of being
+
+00:01:36,950 --> 00:01:40,370
+this rigid function call interface to
+
+00:01:38,960 --> 00:01:42,530
+these kinds of libraries worse and worse
+
+00:01:40,370 --> 00:01:43,970
+over time so as an example of there so
+
+00:01:42,530 --> 00:01:46,010
+here's a pretty simple Python program
+
+00:01:43,970 --> 00:01:49,040
+and so it's using pandas to parse the
+
+00:01:46,010 --> 00:01:50,840
+CSV and then drop some null values and
+
+00:01:49,040 --> 00:01:53,300
+then it's using numpy to computer me and
+
+00:01:50,840 --> 00:01:54,620
+realized for these like Python and kind
+
+00:01:53,300 --> 00:01:56,240
+of data science style libraries there's
+
+00:01:54,620 --> 00:01:57,890
+nothing like straight iterator right the
+
+00:01:56,240 --> 00:01:59,270
+interface to these libraries is you have
+
+00:01:57,890 --> 00:02:00,620
+some functions and you throw some data
+
+00:01:59,270 --> 00:02:02,090
+at them and they you know crunch some
+
+00:02:00,620 --> 00:02:04,580
+numbers and give you back a result and
+
+00:02:02,090 --> 00:02:06,290
+because of this when you actually look
+
+00:02:04,580 --> 00:02:08,239
+at the execution of these like typical
+
+00:02:06,290 --> 00:02:09,979
+data science type workflows it looks
+
+00:02:08,239 --> 00:02:11,870
+something like this you have some memory
+
+00:02:09,979 --> 00:02:13,640
+sitting around and you call a function
+
+00:02:11,870 --> 00:02:15,560
+and basically what that entails is that
+
+00:02:13,640 --> 00:02:17,540
+you give it some data it processes
+
+00:02:15,560 --> 00:02:19,519
+something and then it gives you back a
+
+00:02:17,540 --> 00:02:21,530
+result when you call another function
+
+00:02:19,519 --> 00:02:23,360
+you basically do another entire scan
+
+00:02:21,530 --> 00:02:24,920
+over your data set you know go back to
+
+00:02:23,360 --> 00:02:26,930
+main memory you load those values back
+
+00:02:24,920 --> 00:02:29,069
+into the CPU cache into the registers
+
+00:02:26,930 --> 00:02:31,019
+compute some more values and then
+
+00:02:29,069 --> 00:02:32,969
+again you know a store the values back
+
+00:02:31,019 --> 00:02:34,409
+and if you have these large data sets
+
+00:02:32,969 --> 00:02:36,359
+what ends up happening because of this
+
+00:02:34,409 --> 00:02:38,040
+gap between memory access speeds and
+
+00:02:36,359 --> 00:02:40,769
+processing speeds is that you actually
+
+00:02:38,040 --> 00:02:42,659
+spend most of your time just accessing
+
+00:02:40,769 --> 00:02:45,090
+memory instead of actually doing
+
+00:02:42,659 --> 00:02:46,980
+meaningful work on the CPU and for these
+
+00:02:45,090 --> 00:02:49,530
+kinds of workloads we found up to 30x
+
+00:02:46,980 --> 00:02:51,689
+slowdowns in popular libraries such as
+
+00:02:49,530 --> 00:02:53,250
+numpy panda as tensorflow all these kind
+
+00:02:51,689 --> 00:02:55,319
+of data analytics libraries that you
+
+00:02:53,250 --> 00:02:56,969
+hear about compared to an optimized just
+
+00:02:55,319 --> 00:02:58,319
+c or washed implementation so if I were
+
+00:02:56,969 --> 00:03:00,450
+to take the same application and write
+
+00:02:58,319 --> 00:03:02,040
+it and see there would be this huge kind
+
+00:03:00,450 --> 00:03:04,079
+of gap between what people actually use
+
+00:03:02,040 --> 00:03:07,349
+to this kind of stuff today and what the
+
+00:03:04,079 --> 00:03:08,819
+hardware is actually capable of so well
+
+00:03:07,349 --> 00:03:10,379
+this is a common runtime for data
+
+00:03:08,819 --> 00:03:12,780
+analytics libraries that kind of
+
+00:03:10,379 --> 00:03:15,060
+attempts to tackle this problem and the
+
+00:03:12,780 --> 00:03:17,040
+approach that well takes is something
+
+00:03:15,060 --> 00:03:18,750
+like this there's these libraries for
+
+00:03:17,040 --> 00:03:20,819
+different domains just sequel or machine
+
+00:03:18,750 --> 00:03:22,909
+learning and they effectively target a
+
+00:03:20,819 --> 00:03:25,109
+common parallel runtime and instead of
+
+00:03:22,909 --> 00:03:27,239
+executing each function individually
+
+00:03:25,109 --> 00:03:28,919
+this runtime will act like a you know
+
+00:03:27,239 --> 00:03:30,870
+like a standard compiler it'll look at
+
+00:03:28,919 --> 00:03:32,939
+all your code just at runtime instead of
+
+00:03:30,870 --> 00:03:35,639
+at compile time and it'll basically run
+
+00:03:32,939 --> 00:03:37,680
+an optimizer over it and JIT code to
+
+00:03:35,639 --> 00:03:39,840
+execute during the execution of your
+
+00:03:37,680 --> 00:03:40,979
+application and you can get code for
+
+00:03:39,840 --> 00:03:43,019
+these different kind of parallel
+
+00:03:40,979 --> 00:03:45,989
+platforms such as CPUs or GPUs or
+
+00:03:43,019 --> 00:03:48,750
+something else so internally well it has
+
+00:03:45,989 --> 00:03:50,790
+a bunch of components the first one is
+
+00:03:48,750 --> 00:03:52,319
+this runtime api that developers of
+
+00:03:50,790 --> 00:03:54,479
+libraries use to actually submit work
+
+00:03:52,319 --> 00:03:56,220
+into wealth the second component is this
+
+00:03:54,479 --> 00:03:57,959
+world IRS this is basically like a
+
+00:03:56,220 --> 00:04:00,329
+parallel kind of functional small
+
+00:03:57,959 --> 00:04:02,310
+programming language that developers of
+
+00:04:00,329 --> 00:04:03,810
+libraries use to submit work into the
+
+00:04:02,310 --> 00:04:05,970
+runtime and I'll talk a bit more about
+
+00:04:03,810 --> 00:04:08,220
+that in a in a bit and the final
+
+00:04:05,970 --> 00:04:09,720
+component is this optimizer which is
+
+00:04:08,220 --> 00:04:12,599
+basically like a standard compiler
+
+00:04:09,720 --> 00:04:14,459
+optimizer which takes the IR and kind of
+
+00:04:12,599 --> 00:04:16,019
+just transforms it into a basically more
+
+00:04:14,459 --> 00:04:17,789
+efficient version of the same IR and
+
+00:04:16,019 --> 00:04:18,870
+then that's sent over to the back ends
+
+00:04:17,789 --> 00:04:22,830
+and the back ends use something like
+
+00:04:18,870 --> 00:04:24,120
+LLVM to you know do code generation so
+
+00:04:22,830 --> 00:04:26,370
+if we look at kind of the thousand foot
+
+00:04:24,120 --> 00:04:28,259
+view of how a program using world
+
+00:04:26,370 --> 00:04:30,210
+executes it starts with some user
+
+00:04:28,259 --> 00:04:32,550
+application that's unmodified so the
+
+00:04:30,210 --> 00:04:34,289
+idea here is that for users Weld is kind
+
+00:04:32,550 --> 00:04:35,460
+of invisible but for library developers
+
+00:04:34,289 --> 00:04:38,099
+you're you know replacing the
+
+00:04:35,460 --> 00:04:40,020
+implementation of your library functions
+
+00:04:38,099 --> 00:04:42,500
+to integrate with well so let's say we
+
+00:04:40,020 --> 00:04:44,909
+have a function with some Weld enabled
+
+00:04:42,500 --> 00:04:47,639
+when a user calls a function instead of
+
+00:04:44,909 --> 00:04:49,440
+evaluating those functions internally
+
+00:04:47,639 --> 00:04:51,120
+those function calls will kind of submit
+
+00:04:49,440 --> 00:04:53,400
+these fragments of IR code into the
+
+00:04:51,120 --> 00:04:56,129
+world runtime when you actually want to
+
+00:04:53,400 --> 00:04:57,389
+evaluate this so this might be when you
+
+00:04:56,129 --> 00:04:58,889
+say I want to print something to the
+
+00:04:57,389 --> 00:05:01,590
+screen or send it over the network or
+
+00:04:58,889 --> 00:05:02,789
+whatever the the runtime will basically
+
+00:05:01,590 --> 00:05:04,650
+figure out that there's these data
+
+00:05:02,789 --> 00:05:06,509
+dependencies between these lazy
+
+00:05:04,650 --> 00:05:08,879
+computations and it'll combine them into
+
+00:05:06,509 --> 00:05:11,370
+a single program and then it'll fire up
+
+00:05:08,879 --> 00:05:12,870
+the optimizer optimize that program and
+
+00:05:11,370 --> 00:05:13,889
+then JIT some code and that's what the
+
+00:05:12,870 --> 00:05:15,659
+data in your application actually
+
+00:05:13,889 --> 00:05:17,430
+interacts with and then there's also
+
+00:05:15,659 --> 00:05:19,560
+this kind of managed parallel runtime
+
+00:05:17,430 --> 00:05:20,969
+that hooks into this thing because we're
+
+00:05:19,560 --> 00:05:22,530
+actually generating code that's meant to
+
+00:05:20,969 --> 00:05:24,389
+be run in parallel so there needs to be
+
+00:05:22,530 --> 00:05:25,979
+a runtime to do things like scheduling
+
+00:05:24,389 --> 00:05:29,370
+and task management and memory
+
+00:05:25,979 --> 00:05:30,659
+management and all that good stuff so
+
+00:05:29,370 --> 00:05:32,789
+when you started with Weld it was kind
+
+00:05:30,659 --> 00:05:35,669
+of meant to target these cross library
+
+00:05:32,789 --> 00:05:37,620
+optimization based workloads but over
+
+00:05:35,669 --> 00:05:38,879
+time we've kind of been we've kind of
+
+00:05:37,620 --> 00:05:39,659
+seen that it's been useful for other
+
+00:05:38,879 --> 00:05:41,909
+things as well
+
+00:05:39,659 --> 00:05:44,310
+so as a few examples we've seen people
+
+00:05:41,909 --> 00:05:46,139
+use well to build jits or new physical
+
+00:05:44,310 --> 00:05:48,479
+execution engines for databases or
+
+00:05:46,139 --> 00:05:50,789
+analytics frameworks we've seen it being
+
+00:05:48,479 --> 00:05:52,409
+used just within individual libraries so
+
+00:05:50,789 --> 00:05:54,469
+if you just want better kind of native
+
+00:05:52,409 --> 00:05:56,520
+code execution and a Python library
+
+00:05:54,469 --> 00:05:58,590
+using a JIT compiler is a great way to
+
+00:05:56,520 --> 00:06:01,139
+do that so we've seen it being used for
+
+00:05:58,590 --> 00:06:02,729
+that and we've also been seen it being
+
+00:06:01,139 --> 00:06:04,830
+used to target new kinds of parallel
+
+00:06:02,729 --> 00:06:06,419
+hardware and the reason that weld is
+
+00:06:04,830 --> 00:06:08,699
+especially nice for that is because the
+
+00:06:06,419 --> 00:06:10,139
+ir is just structured in a way that it
+
+00:06:08,699 --> 00:06:12,150
+can assume that a bunch of things are
+
+00:06:10,139 --> 00:06:13,740
+inherently parallel so if you have
+
+00:06:12,150 --> 00:06:16,349
+hardware such as GPUs or vector
+
+00:06:13,740 --> 00:06:17,610
+accelerators the IR is kind of an
+
+00:06:16,349 --> 00:06:20,400
+attractive way to kind of bridge
+
+00:06:17,610 --> 00:06:24,629
+high-level code with the kind of machine
+
+00:06:20,400 --> 00:06:26,610
+specific code so just quickly to provide
+
+00:06:24,629 --> 00:06:28,050
+some context and the kinds of speed ups
+
+00:06:26,610 --> 00:06:29,460
+where else could provide these are
+
+00:06:28,050 --> 00:06:31,020
+obviously cherry-picked benchmarks to
+
+00:06:29,460 --> 00:06:33,120
+make us look better to take them with a
+
+00:06:31,020 --> 00:06:35,219
+grain of salt but in this like Tagle
+
+00:06:33,120 --> 00:06:37,560
+type competition where we basically do
+
+00:06:35,219 --> 00:06:40,529
+some data cleaning and linear algebra
+
+00:06:37,560 --> 00:06:43,080
+and numpy and pandas we saw 180 x speed
+
+00:06:40,529 --> 00:06:44,430
+up here so this is a because we
+
+00:06:43,080 --> 00:06:46,500
+parallelized the single-threaded
+
+00:06:44,430 --> 00:06:48,330
+libraries numpy and pandas but it's also
+
+00:06:46,500 --> 00:06:50,909
+because we can do optimizations such as
+
+00:06:48,330 --> 00:06:52,740
+loop fusion that you know like iterators
+
+00:06:50,909 --> 00:06:54,330
+and rush can do for example but it's
+
+00:06:52,740 --> 00:06:56,039
+doing them over these kind of native
+
+00:06:54,330 --> 00:06:58,740
+libraries and I want to point out that
+
+00:06:56,039 --> 00:07:00,479
+pan doesn't numpy are written and see
+
+00:06:58,740 --> 00:07:02,610
+internally so this isn't like comparing
+
+00:07:00,479 --> 00:07:06,030
+against like some weird Python loop or
+
+00:07:02,610 --> 00:07:08,129
+something as another example we were
+
+00:07:06,030 --> 00:07:09,810
+able to optimize this image whitening
+
+00:07:08,129 --> 00:07:11,580
+plus linear regression workflow in
+
+00:07:09,810 --> 00:07:13,530
+tensorflow and numpy and this is
+
+00:07:11,580 --> 00:07:15,210
+comparing against tensor flows own kind
+
+00:07:13,530 --> 00:07:17,490
+of excel a compiler so cancer for all
+
+00:07:15,210 --> 00:07:19,830
+journey has this compiler that it uses
+
+00:07:17,490 --> 00:07:21,000
+to do things like operator fusion but
+
+00:07:19,830 --> 00:07:22,800
+because we can actually look across
+
+00:07:21,000 --> 00:07:26,219
+library boundaries we get we still get a
+
+00:07:22,800 --> 00:07:27,659
+pretty nice speed up here and finally we
+
+00:07:26,219 --> 00:07:30,300
+can also use well to kind of just
+
+00:07:27,659 --> 00:07:32,669
+optimize the execution of things like
+
+00:07:30,300 --> 00:07:35,460
+data analytics frameworks so here we
+
+00:07:32,669 --> 00:07:36,990
+integrated it with spark sequel and we
+
+00:07:35,460 --> 00:07:39,240
+can basically get some native code
+
+00:07:36,990 --> 00:07:41,490
+execution and spark so instead of
+
+00:07:39,240 --> 00:07:43,800
+relying on the JVM we're executing you
+
+00:07:41,490 --> 00:07:47,129
+know like vectorized native code so we
+
+00:07:43,800 --> 00:07:48,870
+get some nice speed up there okay so
+
+00:07:47,129 --> 00:07:50,340
+just to provide some more context for
+
+00:07:48,870 --> 00:07:51,779
+the rest of the talk and to show how the
+
+00:07:50,340 --> 00:07:53,879
+optimizer kind of functions and I'm
+
+00:07:51,779 --> 00:07:55,949
+gonna do a quick demo where we compile a
+
+00:07:53,879 --> 00:07:59,779
+weld program using this rebel that we've
+
+00:07:55,949 --> 00:08:03,419
+built so I'll switch over to that now
+
+00:07:59,779 --> 00:08:06,690
+all right hopefully that's readable so I
+
+00:08:03,419 --> 00:08:08,550
+have to look at this all right so here's
+
+00:08:06,690 --> 00:08:11,279
+the repple so basically you can just
+
+00:08:08,550 --> 00:08:16,159
+type in weld programs here so here's a
+
+00:08:11,279 --> 00:08:19,500
+simple one that just adds one two input
+
+00:08:16,159 --> 00:08:20,789
+and you can see that it basically just
+
+00:08:19,500 --> 00:08:22,110
+dumps out some information on things
+
+00:08:20,789 --> 00:08:24,659
+that it's doing so here it did some
+
+00:08:22,110 --> 00:08:26,279
+macro substitution followed by type
+
+00:08:24,659 --> 00:08:27,539
+inference so this isn't gonna look super
+
+00:08:26,279 --> 00:08:29,669
+interesting because this program is
+
+00:08:27,539 --> 00:08:31,500
+pretty simple you can hit enter and kind
+
+00:08:29,669 --> 00:08:35,130
+of walk through the different passes
+
+00:08:31,500 --> 00:08:37,019
+that the compiler applies here it's not
+
+00:08:35,130 --> 00:08:38,370
+really going to do much because it's
+
+00:08:37,019 --> 00:08:41,610
+kind of hard to optimize adding one to a
+
+00:08:38,370 --> 00:08:44,039
+number but you can also get some stats
+
+00:08:41,610 --> 00:08:45,740
+about how the compiler does there so if
+
+00:08:44,039 --> 00:08:47,699
+you look at the right side here now
+
+00:08:45,740 --> 00:08:49,230
+there's a slightly more complicated
+
+00:08:47,699 --> 00:08:51,390
+program where we're computing the sum of
+
+00:08:49,230 --> 00:08:53,970
+squares so that first line with the map
+
+00:08:51,390 --> 00:08:55,589
+is basically squaring each integer that
+
+00:08:53,970 --> 00:08:58,589
+we pass in and the second line is
+
+00:08:55,589 --> 00:08:59,640
+summing the squared integers and you
+
+00:08:58,589 --> 00:09:01,230
+might be wondering why we've actually
+
+00:08:59,640 --> 00:09:02,579
+written this program in this way right
+
+00:09:01,230 --> 00:09:04,199
+why didn't we just read a single loop
+
+00:09:02,579 --> 00:09:06,390
+that does this right off the bat with a
+
+00:09:04,199 --> 00:09:06,640
+so remember that weld is meant to be in
+
+00:09:06,390 --> 00:09:08,980
+degree
+
+00:09:06,640 --> 00:09:10,690
+to these kind of higher-level libraries
+
+00:09:08,980 --> 00:09:13,900
+so this is kind of how you can expect a
+
+00:09:10,690 --> 00:09:16,270
+typical world program to look so for
+
+00:09:13,900 --> 00:09:17,680
+example a numpy program that call or
+
+00:09:16,270 --> 00:09:19,060
+sorry an umpire function that squares
+
+00:09:17,680 --> 00:09:21,340
+things might generate the first line of
+
+00:09:19,060 --> 00:09:22,960
+this program and a numpy function that
+
+00:09:21,340 --> 00:09:24,430
+you know computes as some might generate
+
+00:09:22,960 --> 00:09:25,510
+the second line and it's up to well to
+
+00:09:24,430 --> 00:09:27,850
+kind of look at these individual
+
+00:09:25,510 --> 00:09:29,800
+fragments and come up with something
+
+00:09:27,850 --> 00:09:31,720
+more reasonable so we'll go ahead and
+
+00:09:29,800 --> 00:09:34,930
+load this into the repple so I'll just
+
+00:09:31,720 --> 00:09:36,070
+hit load demo dot weld here and right
+
+00:09:34,930 --> 00:09:37,600
+off the bat you can see that this
+
+00:09:36,070 --> 00:09:39,790
+program looks fairly different from what
+
+00:09:37,600 --> 00:09:41,320
+we have on the right side so here we've
+
+00:09:39,790 --> 00:09:43,240
+done macro substitution and type
+
+00:09:41,320 --> 00:09:44,860
+inference and the reason this program
+
+00:09:43,240 --> 00:09:46,450
+looks so different is because map and
+
+00:09:44,860 --> 00:09:48,310
+summon well they're actually macros that
+
+00:09:46,450 --> 00:09:50,200
+expand into these parallel for loop
+
+00:09:48,310 --> 00:09:52,330
+operators on so you can see there's that
+
+00:09:50,200 --> 00:09:54,310
+for operator there and that just means
+
+00:09:52,330 --> 00:09:56,530
+that we're iterating over the input that
+
+00:09:54,310 --> 00:09:58,480
+we give it in parallel so that first for
+
+00:09:56,530 --> 00:09:59,890
+loop is iterating over a in parallel and
+
+00:09:58,480 --> 00:10:02,260
+it's using this thing called an appender
+
+00:09:59,890 --> 00:10:04,870
+to basically append items to a list so
+
+00:10:02,260 --> 00:10:07,570
+that's our kind of map that constructs
+
+00:10:04,870 --> 00:10:10,000
+the squares and the second floor loop is
+
+00:10:07,570 --> 00:10:11,920
+actually doing the sum so that merger
+
+00:10:10,000 --> 00:10:13,780
+with the plus in it that's just a way to
+
+00:10:11,920 --> 00:10:15,610
+represent a parallel aggregation in well
+
+00:10:13,780 --> 00:10:16,540
+so these are just details about the ir
+
+00:10:15,610 --> 00:10:18,700
+that i'm not gonna spend too much time
+
+00:10:16,540 --> 00:10:21,340
+on but that's that's basically how the
+
+00:10:18,700 --> 00:10:23,680
+program looks like and it's kind of
+
+00:10:21,340 --> 00:10:25,810
+unfurnished for so well now step through
+
+00:10:23,680 --> 00:10:27,850
+the optimizer and look at what it does
+
+00:10:25,810 --> 00:10:29,440
+so this in line let pass as an example
+
+00:10:27,850 --> 00:10:31,270
+got rid of the assignments and kind of
+
+00:10:29,440 --> 00:10:34,570
+inline those loops but we still have
+
+00:10:31,270 --> 00:10:35,770
+those two passes over the data stepping
+
+00:10:34,570 --> 00:10:37,210
+through it a couple more times you can
+
+00:10:35,770 --> 00:10:38,620
+see this loop fusion pass which is
+
+00:10:37,210 --> 00:10:40,690
+probably the most interesting one in
+
+00:10:38,620 --> 00:10:42,490
+this example actually got rid of one of
+
+00:10:40,690 --> 00:10:45,070
+the loops and it inlined the squaring of
+
+00:10:42,490 --> 00:10:47,040
+the input into that aggregation so now
+
+00:10:45,070 --> 00:10:49,030
+we're just doing one pass over the data
+
+00:10:47,040 --> 00:10:50,320
+so we'll step through it a little bit
+
+00:10:49,030 --> 00:10:53,140
+more and you can see that it also
+
+00:10:50,320 --> 00:10:55,060
+vectorized this thing by basically
+
+00:10:53,140 --> 00:10:57,430
+introducing these sim da tur things that
+
+00:10:55,060 --> 00:11:00,100
+allow the backend to generate sim decode
+
+00:10:57,430 --> 00:11:04,030
+and finally we get some statistics about
+
+00:11:00,100 --> 00:11:05,590
+how the compiler did okay so that's kind
+
+00:11:04,030 --> 00:11:09,160
+of a thousand foot view of what well
+
+00:11:05,590 --> 00:11:10,750
+there's and outworks alright so
+
+00:11:09,160 --> 00:11:12,790
+switching a little bit to the
+
+00:11:10,750 --> 00:11:14,830
+implementation side of things
+
+00:11:12,790 --> 00:11:16,600
+the first kind of Weld compiler
+
+00:11:14,830 --> 00:11:18,190
+implementation was in scala so I'll
+
+00:11:16,600 --> 00:11:18,840
+briefly talk about what was good about
+
+00:11:18,190 --> 00:11:20,400
+Scala
+
+00:11:18,840 --> 00:11:23,310
+and then I'll talk about what was bad
+
+00:11:20,400 --> 00:11:25,200
+and why we ended up with rust so the
+
+00:11:23,310 --> 00:11:26,760
+good things about Scala the main reason
+
+00:11:25,200 --> 00:11:28,590
+that we chose Scala to begin with was
+
+00:11:26,760 --> 00:11:29,940
+because it had these algebraic types and
+
+00:11:28,590 --> 00:11:31,770
+this really nice pattern matching
+
+00:11:29,940 --> 00:11:33,360
+mechanism so all those rules that I
+
+00:11:31,770 --> 00:11:35,400
+showed you in the demo those are
+
+00:11:33,360 --> 00:11:37,410
+basically just you know pattern matching
+
+00:11:35,400 --> 00:11:39,600
+rules where you look at some subtree of
+
+00:11:37,410 --> 00:11:41,520
+a program and you substitute it with
+
+00:11:39,600 --> 00:11:44,160
+another tree and that out of the tree
+
+00:11:41,520 --> 00:11:46,230
+just happens to be more efficient but it
+
+00:11:44,160 --> 00:11:49,050
+computes the kind of same result that
+
+00:11:46,230 --> 00:11:51,450
+the first tree computes as well other
+
+00:11:49,050 --> 00:11:54,480
+kind of auxilary reasons it already had
+
+00:11:51,450 --> 00:11:56,010
+like a large ecosystem so with Scala you
+
+00:11:54,480 --> 00:11:57,540
+can use all the things that Java has and
+
+00:11:56,010 --> 00:11:58,770
+it also also had things like collections
+
+00:11:57,540 --> 00:12:01,680
+and everything so that just makes you
+
+00:11:58,770 --> 00:12:03,060
+know building stuff easier and also my
+
+00:12:01,680 --> 00:12:07,050
+adviser liked it so that obviously
+
+00:12:03,060 --> 00:12:09,540
+impacted things as well so going back to
+
+00:12:07,050 --> 00:12:12,089
+this pattern matching example here's an
+
+00:12:09,540 --> 00:12:13,680
+example of converting a boolean
+
+00:12:12,089 --> 00:12:16,800
+expression into a short-circuited
+
+00:12:13,680 --> 00:12:18,810
+version of that boolean expression so as
+
+00:12:16,800 --> 00:12:20,880
+an example this end expression it
+
+00:12:18,810 --> 00:12:22,529
+computes the computes left and then
+
+00:12:20,880 --> 00:12:23,940
+computes right and then it takes the N
+
+00:12:22,529 --> 00:12:25,500
+and then returns either true and false
+
+00:12:23,940 --> 00:12:27,750
+so if we want to convert this to a
+
+00:12:25,500 --> 00:12:29,160
+short-circuited expression we can
+
+00:12:27,750 --> 00:12:31,200
+convert it to an if statement where it
+
+00:12:29,160 --> 00:12:33,000
+evaluates left if left is true we
+
+00:12:31,200 --> 00:12:35,400
+evaluate right and if left is false you
+
+00:12:33,000 --> 00:12:37,320
+just return false okay and you can see
+
+00:12:35,400 --> 00:12:40,170
+that writing these kinds of pattern
+
+00:12:37,320 --> 00:12:41,550
+matching rules for an optimizer or you
+
+00:12:40,170 --> 00:12:43,800
+know these kind of correctness rules as
+
+00:12:41,550 --> 00:12:44,970
+well it's super natural both to read and
+
+00:12:43,800 --> 00:12:48,570
+to write and this was kind of the main
+
+00:12:44,970 --> 00:12:50,070
+reason that we that we chose Scala to
+
+00:12:48,570 --> 00:12:52,110
+begin with and when I talk about the
+
+00:12:50,070 --> 00:12:53,970
+rest part you'll see that it also
+
+00:12:52,110 --> 00:12:55,740
+influenced the design of how we decide
+
+00:12:53,970 --> 00:12:59,280
+to structure the compiler and rust as
+
+00:12:55,740 --> 00:13:00,960
+well okay this is a talk about rust and
+
+00:12:59,280 --> 00:13:03,209
+so naturally there are some bad things
+
+00:13:00,960 --> 00:13:05,310
+that we ran into that led us to move on
+
+00:13:03,209 --> 00:13:07,470
+and kind of the main bad thing about
+
+00:13:05,310 --> 00:13:10,380
+Scala was that it was very hard to embed
+
+00:13:07,470 --> 00:13:11,700
+into other things and you know hindsight
+
+00:13:10,380 --> 00:13:14,520
+is 20/20 but we should have known this
+
+00:13:11,700 --> 00:13:16,230
+but it's not great if you have some
+
+00:13:14,520 --> 00:13:17,550
+Python program running and you want to
+
+00:13:16,230 --> 00:13:20,339
+compile something and you have to fire
+
+00:13:17,550 --> 00:13:22,800
+up like a you know 100 megabyte JVM
+
+00:13:20,339 --> 00:13:24,450
+process to do that so that was probably
+
+00:13:22,800 --> 00:13:26,010
+the biggest reason why we decided to
+
+00:13:24,450 --> 00:13:29,280
+move away from this kind of managed
+
+00:13:26,010 --> 00:13:30,690
+runtime world auxilary reasons JIT
+
+00:13:29,280 --> 00:13:32,220
+compilation times we also found were
+
+00:13:30,690 --> 00:13:33,750
+pretty slow for larger
+
+00:13:32,220 --> 00:13:35,820
+programs for smaller programs that
+
+00:13:33,750 --> 00:13:37,080
+didn't really matter and this was again
+
+00:13:35,820 --> 00:13:39,420
+just due to the fact that we were
+
+00:13:37,080 --> 00:13:41,420
+actually interpreting code and usually
+
+00:13:39,420 --> 00:13:43,950
+we weren't running things enough for the
+
+00:13:41,420 --> 00:13:47,400
+JVM to you know compile things to native
+
+00:13:43,950 --> 00:13:49,680
+code we had to manage runtime this feeds
+
+00:13:47,400 --> 00:13:51,330
+back into the first reason but it also
+
+00:13:49,680 --> 00:13:54,630
+makes things like writing FFI is very
+
+00:13:51,330 --> 00:13:55,800
+difficult it had a pretty clunky build
+
+00:13:54,630 --> 00:13:59,010
+system I don't know if anyone's ever
+
+00:13:55,800 --> 00:14:00,750
+tried to use SBT here but I'm not gonna
+
+00:13:59,010 --> 00:14:02,850
+say more about it
+
+00:14:00,750 --> 00:14:04,170
+finally the runtime also had to be in a
+
+00:14:02,850 --> 00:14:06,000
+different language right so we're
+
+00:14:04,170 --> 00:14:07,680
+ginning code and this jittered code is
+
+00:14:06,000 --> 00:14:09,870
+just some arbitrary machine code that's
+
+00:14:07,680 --> 00:14:12,000
+expected to be scheduled by you know
+
+00:14:09,870 --> 00:14:13,200
+some kind of threading library and you
+
+00:14:12,000 --> 00:14:14,400
+know there was no way that we were going
+
+00:14:13,200 --> 00:14:17,360
+to use like Java threads for that
+
+00:14:14,400 --> 00:14:20,160
+because that's that's just not funny
+
+00:14:17,360 --> 00:14:22,050
+so effectively we wanted to redesign the
+
+00:14:20,160 --> 00:14:23,790
+JIT compiler the core API and runtime
+
+00:14:22,050 --> 00:14:25,170
+from the gap from the ground up because
+
+00:14:23,790 --> 00:14:26,940
+of these kind of shortcomings of the
+
+00:14:25,170 --> 00:14:28,050
+language that we were using but if you
+
+00:14:26,940 --> 00:14:30,240
+think about it these three things have
+
+00:14:28,050 --> 00:14:31,740
+some fairly different requirements the
+
+00:14:30,240 --> 00:14:33,450
+JIT compiler needs things like pattern
+
+00:14:31,740 --> 00:14:35,190
+matching and algebraic data type so it's
+
+00:14:33,450 --> 00:14:37,980
+nice to express these kind of
+
+00:14:35,190 --> 00:14:39,150
+optimization rules the core API because
+
+00:14:37,980 --> 00:14:42,930
+we want to integrate it into other
+
+00:14:39,150 --> 00:14:44,460
+things needs a nicely compatible FFI and
+
+00:14:42,930 --> 00:14:46,380
+we also need strong support for
+
+00:14:44,460 --> 00:14:48,120
+parallelism and also the ability to
+
+00:14:46,380 --> 00:14:50,550
+control kind of low-level things like
+
+00:14:48,120 --> 00:14:52,950
+memory layout okay so I think everyone
+
+00:14:50,550 --> 00:14:55,740
+knows where I'm going with this so this
+
+00:14:52,950 --> 00:14:57,540
+was kind of what led us to rust just
+
+00:14:55,740 --> 00:14:58,830
+kind of really quickly reiterating the
+
+00:14:57,540 --> 00:15:02,370
+requirements we had these are in no
+
+00:14:58,830 --> 00:15:04,050
+specific order we needed speed because
+
+00:15:02,370 --> 00:15:05,850
+compilation happens at runtime so this
+
+00:15:04,050 --> 00:15:07,500
+isn't some offline compiler right the
+
+00:15:05,850 --> 00:15:10,020
+compilation time actually counts toward
+
+00:15:07,500 --> 00:15:11,190
+what the user sees we needed safety
+
+00:15:10,020 --> 00:15:13,020
+because we were embedding things into
+
+00:15:11,190 --> 00:15:14,730
+other libraries we needed a managed we
+
+00:15:13,020 --> 00:15:16,410
+did not want to manage run time again
+
+00:15:14,730 --> 00:15:18,900
+because we were embedding this into
+
+00:15:16,410 --> 00:15:21,390
+other runtimes we wanted a rich standard
+
+00:15:18,900 --> 00:15:23,190
+library functional paradigms for things
+
+00:15:21,390 --> 00:15:25,560
+like pattern matching and also a good
+
+00:15:23,190 --> 00:15:26,880
+bandage good managed build system
+
+00:15:25,560 --> 00:15:29,880
+because of you know the kind of
+
+00:15:26,880 --> 00:15:31,340
+struggles that we had with SPG so we
+
+00:15:29,880 --> 00:15:33,870
+started our search for a new language
+
+00:15:31,340 --> 00:15:36,150
+and these are kind of the languages that
+
+00:15:33,870 --> 00:15:37,230
+we considered up off the bat but going
+
+00:15:36,150 --> 00:15:39,180
+through our requirements it was pretty
+
+00:15:37,230 --> 00:15:40,740
+easy to kind of knock these off right so
+
+00:15:39,180 --> 00:15:43,020
+we wanted things to be fast to back out
+
+00:15:40,740 --> 00:15:45,070
+of Python we wanted it to be safe so we
+
+00:15:43,020 --> 00:15:46,930
+said goodbye to c-plus
+
+00:15:45,070 --> 00:15:50,590
+we didn't want to manage run time so
+
+00:15:46,930 --> 00:15:52,870
+there went oops there went going and
+
+00:15:50,590 --> 00:15:54,730
+Java and we were basically left with
+
+00:15:52,870 --> 00:15:57,070
+Swift and rust and recall that this is
+
+00:15:54,730 --> 00:15:59,340
+back in like 2016 or something so it was
+
+00:15:57,070 --> 00:16:04,420
+a slightly different landscape back then
+
+00:15:59,340 --> 00:16:05,860
+we wanted a rich standard library we
+
+00:16:04,420 --> 00:16:07,270
+wanted these functional paradigms for
+
+00:16:05,860 --> 00:16:09,190
+things like pattern matching so both of
+
+00:16:07,270 --> 00:16:10,600
+them kind of had that back then and we
+
+00:16:09,190 --> 00:16:12,520
+also wanted a good package manager and
+
+00:16:10,600 --> 00:16:13,780
+this isn't on the slides but after we
+
+00:16:12,520 --> 00:16:15,370
+started using both of these in
+
+00:16:13,780 --> 00:16:17,740
+evaluating them we realized that we also
+
+00:16:15,370 --> 00:16:20,590
+wanted a good community and that's kind
+
+00:16:17,740 --> 00:16:22,390
+of a rust really want out the ability to
+
+00:16:20,590 --> 00:16:25,210
+have crates do and these super high
+
+00:16:22,390 --> 00:16:26,530
+quality packages and also you know the
+
+00:16:25,210 --> 00:16:29,110
+rest forums and everything to have
+
+00:16:26,530 --> 00:16:30,520
+people help us with stuff and also the
+
+00:16:29,110 --> 00:16:32,740
+ability to ask questions that weren't
+
+00:16:30,520 --> 00:16:34,240
+related to iOS development um all that
+
+00:16:32,740 --> 00:16:37,560
+stuff was pretty nice and it's kind of
+
+00:16:34,240 --> 00:16:40,240
+what sold rust for us at the end
+
+00:16:37,560 --> 00:16:42,130
+okay so I'll dive a little bit into how
+
+00:16:40,240 --> 00:16:46,090
+we actually use rust for building weld
+
+00:16:42,130 --> 00:16:48,730
+them so the first iteration of using of
+
+00:16:46,090 --> 00:16:50,530
+weld and rust was basically just looking
+
+00:16:48,730 --> 00:16:52,900
+at the compiler so we took all the Scala
+
+00:16:50,530 --> 00:16:54,700
+bits of our code and we ported them over
+
+00:16:52,900 --> 00:16:57,550
+to rust so this involves the core API
+
+00:16:54,700 --> 00:17:00,280
+the optimizer and also the compiler
+
+00:16:57,550 --> 00:17:01,600
+backends so to begin with just because
+
+00:17:00,280 --> 00:17:03,490
+we were trying things out we decided to
+
+00:17:01,600 --> 00:17:05,589
+keep the C++ runtime to do things like
+
+00:17:03,490 --> 00:17:06,880
+thread management and memory and we
+
+00:17:05,589 --> 00:17:08,709
+basically just had some like thin
+
+00:17:06,880 --> 00:17:10,990
+bindings between the main kind of
+
+00:17:08,709 --> 00:17:14,440
+compilation part and the actual runtime
+
+00:17:10,990 --> 00:17:16,360
+part to build bindings that we had from
+
+00:17:14,440 --> 00:17:19,000
+before so we had bindings for like Java
+
+00:17:16,360 --> 00:17:20,709
+and Python we basically built a C API
+
+00:17:19,000 --> 00:17:23,320
+and I'll talk a bit more about how we
+
+00:17:20,709 --> 00:17:26,020
+did this in a few slides and then the C
+
+00:17:23,320 --> 00:17:28,270
+API bindings basically just mapped into
+
+00:17:26,020 --> 00:17:32,170
+our existing bindings for languages like
+
+00:17:28,270 --> 00:17:34,330
+Python and Java okay so going into a
+
+00:17:32,170 --> 00:17:36,370
+little bit more detail now the world IR
+
+00:17:34,330 --> 00:17:38,890
+itself is implemented basically as a
+
+00:17:36,370 --> 00:17:40,690
+tree with all the operators represented
+
+00:17:38,890 --> 00:17:42,280
+using an enum so the main kind of
+
+00:17:40,690 --> 00:17:44,890
+construct in the IR is this thing called
+
+00:17:42,280 --> 00:17:46,480
+an expression or expert that has a kind
+
+00:17:44,890 --> 00:17:48,370
+that's the kind of expression it is and
+
+00:17:46,480 --> 00:17:51,010
+a type such as you know integer float or
+
+00:17:48,370 --> 00:17:53,140
+whatever and expert kind itself is
+
+00:17:51,010 --> 00:17:54,820
+basically this giant enum that defines
+
+00:17:53,140 --> 00:17:57,310
+all the different kinds of operators
+
+00:17:54,820 --> 00:17:58,000
+that we support so you might wonder why
+
+00:17:57,310 --> 00:18:00,580
+we actually
+
+00:17:58,000 --> 00:18:02,140
+did did it this way another you know
+
+00:18:00,580 --> 00:18:03,400
+kind of strong man way of doing it is to
+
+00:18:02,140 --> 00:18:06,040
+use something like trade objects which
+
+00:18:03,400 --> 00:18:07,270
+was arguably more extensible so if you
+
+00:18:06,040 --> 00:18:08,800
+want to add more things you don't have
+
+00:18:07,270 --> 00:18:10,720
+to go and update this enum everywhere
+
+00:18:08,800 --> 00:18:11,710
+and this kind of goes back to the
+
+00:18:10,720 --> 00:18:13,540
+pattern matching thing I was talking
+
+00:18:11,710 --> 00:18:16,320
+about a while back these genomes make
+
+00:18:13,540 --> 00:18:18,220
+pattern matching super easy and
+
+00:18:16,320 --> 00:18:20,320
+basically because so much of the
+
+00:18:18,220 --> 00:18:21,970
+compiler has to do with the optimizer
+
+00:18:20,320 --> 00:18:24,610
+rules this was kind of a first class
+
+00:18:21,970 --> 00:18:26,590
+concern for us so diving into that a
+
+00:18:24,610 --> 00:18:28,330
+little bit more we were pleasantly
+
+00:18:26,590 --> 00:18:30,130
+surprised that the pattern matching
+
+00:18:28,330 --> 00:18:32,050
+rules were fairly similar to Scala
+
+00:18:30,130 --> 00:18:33,820
+despite having to you know get around
+
+00:18:32,050 --> 00:18:36,010
+the borrowed checker and everything so
+
+00:18:33,820 --> 00:18:37,480
+in most cases this is the same rule that
+
+00:18:36,010 --> 00:18:39,100
+we had from before it's basically
+
+00:18:37,480 --> 00:18:41,200
+converting binary operations into
+
+00:18:39,100 --> 00:18:44,200
+short-circuited operations all you have
+
+00:18:41,200 --> 00:18:46,630
+to do is match on target pattern create
+
+00:18:44,200 --> 00:18:50,500
+a substitution and then replace the
+
+00:18:46,630 --> 00:18:53,260
+expression in place so there was one
+
+00:18:50,500 --> 00:18:54,310
+kind of quirky thing that we had to deal
+
+00:18:53,260 --> 00:18:56,380
+with in the beginning while we were
+
+00:18:54,310 --> 00:18:58,390
+learning rust and that was learning to
+
+00:18:56,380 --> 00:19:00,250
+live without clones and we found that
+
+00:18:58,390 --> 00:19:02,020
+this was especially difficult with these
+
+00:19:00,250 --> 00:19:03,880
+kind of tree and graph data structures
+
+00:19:02,020 --> 00:19:06,430
+just because it's an easy escape hatch
+
+00:19:03,880 --> 00:19:08,200
+so our old code for this transform looks
+
+00:19:06,430 --> 00:19:09,400
+something like this and if you squint at
+
+00:19:08,200 --> 00:19:11,020
+this code you can see that what it's
+
+00:19:09,400 --> 00:19:13,120
+basically doing is that it's taking your
+
+00:19:11,020 --> 00:19:14,860
+entire sub program and copying it every
+
+00:19:13,120 --> 00:19:17,440
+time this pattern matches which isn't
+
+00:19:14,860 --> 00:19:18,850
+great but there's kind of two things
+
+00:19:17,440 --> 00:19:20,350
+wrong with this the first is that it's
+
+00:19:18,850 --> 00:19:23,620
+kind of tricky to avoid it at least for
+
+00:19:20,350 --> 00:19:24,940
+us when we were newcomers because these
+
+00:19:23,620 --> 00:19:26,200
+data structures are kind of pointer
+
+00:19:24,940 --> 00:19:27,970
+based and you have to deal with the
+
+00:19:26,200 --> 00:19:29,080
+borrowed gender so we knew in the back
+
+00:19:27,970 --> 00:19:31,270
+of our minds that there were some
+
+00:19:29,080 --> 00:19:34,620
+combination of ref and ref mud and an
+
+00:19:31,270 --> 00:19:36,880
+mut and whatever to you know fix this
+
+00:19:34,620 --> 00:19:39,280
+but it was easier just to drop in some
+
+00:19:36,880 --> 00:19:41,470
+clones and some well-chosen spaces and
+
+00:19:39,280 --> 00:19:44,890
+get the bar checker to shut up for a
+
+00:19:41,470 --> 00:19:46,150
+couple weeks but unfortunately the other
+
+00:19:44,890 --> 00:19:47,950
+bad thing is that this is especially
+
+00:19:46,150 --> 00:19:49,720
+fatal for performance because we're
+
+00:19:47,950 --> 00:19:52,480
+fundamentally dealing with recursive
+
+00:19:49,720 --> 00:19:54,070
+data structures here so this ends up
+
+00:19:52,480 --> 00:19:57,490
+becoming a recursive clone so at some
+
+00:19:54,070 --> 00:19:59,050
+point we did have to fix these issues so
+
+00:19:57,490 --> 00:20:01,870
+our solution to this was fairly simple
+
+00:19:59,050 --> 00:20:04,480
+we have this cake call now and basically
+
+00:20:01,870 --> 00:20:06,700
+all it does is you create a placeholder
+
+00:20:04,480 --> 00:20:08,890
+expression and then you use this mem
+
+00:20:06,700 --> 00:20:10,330
+swap to you know swap it out and he
+
+00:20:08,890 --> 00:20:11,680
+returned the old thing so you can
+
+00:20:10,330 --> 00:20:13,570
+basically drop in
+
+00:20:11,680 --> 00:20:15,220
+take in most places where use clone and
+
+00:20:13,570 --> 00:20:18,700
+as long as you're replacing that old
+
+00:20:15,220 --> 00:20:20,140
+expression that you're substituting this
+
+00:20:18,700 --> 00:20:21,490
+is basically like a pointer slop and
+
+00:20:20,140 --> 00:20:24,220
+this obviously gives us some pretty
+
+00:20:21,490 --> 00:20:25,960
+substantial and performance benefits it
+
+00:20:24,220 --> 00:20:27,250
+was just you know as newcomers to the
+
+00:20:25,960 --> 00:20:28,780
+language it was hard for us to kind of
+
+00:20:27,250 --> 00:20:30,610
+find these kinds of things I think
+
+00:20:28,780 --> 00:20:33,070
+Steven is key note even said that mem
+
+00:20:30,610 --> 00:20:35,350
+swap used to be part of the syntax you
+
+00:20:33,070 --> 00:20:37,030
+know few years ago and I can totally see
+
+00:20:35,350 --> 00:20:39,010
+why that's the case right it took us
+
+00:20:37,030 --> 00:20:40,840
+like probably a year to find that this
+
+00:20:39,010 --> 00:20:43,930
+mem swap utility even existed and it's
+
+00:20:40,840 --> 00:20:45,460
+our fault for not asking but now that we
+
+00:20:43,930 --> 00:20:47,590
+have it you know performance is great
+
+00:20:45,460 --> 00:20:51,400
+and our rules are also be easy to write
+
+00:20:47,590 --> 00:20:54,550
+so we're pretty happy other things we
+
+00:20:51,400 --> 00:20:57,790
+use LLVM C API for code generation and
+
+00:20:54,550 --> 00:20:59,590
+it's pleasantly easy to interface with C
+
+00:20:57,790 --> 00:21:02,200
+libraries and again this is in large
+
+00:20:59,590 --> 00:21:04,840
+part thanks to cargo so cargo has these
+
+00:21:02,200 --> 00:21:07,840
+- sis crates it's just a paradigm in
+
+00:21:04,840 --> 00:21:10,300
+cargo where - this crate is basically
+
+00:21:07,840 --> 00:21:13,090
+just definition rust definitions of a C
+
+00:21:10,300 --> 00:21:15,340
+library so here's some code that you
+
+00:21:13,090 --> 00:21:18,430
+don't have to read but it's basically
+
+00:21:15,340 --> 00:21:20,980
+taking a struct and generating code for
+
+00:21:18,430 --> 00:21:23,320
+creating that struct and embedded in
+
+00:21:20,980 --> 00:21:25,150
+there are two kind of llbmc API calls
+
+00:21:23,320 --> 00:21:28,690
+and it was very natural just to you know
+
+00:21:25,150 --> 00:21:30,760
+call C from rust and also the other way
+
+00:21:28,690 --> 00:21:32,410
+around which I'll talk about and that
+
+00:21:30,760 --> 00:21:34,330
+kind of made it easy to kind of take the
+
+00:21:32,410 --> 00:21:36,520
+huge like ecosystem of C libraries that
+
+00:21:34,330 --> 00:21:38,620
+are out there and use them in cases
+
+00:21:36,520 --> 00:21:41,050
+where you know the same thing in rust
+
+00:21:38,620 --> 00:21:43,590
+didn't exist
+
+00:21:41,050 --> 00:21:45,730
+FF eyes are also very easy to build
+
+00:21:43,590 --> 00:21:47,380
+compared to Scala where we needed things
+
+00:21:45,730 --> 00:21:49,570
+like these weird wrapper objects we
+
+00:21:47,380 --> 00:21:52,060
+needed to you know tell the GC not to
+
+00:21:49,570 --> 00:21:54,670
+throw our stuff away and so forth in
+
+00:21:52,060 --> 00:21:56,680
+rust we basically define some type you
+
+00:21:54,670 --> 00:21:59,050
+can you know easily specify how long you
+
+00:21:56,680 --> 00:22:00,700
+want that type to be you know we made an
+
+00:21:59,050 --> 00:22:02,560
+alias for it and then you basically
+
+00:22:00,700 --> 00:22:03,850
+create a function that you know
+
+00:22:02,560 --> 00:22:06,580
+allocates the memory on the heap and
+
+00:22:03,850 --> 00:22:09,400
+forgets about it so for a rest developer
+
+00:22:06,580 --> 00:22:11,080
+this is evil but you know for people who
+
+00:22:09,400 --> 00:22:12,550
+you see this is very natural right you
+
+00:22:11,080 --> 00:22:13,990
+call a function it allocates the memory
+
+00:22:12,550 --> 00:22:16,450
+on the heap and you're responsible to
+
+00:22:13,990 --> 00:22:18,880
+write it down in your notebook and free
+
+00:22:16,450 --> 00:22:22,420
+it somewhere else so it's a very thin
+
+00:22:18,880 --> 00:22:24,460
+layer of kind of connecting the C world
+
+00:22:22,420 --> 00:22:25,190
+we're giving an interface to C
+
+00:22:24,460 --> 00:22:27,950
+developers that
+
+00:22:25,190 --> 00:22:29,359
+they're comfortable with and also kind
+
+00:22:27,950 --> 00:22:30,830
+of the rust world where everything above
+
+00:22:29,359 --> 00:22:31,929
+this is just pure rust and you don't
+
+00:22:30,830 --> 00:22:34,789
+have to worry about this stuff anymore
+
+00:22:31,929 --> 00:22:36,409
+and I also want to say that you can
+
+00:22:34,789 --> 00:22:38,840
+almost certainly automate this kind of
+
+00:22:36,409 --> 00:22:40,429
+stuff with procedural macros though we
+
+00:22:38,840 --> 00:22:42,889
+haven't tried so if anyone knows of any
+
+00:22:40,429 --> 00:22:47,599
+crates that does stuff like this please
+
+00:22:42,889 --> 00:22:49,580
+let me know okay finally we use cargo to
+
+00:22:47,599 --> 00:22:52,340
+manage literally everything about our
+
+00:22:49,580 --> 00:22:55,190
+project so the FFI that was generated on
+
+00:22:52,340 --> 00:22:56,809
+the previous slide that's a header for
+
+00:22:55,190 --> 00:22:59,450
+that is generated using a build dot RS
+
+00:22:56,809 --> 00:23:01,549
+file we use the workspaces to build
+
+00:22:59,450 --> 00:23:02,960
+tools automatically so you know
+
+00:23:01,549 --> 00:23:04,460
+literally all you have to do to get the
+
+00:23:02,960 --> 00:23:06,619
+tooling and the compiler and the runtime
+
+00:23:04,460 --> 00:23:07,940
+is you get clone and carve abode police
+
+00:23:06,619 --> 00:23:10,989
+and everything is just there sitting
+
+00:23:07,940 --> 00:23:13,429
+waiting to be run so that's really nice
+
+00:23:10,989 --> 00:23:16,429
+Docs and testing all that standard stuff
+
+00:23:13,429 --> 00:23:19,009
+we also use cargo for yeah I love cargo
+
+00:23:16,429 --> 00:23:22,249
+I think it's probably one of the most
+
+00:23:19,009 --> 00:23:24,799
+underrated features of rust just because
+
+00:23:22,249 --> 00:23:27,320
+it's so easy to use and get started with
+
+00:23:24,799 --> 00:23:28,519
+so you know people often say that rust
+
+00:23:27,320 --> 00:23:30,619
+is one of the Hardware programming
+
+00:23:28,519 --> 00:23:32,960
+languages to learn today I've been
+
+00:23:30,619 --> 00:23:34,159
+writing C for 10-15 years now and I
+
+00:23:32,960 --> 00:23:38,119
+still don't know how to write a proper
+
+00:23:34,159 --> 00:23:43,519
+make file so yeah if you if you think
+
+00:23:38,119 --> 00:23:45,259
+that learning rust is difficult yeah try
+
+00:23:43,519 --> 00:23:46,549
+to write a make file or auto comm for C
+
+00:23:45,259 --> 00:23:49,330
+make or whatever those other things are
+
+00:23:46,549 --> 00:23:49,330
+it's not that easy
+
+00:23:49,399 --> 00:23:53,239
+so overall life was pretty good but we
+
+00:23:51,200 --> 00:23:57,019
+still had that pesky C++ runtime and
+
+00:23:53,239 --> 00:23:58,340
+that led to the usual host of issues so
+
+00:23:57,019 --> 00:24:00,739
+we had concurrency bugs that were
+
+00:23:58,340 --> 00:24:03,080
+unrelated to the generated code we had
+
+00:24:00,739 --> 00:24:04,879
+two code bases which wasn't fun we had a
+
+00:24:03,080 --> 00:24:06,739
+more complex build system so we still
+
+00:24:04,879 --> 00:24:08,539
+had you know some nested makes left in
+
+00:24:06,739 --> 00:24:10,460
+there somewhere
+
+00:24:08,539 --> 00:24:12,739
+we had to logging and debugging systems
+
+00:24:10,460 --> 00:24:17,809
+so just like small usability things like
+
+00:24:12,739 --> 00:24:19,940
+that so our second cut of valve in rust
+
+00:24:17,809 --> 00:24:22,849
+actually ported the entire runtime to
+
+00:24:19,940 --> 00:24:24,739
+use rust as well so the fundamental kind
+
+00:24:22,849 --> 00:24:26,809
+of architecture picture looks the same
+
+00:24:24,739 --> 00:24:28,729
+it's just that we've replaced the chunk
+
+00:24:26,809 --> 00:24:31,700
+that was in C++ and we've kind of moved
+
+00:24:28,729 --> 00:24:34,580
+it into question and this gave us some
+
+00:24:31,700 --> 00:24:35,929
+advantages it's safer than C there's
+
+00:24:34,580 --> 00:24:37,650
+really no guarantees when you're
+
+00:24:35,929 --> 00:24:40,740
+interacting with this arbitrary
+
+00:24:37,650 --> 00:24:42,390
+code but it's definitely things like
+
+00:24:40,740 --> 00:24:43,860
+scheduling and task management are
+
+00:24:42,390 --> 00:24:46,200
+definitely safer than they were before
+
+00:24:43,860 --> 00:24:48,600
+we also have a nice single logging and
+
+00:24:46,200 --> 00:24:50,820
+debugging API so you can set a log level
+
+00:24:48,600 --> 00:24:52,350
+in the rust compiler and then you'll get
+
+00:24:50,820 --> 00:24:54,330
+the kind of same logging output for when
+
+00:24:52,350 --> 00:24:57,060
+you're running generated code which is
+
+00:24:54,330 --> 00:24:59,400
+nice and it's also easier to pass data
+
+00:24:57,060 --> 00:25:01,500
+from the runtime to the compiler also um
+
+00:24:59,400 --> 00:25:03,720
+so this was easy enough before but this
+
+00:25:01,500 --> 00:25:05,340
+lets us do things like asserting the
+
+00:25:03,720 --> 00:25:07,830
+size of some generated structure or
+
+00:25:05,340 --> 00:25:09,450
+compiler matches the size that we expect
+
+00:25:07,830 --> 00:25:12,390
+in like a unit test or something it's
+
+00:25:09,450 --> 00:25:15,140
+like kind of clean key stuff like that
+
+00:25:12,390 --> 00:25:19,560
+that just ensures that stuff is clicking
+
+00:25:15,140 --> 00:25:20,940
+so a little bit of detail on this so the
+
+00:25:19,560 --> 00:25:22,680
+way that this runtime works is as
+
+00:25:20,940 --> 00:25:24,630
+follows so you basically judge some
+
+00:25:22,680 --> 00:25:26,160
+machine code and then you basically call
+
+00:25:24,630 --> 00:25:28,260
+into rust using these FFI style
+
+00:25:26,160 --> 00:25:30,240
+functions so on the rest side you
+
+00:25:28,260 --> 00:25:31,800
+basically have this type definition and
+
+00:25:30,240 --> 00:25:34,170
+that's all there's this JIT func type
+
+00:25:31,800 --> 00:25:35,790
+definition and this indicates this
+
+00:25:34,170 --> 00:25:38,250
+basically refers to a function pointer
+
+00:25:35,790 --> 00:25:40,290
+that is generated somewhere by the
+
+00:25:38,250 --> 00:25:42,450
+actual JIT compiler so there's some
+
+00:25:40,290 --> 00:25:43,890
+function somewhere that was generated
+
+00:25:42,450 --> 00:25:46,590
+because you took some Weld ir and you
+
+00:25:43,890 --> 00:25:49,080
+compiled it into the memory of the
+
+00:25:46,590 --> 00:25:51,180
+existing process and then you have this
+
+00:25:49,080 --> 00:25:52,770
+run task function which is a standard
+
+00:25:51,180 --> 00:25:55,710
+everyday rust function except it has
+
+00:25:52,770 --> 00:25:57,480
+this c wrapper as well and by wrapping
+
+00:25:55,710 --> 00:26:00,150
+it as like a FFI function you can
+
+00:25:57,480 --> 00:26:02,610
+basically call that function from the
+
+00:26:00,150 --> 00:26:03,960
+generated code so this is what that
+
+00:26:02,610 --> 00:26:05,490
+looks like
+
+00:26:03,960 --> 00:26:06,960
+this is kind of scary-looking but it's
+
+00:26:05,490 --> 00:26:10,590
+not that bad you basically have this
+
+00:26:06,960 --> 00:26:12,180
+function f1 that's generated via the JIT
+
+00:26:10,590 --> 00:26:14,190
+and then you have some code that does
+
+00:26:12,180 --> 00:26:15,990
+some one packing and stuff and then you
+
+00:26:14,190 --> 00:26:18,450
+have the run task function so rhyme task
+
+00:26:15,990 --> 00:26:21,690
+basically takes f1 which is a function
+
+00:26:18,450 --> 00:26:24,150
+that we generated as a input so this is
+
+00:26:21,690 --> 00:26:25,350
+just a pointer and run task is just
+
+00:26:24,150 --> 00:26:27,510
+written in rust and how we can do our
+
+00:26:25,350 --> 00:26:28,980
+standard rust stuff here so we can use
+
+00:26:27,510 --> 00:26:31,740
+the standard brush library to spawn
+
+00:26:28,980 --> 00:26:34,200
+threads we can you know time tasks do
+
+00:26:31,740 --> 00:26:36,990
+load balancing use stuff from crazy.i or
+
+00:26:34,200 --> 00:26:39,480
+whatever the only funky thing is that we
+
+00:26:36,990 --> 00:26:41,220
+have this call to f1 at some point which
+
+00:26:39,480 --> 00:26:43,640
+from rest perspective is just this kind
+
+00:26:41,220 --> 00:26:45,930
+of black box function that it's calling
+
+00:26:43,640 --> 00:26:47,400
+and it really just ends up calling into
+
+00:26:45,930 --> 00:26:49,799
+some code that we generated so this
+
+00:26:47,400 --> 00:26:52,529
+obviously needs to be wrapped in unsafe
+
+00:26:49,799 --> 00:26:54,720
+but you know every it's it's pretty nice
+
+00:26:52,529 --> 00:26:56,279
+just because you get there kind of unify
+
+00:26:54,720 --> 00:27:00,299
+the compilation part and the runtime
+
+00:26:56,279 --> 00:27:01,860
+part of this stuff okay so if you're
+
+00:27:00,299 --> 00:27:04,320
+interested in this stuff we'd love
+
+00:27:01,860 --> 00:27:05,789
+contributors we have you know around 30
+
+00:27:04,320 --> 00:27:07,710
+contributors today over a thousand
+
+00:27:05,789 --> 00:27:09,750
+github stars so the project is
+
+00:27:07,710 --> 00:27:11,730
+definitely still growing there's many
+
+00:27:09,750 --> 00:27:13,710
+many things to do ranging from compiler
+
+00:27:11,730 --> 00:27:16,049
+optimizations to fleshing out things
+
+00:27:13,710 --> 00:27:18,570
+like GPU support and we also have
+
+00:27:16,049 --> 00:27:20,700
+contributions by many other groups and
+
+00:27:18,570 --> 00:27:22,559
+academia and Industry so I think we can
+
+00:27:20,700 --> 00:27:24,630
+find something to do no matter where you
+
+00:27:22,559 --> 00:27:27,210
+are I also just want to give a quick
+
+00:27:24,630 --> 00:27:28,860
+shout out to other people at Stanford
+
+00:27:27,210 --> 00:27:31,350
+who contribute to this project obviously
+
+00:27:28,860 --> 00:27:33,990
+none of this would exist without them
+
+00:27:31,350 --> 00:27:35,700
+and now just to conclude rust we thought
+
+00:27:33,990 --> 00:27:37,470
+was a fantastic fit for building kind of
+
+00:27:35,700 --> 00:27:39,539
+a modern high-performance JIT compiler
+
+00:27:37,470 --> 00:27:41,880
+and runtime has these nice functional
+
+00:27:39,539 --> 00:27:43,440
+semantics for building a compiler it
+
+00:27:41,880 --> 00:27:44,820
+also has the native execution speed
+
+00:27:43,440 --> 00:27:46,980
+which is important for the runtime but
+
+00:27:44,820 --> 00:27:47,970
+also for the JIT compilation part and it
+
+00:27:46,980 --> 00:27:49,830
+also gives you the kind of low-level
+
+00:27:47,970 --> 00:27:52,020
+control you need to build these kinds of
+
+00:27:49,830 --> 00:27:54,029
+things and finally it interoperates
+
+00:27:52,020 --> 00:27:55,110
+fairly seamlessly at CD which is
+
+00:27:54,029 --> 00:27:57,090
+important for hooking into other
+
+00:27:55,110 --> 00:27:59,130
+languages and so the link to the code
+
+00:27:57,090 --> 00:28:01,080
+and the website and stuff is up there my
+
+00:27:59,130 --> 00:28:04,669
+email is also there so if you have any
+
+00:28:01,080 --> 00:28:04,669
+questions feel free to reach out Thanks
+
+00:28:08,370 --> 00:28:21,670
+
+YouTube URL: https://www.youtube.com/watch?v=AZsgdCEQjFo
+
+

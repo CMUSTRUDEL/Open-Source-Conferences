@@ -1,0 +1,2507 @@
+Title: The Story of Stylo: Replacing Firefox's CSS engine with Rust — Josh Matthews
+Publication date: 2018-01-06
+Playlist: Rust Belt Rust 2017
+Description: 
+	Firefox is in the process of shipping a new implementation of CSS styling written in Rust as part of Mozilla’s Servo project. Firefox has 20+ million lines of code and hundreds of millions of users, so this is no small undertaking! As a case study for integrating a large, multi-repo Rust project into a larger C++ project, this talk explains how we:
+
+- created bi-directional FFI boundaries that maximized each project’s strengths
+- addressed cross-language mismatches including threadsafety and ownership
+- integrated two fast-moving codebases while managing regressions
+
+We’ll cover specific successes and failures that emerged over the course of the project, and discuss how Rust contributed to those outcomes.
+Captions: 
+	00:00:04,359 --> 00:00:12,590
+good morning so Firefox is a very big
+
+00:00:10,700 --> 00:00:14,420
+project there's a reason why people keep
+
+00:00:12,590 --> 00:00:15,799
+talking about Oh something big is coming
+
+00:00:14,420 --> 00:00:17,690
+into Firefox something big is coming
+
+00:00:15,799 --> 00:00:19,580
+into rest into Firefox and that's
+
+00:00:17,690 --> 00:00:21,800
+because Firefox is a really big C++
+
+00:00:19,580 --> 00:00:24,619
+project it is over nine million lines
+
+00:00:21,800 --> 00:00:26,359
+just of C++ by itself and then there's
+
+00:00:24,619 --> 00:00:28,970
+other languages of languages on top of
+
+00:00:26,359 --> 00:00:31,669
+that I mean the engine that's written
+
+00:00:28,970 --> 00:00:35,990
+mostly in C++ we tend refer to as gecko
+
+00:00:31,669 --> 00:00:37,340
+and gecko has a style system which is a
+
+00:00:35,990 --> 00:00:40,310
+component I'll explain a little bit
+
+00:00:37,340 --> 00:00:42,650
+which is by itself about 160,000 lines
+
+00:00:40,310 --> 00:00:45,170
+of C++ code and this is something that's
+
+00:00:42,650 --> 00:00:47,690
+been around for almost two decades now
+
+00:00:45,170 --> 00:00:51,100
+and has like evolved over time and grown
+
+00:00:47,690 --> 00:00:55,730
+larger and larger and more complex so
+
+00:00:51,100 --> 00:00:57,020
+the new thing stylo is 85,000 lines of
+
+00:00:55,730 --> 00:00:59,270
+handwritten rust and that is an
+
+00:00:57,020 --> 00:01:01,790
+important qualifier which we'll explore
+
+00:00:59,270 --> 00:01:05,479
+later but this is what is coming to
+
+00:01:01,790 --> 00:01:07,009
+Firefox in about two weeks it's gonna be
+
+00:01:05,479 --> 00:01:08,689
+shipping and that's really exciting it's
+
+00:01:07,009 --> 00:01:12,469
+been a number of years of effort to get
+
+00:01:08,689 --> 00:01:13,939
+to this point so let's talk about what a
+
+00:01:12,469 --> 00:01:15,829
+style system actually is a web browser
+
+00:01:13,939 --> 00:01:18,640
+so a web browser basically contains a
+
+00:01:15,829 --> 00:01:20,960
+pipeline to get bytes from the network
+
+00:01:18,640 --> 00:01:22,579
+and then turn them into something that
+
+00:01:20,960 --> 00:01:25,249
+shows up in front of you so starts with
+
+00:01:22,579 --> 00:01:27,439
+the HTML parser and this takes the
+
+00:01:25,249 --> 00:01:28,899
+source code of an HTML page which
+
+00:01:27,439 --> 00:01:32,119
+contains your HTML tags and everything
+
+00:01:28,899 --> 00:01:34,490
+as an input and as an output it turns
+
+00:01:32,119 --> 00:01:37,399
+that into a tree of what are called Dom
+
+00:01:34,490 --> 00:01:40,429
+nodes and these two these correspond to
+
+00:01:37,399 --> 00:01:43,490
+those tags everything inside of a pair
+
+00:01:40,429 --> 00:01:45,619
+of matched tags becomes an element and
+
+00:01:43,490 --> 00:01:47,840
+everything or everything inside of that
+
+00:01:45,619 --> 00:01:49,459
+that pair of match tags becomes children
+
+00:01:47,840 --> 00:01:52,310
+child nodes of that element
+
+00:01:49,459 --> 00:01:54,139
+so here the HTML has two children and
+
+00:01:52,310 --> 00:01:57,950
+each of those children each have one
+
+00:01:54,139 --> 00:02:00,079
+child by themselves so after that if we
+
+00:01:57,950 --> 00:02:02,090
+come across any CSS text while parsing
+
+00:02:00,079 --> 00:02:04,310
+the page will then feed that into the
+
+00:02:02,090 --> 00:02:06,529
+CSS parser and CSS is the language that
+
+00:02:04,310 --> 00:02:09,020
+allows you to style your page based on
+
+00:02:06,529 --> 00:02:11,360
+this contents so we might see that there
+
+00:02:09,020 --> 00:02:14,750
+is there's there's some CSS text that
+
+00:02:11,360 --> 00:02:17,210
+says Oh make all spans turn red but make
+
+00:02:14,750 --> 00:02:20,420
+any div element that has a header
+
+00:02:17,210 --> 00:02:22,100
+I D make that text green and so that's
+
+00:02:20,420 --> 00:02:23,720
+the input and the output of the CSS
+
+00:02:22,100 --> 00:02:26,030
+parser is what we call a list of style
+
+00:02:23,720 --> 00:02:28,940
+rules and these are rules that are
+
+00:02:26,030 --> 00:02:30,170
+easier for the CSS engine to interpret
+
+00:02:28,940 --> 00:02:34,490
+later without having to parse the text
+
+00:02:30,170 --> 00:02:36,620
+over and over so the next step we go
+
+00:02:34,490 --> 00:02:38,360
+through is the Cascade and this is from
+
+00:02:36,620 --> 00:02:40,550
+the name of CSS that stands for
+
+00:02:38,360 --> 00:02:42,740
+cascading style sheets that means that
+
+00:02:40,550 --> 00:02:45,470
+for every element in the tree we will
+
+00:02:42,740 --> 00:02:47,570
+proceed through the tree and apply these
+
+00:02:45,470 --> 00:02:49,820
+style rules based on these inputs were
+
+00:02:47,570 --> 00:02:52,550
+given and figure out what the actual
+
+00:02:49,820 --> 00:02:55,190
+computed styles for each node should be
+
+00:02:52,550 --> 00:02:57,290
+what color in this case is each element
+
+00:02:55,190 --> 00:02:59,780
+going to be based on these rules so we
+
+00:02:57,290 --> 00:03:01,370
+look and say oh we have we see that we
+
+00:02:59,780 --> 00:03:03,200
+have a div with an ID header so we can
+
+00:03:01,370 --> 00:03:05,300
+apply the style rule to turn that green
+
+00:03:03,200 --> 00:03:05,660
+and that gets inherited by all of its
+
+00:03:05,300 --> 00:03:08,330
+children
+
+00:03:05,660 --> 00:03:13,340
+but that gets overwritten by the span
+
+00:03:08,330 --> 00:03:15,020
+which says oh I should be red so we take
+
+00:03:13,340 --> 00:03:16,520
+the result of these computed styles and
+
+00:03:15,020 --> 00:03:18,770
+then we feed them into the layout
+
+00:03:16,520 --> 00:03:21,950
+component and that's what takes both
+
+00:03:18,770 --> 00:03:24,830
+your your tree of nodes and and they're
+
+00:03:21,950 --> 00:03:27,170
+their actual style information we've
+
+00:03:24,830 --> 00:03:29,240
+computed and then says okay based on
+
+00:03:27,170 --> 00:03:31,760
+these computer styles where should we
+
+00:03:29,240 --> 00:03:33,410
+actually draw boxes what is the size of
+
+00:03:31,760 --> 00:03:35,330
+each box how's it relate to which
+
+00:03:33,410 --> 00:03:37,340
+children and parents what how are they
+
+00:03:35,330 --> 00:03:39,050
+aligned together that layout is what
+
+00:03:37,340 --> 00:03:40,190
+takes all that information and turns it
+
+00:03:39,050 --> 00:03:44,870
+into something that you could end up
+
+00:03:40,190 --> 00:03:47,120
+visually seeing and so the style system
+
+00:03:44,870 --> 00:03:48,800
+when you talk about it encompasses a
+
+00:03:47,120 --> 00:03:53,780
+number of your steps it encompasses
+
+00:03:48,800 --> 00:03:56,330
+parsing the CSX parsing the CSX CSS it
+
+00:03:53,780 --> 00:03:57,770
+also incorporates the Cascade and
+
+00:03:56,330 --> 00:04:01,000
+turning everything into a series of
+
+00:03:57,770 --> 00:04:03,200
+computed styles it also incorporates
+
+00:04:01,000 --> 00:04:05,810
+introspection so javascript is able to
+
+00:04:03,200 --> 00:04:08,330
+ask your web page what is the computed
+
+00:04:05,810 --> 00:04:10,100
+style of a particular element and it can
+
+00:04:08,330 --> 00:04:11,810
+also look into what are the contents of
+
+00:04:10,100 --> 00:04:14,870
+the style sheets that the browser knows
+
+00:04:11,810 --> 00:04:17,299
+about furthermore their CSS animations
+
+00:04:14,870 --> 00:04:19,040
+and the style system is responsible for
+
+00:04:17,299 --> 00:04:21,980
+processing those at any given time and
+
+00:04:19,040 --> 00:04:24,740
+figuring out what the values that are
+
+00:04:21,980 --> 00:04:27,680
+being animated should be and finally
+
+00:04:24,740 --> 00:04:29,419
+whenever a page is modified then the
+
+00:04:27,680 --> 00:04:31,090
+style system is responsible for
+
+00:04:29,419 --> 00:04:34,419
+determining what is the most
+
+00:04:31,090 --> 00:04:36,580
+way of recomputing all that information
+
+00:04:34,419 --> 00:04:38,230
+because it turns out it's not actually
+
+00:04:36,580 --> 00:04:39,880
+very performant if you go and either
+
+00:04:38,230 --> 00:04:41,979
+rate over the entire tree of all nodes
+
+00:04:39,880 --> 00:04:46,449
+every single time you make a change to
+
+00:04:41,979 --> 00:04:47,740
+just one of them so you might ask if we
+
+00:04:46,449 --> 00:04:50,560
+have this thing which has been working
+
+00:04:47,740 --> 00:04:51,790
+for decades and Firefox what is was the
+
+00:04:50,560 --> 00:04:53,530
+reason we would want to go to all this
+
+00:04:51,790 --> 00:04:56,110
+effort to replace it and really the
+
+00:04:53,530 --> 00:04:58,300
+answer is performance performance is a
+
+00:04:56,110 --> 00:05:00,400
+key driver of all web browsers and
+
+00:04:58,300 --> 00:05:02,290
+anytime we see something which could be
+
+00:05:00,400 --> 00:05:03,729
+improved we start to think maybe we
+
+00:05:02,290 --> 00:05:04,870
+should be improving it maybe we're just
+
+00:05:03,729 --> 00:05:08,169
+leaving performance on the table
+
+00:05:04,870 --> 00:05:10,570
+otherwise and the reason why performance
+
+00:05:08,169 --> 00:05:12,760
+is so key here is that the Cascade that
+
+00:05:10,570 --> 00:05:14,710
+I talked about it actually fits the
+
+00:05:12,760 --> 00:05:18,220
+model of what we call an embarrassingly
+
+00:05:14,710 --> 00:05:20,620
+parallel problem and what that means is
+
+00:05:18,220 --> 00:05:23,860
+we iterate over each node in the tree
+
+00:05:20,620 --> 00:05:25,389
+and all we're doing at this point is
+
+00:05:23,860 --> 00:05:27,880
+just reading some data from the parent
+
+00:05:25,389 --> 00:05:29,940
+and reading some data from the style
+
+00:05:27,880 --> 00:05:32,260
+rules that we computed earlier and
+
+00:05:29,940 --> 00:05:34,150
+reading some data from the actual node
+
+00:05:32,260 --> 00:05:35,740
+in the tree and then we create something
+
+00:05:34,150 --> 00:05:37,870
+new based on combining all that
+
+00:05:35,740 --> 00:05:41,070
+information which means that it should
+
+00:05:37,870 --> 00:05:43,389
+be possible to distribute that that work
+
+00:05:41,070 --> 00:05:45,910
+throughout a bunch of different CPUs and
+
+00:05:43,389 --> 00:05:48,190
+get potentially even linear speed ups
+
+00:05:45,910 --> 00:05:50,349
+based on the number of CPUs you have so
+
+00:05:48,190 --> 00:05:52,720
+if you have two CPUs in theory we could
+
+00:05:50,349 --> 00:05:55,150
+do the Cascade twice as fast if we use
+
+00:05:52,720 --> 00:05:56,590
+both of them at full capacity if you
+
+00:05:55,150 --> 00:05:58,240
+have four CPUs we might be able to do it
+
+00:05:56,590 --> 00:06:02,740
+in a quarter of the time that's a pretty
+
+00:05:58,240 --> 00:06:03,970
+exciting prospect however as much as it
+
+00:06:02,740 --> 00:06:05,889
+sounds like you should be a
+
+00:06:03,970 --> 00:06:08,380
+straightforward a straightforward
+
+00:06:05,889 --> 00:06:10,150
+operation to perform it turns out that
+
+00:06:08,380 --> 00:06:12,580
+it is more complicated than that
+
+00:06:10,150 --> 00:06:16,060
+and there's been two attempts to do this
+
+00:06:12,580 --> 00:06:18,250
+in Firefox itself in C++ in the past few
+
+00:06:16,060 --> 00:06:20,770
+years so one was a group of grad
+
+00:06:18,250 --> 00:06:22,690
+students at UC Irvine and they had an
+
+00:06:20,770 --> 00:06:24,220
+advisor working at Intel and they
+
+00:06:22,690 --> 00:06:27,099
+published a paper on their efforts to
+
+00:06:24,220 --> 00:06:29,740
+measure and and do more of the work in
+
+00:06:27,099 --> 00:06:32,490
+parallel and it seemed to go really well
+
+00:06:29,740 --> 00:06:34,570
+except that the resulting code was
+
+00:06:32,490 --> 00:06:36,160
+difficult to maintain there was a lot of
+
+00:06:34,570 --> 00:06:39,280
+duplication it was difficult to reason
+
+00:06:36,160 --> 00:06:41,540
+about and in general it didn't actually
+
+00:06:39,280 --> 00:06:43,490
+look like the most
+
+00:06:41,540 --> 00:06:44,810
+thing to spend time on given how many
+
+00:06:43,490 --> 00:06:45,800
+other parts of Firefox we could be
+
+00:06:44,810 --> 00:06:48,500
+focusing on
+
+00:06:45,800 --> 00:06:51,320
+similarly in 2011 we decided to give it
+
+00:06:48,500 --> 00:06:53,270
+to an intern which surprised me but came
+
+00:06:51,320 --> 00:06:54,800
+up with a patch and it seemed to be
+
+00:06:53,270 --> 00:06:56,360
+working but there were these mysterious
+
+00:06:54,800 --> 00:06:58,760
+crashes they were really difficult to
+
+00:06:56,360 --> 00:07:01,130
+track down it was hard to debug it was
+
+00:06:58,760 --> 00:07:02,780
+again hard to maintain and so again it
+
+00:07:01,130 --> 00:07:04,580
+just languished there because no one
+
+00:07:02,780 --> 00:07:06,170
+really saw this as a high priority when
+
+00:07:04,580 --> 00:07:11,450
+it turned out to be more complicated
+
+00:07:06,170 --> 00:07:14,150
+than people assumed so let's talk about
+
+00:07:11,450 --> 00:07:16,240
+servo servo is the web browser engine
+
+00:07:14,150 --> 00:07:18,260
+we've been building since 2012
+
+00:07:16,240 --> 00:07:20,210
+completely from the ground up in rest
+
+00:07:18,260 --> 00:07:22,340
+with a couple minor exceptions but in
+
+00:07:20,210 --> 00:07:23,510
+general we're we're learning we're
+
+00:07:22,340 --> 00:07:25,520
+taking lessons we've learned from
+
+00:07:23,510 --> 00:07:27,530
+building browsers over the past decade
+
+00:07:25,520 --> 00:07:29,660
+no matter Firefox or Chrome or WebKit or
+
+00:07:27,530 --> 00:07:31,280
+something we're looking at the best
+
+00:07:29,660 --> 00:07:32,870
+choices made in those browsers and
+
+00:07:31,280 --> 00:07:36,320
+trying to build something new in rust
+
+00:07:32,870 --> 00:07:39,050
+that gets the benefits of more modern
+
+00:07:36,320 --> 00:07:40,370
+hardware and particular we're trying to
+
+00:07:39,050 --> 00:07:42,830
+build things in parallel from the start
+
+00:07:40,370 --> 00:07:45,380
+and we have a strong focus on building
+
+00:07:42,830 --> 00:07:47,870
+things in a very modular fashion and
+
+00:07:45,380 --> 00:07:50,900
+what this means is that the style system
+
+00:07:47,870 --> 00:07:54,500
+in servo not only did we build something
+
+00:07:50,900 --> 00:07:55,970
+in parallel in 2013 but also it exists
+
+00:07:54,500 --> 00:07:58,340
+in its own crate and it's got strong
+
+00:07:55,970 --> 00:08:00,050
+trait interfaces and this means that it
+
+00:07:58,340 --> 00:08:02,000
+is much more feasible to look at
+
+00:08:00,050 --> 00:08:03,410
+extracting just the style system from
+
+00:08:02,000 --> 00:08:06,110
+servo and putting it into another
+
+00:08:03,410 --> 00:08:07,550
+project like Firefox as much more
+
+00:08:06,110 --> 00:08:09,830
+feasible to contemplate that than it is
+
+00:08:07,550 --> 00:08:11,540
+to do something like the reverse of
+
+00:08:09,830 --> 00:08:14,180
+taking something out of Firefox which is
+
+00:08:11,540 --> 00:08:16,160
+sort of a gargantuan monolithic thing
+
+00:08:14,180 --> 00:08:18,040
+and try to extract it into something
+
+00:08:16,160 --> 00:08:21,800
+else
+
+00:08:18,040 --> 00:08:23,570
+so we started looking into whether this
+
+00:08:21,800 --> 00:08:25,970
+would be possible in 2015 and that was
+
+00:08:23,570 --> 00:08:27,920
+our the sort of lead developer of this
+
+00:08:25,970 --> 00:08:29,960
+project he did a bunch of Investigations
+
+00:08:27,920 --> 00:08:32,210
+he said okay if we make these changes to
+
+00:08:29,960 --> 00:08:35,510
+these interfaces I can get this very
+
+00:08:32,210 --> 00:08:38,930
+basic demo styling the Wikipedia page
+
+00:08:35,510 --> 00:08:40,580
+for Barack Obama and using multiple CPUs
+
+00:08:38,930 --> 00:08:41,750
+and that'll be great and then there then
+
+00:08:40,580 --> 00:08:43,550
+he came up with a list of all the
+
+00:08:41,750 --> 00:08:47,210
+different things we needed to do to make
+
+00:08:43,550 --> 00:08:50,060
+it actually fit everything the Firefox
+
+00:08:47,210 --> 00:08:52,010
+could do and so in 2016 that work
+
+00:08:50,060 --> 00:08:53,250
+happened and the team is been growing
+
+00:08:52,010 --> 00:08:55,890
+and growing
+
+00:08:53,250 --> 00:09:00,210
+to get this work done but in order to
+
+00:08:55,890 --> 00:09:03,090
+ship in two weeks so the actual process
+
+00:09:00,210 --> 00:09:05,970
+of integrating this code is is
+
+00:09:03,090 --> 00:09:08,190
+interesting because Firefox exists in a
+
+00:09:05,970 --> 00:09:11,070
+single monolithic repo all the Firefox
+
+00:09:08,190 --> 00:09:13,740
+code exists in a mercurial repo and the
+
+00:09:11,070 --> 00:09:16,080
+servo code exists in a github repository
+
+00:09:13,740 --> 00:09:17,100
+and has a bunch of different crates and
+
+00:09:16,080 --> 00:09:19,410
+some of them are important as some of
+
+00:09:17,100 --> 00:09:21,630
+them are not and servo also chooses to
+
+00:09:19,410 --> 00:09:24,480
+make use of the crates at i/o ecosystem
+
+00:09:21,630 --> 00:09:26,520
+it's been really great but what it means
+
+00:09:24,480 --> 00:09:29,460
+is that for Firefox this is a problem
+
+00:09:26,520 --> 00:09:30,870
+because Firefox uses continuous
+
+00:09:29,460 --> 00:09:33,150
+integration servers which don't have any
+
+00:09:30,870 --> 00:09:34,710
+external network access and that goes
+
+00:09:33,150 --> 00:09:37,170
+against the model that is traditionally
+
+00:09:34,710 --> 00:09:39,300
+followed by cargo projects so what
+
+00:09:37,170 --> 00:09:41,460
+happens is Firefox actually vendor the
+
+00:09:39,300 --> 00:09:44,490
+entire source code of servo into the
+
+00:09:41,460 --> 00:09:47,130
+Firefox repository and then also vendor
+
+00:09:44,490 --> 00:09:50,940
+all of the dependencies of servo into
+
+00:09:47,130 --> 00:09:52,650
+the Firefox repository which is an
+
+00:09:50,940 --> 00:09:54,860
+interesting stress test for all sorts of
+
+00:09:52,650 --> 00:09:56,880
+different systems it turns out and
+
+00:09:54,860 --> 00:10:00,870
+honestly I wouldn't actually recommend
+
+00:09:56,880 --> 00:10:03,470
+following this path it I'm glad we did
+
+00:10:00,870 --> 00:10:05,670
+for servo but it's actually quite a pain
+
+00:10:03,470 --> 00:10:07,740
+so let's talk about how this actually
+
+00:10:05,670 --> 00:10:10,740
+fits together there's a crate in the
+
+00:10:07,740 --> 00:10:13,350
+servo source code called gecko lib and
+
+00:10:10,740 --> 00:10:17,430
+that contains all of the API is that the
+
+00:10:13,350 --> 00:10:20,210
+gecko C++ code can invoke in order to
+
+00:10:17,430 --> 00:10:22,230
+call in to the servo style system
+
+00:10:20,210 --> 00:10:25,020
+there's a header file called servo
+
+00:10:22,230 --> 00:10:28,830
+binding list H in the C++ gecko code
+
+00:10:25,020 --> 00:10:31,020
+which has equivalent C declarations for
+
+00:10:28,830 --> 00:10:32,850
+all of those functions because the way
+
+00:10:31,020 --> 00:10:35,460
+you can do cross language interaction
+
+00:10:32,850 --> 00:10:37,860
+like this is by pretending that you have
+
+00:10:35,460 --> 00:10:39,660
+a C function in rest code and then the C
+
+00:10:37,860 --> 00:10:41,040
+code goes oh I know how to invoke C code
+
+00:10:39,660 --> 00:10:44,130
+that's great I'll just be able to color
+
+00:10:41,040 --> 00:10:45,839
+ate into that so all of the API is that
+
+00:10:44,130 --> 00:10:49,050
+can be invoked from gecko code start
+
+00:10:45,839 --> 00:10:52,170
+with the prefix servo underscore and the
+
+00:10:49,050 --> 00:10:53,280
+only interesting bit here is that we
+
+00:10:52,170 --> 00:10:56,089
+don't have any automatic synchronization
+
+00:10:53,280 --> 00:10:58,380
+here so if you make a change to the
+
+00:10:56,089 --> 00:11:00,660
+servo API is that are provided in the
+
+00:10:58,380 --> 00:11:01,860
+rest code and you change like you had an
+
+00:11:00,660 --> 00:11:03,060
+argument to something that means you
+
+00:11:01,860 --> 00:11:06,300
+also need to update this header file
+
+00:11:03,060 --> 00:11:10,620
+otherwise you can get surprising program
+
+00:11:06,300 --> 00:11:12,450
+a view and sometimes even crashes so as
+
+00:11:10,620 --> 00:11:14,850
+an example here is the API that the
+
+00:11:12,450 --> 00:11:16,950
+style system or the the code in gecko
+
+00:11:14,850 --> 00:11:19,950
+that invokes the style system from servo
+
+00:11:16,950 --> 00:11:24,090
+calls it says it's called servo Traverse
+
+00:11:19,950 --> 00:11:26,520
+subtree and it is giving a a root node
+
+00:11:24,090 --> 00:11:28,350
+to start traversing from and it's given
+
+00:11:26,520 --> 00:11:30,960
+some data that servo needs in order to
+
+00:11:28,350 --> 00:11:32,700
+do that and some other things which
+
+00:11:30,960 --> 00:11:36,360
+servo also needs and returns a boolean
+
+00:11:32,700 --> 00:11:38,580
+which I presume means either it the
+
+00:11:36,360 --> 00:11:42,740
+result is like needs needs some more
+
+00:11:38,580 --> 00:11:42,740
+processing afterwards or is ready to go
+
+00:11:43,040 --> 00:11:46,290
+similarly then we have the equivalency
+
+00:11:45,120 --> 00:11:49,430
+declaration that lives in the header
+
+00:11:46,290 --> 00:11:52,860
+file for this and it uses types that
+
+00:11:49,430 --> 00:11:55,260
+that match the types that the RUS code
+
+00:11:52,860 --> 00:11:58,110
+receives so everything should just be
+
+00:11:55,260 --> 00:12:00,120
+passed across this this sort of foreign
+
+00:11:58,110 --> 00:12:03,950
+function interface boundary without
+
+00:12:00,120 --> 00:12:06,210
+having any problems so on the other hand
+
+00:12:03,950 --> 00:12:08,490
+it would be nice if we could just
+
+00:12:06,210 --> 00:12:11,160
+encapsulate all of this new behavior
+
+00:12:08,490 --> 00:12:13,530
+inside this function you know traverse
+
+00:12:11,160 --> 00:12:14,880
+subtree and then just have that happen
+
+00:12:13,530 --> 00:12:15,660
+and when when it comes back it's done
+
+00:12:14,880 --> 00:12:18,030
+that'd be great
+
+00:12:15,660 --> 00:12:19,680
+however it turns out that Firefox is a
+
+00:12:18,030 --> 00:12:21,300
+bit more complicated than that and turns
+
+00:12:19,680 --> 00:12:24,030
+out that the rest code also needs to
+
+00:12:21,300 --> 00:12:25,590
+call back into C++ and sometimes go back
+
+00:12:24,030 --> 00:12:28,650
+and forth a few times and that means
+
+00:12:25,590 --> 00:12:30,840
+that we need to declare API is that the
+
+00:12:28,650 --> 00:12:31,950
+rest code can call because it knows how
+
+00:12:30,840 --> 00:12:33,630
+to invoke C code as well
+
+00:12:31,950 --> 00:12:35,670
+so there's another header file called
+
+00:12:33,630 --> 00:12:37,530
+server bindings which has the C api's
+
+00:12:35,670 --> 00:12:38,760
+that can be called from rest and these
+
+00:12:37,530 --> 00:12:41,760
+I'll start with the gecko underscore
+
+00:12:38,760 --> 00:12:43,910
+prefix and these on the other hand are
+
+00:12:41,760 --> 00:12:46,710
+generated by using the program bind gen
+
+00:12:43,910 --> 00:12:48,330
+or the rest side declarations are
+
+00:12:46,710 --> 00:12:50,250
+generated by bind JNT which looks at a C
+
+00:12:48,330 --> 00:12:52,080
+header file and spits out all the rest
+
+00:12:50,250 --> 00:12:54,690
+declarations you need in order to use
+
+00:12:52,080 --> 00:12:58,470
+those types and in call those functions
+
+00:12:54,690 --> 00:13:01,140
+it's very handy so the C API for
+
+00:12:58,470 --> 00:13:04,380
+creating an error reporter because in
+
+00:13:01,140 --> 00:13:06,360
+Firefox a CSS error that gets the or if
+
+00:13:04,380 --> 00:13:08,700
+there's an error in your CSS code that
+
+00:13:06,360 --> 00:13:10,200
+gets processed then we want to notify
+
+00:13:08,700 --> 00:13:12,300
+the developer tools in the browser about
+
+00:13:10,200 --> 00:13:13,920
+that so servo doesn't know anything
+
+00:13:12,300 --> 00:13:15,720
+about Firefox developer tools it needs
+
+00:13:13,920 --> 00:13:18,270
+to just have this interface of this
+
+00:13:15,720 --> 00:13:19,710
+error reporter and it says ok gecko
+
+00:13:18,270 --> 00:13:21,660
+create me an error
+
+00:13:19,710 --> 00:13:25,410
+Porter I'll be able to use it later and
+
+00:13:21,660 --> 00:13:27,420
+so there's the C API for doing that and
+
+00:13:25,410 --> 00:13:29,610
+then similarly there's this rest
+
+00:13:27,420 --> 00:13:34,980
+declaration that allows servo to
+
+00:13:29,610 --> 00:13:37,380
+actually invoke this when necessary so
+
+00:13:34,980 --> 00:13:38,700
+as I said we use by and Jen to avoid any
+
+00:13:37,380 --> 00:13:41,010
+mistakes it just generates everything
+
+00:13:38,700 --> 00:13:44,790
+automatically and if you ever update the
+
+00:13:41,010 --> 00:13:46,680
+C API or the that gecko provides then
+
+00:13:44,790 --> 00:13:50,850
+those automatically get reflected into
+
+00:13:46,680 --> 00:13:52,290
+the rest bindings at Build time which
+
+00:13:50,850 --> 00:13:54,870
+means that if you add a parameter to the
+
+00:13:52,290 --> 00:13:57,450
+C ones then you'll get a compile error
+
+00:13:54,870 --> 00:13:58,920
+in any uses of that API in the rest code
+
+00:13:57,450 --> 00:14:00,120
+because it says oh there's you know
+
+00:13:58,920 --> 00:14:01,740
+you're not passing a parameter it's
+
+00:14:00,120 --> 00:14:03,150
+necessary and that's very convenient you
+
+00:14:01,740 --> 00:14:05,430
+don't get any crashes or unexpected
+
+00:14:03,150 --> 00:14:10,260
+behavior that way it's also extremely
+
+00:14:05,430 --> 00:14:13,470
+slow because we end up processing dozens
+
+00:14:10,260 --> 00:14:15,450
+or hundreds of header files and it's
+
+00:14:13,470 --> 00:14:16,860
+extremely easy to make a change to a
+
+00:14:15,450 --> 00:14:19,500
+header file which doesn't actually
+
+00:14:16,860 --> 00:14:21,810
+matter to rest but is transitively
+
+00:14:19,500 --> 00:14:23,370
+included by something and then that you
+
+00:14:21,810 --> 00:14:24,810
+have to run this whole Banton process
+
+00:14:23,370 --> 00:14:29,670
+again so that's a bit of a frustration
+
+00:14:24,810 --> 00:14:32,460
+for us so there's sort of two main ways
+
+00:14:29,670 --> 00:14:34,830
+that you can focus on doing your across
+
+00:14:32,460 --> 00:14:37,890
+language interaction you can either
+
+00:14:34,830 --> 00:14:42,120
+encapsulate these operations behind
+
+00:14:37,890 --> 00:14:44,340
+functions or you can dive directly into
+
+00:14:42,120 --> 00:14:46,380
+the types and manipulate them like
+
+00:14:44,340 --> 00:14:49,200
+manipulate C types from the rest code or
+
+00:14:46,380 --> 00:14:50,880
+rest types from the C code either one is
+
+00:14:49,200 --> 00:14:52,440
+possible but it turns out that there's
+
+00:14:50,880 --> 00:14:54,630
+bit of a trade-off either way that
+
+00:14:52,440 --> 00:14:58,830
+usually revolves around performance
+
+00:14:54,630 --> 00:15:02,070
+versus safety so it turns out that every
+
+00:14:58,830 --> 00:15:04,080
+time you call a function in general if
+
+00:15:02,070 --> 00:15:06,000
+you're calling like a rest function from
+
+00:15:04,080 --> 00:15:08,190
+rest code the compiler says oh I know
+
+00:15:06,000 --> 00:15:09,570
+what that function is I can see how big
+
+00:15:08,190 --> 00:15:12,180
+it is it would probably make sense just
+
+00:15:09,570 --> 00:15:13,770
+to inline that code directly rather than
+
+00:15:12,180 --> 00:15:15,960
+going through the process of performing
+
+00:15:13,770 --> 00:15:18,090
+a call pushing things onto the stack
+
+00:15:15,960 --> 00:15:21,240
+jumping returning back all these things
+
+00:15:18,090 --> 00:15:22,530
+that usually happen and that's fine but
+
+00:15:21,240 --> 00:15:24,150
+every time you do a cross-language
+
+00:15:22,530 --> 00:15:26,190
+function call the compiler doesn't know
+
+00:15:24,150 --> 00:15:28,230
+anything about that and can't avoid this
+
+00:15:26,190 --> 00:15:31,680
+that means that if you're going back and
+
+00:15:28,230 --> 00:15:33,220
+forth between languages during code that
+
+00:15:31,680 --> 00:15:36,070
+is performance sensitive than the
+
+00:15:33,220 --> 00:15:37,840
+can be a problem I mean the benefit of
+
+00:15:36,070 --> 00:15:41,110
+using a function is that if you have in
+
+00:15:37,840 --> 00:15:42,820
+very invariants around what your data
+
+00:15:41,110 --> 00:15:43,570
+model is doing around what do types are
+
+00:15:42,820 --> 00:15:46,060
+supposed to be doing
+
+00:15:43,570 --> 00:15:47,800
+you can assert those you can have safety
+
+00:15:46,060 --> 00:15:51,070
+checks and that is very helpful so
+
+00:15:47,800 --> 00:15:53,470
+there's a bit of trade-off there so as
+
+00:15:51,070 --> 00:15:56,890
+an example of this there's there's one
+
+00:15:53,470 --> 00:15:59,110
+piece in in stylo where we need to talk
+
+00:15:56,890 --> 00:16:02,620
+to gecko to say okay this particular
+
+00:15:59,110 --> 00:16:04,660
+thing we need to make sure it is marked
+
+00:16:02,620 --> 00:16:06,310
+as being an image element and there's
+
+00:16:04,660 --> 00:16:08,770
+too much involved there for us to really
+
+00:16:06,310 --> 00:16:10,990
+do that from the rest code so it's just
+
+00:16:08,770 --> 00:16:14,410
+a simple function call to one of these C
+
+00:16:10,990 --> 00:16:16,600
+api's that were declared earlier and the
+
+00:16:14,410 --> 00:16:17,740
+actual gecko definition first asserts
+
+00:16:16,600 --> 00:16:20,440
+that you're actually passing a valid
+
+00:16:17,740 --> 00:16:23,020
+image and secondly then invokes a method
+
+00:16:20,440 --> 00:16:25,090
+C++ method on that type and does
+
+00:16:23,020 --> 00:16:28,240
+something funky with reference counting
+
+00:16:25,090 --> 00:16:29,740
+we're related to the kind of or the name
+
+00:16:28,240 --> 00:16:31,390
+of the the element that you're
+
+00:16:29,740 --> 00:16:33,160
+interacting with this is all stuff that
+
+00:16:31,390 --> 00:16:34,750
+is much easier to just push onto the
+
+00:16:33,160 --> 00:16:40,150
+Gecko side rather than try to replicate
+
+00:16:34,750 --> 00:16:43,000
+that into the rest side so on the other
+
+00:16:40,150 --> 00:16:45,400
+hand if you're using types then you have
+
+00:16:43,000 --> 00:16:48,040
+the option to just dive directly into
+
+00:16:45,400 --> 00:16:49,930
+the memory and start modifying things
+
+00:16:48,040 --> 00:16:51,430
+and there's no performance penalty for
+
+00:16:49,930 --> 00:16:53,380
+this it's just it's just a memory you
+
+00:16:51,430 --> 00:16:56,140
+have pointers to it you can reach in and
+
+00:16:53,380 --> 00:16:58,050
+set things or read things and it's up to
+
+00:16:56,140 --> 00:17:00,820
+you to make sure that you're actually
+
+00:16:58,050 --> 00:17:03,070
+following the model and not breaking the
+
+00:17:00,820 --> 00:17:04,959
+system I think the downside here is that
+
+00:17:03,070 --> 00:17:05,980
+if you do have rules around what's
+
+00:17:04,959 --> 00:17:07,660
+allowed and what isn't
+
+00:17:05,980 --> 00:17:09,520
+suddenly the logic is now distributed
+
+00:17:07,660 --> 00:17:12,130
+between like two completely separate
+
+00:17:09,520 --> 00:17:13,870
+files and two different source trees and
+
+00:17:12,130 --> 00:17:15,670
+that that might not be a good trade-off
+
+00:17:13,870 --> 00:17:18,040
+but for performance sensitive code maybe
+
+00:17:15,670 --> 00:17:20,800
+that's what you want an example of where
+
+00:17:18,040 --> 00:17:23,170
+we do this I particularly like that like
+
+00:17:20,800 --> 00:17:24,640
+there's this comment that explains what
+
+00:17:23,170 --> 00:17:27,280
+properties of the model that we're
+
+00:17:24,640 --> 00:17:29,770
+relying on in order to do this mucking
+
+00:17:27,280 --> 00:17:32,980
+around inside a C type from the rest
+
+00:17:29,770 --> 00:17:35,500
+code in this case we have a pointer to a
+
+00:17:32,980 --> 00:17:38,020
+C type and we're getting a mutable
+
+00:17:35,500 --> 00:17:39,970
+pointer to a field inside an array
+
+00:17:38,020 --> 00:17:43,679
+that's stored inside that type and then
+
+00:17:39,970 --> 00:17:45,600
+setting a particular field of of that
+
+00:17:43,679 --> 00:17:48,509
+subfield to
+
+00:17:45,600 --> 00:17:50,009
+another rust value that the C code will
+
+00:17:48,509 --> 00:17:54,929
+eventually understand when when it gets
+
+00:17:50,009 --> 00:17:57,000
+back there so we actually did something
+
+00:17:54,929 --> 00:17:59,580
+interesting with dealing with these with
+
+00:17:57,000 --> 00:18:00,750
+these types between languages so by and
+
+00:17:59,580 --> 00:18:03,509
+Jen will typically just give you
+
+00:18:00,750 --> 00:18:06,330
+declarations which involve raw pointers
+
+00:18:03,509 --> 00:18:08,190
+everywhere and that's fine you know raw
+
+00:18:06,330 --> 00:18:10,919
+pointers are thing that you're used to
+
+00:18:08,190 --> 00:18:12,960
+using in C for example and it's not that
+
+00:18:10,919 --> 00:18:15,659
+bad to go back to using them in rest but
+
+00:18:12,960 --> 00:18:18,090
+we did something where we started naming
+
+00:18:15,659 --> 00:18:20,879
+or creating these types in in rust which
+
+00:18:18,090 --> 00:18:23,460
+wrap raw pointers but they have
+
+00:18:20,879 --> 00:18:25,710
+particular extra meaning associated with
+
+00:18:23,460 --> 00:18:27,690
+them so for example we created this the
+
+00:18:25,710 --> 00:18:30,389
+so generic type called owned which
+
+00:18:27,690 --> 00:18:33,899
+represents a a raw pointer that was
+
+00:18:30,389 --> 00:18:36,960
+originally created from a value like a
+
+00:18:33,899 --> 00:18:39,090
+box in rust and so the idea here is we
+
+00:18:36,960 --> 00:18:41,399
+create this value in rust as a box and
+
+00:18:39,090 --> 00:18:43,860
+then we turn it into this own value and
+
+00:18:41,399 --> 00:18:45,659
+then pass it over to the C++ code and it
+
+00:18:43,860 --> 00:18:48,090
+gets moved around gets stored places and
+
+00:18:45,659 --> 00:18:50,190
+eventually it comes back to rest in the
+
+00:18:48,090 --> 00:18:51,750
+form of a known value and we say okay we
+
+00:18:50,190 --> 00:18:53,669
+know that it is owned therefore we can
+
+00:18:51,750 --> 00:18:55,649
+turn it back into a box and it'll be
+
+00:18:53,669 --> 00:18:56,879
+de-allocated safely and properly and we
+
+00:18:55,649 --> 00:18:58,769
+have this idea of ownership that
+
+00:18:56,879 --> 00:19:00,899
+persists across the language barrier
+
+00:18:58,769 --> 00:19:05,549
+even though c++ does not have the same
+
+00:19:00,899 --> 00:19:06,450
+kind of ownership model as rust-eze so
+
+00:19:05,549 --> 00:19:08,399
+by i'm jen does this for us
+
+00:19:06,450 --> 00:19:10,889
+automatically we have a list of types
+
+00:19:08,399 --> 00:19:12,450
+that we'll just see the c++ type for
+
+00:19:10,889 --> 00:19:14,309
+example ross perot style set owned
+
+00:19:12,450 --> 00:19:16,529
+you'll say okay i know that i need to
+
+00:19:14,309 --> 00:19:18,720
+turn this into this actual more complex
+
+00:19:16,529 --> 00:19:22,320
+rust type which is the same under the
+
+00:19:18,720 --> 00:19:25,190
+hood so in c++ it's just a raw planer if
+
+00:19:22,320 --> 00:19:27,649
+but it has the same name and we have a
+
+00:19:25,190 --> 00:19:30,480
+function which is declared from rest
+
+00:19:27,649 --> 00:19:33,750
+which says oh I accept this raw servo
+
+00:19:30,480 --> 00:19:36,179
+style set owned wares on the rest side
+
+00:19:33,750 --> 00:19:37,940
+we say okay it's not just a raw planer
+
+00:19:36,179 --> 00:19:41,070
+it is actually this type called owned
+
+00:19:37,940 --> 00:19:43,440
+that specializes on this underlying raw
+
+00:19:41,070 --> 00:19:45,419
+pointer and in the actual definition of
+
+00:19:43,440 --> 00:19:47,429
+servo style set drop we accept this own
+
+00:19:45,419 --> 00:19:48,960
+value and then turn it into a box which
+
+00:19:47,429 --> 00:19:51,629
+will be de-allocated because we know
+
+00:19:48,960 --> 00:19:54,029
+what's going on here and we do the same
+
+00:19:51,629 --> 00:19:55,769
+for other interesting types so we have
+
+00:19:54,029 --> 00:19:59,400
+types that have borrowed attached to the
+
+00:19:55,769 --> 00:20:01,570
+name and bind and we'll turn those into
+
+00:19:59,400 --> 00:20:03,910
+traditional rust references for us and
+
+00:20:01,570 --> 00:20:06,790
+similarly borrowed or null which will be
+
+00:20:03,910 --> 00:20:09,370
+a raw pointer which might be null we
+
+00:20:06,790 --> 00:20:11,650
+then turn into an option value around a
+
+00:20:09,370 --> 00:20:13,330
+rust reference which gives us much nicer
+
+00:20:11,650 --> 00:20:16,690
+ergonomics and prevents us accidentally
+
+00:20:13,330 --> 00:20:18,130
+dereferencing null pointers so let's
+
+00:20:16,690 --> 00:20:20,980
+talk about this parallel style system
+
+00:20:18,130 --> 00:20:23,350
+stuff we built it back in 2013 it was
+
+00:20:20,980 --> 00:20:25,180
+handwritten and it worked fine but we
+
+00:20:23,350 --> 00:20:26,250
+switch to rayon in 2016 and that's
+
+00:20:25,180 --> 00:20:28,990
+worked out really well for us
+
+00:20:26,250 --> 00:20:30,610
+rayon is the library that's written and
+
+00:20:28,990 --> 00:20:32,230
+shared by lots of different projects
+
+00:20:30,610 --> 00:20:34,690
+that do things in parallel it provides a
+
+00:20:32,230 --> 00:20:36,580
+safe abstraction over sort of unsafe
+
+00:20:34,690 --> 00:20:40,240
+operations of distributing work around
+
+00:20:36,580 --> 00:20:41,620
+multiple workers and so not only did we
+
+00:20:40,240 --> 00:20:43,630
+make some changes to rayon to better
+
+00:20:41,620 --> 00:20:45,850
+accommodate our use cases we also have
+
+00:20:43,630 --> 00:20:48,190
+made use of changes that other people
+
+00:20:45,850 --> 00:20:49,660
+from other projects have added to rayon
+
+00:20:48,190 --> 00:20:53,380
+and that's been a really nice sort of
+
+00:20:49,660 --> 00:20:55,810
+synergistic relationship there so the
+
+00:20:53,380 --> 00:20:58,840
+idea insert in stylo is that we have a
+
+00:20:55,810 --> 00:21:00,610
+queue of unstyled nodes and it will
+
+00:20:58,840 --> 00:21:02,770
+literally be a single node and they'll
+
+00:21:00,610 --> 00:21:04,060
+be the root of a tree so there's a pool
+
+00:21:02,770 --> 00:21:05,380
+of worker threads that are waiting for
+
+00:21:04,060 --> 00:21:07,060
+work and as soon as work becomes
+
+00:21:05,380 --> 00:21:09,550
+available they'll start trying to grab
+
+00:21:07,060 --> 00:21:11,500
+it off of the queue so when a worker
+
+00:21:09,550 --> 00:21:12,970
+grab something off the queue you'll say
+
+00:21:11,500 --> 00:21:15,070
+okay this is my node no one else can
+
+00:21:12,970 --> 00:21:17,230
+style it I will now proceed and do the
+
+00:21:15,070 --> 00:21:18,940
+Cascade on this particular node and I
+
+00:21:17,230 --> 00:21:20,920
+can always reach the parent which is
+
+00:21:18,940 --> 00:21:23,830
+already styled to get that information
+
+00:21:20,920 --> 00:21:25,660
+and when I'm done styling this node I'll
+
+00:21:23,830 --> 00:21:28,120
+write that information or I'll write the
+
+00:21:25,660 --> 00:21:31,090
+computer style to the node and only then
+
+00:21:28,120 --> 00:21:34,780
+will I retrieve the unstyled children of
+
+00:21:31,090 --> 00:21:36,130
+that now styled node and add those to
+
+00:21:34,780 --> 00:21:38,470
+the queue for other workers to then
+
+00:21:36,130 --> 00:21:40,090
+access because this now provides a safe
+
+00:21:38,470 --> 00:21:42,040
+day of the dependency where no other
+
+00:21:40,090 --> 00:21:43,810
+workers will be trying to interact with
+
+00:21:42,040 --> 00:21:48,670
+a none style parent while it's being
+
+00:21:43,810 --> 00:21:50,830
+styled so the the problem of trying to
+
+00:21:48,670 --> 00:21:53,230
+deal with here is that parallel code in
+
+00:21:50,830 --> 00:21:53,770
+general has some problems and that's
+
+00:21:53,230 --> 00:21:55,660
+that
+
+00:21:53,770 --> 00:21:58,240
+code executes simultaneously and and
+
+00:21:55,660 --> 00:21:59,740
+sharing data is a problem so if if they
+
+00:21:58,240 --> 00:22:01,570
+only read the same data that's fine
+
+00:21:59,740 --> 00:22:03,610
+everyone can read the same thing you get
+
+00:22:01,570 --> 00:22:05,770
+a consistent view of the world but if
+
+00:22:03,610 --> 00:22:07,600
+you're reading and writing then you end
+
+00:22:05,770 --> 00:22:09,370
+up with a problem because you can get
+
+00:22:07,600 --> 00:22:10,810
+any consistency showing up or if
+
+00:22:09,370 --> 00:22:12,519
+different things are writing at the same
+
+00:22:10,810 --> 00:22:14,289
+time still more inconsistent
+
+00:22:12,519 --> 00:22:17,349
+that's no good the rest compiler
+
+00:22:14,289 --> 00:22:20,289
+protects us against these problems but
+
+00:22:17,349 --> 00:22:22,869
+there is an issue and that is when we go
+
+00:22:20,289 --> 00:22:25,929
+into C++ from a worker thread that's
+
+00:22:22,869 --> 00:22:28,299
+running on a thread we lose the ability
+
+00:22:25,929 --> 00:22:30,519
+of the rest compiler to protect us and
+
+00:22:28,299 --> 00:22:33,339
+that means that a C++ method like get
+
+00:22:30,519 --> 00:22:34,779
+brute element as shown here it turns out
+
+00:22:33,339 --> 00:22:36,609
+is a problem because it actually has a
+
+00:22:34,779 --> 00:22:38,169
+little internal cache the first time is
+
+00:22:36,609 --> 00:22:39,969
+called it'll look for a root element
+
+00:22:38,169 --> 00:22:42,339
+it'll say oh great okay we can do this
+
+00:22:39,969 --> 00:22:45,609
+faster next time if I just store this as
+
+00:22:42,339 --> 00:22:47,529
+a member in this class but what happens
+
+00:22:45,609 --> 00:22:49,179
+if you have two different workers which
+
+00:22:47,529 --> 00:22:51,669
+both call it at the same time for the
+
+00:22:49,179 --> 00:22:53,529
+first time and they both try to write to
+
+00:22:51,669 --> 00:22:54,309
+the same thing together or read it at
+
+00:22:53,529 --> 00:22:58,419
+the same time
+
+00:22:54,309 --> 00:22:59,529
+turns out this causes a crash and it's
+
+00:22:58,419 --> 00:23:01,329
+really difficult to actually spot
+
+00:22:59,529 --> 00:23:02,979
+problems like this for a while our lead
+
+00:23:01,329 --> 00:23:04,929
+developer was trying to keep track of
+
+00:23:02,979 --> 00:23:06,129
+like reading through the code thinking
+
+00:23:04,929 --> 00:23:07,899
+really hard about what would be called
+
+00:23:06,129 --> 00:23:10,269
+at any given time and thinking okay is
+
+00:23:07,899 --> 00:23:12,729
+this safe this is probably safe this
+
+00:23:10,269 --> 00:23:15,089
+might be safe maybe this isn't safe and
+
+00:23:12,729 --> 00:23:19,509
+that doesn't really scale it turns out
+
+00:23:15,089 --> 00:23:21,519
+so so it turns out we came up with some
+
+00:23:19,509 --> 00:23:24,940
+simple rules to avoid this if we said
+
+00:23:21,519 --> 00:23:27,369
+that the the code being called from
+
+00:23:24,940 --> 00:23:29,079
+these worker threads was only allowed to
+
+00:23:27,369 --> 00:23:31,269
+write to local variables those would not
+
+00:23:29,079 --> 00:23:32,919
+be observed by any other workers they
+
+00:23:31,269 --> 00:23:35,289
+can read from anything because no one's
+
+00:23:32,919 --> 00:23:36,759
+writing to anything and the main thread
+
+00:23:35,289 --> 00:23:39,609
+which is usually the one doing all the
+
+00:23:36,759 --> 00:23:41,739
+writing doesn't get to run if we follow
+
+00:23:39,609 --> 00:23:43,899
+those rules could we get the compiler to
+
+00:23:41,739 --> 00:23:47,589
+help us do this and the answer is yes we
+
+00:23:43,899 --> 00:23:49,509
+have a compiler plugin for GCC which
+
+00:23:47,589 --> 00:23:51,969
+performs static analysis on all
+
+00:23:49,509 --> 00:23:53,979
+functions that start with the Gecko
+
+00:23:51,969 --> 00:23:56,619
+prefix so all of those API is that can
+
+00:23:53,979 --> 00:23:59,829
+be called from rest it will go and
+
+00:23:56,619 --> 00:24:02,379
+explore every single possible code path
+
+00:23:59,829 --> 00:24:06,249
+that could ever execute in any universe
+
+00:24:02,379 --> 00:24:08,859
+and it will see ok are any writes
+
+00:24:06,249 --> 00:24:10,570
+occurring in any of these code paths to
+
+00:24:08,859 --> 00:24:12,849
+anything that is not a local variable if
+
+00:24:10,570 --> 00:24:14,320
+so that is an error and that means we
+
+00:24:12,849 --> 00:24:17,019
+now have the compiler helping us and
+
+00:24:14,320 --> 00:24:19,739
+telling us whether anything could end up
+
+00:24:17,019 --> 00:24:24,070
+causing a crash by being culled from
+
+00:24:19,739 --> 00:24:26,109
+these these rust workers and this is
+
+00:24:24,070 --> 00:24:26,419
+kind of scary because we found over
+
+00:24:26,109 --> 00:24:28,220
+three
+
+00:24:26,419 --> 00:24:30,200
+preexisting problems from code that was
+
+00:24:28,220 --> 00:24:31,609
+like a decade old that was only now
+
+00:24:30,200 --> 00:24:34,340
+causing us problems because we were
+
+00:24:31,609 --> 00:24:36,320
+doing this on threads and it saved us so
+
+00:24:34,340 --> 00:24:37,879
+many times as we kept trying to
+
+00:24:36,320 --> 00:24:38,869
+introduce new problems we were like oh
+
+00:24:37,879 --> 00:24:43,399
+this is great I'll let's Cal this
+
+00:24:38,869 --> 00:24:45,169
+function and it's like nope you can't so
+
+00:24:43,399 --> 00:24:47,659
+let's talk a little bit about some pain
+
+00:24:45,169 --> 00:24:50,539
+points that came from this this this
+
+00:24:47,659 --> 00:24:52,580
+work first ones memory usage Firefox is
+
+00:24:50,539 --> 00:24:55,549
+really sensitive about memory usage
+
+00:24:52,580 --> 00:24:57,049
+there's a sort of a long-standing meme
+
+00:24:55,549 --> 00:24:59,899
+that like there's a leak in Firefox
+
+00:24:57,049 --> 00:25:01,789
+it'll just keep growing over time so we
+
+00:24:59,899 --> 00:25:03,830
+fix that a few years ago so that's not a
+
+00:25:01,789 --> 00:25:06,009
+big deal but we're really careful not to
+
+00:25:03,830 --> 00:25:10,279
+like keep having memory users increase
+
+00:25:06,009 --> 00:25:12,619
+and we have infrastructure which is good
+
+00:25:10,279 --> 00:25:15,049
+at measuring current heap usage
+
+00:25:12,619 --> 00:25:17,720
+throughout the program but it needs
+
+00:25:15,049 --> 00:25:19,369
+pointers to the actual allocated buffer
+
+00:25:17,720 --> 00:25:21,590
+in order to be able to report those and
+
+00:25:19,369 --> 00:25:24,080
+that's finding in the gecko code because
+
+00:25:21,590 --> 00:25:25,759
+we wrote our own standard library so we
+
+00:25:24,080 --> 00:25:27,919
+have all those pointers everywhere we
+
+00:25:25,759 --> 00:25:29,269
+can dig into everything rest doesn't
+
+00:25:27,919 --> 00:25:32,840
+actually give us that in all cases
+
+00:25:29,269 --> 00:25:34,700
+though and turns out that hashmaps both
+
+00:25:32,840 --> 00:25:36,440
+are extremely important to the style
+
+00:25:34,700 --> 00:25:39,169
+system and are pervasive everywhere and
+
+00:25:36,440 --> 00:25:41,350
+they also get really big sometimes so it
+
+00:25:39,169 --> 00:25:44,570
+turns out that we were lacking
+
+00:25:41,350 --> 00:25:46,429
+significant ability to measure the
+
+00:25:44,570 --> 00:25:50,419
+memory usage of this new style system
+
+00:25:46,429 --> 00:25:52,909
+that we created so another problem that
+
+00:25:50,419 --> 00:25:55,519
+we came across is that we really love
+
+00:25:52,909 --> 00:25:57,259
+enemies like enums are fantastic and
+
+00:25:55,519 --> 00:26:00,649
+being able to match on them is wonderful
+
+00:25:57,259 --> 00:26:03,440
+and every every new rest developer that
+
+00:26:00,649 --> 00:26:05,619
+worked on stylo got really excited about
+
+00:26:03,440 --> 00:26:08,359
+enums and you know sang their praises
+
+00:26:05,619 --> 00:26:10,999
+but it turns out that enums have a
+
+00:26:08,359 --> 00:26:14,960
+ability to like grow over time as you
+
+00:26:10,999 --> 00:26:16,759
+keep nesting them so let's imagine a CSS
+
+00:26:14,960 --> 00:26:18,470
+property called borderless style which
+
+00:26:16,759 --> 00:26:22,149
+could have three different values it's
+
+00:26:18,470 --> 00:26:25,399
+either none or solid or a dashed border
+
+00:26:22,149 --> 00:26:27,169
+we might represent that as an enum with
+
+00:26:25,399 --> 00:26:29,450
+three states you know none solid or
+
+00:26:27,169 --> 00:26:31,450
+dashed and it has you know a pixel value
+
+00:26:29,450 --> 00:26:33,799
+for like how big the spacers should be
+
+00:26:31,450 --> 00:26:35,299
+so under the hood this is going to be
+
+00:26:33,799 --> 00:26:38,119
+eight bytes you've got four bytes for
+
+00:26:35,299 --> 00:26:39,760
+the actual u-32 value that is stored in
+
+00:26:38,119 --> 00:26:42,780
+the enum and you also have four by
+
+00:26:39,760 --> 00:26:45,550
+for the tag which indicates what kind of
+
+00:26:42,780 --> 00:26:48,810
+what kind of what state this value is in
+
+00:26:45,550 --> 00:26:51,790
+at any given time and that's unavoidable
+
+00:26:48,810 --> 00:26:53,860
+so we might look at that and go okay
+
+00:26:51,790 --> 00:26:54,970
+well the none state that seems redundant
+
+00:26:53,860 --> 00:26:56,770
+why don't we just put this inside of an
+
+00:26:54,970 --> 00:26:58,990
+option options are much nicer to use to
+
+00:26:56,770 --> 00:27:01,180
+get better ergonomics so if we just have
+
+00:26:58,990 --> 00:27:03,700
+an option around this enum we only need
+
+00:27:01,180 --> 00:27:05,440
+two states inside of it and now it turns
+
+00:27:03,700 --> 00:27:07,210
+out that border style value is still the
+
+00:27:05,440 --> 00:27:08,680
+same size it still has a four byte tag
+
+00:27:07,210 --> 00:27:11,230
+and it still needs to store four bytes
+
+00:27:08,680 --> 00:27:13,210
+for the u-32 value but the option value
+
+00:27:11,230 --> 00:27:14,890
+is also has its own tag and that's four
+
+00:27:13,210 --> 00:27:17,650
+bytes and then you need to store the
+
+00:27:14,890 --> 00:27:19,540
+eight bytes for the nested enum so in
+
+00:27:17,650 --> 00:27:22,680
+total your option value is now 12 bytes
+
+00:27:19,540 --> 00:27:27,340
+even though it's still still
+
+00:27:22,680 --> 00:27:29,620
+representing the same amount of data now
+
+00:27:27,340 --> 00:27:31,750
+we will look at this and say what if the
+
+00:27:29,620 --> 00:27:32,830
+dash width was optional what if you
+
+00:27:31,750 --> 00:27:34,330
+didn't actually like what if there was
+
+00:27:32,830 --> 00:27:36,400
+like a default that would be specified
+
+00:27:34,330 --> 00:27:38,500
+automatically you might say okay well
+
+00:27:36,400 --> 00:27:40,870
+let's make the option inside the dashed
+
+00:27:38,500 --> 00:27:43,290
+thing so now we have an option of an
+
+00:27:40,870 --> 00:27:47,920
+enum that contains an option sometimes
+
+00:27:43,290 --> 00:27:49,960
+so this adds up the option u32 is itself
+
+00:27:47,920 --> 00:27:52,270
+8 bytes 4 bytes for the tag 4 bytes for
+
+00:27:49,960 --> 00:27:54,070
+the value then you've got the border
+
+00:27:52,270 --> 00:27:56,140
+style value which has 4 bytes for the
+
+00:27:54,070 --> 00:28:00,160
+tag and now it stores an 8 byte enum and
+
+00:27:56,140 --> 00:28:02,230
+the overall enum is still 4 by tag now
+
+00:28:00,160 --> 00:28:04,870
+it stores 8 bytes for the value so
+
+00:28:02,230 --> 00:28:05,890
+you've got 16 bytes for storing the you
+
+00:28:04,870 --> 00:28:10,180
+know almost the exact same amount of
+
+00:28:05,890 --> 00:28:11,860
+information now so our option here is
+
+00:28:10,180 --> 00:28:13,000
+that we could flatten this automatic or
+
+00:28:11,860 --> 00:28:15,010
+not automatically but we can flatten
+
+00:28:13,000 --> 00:28:16,570
+this manually and put this all back into
+
+00:28:15,010 --> 00:28:18,910
+a single enum that contains all the
+
+00:28:16,570 --> 00:28:21,580
+different states you have none and then
+
+00:28:18,910 --> 00:28:23,800
+you also have a - non state instead of
+
+00:28:21,580 --> 00:28:25,510
+having an option inside of it and so now
+
+00:28:23,800 --> 00:28:27,730
+you're back to 1 nm and it's back to 4
+
+00:28:25,510 --> 00:28:29,200
+by or in fact - 8 bytes in total because
+
+00:28:27,730 --> 00:28:33,780
+you only need to store 4 bytes for the
+
+00:28:29,200 --> 00:28:35,710
+u-32 value but this isn't this isn't a
+
+00:28:33,780 --> 00:28:37,510
+delightful solution because you no
+
+00:28:35,710 --> 00:28:39,760
+longer get the ergonomics you associate
+
+00:28:37,510 --> 00:28:43,330
+with option values so trading off
+
+00:28:39,760 --> 00:28:49,120
+between organ omits or space is you know
+
+00:28:43,330 --> 00:28:51,130
+not my favorite thing so another thing
+
+00:28:49,120 --> 00:28:52,850
+we came across is that the the arc
+
+00:28:51,130 --> 00:28:54,680
+values contained we
+
+00:28:52,850 --> 00:28:56,060
+pointers and this is something a silo
+
+00:28:54,680 --> 00:28:57,800
+doesn't actually use and this means that
+
+00:28:56,060 --> 00:28:59,930
+there's an extra four or eight bytes per
+
+00:28:57,800 --> 00:29:03,250
+thing you allocate inside of an arc
+
+00:28:59,930 --> 00:29:05,690
+wrapper and we do that a lot in servo so
+
+00:29:03,250 --> 00:29:07,540
+there there seem to be some discussion
+
+00:29:05,690 --> 00:29:10,250
+going on about whether this is necessary
+
+00:29:07,540 --> 00:29:13,000
+we decided that we should just fork arc
+
+00:29:10,250 --> 00:29:16,520
+to get rid of it
+
+00:29:13,000 --> 00:29:17,900
+compiling time kind of not wonderful all
+
+00:29:16,520 --> 00:29:19,370
+the time there's you know three hundred
+
+00:29:17,900 --> 00:29:21,050
+thousand lines of rust code after you go
+
+00:29:19,370 --> 00:29:24,740
+through all the cogeneration just for
+
+00:29:21,050 --> 00:29:27,950
+the largest crate and that isn't easy to
+
+00:29:24,740 --> 00:29:29,450
+do quick work on you know minute 34
+
+00:29:27,950 --> 00:29:31,550
+debug build but performance is terrible
+
+00:29:29,450 --> 00:29:33,230
+meanwhile six and a half minutes for
+
+00:29:31,550 --> 00:29:36,020
+release build if you get good
+
+00:29:33,230 --> 00:29:37,370
+performance and we only use stable rest
+
+00:29:36,020 --> 00:29:40,550
+so we can't try a lot of the new things
+
+00:29:37,370 --> 00:29:42,740
+which are coming out recently and
+
+00:29:40,550 --> 00:29:44,570
+finally fallible allocation is really
+
+00:29:42,740 --> 00:29:48,140
+important for Firefox because we need to
+
+00:29:44,570 --> 00:29:50,600
+be able to not break the browser if you
+
+00:29:48,140 --> 00:29:52,760
+know you run out of memory or some web
+
+00:29:50,600 --> 00:29:54,920
+content says you know gives you content
+
+00:29:52,760 --> 00:29:57,260
+that is really really large that's no
+
+00:29:54,920 --> 00:29:59,180
+good and this is in particularly
+
+00:29:57,260 --> 00:30:00,560
+important on Windows for us because it
+
+00:29:59,180 --> 00:30:04,700
+has very different behavior than other
+
+00:30:00,560 --> 00:30:06,620
+river platforms so you know this isn't
+
+00:30:04,700 --> 00:30:07,940
+great there's an IRC being discussed but
+
+00:30:06,620 --> 00:30:09,080
+it's not ready yet and we needed to be
+
+00:30:07,940 --> 00:30:10,790
+able to ship and we were seeing crash
+
+00:30:09,080 --> 00:30:13,340
+reports of failed allocations coming up
+
+00:30:10,790 --> 00:30:16,070
+heavily on windows standard library
+
+00:30:13,340 --> 00:30:19,850
+doesn't allow it so we forked hashmap
+
+00:30:16,070 --> 00:30:23,230
+it's disappointing also we duplicated
+
+00:30:19,850 --> 00:30:23,230
+some stuff to do that with X as well
+
+00:30:23,590 --> 00:30:27,590
+things that went really well
+
+00:30:25,580 --> 00:30:30,200
+deriving traits has saved us so much
+
+00:30:27,590 --> 00:30:32,120
+time been able to fix entire classes of
+
+00:30:30,200 --> 00:30:34,520
+errors and make it impossible to do them
+
+00:30:32,120 --> 00:30:36,140
+that's been really great thread safety
+
+00:30:34,520 --> 00:30:38,990
+like I said earlier it has saved us so
+
+00:30:36,140 --> 00:30:41,180
+much time not making mistakes when doing
+
+00:30:38,990 --> 00:30:42,950
+things with threaded code the fact that
+
+00:30:41,180 --> 00:30:44,720
+people are really happy to write asserts
+
+00:30:42,950 --> 00:30:47,090
+in their code means that we've caught
+
+00:30:44,720 --> 00:30:49,460
+bugs that have been lurking in Firefox
+
+00:30:47,090 --> 00:30:51,650
+around the old-style system that were
+
+00:30:49,460 --> 00:30:53,600
+just swept under the rug but they now
+
+00:30:51,650 --> 00:30:55,070
+panic in the new style system and we've
+
+00:30:53,600 --> 00:30:57,650
+caught bugs are a decade old because of
+
+00:30:55,070 --> 00:30:59,090
+this that's pretty cool and crazy io has
+
+00:30:57,650 --> 00:31:02,270
+been very helpful there's lots of really
+
+00:30:59,090 --> 00:31:02,810
+great packages we depend upon so I want
+
+00:31:02,270 --> 00:31:05,870
+to leave you with this final
+
+00:31:02,810 --> 00:31:06,110
+conversation I oversaw I overheard in in
+
+00:31:05,870 --> 00:31:07,670
+an
+
+00:31:06,110 --> 00:31:11,000
+see channel from some of the long-term
+
+00:31:07,670 --> 00:31:14,720
+Firefox developers who have been saying
+
+00:31:11,000 --> 00:31:17,540
+that they they have found using rest for
+
+00:31:14,720 --> 00:31:20,030
+stylo to be an incredibly positive
+
+00:31:17,540 --> 00:31:21,710
+experience the lead developer someone's
+
+00:31:20,030 --> 00:31:23,570
+been working on Firefox for like seven
+
+00:31:21,710 --> 00:31:25,490
+or eight years at this point he said you
+
+00:31:23,570 --> 00:31:27,170
+know the best part about stylo has been
+
+00:31:25,490 --> 00:31:29,960
+how much easier has been to implement
+
+00:31:27,170 --> 00:31:31,940
+these optimizations that we needed and
+
+00:31:29,960 --> 00:31:34,640
+it like it's because of rust that that's
+
+00:31:31,940 --> 00:31:36,170
+possible and like can you imagine if we
+
+00:31:34,640 --> 00:31:38,090
+needed to do this in the timeframe that
+
+00:31:36,170 --> 00:31:40,340
+we've been if we need is like rewrite
+
+00:31:38,090 --> 00:31:43,520
+all this in the time frame but in C++
+
+00:31:40,340 --> 00:31:45,500
+like that would be ridiculous and
+
+00:31:43,520 --> 00:31:47,059
+additionally like we run fuzzers against
+
+00:31:45,500 --> 00:31:49,280
+this new code and it's actually
+
+00:31:47,059 --> 00:31:51,429
+extremely rare for those buzzers to find
+
+00:31:49,280 --> 00:31:53,630
+bugs in the arrest implementation itself
+
+00:31:51,429 --> 00:31:55,460
+and that's really impressive like we
+
+00:31:53,630 --> 00:31:58,460
+have a long history of seeing lots of
+
+00:31:55,460 --> 00:32:03,320
+fussing bugs in the C++ code for the old
+
+00:31:58,460 --> 00:32:06,110
+style system and you know imagine if we
+
+00:32:03,320 --> 00:32:07,880
+could just like save time by trading all
+
+00:32:06,110 --> 00:32:09,980
+of those compiler errors for like just
+
+00:32:07,880 --> 00:32:13,010
+bugs we find later it'd be so much
+
+00:32:09,980 --> 00:32:15,080
+easier to ship and yeah someone else
+
+00:32:13,010 --> 00:32:16,880
+pointed out that like this is we just
+
+00:32:15,080 --> 00:32:19,610
+put this on a billboard this is a great
+
+00:32:16,880 --> 00:32:21,470
+ad for the powers of rest so thanks for
+
+00:32:19,610 --> 00:32:24,370
+listening I hope this has been useful I
+
+00:32:21,470 --> 00:32:24,370
+
+YouTube URL: https://www.youtube.com/watch?v=Y6SSTRr2mFU
+
+

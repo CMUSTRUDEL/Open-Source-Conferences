@@ -1,0 +1,4429 @@
+Title: Immutable data stores and CORS for safety, flexibility and profit by Sidney Shek
+Publication date: 2016-07-22
+Playlist: Scala Days Berlin 2016
+Description: 
+	This video was recorded at Scala Days Berlin 2016
+Follow us on Twitter @ScalaDays or visit our website for more information http://scaladays.org 
+
+Anstract:
+At Atlassian, we are in the midst of an architectural shift towards microservices to provide a scalable and flexible platform for our cloud services. In order to achieve this safely with no risk of losing customer data, we are investigating ‘event sourcing’ for representing our domain models i.e. capturing streams of immutable events to represent data instead of the traditional update-in-place paradigm. With event sourcing, old versions of data can be easily restored and audit trails are available by default to help with debugging. In combination with the command-query responsibility separation (CQRS) pattern, we can seamlessly bring online new functionality requiring schema changes or new query patterns, and re-architect later for more scale simply by replaying and reinterpreting events into new microservices and ephemeral data stores.
+
+In this talk, we will describe in detail what event sourcing and CQRS are, why we are using this approach, and a walk through of our implementation in Scala (leveraging scalaz-streams) in an AWS environment using DynamoDB, Kinesis and Lambdas.
+
+Goals:
+By the end of the presentation, the audience should:
+* have an understanding of the benefits of event sourcing
+* have an understanding of how event sourcing works
+* be able to identify how event sourcing can be applied to their environment
+
+Draft content outline:
+* Why event sourcing and CQRS, and why for everyone
+* safety - being able to revert changes, audit trails for free
+* flexibility - support any future queries, simple handling of schema changes
+* simple DB requirement - simply a key-value store with some kind of CAS (atomic counter, transaction)
+* Easy to implement on distributed databases e.g. Dynamo
+
+Walkthrough of Event sourcing principles by example (user account management) using our open source eventsrc library 
+
+Walkthrough of architecture of event sourcing/CQRS system being developed in Atlassian running on AWS.
+Captions: 
+	00:00:00,000 --> 00:00:06,569
+um let's get started so hello g'day
+
+00:00:04,350 --> 00:00:07,950
+I'm Sydney I'm from a company called
+
+00:00:06,569 --> 00:00:10,200
+Atlassian so you might have heard of
+
+00:00:07,950 --> 00:00:12,840
+juror confluence HipChat bitbucket
+
+00:00:10,200 --> 00:00:14,280
+we kind of make those things and today
+
+00:00:12,840 --> 00:00:15,089
+I'm talking about immutable data stores
+
+00:00:14,280 --> 00:00:17,250
+in CQRS
+
+00:00:15,089 --> 00:00:19,949
+so over the past couple years we've had
+
+00:00:17,250 --> 00:00:21,270
+a few teams so invests a lot in events
+
+00:00:19,949 --> 00:00:23,880
+or seeing am you know in mutable data
+
+00:00:21,270 --> 00:00:26,189
+and more recently in command query
+
+00:00:23,880 --> 00:00:27,630
+responsibilities segregation we've got
+
+00:00:26,189 --> 00:00:30,150
+various systems in various stages of
+
+00:00:27,630 --> 00:00:32,099
+production today is mostly around the
+
+00:00:30,150 --> 00:00:34,079
+particular case study on rewriting a
+
+00:00:32,099 --> 00:00:35,610
+core part of our identity platform to
+
+00:00:34,079 --> 00:00:37,079
+use these technologies and that's
+
+00:00:35,610 --> 00:00:37,890
+currently in internal dogfooding and
+
+00:00:37,079 --> 00:00:40,500
+we're currently building out the
+
+00:00:37,890 --> 00:00:41,820
+production scale of it this year so I
+
+00:00:40,500 --> 00:00:43,680
+guess one of the things we found with
+
+00:00:41,820 --> 00:00:45,539
+while we're doing this work is that it
+
+00:00:43,680 --> 00:00:47,129
+was a lot of material at high level
+
+00:00:45,539 --> 00:00:49,620
+material about event sourcing and CQRS
+
+00:00:47,129 --> 00:00:51,149
+but not a lot of detail about you know
+
+00:00:49,620 --> 00:00:53,250
+like design principles and concrete
+
+00:00:51,149 --> 00:00:54,840
+examples in the real world and I guess
+
+00:00:53,250 --> 00:00:56,879
+hopefully by sharing some our
+
+00:00:54,840 --> 00:00:59,520
+experiences today I'm happy to sort of
+
+00:00:56,879 --> 00:01:01,649
+fill that gap a little bit so a quick
+
+00:00:59,520 --> 00:01:03,660
+show of hands who here is really into
+
+00:01:01,649 --> 00:01:06,000
+event sourcing and CQRS like using it
+
+00:01:03,660 --> 00:01:07,770
+all the time oh great book that good
+
+00:01:06,000 --> 00:01:09,060
+count who here is kind of interested it
+
+00:01:07,770 --> 00:01:12,510
+but hasn't had the opportunity yet to
+
+00:01:09,060 --> 00:01:14,159
+dig into it excellent and who he doesn't
+
+00:01:12,510 --> 00:01:17,250
+really know much about event sourcing
+
+00:01:14,159 --> 00:01:20,040
+it's ukrs you guys were experts
+
+00:01:17,250 --> 00:01:22,020
+excellent alrighty so today's talk is
+
+00:01:20,040 --> 00:01:23,759
+I've broken up to four parts so first
+
+00:01:22,020 --> 00:01:25,409
+I'll talk about the what the why or
+
+00:01:23,759 --> 00:01:28,200
+really its how to sell this to your boss
+
+00:01:25,409 --> 00:01:29,460
+alright and then we're talking about the
+
+00:01:28,200 --> 00:01:32,090
+architecture so how we evolved from
+
+00:01:29,460 --> 00:01:34,680
+event sourcing into full-blown CQRS
+
+00:01:32,090 --> 00:01:35,640
+would then dig into some code so walk
+
+00:01:34,680 --> 00:01:37,680
+through some of the event sourcing
+
+00:01:35,640 --> 00:01:38,939
+library that we've written up and then
+
+00:01:37,680 --> 00:01:40,200
+we'll get into some of the design
+
+00:01:38,939 --> 00:01:43,890
+principles that we've learnt along the
+
+00:01:40,200 --> 00:01:45,420
+way so just a quick intro to vent sauce
+
+00:01:43,890 --> 00:01:47,700
+and just so we're on the same page you
+
+00:01:45,420 --> 00:01:50,009
+know in a traditional application you've
+
+00:01:47,700 --> 00:01:51,360
+got database tables and when you have
+
+00:01:50,009 --> 00:01:53,880
+records any when you update those
+
+00:01:51,360 --> 00:01:56,100
+records you sort of make changes to them
+
+00:01:53,880 --> 00:01:56,880
+in place all right so that's your master
+
+00:01:56,100 --> 00:01:59,460
+of the data all right
+
+00:01:56,880 --> 00:02:00,860
+you don't really store history but you
+
+00:01:59,460 --> 00:02:03,869
+know it's kind of just how we do things
+
+00:02:00,860 --> 00:02:06,540
+with event sourcing right on having this
+
+00:02:03,869 --> 00:02:08,280
+as our master we actually store a series
+
+00:02:06,540 --> 00:02:11,280
+of immutable business level events as
+
+00:02:08,280 --> 00:02:12,870
+our master right and when we reap and to
+
+00:02:11,280 --> 00:02:13,830
+get the original view the data we
+
+00:02:12,870 --> 00:02:17,070
+essentially replay
+
+00:02:13,830 --> 00:02:19,890
+these events in series 2 original view
+
+00:02:17,070 --> 00:02:21,930
+data all right so a couple things to
+
+00:02:19,890 --> 00:02:23,400
+know firstly the structure of this event
+
+00:02:21,930 --> 00:02:25,860
+table essentially is pretty simple right
+
+00:02:23,400 --> 00:02:28,500
+or really need is a way of identifying
+
+00:02:25,860 --> 00:02:29,940
+each events uniquely and having them
+
+00:02:28,500 --> 00:02:32,880
+ordered so that hence that sequence
+
+00:02:29,940 --> 00:02:34,320
+column there all right in terms of the
+
+00:02:32,880 --> 00:02:36,900
+event pelo itself well it's just a
+
+00:02:34,320 --> 00:02:39,690
+flexible blob right JSON object almost
+
+00:02:36,900 --> 00:02:41,640
+so all we really need to store it is
+
+00:02:39,690 --> 00:02:43,470
+essentially a key value data store that
+
+00:02:41,640 --> 00:02:44,730
+supports condition of rights to make
+
+00:02:43,470 --> 00:02:46,530
+sure we don't overwrite something that's
+
+00:02:44,730 --> 00:02:48,300
+already there and the nice thing about
+
+00:02:46,530 --> 00:02:50,220
+having this simple requirements like
+
+00:02:48,300 --> 00:02:51,300
+that is it's really easy to use a
+
+00:02:50,220 --> 00:02:52,680
+database for that right you got
+
+00:02:51,300 --> 00:02:53,940
+Cassandra you've got dynamo you've got
+
+00:02:52,680 --> 00:02:55,920
+all these things they can scale outs
+
+00:02:53,940 --> 00:02:57,480
+really really well right you're not
+
+00:02:55,920 --> 00:03:00,140
+stuck to traditional relational
+
+00:02:57,480 --> 00:03:02,070
+databases which are harder to scale out
+
+00:03:00,140 --> 00:03:04,170
+the other nice thing about event
+
+00:03:02,070 --> 00:03:06,390
+sourcing is well we replay one view here
+
+00:03:04,170 --> 00:03:09,000
+but you can also every plan so different
+
+00:03:06,390 --> 00:03:10,440
+database schemas or different completely
+
+00:03:09,000 --> 00:03:11,850
+different data stores if it really needs
+
+00:03:10,440 --> 00:03:14,280
+to and we'll see why that's really
+
+00:03:11,850 --> 00:03:16,050
+useful in a minute all right so this is
+
+00:03:14,280 --> 00:03:17,820
+a kind of a technical interview or an
+
+00:03:16,050 --> 00:03:19,830
+introduction but what does it mean for a
+
+00:03:17,820 --> 00:03:21,060
+business use case right so let's talk
+
+00:03:19,830 --> 00:03:23,280
+about our particular use case we're
+
+00:03:21,060 --> 00:03:23,820
+dealing with so we're talking identity
+
+00:03:23,280 --> 00:03:26,640
+systems
+
+00:03:23,820 --> 00:03:29,010
+all right users groups memberships you
+
+00:03:26,640 --> 00:03:30,300
+know group memberships and so forth but
+
+00:03:29,010 --> 00:03:32,190
+specifically we need to provide
+
+00:03:30,300 --> 00:03:33,480
+different views of this data all right
+
+00:03:32,190 --> 00:03:34,800
+so you know you might buy the search for
+
+00:03:33,480 --> 00:03:36,570
+users you might want to retrieve by
+
+00:03:34,800 --> 00:03:38,130
+emails you might want to get users and
+
+00:03:36,570 --> 00:03:40,920
+their group memberships and so forth all
+
+00:03:38,130 --> 00:03:42,120
+right but to do that we need performance
+
+00:03:40,920 --> 00:03:44,400
+right so we're talking about high
+
+00:03:42,120 --> 00:03:45,660
+volumes and low Clancey reads for us
+
+00:03:44,400 --> 00:03:47,220
+writes on that critical because you
+
+00:03:45,660 --> 00:03:48,630
+don't change things that often but reads
+
+00:03:47,220 --> 00:03:50,040
+are really important right you access
+
+00:03:48,630 --> 00:03:51,870
+that a lot when you log in when you're
+
+00:03:50,040 --> 00:03:54,150
+getting you know getting each page check
+
+00:03:51,870 --> 00:03:56,040
+permissions and so forth all right and
+
+00:03:54,150 --> 00:03:58,890
+the nice thing about event sourcing is
+
+00:03:56,040 --> 00:04:00,480
+we can provide very customized views for
+
+00:03:58,890 --> 00:04:03,180
+each of these by simply replay the
+
+00:04:00,480 --> 00:04:04,890
+events in two different data stores that
+
+00:04:03,180 --> 00:04:07,080
+could is specifically tuned for each
+
+00:04:04,890 --> 00:04:09,000
+particular use case and we can do that
+
+00:04:07,080 --> 00:04:10,140
+gradually as well so we can start with
+
+00:04:09,000 --> 00:04:12,299
+all let's just put everything in
+
+00:04:10,140 --> 00:04:14,130
+Postgres like we used to do and then
+
+00:04:12,299 --> 00:04:15,660
+when the scale comes we can say well we
+
+00:04:14,130 --> 00:04:17,760
+have the events now replay them into
+
+00:04:15,660 --> 00:04:19,620
+elasticsearch if we need it right so we
+
+00:04:17,760 --> 00:04:20,940
+can scale for now and in the future and
+
+00:04:19,620 --> 00:04:23,880
+I was a really big win for us for our
+
+00:04:20,940 --> 00:04:25,560
+managers in terms are the business
+
+00:04:23,880 --> 00:04:27,720
+requirements or we had to provide
+
+00:04:25,560 --> 00:04:29,250
+incremental synchronization so
+
+00:04:27,720 --> 00:04:32,220
+essentially a list of change events for
+
+00:04:29,250 --> 00:04:33,570
+downstream consumers to to look at well
+
+00:04:32,220 --> 00:04:34,980
+those are basically the events were
+
+00:04:33,570 --> 00:04:38,100
+storing so we get that for free
+
+00:04:34,980 --> 00:04:39,690
+nifty we also get audit trails for free
+
+00:04:38,100 --> 00:04:42,690
+which again really critical part of any
+
+00:04:39,690 --> 00:04:44,130
+business system these days in terms of
+
+00:04:42,690 --> 00:04:45,180
+non-functional requirements well one of
+
+00:04:44,130 --> 00:04:46,470
+the big ones obviously is high
+
+00:04:45,180 --> 00:04:48,930
+availability right we have to build
+
+00:04:46,470 --> 00:04:50,700
+highly available systems these days and
+
+00:04:48,930 --> 00:04:52,800
+there's two bits of that one is disaster
+
+00:04:50,700 --> 00:04:54,180
+recovery and the other is also zero
+
+00:04:52,800 --> 00:04:55,050
+downtime upgrades during normal
+
+00:04:54,180 --> 00:04:57,330
+operation
+
+00:04:55,050 --> 00:04:58,440
+now with disaster recovery because we
+
+00:04:57,330 --> 00:04:59,970
+have these events they're immutable
+
+00:04:58,440 --> 00:05:01,320
+they're pretty easy to copy around
+
+00:04:59,970 --> 00:05:03,180
+between regions around the world
+
+00:05:01,320 --> 00:05:05,190
+all right and the nice thing is we can
+
+00:05:03,180 --> 00:05:06,900
+if we structure our keys correctly we
+
+00:05:05,190 --> 00:05:08,310
+can actually fail back really easily as
+
+00:05:06,900 --> 00:05:09,960
+well well about any risk of overriding
+
+00:05:08,310 --> 00:05:14,100
+data which is it you know a bit of a
+
+00:05:09,960 --> 00:05:16,470
+concern around zero down up down up time
+
+00:05:14,100 --> 00:05:19,560
+upgrades so who hears like really likes
+
+00:05:16,470 --> 00:05:20,940
+doing sequel table upgrades online yeah
+
+00:05:19,560 --> 00:05:22,320
+no I threw that all right it's dangerous
+
+00:05:20,940 --> 00:05:23,970
+right you get to see it you get you have
+
+00:05:22,320 --> 00:05:25,500
+nightmares right but will the event
+
+00:05:23,970 --> 00:05:26,640
+sourcing that's you know it's quite easy
+
+00:05:25,500 --> 00:05:28,740
+right because it says you have these
+
+00:05:26,640 --> 00:05:30,840
+events you can bring up your new schema
+
+00:05:28,740 --> 00:05:32,640
+offline replayed events into there do
+
+00:05:30,840 --> 00:05:34,169
+your testing make sure it all works and
+
+00:05:32,640 --> 00:05:36,180
+when you're happy you're switching in
+
+00:05:34,169 --> 00:05:37,560
+online replay lazily the events are you
+
+00:05:36,180 --> 00:05:39,900
+just missed all right so that's a lot
+
+00:05:37,560 --> 00:05:41,280
+safer than having to or try backups turn
+
+00:05:39,900 --> 00:05:42,419
+up you know up load things and make sure
+
+00:05:41,280 --> 00:05:44,580
+it doesn't work you know make sure it
+
+00:05:42,419 --> 00:05:46,950
+works and so forth it's a lot safer for
+
+00:05:44,580 --> 00:05:48,540
+our steps
+
+00:05:46,950 --> 00:05:50,190
+and this whole replay concept is also
+
+00:05:48,540 --> 00:05:51,810
+really nifty for testing with production
+
+00:05:50,190 --> 00:05:54,210
+like data as well so if you want to
+
+00:05:51,810 --> 00:05:56,460
+debug production issues or just replay
+
+00:05:54,210 --> 00:05:57,750
+the events into an offline system until
+
+00:05:56,460 --> 00:05:58,800
+you hit the point where oh hang on
+
+00:05:57,750 --> 00:06:00,300
+that's the bulk all right well we can
+
+00:05:58,800 --> 00:06:02,040
+fix it you can test it and make sure it
+
+00:06:00,300 --> 00:06:05,400
+all works then we can apply it in
+
+00:06:02,040 --> 00:06:07,169
+production so these are I guess a mix of
+
+00:06:05,400 --> 00:06:08,550
+technical requirements but critically we
+
+00:06:07,169 --> 00:06:10,470
+could actually hit business requires
+
+00:06:08,550 --> 00:06:11,729
+with with event sourcing and that's a
+
+00:06:10,470 --> 00:06:13,470
+real big win for managers right because
+
+00:06:11,729 --> 00:06:14,880
+I don't care about you know 10 occur
+
+00:06:13,470 --> 00:06:16,740
+alarms they want to see business value
+
+00:06:14,880 --> 00:06:19,979
+out of our work that's how I guess we've
+
+00:06:16,740 --> 00:06:21,330
+got support to continue on so moving on
+
+00:06:19,979 --> 00:06:23,430
+so how do we actually go about building
+
+00:06:21,330 --> 00:06:25,260
+the system and you may have noticed that
+
+00:06:23,430 --> 00:06:27,510
+I haven't really talked much about CQRS
+
+00:06:25,260 --> 00:06:29,610
+yet and the reason is we didn't actually
+
+00:06:27,510 --> 00:06:32,100
+start with CQRS right we started with
+
+00:06:29,610 --> 00:06:34,500
+let's start with event sourcing only all
+
+00:06:32,100 --> 00:06:35,729
+right so how did that look for us you
+
+00:06:34,500 --> 00:06:37,530
+know we wanted to build it with me a
+
+00:06:35,729 --> 00:06:40,560
+small sort of monolithic style
+
+00:06:37,530 --> 00:06:41,280
+application every imagine that you have
+
+00:06:40,560 --> 00:06:43,350
+a rest call
+
+00:06:41,280 --> 00:06:44,670
+you know the data request comes in goes
+
+00:06:43,350 --> 00:06:46,770
+into our you know business layer as it
+
+00:06:44,670 --> 00:06:48,510
+usually does goes into our data access
+
+00:06:46,770 --> 00:06:51,240
+layer which in this case would save our
+
+00:06:48,510 --> 00:06:54,930
+events down through no Android rapid sue
+
+00:06:51,240 --> 00:06:56,910
+dynamodb then to read the data out of
+
+00:06:54,930 --> 00:06:58,500
+this what we do is would actually pull
+
+00:06:56,910 --> 00:07:00,480
+the event stream straight out of de
+
+00:06:58,500 --> 00:07:01,350
+Tomaso get a query data for the stream
+
+00:07:00,480 --> 00:07:04,080
+events in order
+
+00:07:01,350 --> 00:07:05,940
+we then accumulate the values in memory
+
+00:07:04,080 --> 00:07:07,350
+or we can cache a moving into externally
+
+00:07:05,940 --> 00:07:09,480
+but essentially we're folding over that
+
+00:07:07,350 --> 00:07:11,160
+stream right so stream events will come
+
+00:07:09,480 --> 00:07:12,630
+up a lot and send to me other fold over
+
+00:07:11,160 --> 00:07:15,360
+it is one of those nice things nice
+
+00:07:12,630 --> 00:07:16,680
+properties we get and once we fold over
+
+00:07:15,360 --> 00:07:19,260
+it we can then return the result back on
+
+00:07:16,680 --> 00:07:20,280
+the value we want so this actually works
+
+00:07:19,260 --> 00:07:22,380
+really nicely we've got you know
+
+00:07:20,280 --> 00:07:23,970
+production systems working on this but
+
+00:07:22,380 --> 00:07:25,500
+for a particular use case you know the
+
+00:07:23,970 --> 00:07:26,820
+model we started dealing with was
+
+00:07:25,500 --> 00:07:28,470
+getting more and more complex right
+
+00:07:26,820 --> 00:07:30,660
+we've had to join events from multiple
+
+00:07:28,470 --> 00:07:32,370
+streams together you know performance
+
+00:07:30,660 --> 00:07:34,380
+wise and so forth so that's when we
+
+00:07:32,370 --> 00:07:36,600
+started looking at command query
+
+00:07:34,380 --> 00:07:39,780
+responsibility segregation so here who
+
+00:07:36,600 --> 00:07:42,210
+here is kind of familiar with CQRS it's
+
+00:07:39,780 --> 00:07:44,820
+a bit of a mix ok good I took a quick
+
+00:07:42,210 --> 00:07:46,410
+intro so we're on the same page so you
+
+00:07:44,820 --> 00:07:47,790
+know when we start with applications it
+
+00:07:46,410 --> 00:07:48,840
+looks you know this kind of looks like
+
+00:07:47,790 --> 00:07:50,610
+what we had before right
+
+00:07:48,840 --> 00:07:53,100
+traditional application you start with
+
+00:07:50,610 --> 00:07:54,990
+crud right so you have users you read
+
+00:07:53,100 --> 00:07:58,290
+and write users right and most of logics
+
+00:07:54,990 --> 00:07:59,940
+deal with in that domain model but over
+
+00:07:58,290 --> 00:08:01,380
+time what ends up happening is we start
+
+00:07:59,940 --> 00:08:02,790
+you know building different views of
+
+00:08:01,380 --> 00:08:03,750
+data right you want to search for users
+
+00:08:02,790 --> 00:08:05,790
+you want to get users and group
+
+00:08:03,750 --> 00:08:08,669
+memberships and so forth and so what
+
+00:08:05,790 --> 00:08:09,990
+typically happens is that the main motor
+
+00:08:08,669 --> 00:08:11,520
+gets really cluttered right you have
+
+00:08:09,990 --> 00:08:12,810
+optional data fields you have extra
+
+00:08:11,520 --> 00:08:14,850
+business logic everywhere just to
+
+00:08:12,810 --> 00:08:17,370
+accommodate this glory and growing the
+
+00:08:14,850 --> 00:08:19,020
+main model so one of the things we can
+
+00:08:17,370 --> 00:08:21,030
+do is provide what's called command
+
+00:08:19,020 --> 00:08:23,490
+query separation all right so having
+
+00:08:21,030 --> 00:08:25,440
+explicit the main models for your right
+
+00:08:23,490 --> 00:08:27,720
+side and your read side or hence command
+
+00:08:25,440 --> 00:08:29,850
+and query all right so the command side
+
+00:08:27,720 --> 00:08:31,229
+has a very small data model and has only
+
+00:08:29,850 --> 00:08:33,900
+the rules that it needs to deal with
+
+00:08:31,229 --> 00:08:34,979
+saving a particular user and then you
+
+00:08:33,900 --> 00:08:36,240
+have a whole bunch of different query
+
+00:08:34,979 --> 00:08:37,830
+reviews or query models that are
+
+00:08:36,240 --> 00:08:39,510
+targeted to the specific queries as
+
+00:08:37,830 --> 00:08:40,919
+they're supporting right so each
+
+00:08:39,510 --> 00:08:42,570
+component is very small they're
+
+00:08:40,919 --> 00:08:44,130
+independent devs can work on them
+
+00:08:42,570 --> 00:08:47,670
+independently without having having
+
+00:08:44,130 --> 00:08:49,530
+conflict so if you take this model to
+
+00:08:47,670 --> 00:08:51,570
+the extreme or why do you have all this
+
+00:08:49,530 --> 00:08:52,709
+stuff in the same process all right we
+
+00:08:51,570 --> 00:08:54,900
+can have them completely different
+
+00:08:52,709 --> 00:08:56,850
+services you have commands
+
+00:08:54,900 --> 00:08:58,410
+services in the pendant you can even use
+
+00:08:56,850 --> 00:08:59,760
+different data stores right you can save
+
+00:08:58,410 --> 00:09:02,310
+your events in Postgres and then
+
+00:08:59,760 --> 00:09:03,330
+propagate those events asynchronously to
+
+00:09:02,310 --> 00:09:06,780
+you know different stores like
+
+00:09:03,330 --> 00:09:09,390
+elasticsearch alright so how do we apply
+
+00:09:06,780 --> 00:09:11,400
+this for our system well our first step
+
+00:09:09,390 --> 00:09:13,410
+was to have that query commit or command
+
+00:09:11,400 --> 00:09:15,480
+query separation so we actually had
+
+00:09:13,410 --> 00:09:17,520
+explicit command models and query models
+
+00:09:15,480 --> 00:09:18,840
+know the area of case classes the data
+
+00:09:17,520 --> 00:09:21,630
+objects the only thing they really
+
+00:09:18,840 --> 00:09:23,240
+shared was in events as an API and I'll
+
+00:09:21,630 --> 00:09:25,800
+talk about that in a minute
+
+00:09:23,240 --> 00:09:27,510
+now the other required we had was you
+
+00:09:25,800 --> 00:09:30,030
+know complex querying held you know will
+
+00:09:27,510 --> 00:09:32,430
+told to use Postgres so that's fine how
+
+00:09:30,030 --> 00:09:33,810
+do we get data at the Postgres well we
+
+00:09:32,430 --> 00:09:36,180
+then introduced his query synchronizer
+
+00:09:33,810 --> 00:09:37,830
+compiler and it's job was to be notified
+
+00:09:36,180 --> 00:09:39,150
+whatever events were written so we
+
+00:09:37,830 --> 00:09:41,670
+started in process with just an in
+
+00:09:39,150 --> 00:09:43,470
+process scholars jet stream topic but
+
+00:09:41,670 --> 00:09:45,840
+its job was basically the pool event
+
+00:09:43,470 --> 00:09:49,500
+streams out of dynamo and process them
+
+00:09:45,840 --> 00:09:51,270
+and push him into Postgres so this was I
+
+00:09:49,500 --> 00:09:53,100
+guess step one to this interest journey
+
+00:09:51,270 --> 00:09:55,170
+but we obviously need to get these
+
+00:09:53,100 --> 00:09:56,280
+events out so downstream systems can
+
+00:09:55,170 --> 00:09:58,440
+look at them right we don't want to have
+
+00:09:56,280 --> 00:10:00,870
+everything that's one big model with so
+
+00:09:58,440 --> 00:10:03,750
+what we're doing is we're using dynamo
+
+00:10:00,870 --> 00:10:05,910
+DB dynamo DB streams to get change
+
+00:10:03,750 --> 00:10:07,800
+events on a dynamo alright and push
+
+00:10:05,910 --> 00:10:10,170
+those events into Kinesis which is our
+
+00:10:07,800 --> 00:10:11,490
+net bus alright and so we're using unit
+
+00:10:10,170 --> 00:10:14,310
+land or some kind of equivalent
+
+00:10:11,490 --> 00:10:16,080
+technology for that and we can also
+
+00:10:14,310 --> 00:10:17,400
+obviously have multiple consumers now so
+
+00:10:16,080 --> 00:10:19,320
+you can have the query synchronizer as
+
+00:10:17,400 --> 00:10:21,270
+well consumer but you know we'll be
+
+00:10:19,320 --> 00:10:23,490
+building a search service for example
+
+00:10:21,270 --> 00:10:25,800
+might use elastic search again uses the
+
+00:10:23,490 --> 00:10:27,390
+same event stream and we can also have
+
+00:10:25,800 --> 00:10:28,560
+these you know other applications
+
+00:10:27,390 --> 00:10:31,710
+downstream listen to that same event
+
+00:10:28,560 --> 00:10:33,660
+stream so this is kind of where we want
+
+00:10:31,710 --> 00:10:35,520
+to get to is for v1 that's what we're
+
+00:10:33,660 --> 00:10:37,380
+currently building what we really really
+
+00:10:35,520 --> 00:10:39,780
+want to get to though is well you know
+
+00:10:37,380 --> 00:10:40,920
+we have an event bus but why is this the
+
+00:10:39,780 --> 00:10:43,650
+event bus only for this one particular
+
+00:10:40,920 --> 00:10:46,020
+application what happens if we split our
+
+00:10:43,650 --> 00:10:48,000
+assistant into a groups or group
+
+00:10:46,020 --> 00:10:50,280
+memberships application and user
+
+00:10:48,000 --> 00:10:52,470
+profiles and various other kind of
+
+00:10:50,280 --> 00:10:54,240
+identity systems all right well I can't
+
+00:10:52,470 --> 00:10:56,040
+we push all had use the same planner all
+
+00:10:54,240 --> 00:10:58,110
+this use the same technique and push all
+
+00:10:56,040 --> 00:11:03,180
+our events into that same Kinesis event
+
+00:10:58,110 --> 00:11:04,380
+bus then as an extension to that well if
+
+00:11:03,180 --> 00:11:06,000
+we want to expose these events to
+
+00:11:04,380 --> 00:11:08,550
+downstream applications so your gear or
+
+00:11:06,000 --> 00:11:10,530
+hip chats or so forth well
+
+00:11:08,550 --> 00:11:11,670
+they're external external consumers
+
+00:11:10,530 --> 00:11:14,640
+right we want to provide them with a
+
+00:11:11,670 --> 00:11:16,260
+stable API so why don't we transform the
+
+00:11:14,640 --> 00:11:17,880
+internal events you know and a tetenal
+
+00:11:16,260 --> 00:11:19,470
+of extra information or hide away the
+
+00:11:17,880 --> 00:11:21,420
+things we don't want externally exposed
+
+00:11:19,470 --> 00:11:23,010
+and provide them or completely set of a
+
+00:11:21,420 --> 00:11:24,960
+different set of events for their
+
+00:11:23,010 --> 00:11:26,610
+external API so that way we can evolve
+
+00:11:24,960 --> 00:11:28,800
+our internal events from the external
+
+00:11:26,610 --> 00:11:30,030
+events quite differently so this is kind
+
+00:11:28,800 --> 00:11:31,070
+of where we want to get to over the next
+
+00:11:30,030 --> 00:11:33,690
+year or so
+
+00:11:31,070 --> 00:11:35,160
+all right so not for the pretty pictures
+
+00:11:33,690 --> 00:11:38,190
+let's delve into a little bit of code
+
+00:11:35,160 --> 00:11:39,690
+all right so oh so I guess when we
+
+00:11:38,190 --> 00:11:41,040
+started this a couple years ago we we
+
+00:11:39,690 --> 00:11:42,540
+looked around invent sourcing libraries
+
+00:11:41,040 --> 00:11:44,160
+and I guess we didn't see one that
+
+00:11:42,540 --> 00:11:45,660
+really fit the way we coded in a way we
+
+00:11:44,160 --> 00:11:47,490
+deployed our code so we've kind of wrote
+
+00:11:45,660 --> 00:11:50,160
+over a pretty simple pretty simple one
+
+00:11:47,490 --> 00:11:51,570
+and we'll walk through that so the first
+
+00:11:50,160 --> 00:11:53,940
+thing is around how do we model these
+
+00:11:51,570 --> 00:11:56,700
+events all right so this is basically
+
+00:11:53,940 --> 00:11:59,460
+how our dynamo tables look like alright
+
+00:11:56,700 --> 00:12:01,470
+so you have a key in a sequence column
+
+00:11:59,460 --> 00:12:04,050
+so that is that provides I guess you
+
+00:12:01,470 --> 00:12:06,060
+keys I guess unique identifier for event
+
+00:12:04,050 --> 00:12:08,040
+stream so you might have put user events
+
+00:12:06,060 --> 00:12:10,590
+so that ID might be your user ID you
+
+00:12:08,040 --> 00:12:12,990
+have a sequence column obviously for
+
+00:12:10,590 --> 00:12:14,880
+providing that watering and so an event
+
+00:12:12,990 --> 00:12:17,580
+ID is a combination of a key in a
+
+00:12:14,880 --> 00:12:19,770
+sequence so type parameters K and s s
+
+00:12:17,580 --> 00:12:22,500
+has a type class for essentially a zero
+
+00:12:19,770 --> 00:12:24,690
+gives you a zero and also ability to the
+
+00:12:22,500 --> 00:12:28,680
+increment and also the ability to sort
+
+00:12:24,690 --> 00:12:30,060
+which between sequences and the only
+
+00:12:28,680 --> 00:12:31,890
+other thing we have is essentially a
+
+00:12:30,060 --> 00:12:34,040
+flexible value so in sum a type
+
+00:12:31,890 --> 00:12:38,670
+parameter and so event basically is a
+
+00:12:34,040 --> 00:12:41,520
+topple of ksn a pretty simple all right
+
+00:12:38,670 --> 00:12:43,380
+so moving up a level so we then have
+
+00:12:41,520 --> 00:12:44,940
+this event storage API which this
+
+00:12:43,380 --> 00:12:47,070
+basically wraps around out on the line
+
+00:12:44,940 --> 00:12:48,210
+data stores so you might be dynamo by
+
+00:12:47,070 --> 00:12:49,950
+being in memory it could be any other
+
+00:12:48,210 --> 00:12:51,420
+sort of data store we want it could be a
+
+00:12:49,950 --> 00:12:54,960
+Postgres database if you really wanted
+
+00:12:51,420 --> 00:12:56,790
+to but all we all we really need for
+
+00:12:54,960 --> 00:12:58,950
+this to work there are three things all
+
+00:12:56,790 --> 00:13:01,290
+right so we need it obviously way at the
+
+00:12:58,950 --> 00:13:02,850
+same events so given an event save it so
+
+00:13:01,290 --> 00:13:05,490
+f here is just a container type to
+
+00:13:02,850 --> 00:13:06,750
+repair fix we always need a way of
+
+00:13:05,490 --> 00:13:08,910
+getting the latest event and we'll see
+
+00:13:06,750 --> 00:13:10,880
+why in a minute and we also want to be
+
+00:13:08,910 --> 00:13:14,160
+able to get a stream of events somehow
+
+00:13:10,880 --> 00:13:15,330
+now scholar streams you know they're
+
+00:13:14,160 --> 00:13:16,770
+there but they're not they're kind of
+
+00:13:15,330 --> 00:13:18,210
+pure right so we kind of needed some
+
+00:13:16,770 --> 00:13:20,220
+sort of thick full stream right we want
+
+00:13:18,210 --> 00:13:22,380
+to be able to say give me paid query
+
+00:13:20,220 --> 00:13:25,170
+pages of data from dynamo
+
+00:13:22,380 --> 00:13:27,000
+and but make it look like in a stream
+
+00:13:25,170 --> 00:13:28,620
+all right and luckily this is thing
+
+00:13:27,000 --> 00:13:31,320
+called scholars at stream which is now
+
+00:13:28,620 --> 00:13:33,180
+called fs2 which provides exactly just
+
+00:13:31,320 --> 00:13:34,950
+that and so we use this quite heavily so
+
+00:13:33,180 --> 00:13:37,920
+it gives the capability to essentially
+
+00:13:34,950 --> 00:13:39,930
+give us a view give us stream flight
+
+00:13:37,920 --> 00:13:42,180
+capabilities but an effect formatter and
+
+00:13:39,930 --> 00:13:44,550
+wrap up all the error handling and your
+
+00:13:42,180 --> 00:13:45,590
+resource allocation a kind of stuff
+
+00:13:44,550 --> 00:13:48,390
+which is quite a nice
+
+00:13:45,590 --> 00:13:50,820
+all right so given this event storage
+
+00:13:48,390 --> 00:13:54,840
+how do we actually use it to save events
+
+00:13:50,820 --> 00:13:56,790
+right so saving is is a fairly simple
+
+00:13:54,840 --> 00:13:59,670
+logic so we have this Save API case
+
+00:13:56,790 --> 00:14:01,880
+class it's save function basically goes
+
+00:13:59,670 --> 00:14:04,560
+and gets the latest event out of dynamo
+
+00:14:01,880 --> 00:14:06,560
+it will then try to save a new event so
+
+00:14:04,560 --> 00:14:09,420
+basically what it's trying to do is
+
+00:14:06,560 --> 00:14:12,030
+increment this thing here increments the
+
+00:14:09,420 --> 00:14:13,890
+sequence number and then tries to save
+
+00:14:12,030 --> 00:14:15,480
+it right so you know it saves it's okay
+
+00:14:13,890 --> 00:14:17,490
+there's no overwrite you're good if
+
+00:14:15,480 --> 00:14:18,510
+there is a duplicate event that means so
+
+00:14:17,490 --> 00:14:20,880
+on up there's contention on that
+
+00:14:18,510 --> 00:14:22,830
+database so obviously you know you've
+
+00:14:20,880 --> 00:14:25,200
+got to retry it so retry obviously with
+
+00:14:22,830 --> 00:14:28,980
+some back off jitter and and I'm sort of
+
+00:14:25,200 --> 00:14:30,300
+a limited limited retry and obviously
+
+00:14:28,980 --> 00:14:32,460
+any other events you see any other
+
+00:14:30,300 --> 00:14:35,580
+errors you sort of bump up bubble up the
+
+00:14:32,460 --> 00:14:37,320
+errors so that's pretty much saving of
+
+00:14:35,580 --> 00:14:38,910
+answer it's pretty simple but the nice
+
+00:14:37,320 --> 00:14:41,100
+thing is because you have the sequence
+
+00:14:38,910 --> 00:14:43,860
+number kind of in here we can actually
+
+00:14:41,100 --> 00:14:45,240
+provide some data constraints okay so
+
+00:14:43,860 --> 00:14:47,370
+some level of transaction analytic you
+
+00:14:45,240 --> 00:14:49,140
+like and the way we modeled that is
+
+00:14:47,370 --> 00:14:50,700
+through this operation type so
+
+00:14:49,140 --> 00:14:52,170
+essentially an operation is a wrapper
+
+00:14:50,700 --> 00:14:53,760
+around a function that says given an
+
+00:14:52,170 --> 00:14:55,050
+optional sequence number so it could be
+
+00:14:53,760 --> 00:14:58,650
+optional because you may not have any
+
+00:14:55,050 --> 00:15:01,080
+data in dynamo give me an operation
+
+00:14:58,650 --> 00:15:03,090
+result which essentially means should I
+
+00:15:01,080 --> 00:15:04,710
+save it success or should I not say this
+
+00:15:03,090 --> 00:15:07,500
+event because this operator this
+
+00:15:04,710 --> 00:15:09,120
+condition has failed and so what we can
+
+00:15:07,500 --> 00:15:12,270
+do is we could write a simple operation
+
+00:15:09,120 --> 00:15:13,620
+things that says you know only write
+
+00:15:12,270 --> 00:15:15,870
+only write this event if a sequence
+
+00:15:13,620 --> 00:15:17,910
+number is that point X all right and
+
+00:15:15,870 --> 00:15:20,040
+this allows us to expose condition of
+
+00:15:17,910 --> 00:15:23,400
+writes all the way up to our REST API if
+
+00:15:20,040 --> 00:15:25,350
+you want to so it requires a fairly
+
+00:15:23,400 --> 00:15:27,450
+small change to here so this is the code
+
+00:15:25,350 --> 00:15:30,780
+you saw before to space that a bit the
+
+00:15:27,450 --> 00:15:33,360
+big changes would be a taking in the
+
+00:15:30,780 --> 00:15:35,730
+operation type and then essentially
+
+00:15:33,360 --> 00:15:36,150
+apply the OP the old events or event
+
+00:15:35,730 --> 00:15:38,100
+sequence
+
+00:15:36,150 --> 00:15:40,680
+but through the operation and then if
+
+00:15:38,100 --> 00:15:43,380
+that succeeds you save it if not reject
+
+00:15:40,680 --> 00:15:45,270
+okay and this gives us billy the same
+
+00:15:43,380 --> 00:15:49,650
+events with some level constraints on it
+
+00:15:45,270 --> 00:15:51,390
+- all right so querying then okay so
+
+00:15:49,650 --> 00:15:52,680
+there's two ways of querying here right
+
+00:15:51,390 --> 00:15:54,900
+so I guess we started with that pool
+
+00:15:52,680 --> 00:15:56,370
+model and then there's also kind of a
+
+00:15:54,900 --> 00:15:58,230
+push model where you're listening to
+
+00:15:56,370 --> 00:16:00,690
+events of an event stream or an event
+
+00:15:58,230 --> 00:16:03,660
+bus so cover both so firstly we're
+
+00:16:00,690 --> 00:16:05,970
+querying by pulling all right remember
+
+00:16:03,660 --> 00:16:09,480
+we essentially have a stream of events
+
+00:16:05,970 --> 00:16:11,280
+right and when we query what we want to
+
+00:16:09,480 --> 00:16:14,490
+essentially say get or query by some
+
+00:16:11,280 --> 00:16:17,430
+query key type key give you back some
+
+00:16:14,490 --> 00:16:19,380
+optional value but because the event
+
+00:16:17,430 --> 00:16:21,300
+still gives us a stream of events all we
+
+00:16:19,380 --> 00:16:23,310
+really need to do is fold over it right
+
+00:16:21,300 --> 00:16:25,410
+fold over it with some accumulator
+
+00:16:23,310 --> 00:16:28,290
+function so given so this cumulative
+
+00:16:25,410 --> 00:16:30,690
+function f so given an old value and an
+
+00:16:28,290 --> 00:16:33,330
+events generate a new value that you
+
+00:16:30,690 --> 00:16:36,120
+keep on feeding through and the nice
+
+00:16:33,330 --> 00:16:37,590
+thing about scholars and streams or fs2
+
+00:16:36,120 --> 00:16:40,620
+is it gives us all this Mechanics for
+
+00:16:37,590 --> 00:16:42,570
+you automatically so what you can do is
+
+00:16:40,620 --> 00:16:44,850
+given some event stream you push it
+
+00:16:42,570 --> 00:16:46,980
+through a pipe way through this fold and
+
+00:16:44,850 --> 00:16:48,690
+then run the whole thing at the end to
+
+00:16:46,980 --> 00:16:49,020
+get your result that kind of comes for
+
+00:16:48,690 --> 00:16:52,980
+free
+
+00:16:49,020 --> 00:16:54,270
+so yeah it's got a nifty that alright so
+
+00:16:52,980 --> 00:16:55,500
+the one thing I haven't Kerry covered
+
+00:16:54,270 --> 00:16:57,030
+off is okay what's this question mark
+
+00:16:55,500 --> 00:16:58,620
+yeah right remember you're convinced or
+
+00:16:57,030 --> 00:17:00,390
+deal to have event stream keys only and
+
+00:16:58,620 --> 00:17:02,940
+it's kind of boring to only query by
+
+00:17:00,390 --> 00:17:04,680
+event stream case all right so one other
+
+00:17:02,940 --> 00:17:06,420
+little thing we can do is to say well I
+
+00:17:04,680 --> 00:17:07,980
+can create by anything as long as I can
+
+00:17:06,420 --> 00:17:11,610
+get my event stream key out of whatever
+
+00:17:07,980 --> 00:17:13,080
+query parameter I want to provide so
+
+00:17:11,610 --> 00:17:15,030
+we're all wrapped us up into this query
+
+00:17:13,080 --> 00:17:16,560
+API case class so you can instantiate
+
+00:17:15,030 --> 00:17:18,570
+that you've basically pass in the
+
+00:17:16,560 --> 00:17:20,370
+functions you need and the event storage
+
+00:17:18,570 --> 00:17:23,490
+and you could basically get functions
+
+00:17:20,370 --> 00:17:25,200
+like get get history so you can get you
+
+00:17:23,490 --> 00:17:27,480
+can get yeah you get history so please
+
+00:17:25,200 --> 00:17:30,060
+only get me values up to two days ago
+
+00:17:27,480 --> 00:17:32,070
+for example I'll get you can kind of get
+
+00:17:30,060 --> 00:17:34,140
+a scan of history as well so you can get
+
+00:17:32,070 --> 00:17:35,850
+snapshots of history over time which is
+
+00:17:34,140 --> 00:17:37,050
+kind of nice again all that comes for
+
+00:17:35,850 --> 00:17:41,010
+free essentially because we can use
+
+00:17:37,050 --> 00:17:43,650
+scholars jet stream alright so moving on
+
+00:17:41,010 --> 00:17:45,390
+to pushing so this is so I guess where
+
+00:17:43,650 --> 00:17:47,040
+we see this is you know you have events
+
+00:17:45,390 --> 00:17:49,180
+push and push to your father's event bus
+
+00:17:47,040 --> 00:17:51,490
+and again we're using
+
+00:17:49,180 --> 00:17:53,530
+we treat events still as an events dream
+
+00:17:51,490 --> 00:17:55,090
+all right so scholars in-stream has this
+
+00:17:53,530 --> 00:17:57,160
+ability has this teen quota the channel
+
+00:17:55,090 --> 00:17:58,840
+or what's called now pipe and that's
+
+00:17:57,160 --> 00:18:00,700
+essentially a way of effectively
+
+00:17:58,840 --> 00:18:03,790
+processing events from your event stream
+
+00:18:00,700 --> 00:18:05,170
+all right and so what we can do is we
+
+00:18:03,790 --> 00:18:07,390
+have this query synchronizer that cruz
+
+00:18:05,170 --> 00:18:11,290
+requires a component what it does is
+
+00:18:07,390 --> 00:18:13,570
+given an event stream the process i want
+
+00:18:11,290 --> 00:18:15,610
+to run it through some sort of effect
+
+00:18:13,570 --> 00:18:16,930
+for channel all right and so this effect
+
+00:18:15,610 --> 00:18:18,460
+for channels that bit that actually
+
+00:18:16,930 --> 00:18:20,650
+tries to do you know right things the
+
+00:18:18,460 --> 00:18:23,530
+dynamo the right things to Postgres and
+
+00:18:20,650 --> 00:18:25,720
+so is logic is pretty simple essentially
+
+00:18:23,530 --> 00:18:28,150
+its first step is or can i right
+
+00:18:25,720 --> 00:18:29,980
+so can I try to increment my Postgres
+
+00:18:28,150 --> 00:18:32,020
+sequence number so make sure I'm the
+
+00:18:29,980 --> 00:18:34,660
+only one writing to that and if that
+
+00:18:32,020 --> 00:18:36,580
+succeeds then you can write yeah do you
+
+00:18:34,660 --> 00:18:37,990
+insert update statements and so forth if
+
+00:18:36,580 --> 00:18:39,160
+not your role about transaction because
+
+00:18:37,990 --> 00:18:41,560
+someone else has already processed the
+
+00:18:39,160 --> 00:18:42,700
+event you think and you can continue all
+
+00:18:41,560 --> 00:18:46,180
+right so this is all the query
+
+00:18:42,700 --> 00:18:48,910
+synchronized series and to use it we
+
+00:18:46,180 --> 00:18:51,490
+hook it up to a Kinesis processor which
+
+00:18:48,910 --> 00:18:53,560
+basically is a wrapper around and then
+
+00:18:51,490 --> 00:18:55,480
+able us sort of key nice to the client
+
+00:18:53,560 --> 00:18:57,720
+library sort of interface which
+
+00:18:55,480 --> 00:18:59,980
+basically gives you a list of events and
+
+00:18:57,720 --> 00:19:01,900
+it forces you to have a function that
+
+00:18:59,980 --> 00:19:03,340
+takes a list of events and returns units
+
+00:19:01,900 --> 00:19:06,250
+so an effect for operation on your
+
+00:19:03,340 --> 00:19:08,050
+events and so all we can all we need to
+
+00:19:06,250 --> 00:19:09,430
+do is somehow generate those events so
+
+00:19:08,050 --> 00:19:11,260
+we can either push those events straight
+
+00:19:09,430 --> 00:19:13,360
+from the input or we can read them from
+
+00:19:11,260 --> 00:19:16,420
+dynamo there are some subtleties because
+
+00:19:13,360 --> 00:19:18,670
+why we might want to do that but once we
+
+00:19:16,420 --> 00:19:19,900
+have those events then it is just cool
+
+00:19:18,670 --> 00:19:22,330
+query synchronizer and just run the
+
+00:19:19,900 --> 00:19:23,890
+thing right now you might be asking well
+
+00:19:22,330 --> 00:19:25,900
+why would I bother with this complexity
+
+00:19:23,890 --> 00:19:27,100
+of you know dealing with Scala dead
+
+00:19:25,900 --> 00:19:29,050
+stream while we're pushing these events
+
+00:19:27,100 --> 00:19:30,100
+through well the reason is and we'll
+
+00:19:29,050 --> 00:19:31,630
+talk about a little bit later is
+
+00:19:30,100 --> 00:19:33,850
+sometimes you actually want to be able
+
+00:19:31,630 --> 00:19:35,680
+to do pulls and pushes for queries right
+
+00:19:33,850 --> 00:19:37,110
+so for the primary case you might want
+
+00:19:35,680 --> 00:19:39,310
+to say look this deal pushes
+
+00:19:37,110 --> 00:19:41,200
+asynchronous pushes to your query
+
+00:19:39,310 --> 00:19:43,690
+synchronizers to write to dynamo or
+
+00:19:41,200 --> 00:19:45,370
+write to Postgres sometimes you want to
+
+00:19:43,690 --> 00:19:47,290
+say I wanted a force read and say well
+
+00:19:45,370 --> 00:19:49,060
+make sure that my latest version my
+
+00:19:47,290 --> 00:19:50,560
+stress is actually up to the latest
+
+00:19:49,060 --> 00:19:51,610
+events that I've seen right there are
+
+00:19:50,560 --> 00:19:54,040
+some cases where you want that
+
+00:19:51,610 --> 00:19:56,140
+consistency and having it all model the
+
+00:19:54,040 --> 00:19:57,880
+same way using channels and so forth
+
+00:19:56,140 --> 00:20:02,020
+allows us to choose between them quite
+
+00:19:57,880 --> 00:20:03,140
+easily all right so that's code so let's
+
+00:20:02,020 --> 00:20:04,490
+talk a little bit about
+
+00:20:03,140 --> 00:20:06,110
+design principles because you know we
+
+00:20:04,490 --> 00:20:07,510
+talked about advance and streams and
+
+00:20:06,110 --> 00:20:09,320
+stuff but what did it actually look like
+
+00:20:07,510 --> 00:20:11,570
+so I guess I'll call them
+
+00:20:09,320 --> 00:20:13,460
+three-and-a-half design principles and I
+
+00:20:11,570 --> 00:20:16,309
+think the first one is okay what are
+
+00:20:13,460 --> 00:20:19,429
+these events look like and I guess I
+
+00:20:16,309 --> 00:20:20,510
+treat it I call it events as an API all
+
+00:20:19,429 --> 00:20:23,570
+right and the reason why I say that is
+
+00:20:20,510 --> 00:20:25,399
+when you start designing an API you
+
+00:20:23,570 --> 00:20:27,049
+think about what consumers won not what
+
+00:20:25,399 --> 00:20:28,640
+you want to produce but what consumers
+
+00:20:27,049 --> 00:20:31,760
+want okay what makes it easier for them
+
+00:20:28,640 --> 00:20:33,470
+to consume and also what should they be
+
+00:20:31,760 --> 00:20:35,809
+doing right you want them to be doing
+
+00:20:33,470 --> 00:20:37,909
+things smartly like doing things I
+
+00:20:35,809 --> 00:20:41,000
+definitely and so forth so how do you
+
+00:20:37,909 --> 00:20:43,159
+encourage that in our event design so I
+
+00:20:41,000 --> 00:20:44,990
+comes down to I guess how you structure
+
+00:20:43,159 --> 00:20:47,000
+these events so I get there's two
+
+00:20:44,990 --> 00:20:49,460
+general models so you might have insert
+
+00:20:47,000 --> 00:20:51,740
+update style events versus I set payload
+
+00:20:49,460 --> 00:20:53,840
+star limits all right so insert update I
+
+00:20:51,740 --> 00:20:56,419
+mean by well when I say I want to insert
+
+00:20:53,840 --> 00:20:59,149
+a user I had this user added event and
+
+00:20:56,419 --> 00:21:00,529
+when I do an update of user I have the
+
+00:20:59,149 --> 00:21:02,059
+separate user updated event which
+
+00:21:00,529 --> 00:21:03,769
+essentially is a patch right so you have
+
+00:21:02,059 --> 00:21:07,850
+optional values and your patch through
+
+00:21:03,769 --> 00:21:11,240
+the values that were changed and whereas
+
+00:21:07,850 --> 00:21:12,529
+for set events when you insert a user
+
+00:21:11,240 --> 00:21:14,210
+you basically have a whole bunch of
+
+00:21:12,529 --> 00:21:16,370
+these sip payload events right there's
+
+00:21:14,210 --> 00:21:17,990
+no user others are added or insert or
+
+00:21:16,370 --> 00:21:20,990
+keyword it's just I'm just setting these
+
+00:21:17,990 --> 00:21:22,100
+values and similarly when I write the or
+
+00:21:20,990 --> 00:21:24,320
+when I update this user
+
+00:21:22,100 --> 00:21:25,940
+I just basically provide yet not a set
+
+00:21:24,320 --> 00:21:27,230
+event to overwrite all right so there's
+
+00:21:25,940 --> 00:21:30,559
+no distinction between the two cases
+
+00:21:27,230 --> 00:21:31,970
+there so the insert update case is quite
+
+00:21:30,559 --> 00:21:33,590
+a nice from a producer side of things
+
+00:21:31,970 --> 00:21:35,090
+right because that matches the crud in
+
+00:21:33,590 --> 00:21:37,700
+it that matches crud all right you can
+
+00:21:35,090 --> 00:21:39,220
+and matches the patch api's it's really
+
+00:21:37,700 --> 00:21:43,399
+easy for us to produce events like that
+
+00:21:39,220 --> 00:21:45,289
+but sorry the problem is though oh yeah
+
+00:21:43,399 --> 00:21:46,669
+the problem is that there is this now on
+
+00:21:45,289 --> 00:21:49,039
+app listen assumption that there is
+
+00:21:46,669 --> 00:21:51,169
+exactly one insert before any number of
+
+00:21:49,039 --> 00:21:52,429
+updates or deletes all right it's not
+
+00:21:51,169 --> 00:21:54,889
+written down but it's kind of implied
+
+00:21:52,429 --> 00:21:56,690
+all right and so I guess what we found
+
+00:21:54,889 --> 00:21:59,269
+is that consumers didn't say well when I
+
+00:21:56,690 --> 00:22:01,250
+see a user added in user added events
+
+00:21:59,269 --> 00:22:04,100
+I'll just change that into an insert
+
+00:22:01,250 --> 00:22:05,929
+sequel statement no checks similarly
+
+00:22:04,100 --> 00:22:07,220
+when I do it updates them and I just see
+
+00:22:05,929 --> 00:22:10,940
+an update event I just write update
+
+00:22:07,220 --> 00:22:12,200
+sequel and that's it no checks but
+
+00:22:10,940 --> 00:22:13,520
+they're actually are valid cases
+
+00:22:12,200 --> 00:22:15,139
+depending on how we write these events
+
+00:22:13,520 --> 00:22:17,389
+where you actually might have more to
+
+00:22:15,139 --> 00:22:19,190
+insert events right and to be honest
+
+00:22:17,389 --> 00:22:21,169
+doesn't matter you have ways of
+
+00:22:19,190 --> 00:22:22,820
+resolving it all right so you can if you
+
+00:22:21,169 --> 00:22:24,529
+see duplicate inserts you can treat the
+
+00:22:22,820 --> 00:22:25,729
+second one as an update you can just
+
+00:22:24,529 --> 00:22:27,499
+ignore the second one I mean there are
+
+00:22:25,729 --> 00:22:29,149
+lots of ways of doing it you don't have
+
+00:22:27,499 --> 00:22:31,279
+to fail all right so let's be a bit
+
+00:22:29,149 --> 00:22:33,469
+smart about it so essentially we're
+
+00:22:31,279 --> 00:22:35,269
+talking about our dentists all right and
+
+00:22:33,469 --> 00:22:37,070
+the nice thing about set events is that
+
+00:22:35,269 --> 00:22:38,329
+because you don't have that implicit
+
+00:22:37,070 --> 00:22:39,409
+assumption there anymore because you
+
+00:22:38,329 --> 00:22:41,749
+don't know if it's an insert or update
+
+00:22:39,409 --> 00:22:44,209
+you're forcing consumers to be identity
+
+00:22:41,749 --> 00:22:45,979
+which is a good thing right it's makes
+
+00:22:44,209 --> 00:22:48,799
+their code safer it sounds like a lot
+
+00:22:45,979 --> 00:22:50,629
+more work but to be honest you know you
+
+00:22:48,799 --> 00:22:52,339
+now only have a single code path that
+
+00:22:50,629 --> 00:22:53,959
+they need the tests against you have a
+
+00:22:52,339 --> 00:22:55,159
+series of said events they need to test
+
+00:22:53,959 --> 00:22:56,719
+against that you don't need to worry
+
+00:22:55,159 --> 00:22:59,289
+about instead of their cases only for
+
+00:22:56,719 --> 00:23:01,999
+that actually makes their code simpler
+
+00:22:59,289 --> 00:23:03,169
+all right obviously we've got to be
+
+00:23:01,999 --> 00:23:04,339
+little bit careful about the size of
+
+00:23:03,169 --> 00:23:07,609
+these events now right because if you
+
+00:23:04,339 --> 00:23:10,309
+have really big set pelo events like the
+
+00:23:07,609 --> 00:23:11,659
+entire user profile what consumers will
+
+00:23:10,309 --> 00:23:13,459
+end up doing is they'll read the entire
+
+00:23:11,659 --> 00:23:15,229
+user profile from somewhere update the
+
+00:23:13,459 --> 00:23:16,459
+one little field and save it again and
+
+00:23:15,229 --> 00:23:18,200
+of course if you have a lot of
+
+00:23:16,459 --> 00:23:20,059
+concurrent operations like that then you
+
+00:23:18,200 --> 00:23:22,099
+have you know you can override
+
+00:23:20,059 --> 00:23:24,739
+non-conflicting events which is a bad
+
+00:23:22,099 --> 00:23:26,149
+thing and so what we do is we actually
+
+00:23:24,739 --> 00:23:27,499
+have really really small set of its
+
+00:23:26,149 --> 00:23:29,119
+right essentially the fields you are
+
+00:23:27,499 --> 00:23:30,679
+likely to change together you put into
+
+00:23:29,119 --> 00:23:32,119
+one of it but a way to keep them
+
+00:23:30,679 --> 00:23:34,609
+separate all right the events are small
+
+00:23:32,119 --> 00:23:35,539
+they can be cheap all right so this is
+
+00:23:34,609 --> 00:23:40,009
+kind of approach where I guess we
+
+00:23:35,539 --> 00:23:41,209
+eventually evolved to alright so the
+
+00:23:40,009 --> 00:23:42,379
+next thing is okay well I've talked
+
+00:23:41,209 --> 00:23:44,749
+about events I've talked about Vince
+
+00:23:42,379 --> 00:23:47,899
+streams all right and I guess how do
+
+00:23:44,749 --> 00:23:49,129
+they relate and I guess one of the
+
+00:23:47,899 --> 00:23:51,259
+principles I guess we're trying to push
+
+00:23:49,129 --> 00:23:52,429
+well I've been trying to push is split
+
+00:23:51,259 --> 00:23:54,129
+your event streams as much as you can
+
+00:23:52,429 --> 00:23:57,019
+paralyze them okay
+
+00:23:54,129 --> 00:23:58,820
+and I guess the reason why I said it
+
+00:23:57,019 --> 00:24:00,859
+there's essentially two schools of
+
+00:23:58,820 --> 00:24:03,589
+thought here one is you have all events
+
+00:24:00,859 --> 00:24:05,059
+in one big stream okay that's and that's
+
+00:24:03,589 --> 00:24:06,320
+really you know and B coming from a
+
+00:24:05,059 --> 00:24:08,239
+relational wall coming from a world
+
+00:24:06,320 --> 00:24:10,099
+where this you know a different world
+
+00:24:08,239 --> 00:24:12,109
+this is kind of really safe right
+
+00:24:10,099 --> 00:24:13,459
+because all the events are in place I
+
+00:24:12,109 --> 00:24:15,019
+can do this you know it's not the
+
+00:24:13,459 --> 00:24:16,159
+greatest transactions but at least we
+
+00:24:15,019 --> 00:24:18,049
+have those constraints from Williams
+
+00:24:16,159 --> 00:24:21,289
+when we save events so we have that kind
+
+00:24:18,049 --> 00:24:23,029
+of safety there all right the problem
+
+00:24:21,289 --> 00:24:25,519
+obviously though is when you have one
+
+00:24:23,029 --> 00:24:27,289
+stream you have one rider or one reader
+
+00:24:25,519 --> 00:24:29,509
+right that's pretty poor in terms of
+
+00:24:27,289 --> 00:24:31,010
+performance right and so that's when you
+
+00:24:29,509 --> 00:24:32,960
+really decide looking at well
+
+00:24:31,010 --> 00:24:35,870
+multiple streams shouting for your
+
+00:24:32,960 --> 00:24:37,580
+throughput accepting that there is no
+
+00:24:35,870 --> 00:24:39,320
+longer any ordering between events
+
+00:24:37,580 --> 00:24:40,880
+streams which is not a bad thing it's
+
+00:24:39,320 --> 00:24:44,240
+actually a good thing for scalability
+
+00:24:40,880 --> 00:24:45,560
+and I guess you might ask we'll talk
+
+00:24:44,240 --> 00:24:47,180
+about a little bit but essentially what
+
+00:24:45,560 --> 00:24:50,030
+you end up with is a better latency of
+
+00:24:47,180 --> 00:24:53,120
+availability compromise then it would
+
+00:24:50,030 --> 00:24:54,440
+have a single share approach all right
+
+00:24:53,120 --> 00:24:55,760
+so definitely multiple streams so I
+
+00:24:54,440 --> 00:24:57,860
+guess the rules would be splitting these
+
+00:24:55,760 --> 00:24:59,360
+streams are firstly obviously put
+
+00:24:57,860 --> 00:25:01,730
+independent events on different event
+
+00:24:59,360 --> 00:25:04,490
+streams if two users want to update
+
+00:25:01,730 --> 00:25:06,260
+their display names why should they
+
+00:25:04,490 --> 00:25:07,460
+conflict all right that they're
+
+00:25:06,260 --> 00:25:09,200
+independent I'll sum bulb they've
+
+00:25:07,460 --> 00:25:10,640
+changed the display name so on so keep
+
+00:25:09,200 --> 00:25:13,640
+them as separate events keep them on
+
+00:25:10,640 --> 00:25:15,280
+separate event streams there are a
+
+00:25:13,640 --> 00:25:18,110
+couple of ways you can sort of just
+
+00:25:15,280 --> 00:25:20,330
+distribute these events so one by event
+
+00:25:18,110 --> 00:25:23,000
+type so you might have user events
+
+00:25:20,330 --> 00:25:25,220
+versus group events for example and also
+
+00:25:23,000 --> 00:25:27,500
+by unique ID so you might have per user
+
+00:25:25,220 --> 00:25:29,630
+event stream so keyed by user ID for
+
+00:25:27,500 --> 00:25:33,850
+example so the way you can sort of fan
+
+00:25:29,630 --> 00:25:36,650
+out your events quite nicely nope I
+
+00:25:33,850 --> 00:25:38,660
+think before you sort of go down that
+
+00:25:36,650 --> 00:25:40,580
+path though I guess you do need to we
+
+00:25:38,660 --> 00:25:42,290
+know and then of their business systems
+
+00:25:40,580 --> 00:25:43,880
+do have some kind of transaction a like
+
+00:25:42,290 --> 00:25:45,410
+I've acquired but you're going to start
+
+00:25:43,880 --> 00:25:47,150
+questioning what transactions do you
+
+00:25:45,410 --> 00:25:48,500
+really need all right just because your
+
+00:25:47,150 --> 00:25:49,850
+current system has transactions
+
+00:25:48,500 --> 00:25:51,860
+everywhere doesn't mean you actually
+
+00:25:49,850 --> 00:25:54,170
+have that as a business requirement all
+
+00:25:51,860 --> 00:25:56,450
+right so now for example for our case
+
+00:25:54,170 --> 00:25:58,430
+the only thing we really care about is
+
+00:25:56,450 --> 00:25:58,940
+unique let's say of email addresses and
+
+00:25:58,430 --> 00:26:01,100
+that's it
+
+00:25:58,940 --> 00:26:02,870
+everyone change it can be done
+
+00:26:01,100 --> 00:26:05,270
+independently so we aren't any
+
+00:26:02,870 --> 00:26:07,850
+transactions on that on their email
+
+00:26:05,270 --> 00:26:09,470
+address that's it all right and once we
+
+00:26:07,850 --> 00:26:11,210
+have those requirements and go back to
+
+00:26:09,470 --> 00:26:12,590
+the business and make sure and get those
+
+00:26:11,210 --> 00:26:14,930
+requirements don't just ask the tech
+
+00:26:12,590 --> 00:26:16,040
+guys because the tech guys typically
+
+00:26:14,930 --> 00:26:17,900
+will say well we need transactions
+
+00:26:16,040 --> 00:26:21,800
+everywhere go back and really ask those
+
+00:26:17,900 --> 00:26:23,210
+questions then you can start using you
+
+00:26:21,800 --> 00:26:24,890
+can sort of then design your model a
+
+00:26:23,210 --> 00:26:25,940
+little bit differently so I guess one of
+
+00:26:24,890 --> 00:26:28,010
+the things we're doing is more of a
+
+00:26:25,940 --> 00:26:30,050
+hierarchical stream approach so we have
+
+00:26:28,010 --> 00:26:33,260
+a master stream of say email addresses
+
+00:26:30,050 --> 00:26:34,820
+and then have per user streams for
+
+00:26:33,260 --> 00:26:36,380
+everything else all right so that kind
+
+00:26:34,820 --> 00:26:37,880
+of gives us the best of both worlds it
+
+00:26:36,380 --> 00:26:39,740
+allows you to fan out quite nicely for
+
+00:26:37,880 --> 00:26:41,240
+most changes but the change is where you
+
+00:26:39,740 --> 00:26:43,160
+do need that kind of transactionality
+
+00:26:41,240 --> 00:26:45,170
+you can kind of centralized on that one
+
+00:26:43,160 --> 00:26:45,410
+stream but changes aren't written that
+
+00:26:45,170 --> 00:26:46,700
+off
+
+00:26:45,410 --> 00:26:50,690
+into that one stream so the performance
+
+00:26:46,700 --> 00:26:52,940
+hit isn't too bad and one last thing to
+
+00:26:50,690 --> 00:26:54,800
+note is you know as we've started models
+
+00:26:52,940 --> 00:26:58,040
+you actually can changes over time right
+
+00:26:54,800 --> 00:26:59,360
+um you know it's not trivial but if you
+
+00:26:58,040 --> 00:27:00,650
+use things like scales at stream it's
+
+00:26:59,360 --> 00:27:03,380
+actually not too hard to be able to
+
+00:27:00,650 --> 00:27:08,150
+split and or split and most streams
+
+00:27:03,380 --> 00:27:09,620
+later on alright so that's splitting of
+
+00:27:08,150 --> 00:27:11,090
+instruments but remember we have this
+
+00:27:09,620 --> 00:27:12,440
+you know no guaranteed order between
+
+00:27:11,090 --> 00:27:13,700
+streams and that actually has an
+
+00:27:12,440 --> 00:27:16,910
+implication for your downstream
+
+00:27:13,700 --> 00:27:18,590
+consumers alright and that really comes
+
+00:27:16,910 --> 00:27:21,250
+down to query reviews they're actually
+
+00:27:18,590 --> 00:27:23,120
+populated eventually all right because
+
+00:27:21,250 --> 00:27:26,150
+individual streams a process
+
+00:27:23,120 --> 00:27:29,240
+independently so that means two things
+
+00:27:26,150 --> 00:27:31,160
+one is an individual field in your
+
+00:27:29,240 --> 00:27:33,500
+database table so imagine a cell in your
+
+00:27:31,160 --> 00:27:35,600
+database table and Postgres should only
+
+00:27:33,500 --> 00:27:37,040
+be updated by one single event stream
+
+00:27:35,600 --> 00:27:38,330
+right that way you can guarantee that
+
+00:27:37,040 --> 00:27:40,220
+you can consistently get the same
+
+00:27:38,330 --> 00:27:41,960
+results each time you replay your events
+
+00:27:40,220 --> 00:27:45,410
+no matter what order your event streams
+
+00:27:41,960 --> 00:27:46,880
+are replay it in and in general you just
+
+00:27:45,410 --> 00:27:48,740
+don't want any foreign key constraints
+
+00:27:46,880 --> 00:27:50,480
+right because there's no guarantee what
+
+00:27:48,740 --> 00:27:51,830
+you're referencing is actually going to
+
+00:27:50,480 --> 00:27:54,020
+be written if that's on another stream
+
+00:27:51,830 --> 00:27:56,270
+alright and this is a big change right -
+
+00:27:54,020 --> 00:27:57,680
+you know the mindset we use currently
+
+00:27:56,270 --> 00:27:59,980
+constraint readers indices those kind of
+
+00:27:57,680 --> 00:28:03,200
+things a lot in in the traditional world
+
+00:27:59,980 --> 00:28:05,660
+but in general we why would we have any
+
+00:28:03,200 --> 00:28:07,400
+constraints on our or any uniqueness
+
+00:28:05,660 --> 00:28:10,040
+constraint so there's data constraints
+
+00:28:07,400 --> 00:28:12,320
+in our query views these events
+
+00:28:10,040 --> 00:28:13,670
+represent our data model they rip there
+
+00:28:12,320 --> 00:28:15,230
+are the data more all right you have if
+
+00:28:13,670 --> 00:28:16,340
+you want to prevent anything you want to
+
+00:28:15,230 --> 00:28:17,930
+prevent things up front all right
+
+00:28:16,340 --> 00:28:20,360
+there's no point doing it after the
+
+00:28:17,930 --> 00:28:24,760
+horse is bolted all right and again this
+
+00:28:20,360 --> 00:28:28,040
+is a big mindset shift all right so
+
+00:28:24,760 --> 00:28:29,890
+that's event stream so next one next
+
+00:28:28,040 --> 00:28:32,450
+third principle letting go of
+
+00:28:29,890 --> 00:28:35,570
+transactions and consistency gradually
+
+00:28:32,450 --> 00:28:37,370
+okay we're moving into a distributor
+
+00:28:35,570 --> 00:28:39,590
+world distribute transactions are bad I
+
+00:28:37,370 --> 00:28:41,030
+think it's kind of a common theme would
+
+00:28:39,590 --> 00:28:42,830
+be in hearing this conference since in
+
+00:28:41,030 --> 00:28:45,140
+over the last couple years but what does
+
+00:28:42,830 --> 00:28:46,310
+it actually really mean for us and I
+
+00:28:45,140 --> 00:28:48,350
+think it really comes down to really
+
+00:28:46,310 --> 00:28:50,210
+questioning why do we need transactions
+
+00:28:48,350 --> 00:28:53,440
+alright and I see there's probably two
+
+00:28:50,210 --> 00:28:55,580
+main reasons so firstly why does provide
+
+00:28:53,440 --> 00:28:58,010
+enforce business constraints on right
+
+00:28:55,580 --> 00:28:59,180
+okay you want to say I'm a transactions
+
+00:28:58,010 --> 00:29:01,310
+allow you to transition
+
+00:28:59,180 --> 00:29:02,990
+one consistent model to another all
+
+00:29:01,310 --> 00:29:04,670
+right and so you know things like
+
+00:29:02,990 --> 00:29:06,590
+uniqueness constraints and so forth yet
+
+00:29:04,670 --> 00:29:08,150
+that's why we want transactions we want
+
+00:29:06,590 --> 00:29:10,250
+to confirm that you know my model would
+
+00:29:08,150 --> 00:29:12,560
+had no you had it was unique before or
+
+00:29:10,250 --> 00:29:16,550
+unique emails before it still has unique
+
+00:29:12,560 --> 00:29:18,260
+emails after right up to it I guess the
+
+00:29:16,550 --> 00:29:20,120
+second big reason is you know what we
+
+00:29:18,260 --> 00:29:21,470
+hear is well you know I want other
+
+00:29:20,120 --> 00:29:23,570
+people to see what I've written right
+
+00:29:21,470 --> 00:29:24,920
+you know I don't mind my UI will be look
+
+00:29:23,570 --> 00:29:26,840
+a bit funny all the time you know that's
+
+00:29:24,920 --> 00:29:28,190
+that the kind of read afterwards the
+
+00:29:26,840 --> 00:29:29,870
+recommitted kind of transaction
+
+00:29:28,190 --> 00:29:32,360
+isolation model all right that's not a
+
+00:29:29,870 --> 00:29:33,980
+reason why people ask for it and so
+
+00:29:32,360 --> 00:29:36,290
+reward in this is basically talking
+
+00:29:33,980 --> 00:29:38,570
+about read write and read consistency
+
+00:29:36,290 --> 00:29:40,130
+right but there's always this pesky
+
+00:29:38,570 --> 00:29:41,300
+thing called cap theorem so who here
+
+00:29:40,130 --> 00:29:43,370
+actually knows cap theorem or
+
+00:29:41,300 --> 00:29:44,540
+understands kept here excellent you're
+
+00:29:43,370 --> 00:29:48,080
+beautiful
+
+00:29:44,540 --> 00:29:50,240
+all right so I kind of explain what I
+
+00:29:48,080 --> 00:29:52,790
+want to get to is I casually kind of
+
+00:29:50,240 --> 00:29:55,430
+like the the pick elk acronym actually
+
+00:29:52,790 --> 00:29:57,170
+for for cap theory so she came from a
+
+00:29:55,430 --> 00:29:58,810
+guy called Daniel body or his is
+
+00:29:57,170 --> 00:30:01,850
+actually his students who came with this
+
+00:29:58,810 --> 00:30:04,850
+redefinition of extension of cap and the
+
+00:30:01,850 --> 00:30:06,560
+idea is you have the cap bit so during
+
+00:30:04,850 --> 00:30:07,760
+that world partition so you have set to
+
+00:30:06,560 --> 00:30:09,830
+know that it can't talk to each other
+
+00:30:07,760 --> 00:30:11,120
+you choose between availability and
+
+00:30:09,830 --> 00:30:13,580
+consistency so if you want full
+
+00:30:11,120 --> 00:30:14,930
+consistency obviously you can't have it
+
+00:30:13,580 --> 00:30:17,150
+during that work petition because no
+
+00:30:14,930 --> 00:30:19,640
+it's can't talk to each other right but
+
+00:30:17,150 --> 00:30:21,890
+interestingly when you drink normal
+
+00:30:19,640 --> 00:30:24,260
+operation you have a choice now between
+
+00:30:21,890 --> 00:30:26,510
+latency and consistency all right so if
+
+00:30:24,260 --> 00:30:28,400
+you want a fully consistent data model
+
+00:30:26,510 --> 00:30:29,930
+across all your notes you need to talk
+
+00:30:28,400 --> 00:30:32,960
+to every single node right and that
+
+00:30:29,930 --> 00:30:35,030
+takes time hence your latency all right
+
+00:30:32,960 --> 00:30:36,440
+so I guess one of the concerns we hope
+
+00:30:35,030 --> 00:30:39,020
+you know moving to a distributed system
+
+00:30:36,440 --> 00:30:40,970
+world is well how those transactions I
+
+00:30:39,020 --> 00:30:42,890
+mean what can I do you know you know
+
+00:30:40,970 --> 00:30:44,420
+it's a big mindset shift right and the
+
+00:30:42,890 --> 00:30:46,460
+nice thing about event sourcing is this
+
+00:30:44,420 --> 00:30:48,260
+this kind of middle ground and so I
+
+00:30:46,460 --> 00:30:49,880
+guess we've got a couple of solution
+
+00:30:48,260 --> 00:30:52,190
+when we're putting in place so one is
+
+00:30:49,880 --> 00:30:55,370
+for right consistency we have this check
+
+00:30:52,190 --> 00:30:57,740
+and set right operation or mode and on
+
+00:30:55,370 --> 00:30:59,450
+reads we have this concept of optional
+
+00:30:57,740 --> 00:31:02,180
+for strays all right
+
+00:30:59,450 --> 00:31:04,130
+so we're checking set rights the idea is
+
+00:31:02,180 --> 00:31:05,330
+basically all conflictive answer under
+
+00:31:04,130 --> 00:31:07,820
+same event streams hence that
+
+00:31:05,330 --> 00:31:09,920
+hierarchical approach but all we're
+
+00:31:07,820 --> 00:31:12,560
+doing is a check and set loop all right
+
+00:31:09,920 --> 00:31:13,070
+so we the logic in our business layer
+
+00:31:12,560 --> 00:31:14,750
+would be
+
+00:31:13,070 --> 00:31:17,299
+read a view of the dollar at sequence
+
+00:31:14,750 --> 00:31:19,399
+number X do my business logic checks and
+
+00:31:17,299 --> 00:31:21,350
+then try to rights using that operation
+
+00:31:19,399 --> 00:31:23,480
+type I showed you earlier ensure that
+
+00:31:21,350 --> 00:31:25,429
+the stream has not progressed past this
+
+00:31:23,480 --> 00:31:28,190
+point okay that's kind of your
+
+00:31:25,429 --> 00:31:29,360
+transaction there so obviously even I'll
+
+00:31:28,190 --> 00:31:30,950
+care for this gives you a lot of false
+
+00:31:29,360 --> 00:31:33,470
+positives because you know if you you
+
+00:31:30,950 --> 00:31:34,759
+might have non-conflicting rights but
+
+00:31:33,470 --> 00:31:36,679
+there bump the event stream sequence
+
+00:31:34,759 --> 00:31:39,649
+number up sorry not you you falsely fail
+
+00:31:36,679 --> 00:31:40,970
+you need to retry but ironically you
+
+00:31:39,649 --> 00:31:42,470
+know if you actually have really small
+
+00:31:40,970 --> 00:31:44,509
+streams so are very few events on a
+
+00:31:42,470 --> 00:31:46,190
+stream and only conflicting events on a
+
+00:31:44,509 --> 00:31:48,259
+stream and the session becomes less
+
+00:31:46,190 --> 00:31:49,820
+certain problem so you're moving away
+
+00:31:48,259 --> 00:31:52,279
+from a single stream to a multiplicity
+
+00:31:49,820 --> 00:31:55,009
+or approach actually helps you which is
+
+00:31:52,279 --> 00:31:56,419
+a little bit kind of intuitive all right
+
+00:31:55,009 --> 00:31:58,250
+so that's the right all right
+
+00:31:56,419 --> 00:32:00,409
+consistency what about the reads so the
+
+00:31:58,250 --> 00:32:02,750
+idea is basic we need to provide an API
+
+00:32:00,409 --> 00:32:04,460
+for you know when it someone asked for a
+
+00:32:02,750 --> 00:32:06,169
+query review they want to say please
+
+00:32:04,460 --> 00:32:08,299
+give me your career view of sequence
+
+00:32:06,169 --> 00:32:09,889
+number at least X where X might be the
+
+00:32:08,299 --> 00:32:12,559
+value I might have just written for
+
+00:32:09,889 --> 00:32:14,090
+example alright so obviously when we do
+
+00:32:12,559 --> 00:32:15,710
+that you do have potentially increased
+
+00:32:14,090 --> 00:32:17,299
+latency right this is where your pool
+
+00:32:15,710 --> 00:32:19,009
+model comes in so most the time you
+
+00:32:17,299 --> 00:32:21,139
+events are being pushed to a Postgres
+
+00:32:19,009 --> 00:32:23,179
+but when you have one of these requests
+
+00:32:21,139 --> 00:32:25,129
+you want to say well pull from dynamo
+
+00:32:23,179 --> 00:32:26,899
+make sure post goes up up to date and
+
+00:32:25,129 --> 00:32:30,340
+then return the result all right and
+
+00:32:26,899 --> 00:32:32,509
+since you know increased latency there
+
+00:32:30,340 --> 00:32:34,129
+so obviously we don't expose this as a
+
+00:32:32,509 --> 00:32:35,570
+default mode okay something people need
+
+00:32:34,129 --> 00:32:38,690
+to ask for the courage people to think
+
+00:32:35,570 --> 00:32:40,190
+about it and the other thing we sort of
+
+00:32:38,690 --> 00:32:42,139
+found is make sure you do it enforce
+
+00:32:40,190 --> 00:32:43,639
+timed weights as well because if someone
+
+00:32:42,139 --> 00:32:45,230
+asked for a sequence number a long time
+
+00:32:43,639 --> 00:32:47,809
+in the future then you know they'll be
+
+00:32:45,230 --> 00:32:49,159
+waiting there for quite some time all
+
+00:32:47,809 --> 00:32:51,500
+right so how do we actually expose as an
+
+00:32:49,159 --> 00:32:52,940
+API so we have this concept called a
+
+00:32:51,500 --> 00:32:55,039
+consistency token all right
+
+00:32:52,940 --> 00:32:57,370
+so if you look at the events we are the
+
+00:32:55,039 --> 00:33:01,039
+resources we expose like a user resource
+
+00:32:57,370 --> 00:33:02,840
+for our REST API it's actually built up
+
+00:33:01,039 --> 00:33:05,179
+from a number of different event streams
+
+00:33:02,840 --> 00:33:07,669
+so for example this Homa user is built
+
+00:33:05,179 --> 00:33:10,490
+up from two event streams it all uses
+
+00:33:07,669 --> 00:33:13,159
+full set of email and also their use a
+
+00:33:10,490 --> 00:33:14,899
+specific event stream and so a token for
+
+00:33:13,159 --> 00:33:16,429
+this user for this particular home or
+
+00:33:14,899 --> 00:33:18,230
+user at this particular point in time is
+
+00:33:16,429 --> 00:33:19,850
+a combination of its sequence numbers
+
+00:33:18,230 --> 00:33:22,129
+from both of those streams and that's
+
+00:33:19,850 --> 00:33:23,840
+yeah that's the token and we returned
+
+00:33:22,129 --> 00:33:26,520
+that as part of the e-tag for all read
+
+00:33:23,840 --> 00:33:28,410
+and write operations okay and so
+
+00:33:26,520 --> 00:33:29,910
+we consumers this is our pack to
+
+00:33:28,410 --> 00:33:32,460
+consumers so they can then pass it back
+
+00:33:29,910 --> 00:33:34,710
+in to for example provide additional
+
+00:33:32,460 --> 00:33:37,640
+rights we can provide extra head and say
+
+00:33:34,710 --> 00:33:40,320
+please write only if secret rx matches
+
+00:33:37,640 --> 00:33:42,360
+we can also use it for force query reads
+
+00:33:40,320 --> 00:33:43,650
+again series of headers we can say
+
+00:33:42,360 --> 00:33:45,270
+please make sure your sequence number is
+
+00:33:43,650 --> 00:33:47,760
+at least this so exactly this and so
+
+00:33:45,270 --> 00:33:49,020
+forth and also actually ends up being
+
+00:33:47,760 --> 00:33:51,990
+used a little bit for caching as well
+
+00:33:49,020 --> 00:33:55,500
+it's kind of nifty alright so one of the
+
+00:33:51,990 --> 00:33:57,840
+use cases we use this for is is you know
+
+00:33:55,500 --> 00:33:59,610
+say you want to add a user then you want
+
+00:33:57,840 --> 00:34:02,340
+to add a group then you want to add that
+
+00:33:59,610 --> 00:34:04,020
+user to that group now obviously that
+
+00:34:02,340 --> 00:34:07,350
+third operation needed both the user in
+
+00:34:04,020 --> 00:34:08,550
+the group to exist right so let's have a
+
+00:34:07,350 --> 00:34:10,140
+look through the sequence and see how
+
+00:34:08,550 --> 00:34:11,909
+that works so obviously the first thing
+
+00:34:10,140 --> 00:34:14,250
+is the client tries to save that user
+
+00:34:11,909 --> 00:34:16,580
+gets back that user token the sealant
+
+00:34:14,250 --> 00:34:20,159
+that Homer token I showed you earlier
+
+00:34:16,580 --> 00:34:21,780
+you didn't try to save a group ok took
+
+00:34:20,159 --> 00:34:23,730
+group token back now
+
+00:34:21,780 --> 00:34:25,169
+the key thing here is this add user to
+
+00:34:23,730 --> 00:34:27,149
+group operation passes through both of
+
+00:34:25,169 --> 00:34:28,530
+those opaque tokens back to the server
+
+00:34:27,149 --> 00:34:31,260
+right with appropriate headers and
+
+00:34:28,530 --> 00:34:33,179
+that's when the actual server then you
+
+00:34:31,260 --> 00:34:35,220
+know forces query views to be updated
+
+00:34:33,179 --> 00:34:36,810
+the sequence numbers then does its
+
+00:34:35,220 --> 00:34:38,790
+business logic check then does is check
+
+00:34:36,810 --> 00:34:40,890
+and say writes and when that works then
+
+00:34:38,790 --> 00:34:43,500
+you can return and update a token itself
+
+00:34:40,890 --> 00:34:44,790
+so this is yeah I guess so I guess we
+
+00:34:43,500 --> 00:34:46,380
+don't actually see this very often but
+
+00:34:44,790 --> 00:34:47,760
+there are some cases where you know you
+
+00:34:46,380 --> 00:34:49,500
+need this kind of capability and this
+
+00:34:47,760 --> 00:34:51,679
+you know and that's at least event
+
+00:34:49,500 --> 00:34:55,230
+sourcing gives us the ability to do that
+
+00:34:51,679 --> 00:34:56,640
+all right so the last principle I want
+
+00:34:55,230 --> 00:34:57,750
+to talk about is it's kind of a court of
+
+00:34:56,640 --> 00:34:59,010
+three and a half because it's nothing
+
+00:34:57,750 --> 00:35:00,900
+we're not doing it but it's something we
+
+00:34:59,010 --> 00:35:02,970
+want to get to all right and that's
+
+00:35:00,900 --> 00:35:04,710
+moving away from this up front
+
+00:35:02,970 --> 00:35:07,950
+transaction upfront chicken step rights
+
+00:35:04,710 --> 00:35:10,860
+to conflict resolution all right and the
+
+00:35:07,950 --> 00:35:11,940
+idea is well we have all conflicting
+
+00:35:10,860 --> 00:35:15,030
+events in the same event stream already
+
+00:35:11,940 --> 00:35:17,070
+so in theory if we have the same
+
+00:35:15,030 --> 00:35:19,470
+resolution our program to find out all
+
+00:35:17,070 --> 00:35:21,240
+of our query notes then you know we sure
+
+00:35:19,470 --> 00:35:22,650
+we should have independently
+
+00:35:21,240 --> 00:35:24,770
+we should have consistent views
+
+00:35:22,650 --> 00:35:26,640
+generated by each query node
+
+00:35:24,770 --> 00:35:28,500
+independently right there's no consensus
+
+00:35:26,640 --> 00:35:30,120
+required there so things like you might
+
+00:35:28,500 --> 00:35:32,610
+use last right wins
+
+00:35:30,120 --> 00:35:34,740
+that's a worst case or ideally we want
+
+00:35:32,610 --> 00:35:37,460
+to use you know these come see our DT so
+
+00:35:34,740 --> 00:35:40,410
+converge in our commutative read
+
+00:35:37,460 --> 00:35:43,710
+replicated data types the oddities
+
+00:35:40,410 --> 00:35:44,999
+and the nice thing about that is you
+
+00:35:43,710 --> 00:35:46,650
+don't know all they have these
+
+00:35:44,999 --> 00:35:48,779
+transaction issues you don't have that
+
+00:35:46,650 --> 00:35:51,059
+chicken set folder right false positives
+
+00:35:48,779 --> 00:35:52,619
+anymore you make sure you make your
+
+00:35:51,059 --> 00:35:54,299
+query reviews a lot more resilient
+
+00:35:52,619 --> 00:35:55,710
+because you know events may come out of
+
+00:35:54,299 --> 00:35:57,599
+order it's okay you can just you know
+
+00:35:55,710 --> 00:36:00,930
+apply them eventually they'll get
+
+00:35:57,599 --> 00:36:02,400
+consistent you can a little bit of care
+
+00:36:00,930 --> 00:36:03,839
+the way we work structure in the key
+
+00:36:02,400 --> 00:36:05,309
+structures correctly you can actually
+
+00:36:03,839 --> 00:36:08,849
+get multi-region rights working pretty
+
+00:36:05,309 --> 00:36:10,380
+nicely too obviously there are potential
+
+00:36:08,849 --> 00:36:12,029
+glitches because during that resolution
+
+00:36:10,380 --> 00:36:13,170
+process you know you might have
+
+00:36:12,029 --> 00:36:15,359
+different answers between different
+
+00:36:13,170 --> 00:36:16,499
+nodes and I guess the biggest kicker for
+
+00:36:15,359 --> 00:36:18,839
+us which is why we haven't really looked
+
+00:36:16,499 --> 00:36:20,160
+at it too much yet is all our kirino's
+
+00:36:18,839 --> 00:36:22,079
+essentially and to implement the same
+
+00:36:20,160 --> 00:36:24,450
+algorithm right and if you see idt's
+
+00:36:22,079 --> 00:36:26,130
+it's not straight forward yet
+
+00:36:24,450 --> 00:36:29,509
+it will get you eventually get there but
+
+00:36:26,130 --> 00:36:31,859
+it's not straightforward yet all right
+
+00:36:29,509 --> 00:36:33,660
+all right so that's a bit of a whirlwind
+
+00:36:31,859 --> 00:36:35,519
+tour I guess what we've been in doing so
+
+00:36:33,660 --> 00:36:37,739
+I guess let's take a step back and I'll
+
+00:36:35,519 --> 00:36:40,549
+go through some of the key takeaways all
+
+00:36:37,739 --> 00:36:43,470
+right so the first big one is I'd say is
+
+00:36:40,549 --> 00:36:45,599
+start small and challenge everything all
+
+00:36:43,470 --> 00:36:47,569
+right so we talked about you no doubt
+
+00:36:45,599 --> 00:36:49,619
+any platform users groups memberships in
+
+00:36:47,569 --> 00:36:51,029
+retrospect we thought that was a pretty
+
+00:36:49,619 --> 00:36:52,739
+small component of the system in
+
+00:36:51,029 --> 00:36:53,519
+retrospect it actually was too big all
+
+00:36:52,739 --> 00:36:55,980
+right we should have started even
+
+00:36:53,519 --> 00:36:59,160
+smaller than that all right and then
+
+00:36:55,980 --> 00:37:01,289
+I'll and I guess and that would allow so
+
+00:36:59,160 --> 00:37:03,059
+I guess challenge more of those
+
+00:37:01,289 --> 00:37:04,650
+requirements I guess focus running and
+
+00:37:03,059 --> 00:37:06,720
+focus on understanding the full model
+
+00:37:04,650 --> 00:37:08,069
+but allow us to focus small bits and
+
+00:37:06,720 --> 00:37:11,549
+challenge what those requirements were
+
+00:37:08,069 --> 00:37:12,930
+to begin with right and also ask but
+
+00:37:11,549 --> 00:37:14,309
+there are challenging everything is it
+
+00:37:12,930 --> 00:37:15,900
+really important to get the right team
+
+00:37:14,309 --> 00:37:17,309
+to do this all right so you need to get
+
+00:37:15,900 --> 00:37:19,499
+the team who are willing to challenge
+
+00:37:17,309 --> 00:37:21,539
+the status quo and asked why do we have
+
+00:37:19,499 --> 00:37:23,369
+transactions what in a water the actual
+
+00:37:21,539 --> 00:37:26,299
+underlying business requirements all
+
+00:37:23,369 --> 00:37:28,349
+right so that's really really important
+
+00:37:26,299 --> 00:37:29,460
+second the increment architecture
+
+00:37:28,349 --> 00:37:31,890
+approach actually works really well for
+
+00:37:29,460 --> 00:37:33,210
+us okay so if we went to our bosses and
+
+00:37:31,890 --> 00:37:34,769
+said we're doing a fence sourcing and
+
+00:37:33,210 --> 00:37:37,079
+see you are a CQRS from the beginning
+
+00:37:34,769 --> 00:37:40,019
+look I wouldn't be here all right sir
+
+00:37:37,079 --> 00:37:41,579
+but because we started with then
+
+00:37:40,019 --> 00:37:43,499
+sourcing first we started building you
+
+00:37:41,579 --> 00:37:44,640
+know sparking that out first and as
+
+00:37:43,499 --> 00:37:46,739
+people were building a production
+
+00:37:44,640 --> 00:37:48,299
+version of it then we started spark ever
+
+00:37:46,739 --> 00:37:50,549
+see kiosk bits you know the event source
+
+00:37:48,299 --> 00:37:53,150
+the event bus bits and so forth and I
+
+00:37:50,549 --> 00:37:55,140
+guess we were to show people where how
+
+00:37:53,150 --> 00:37:57,300
+bringing people along for the ride I
+
+00:37:55,140 --> 00:37:58,620
+think that helps I guess give us calm
+
+00:37:57,300 --> 00:38:03,030
+confidence that we know we knew what we
+
+00:37:58,620 --> 00:38:04,920
+were doing in terms of design this book
+
+00:38:03,030 --> 00:38:06,840
+with a 3-bit and I guess three key sort
+
+00:38:04,920 --> 00:38:09,120
+of take away so firstly thinking events
+
+00:38:06,840 --> 00:38:11,880
+as an API ok small at third put events
+
+00:38:09,120 --> 00:38:14,130
+set payloads really small as much as
+
+00:38:11,880 --> 00:38:15,840
+small as you can all right
+
+00:38:14,130 --> 00:38:18,840
+events dreams split streams as much as
+
+00:38:15,840 --> 00:38:20,310
+possible don't be suckered into the well
+
+00:38:18,840 --> 00:38:22,200
+everything in one single event stream
+
+00:38:20,310 --> 00:38:24,750
+means transactions don't get stuck into
+
+00:38:22,200 --> 00:38:25,920
+that and in general I think because
+
+00:38:24,750 --> 00:38:27,450
+we're moving this whole distributed
+
+00:38:25,920 --> 00:38:29,250
+system world we really need cell look
+
+00:38:27,450 --> 00:38:30,900
+yet we can transactions and eventual
+
+00:38:29,250 --> 00:38:34,050
+consistency we just need to get
+
+00:38:30,900 --> 00:38:37,740
+comfortable with it okay um two things I
+
+00:38:34,050 --> 00:38:39,540
+want to leave you with so firstly Martin
+
+00:38:37,740 --> 00:38:40,530
+Fowler came to Sydney a little while ago
+
+00:38:39,540 --> 00:38:42,870
+and he was give me a talk and I met
+
+00:38:40,530 --> 00:38:43,950
+saucing it was like a topical months I
+
+00:38:42,870 --> 00:38:45,600
+guess
+
+00:38:43,950 --> 00:38:47,580
+and he said this is be loosely
+
+00:38:45,600 --> 00:38:49,140
+paraphrasing him we as an industry
+
+00:38:47,580 --> 00:38:51,330
+should be using event sourcing more than
+
+00:38:49,140 --> 00:38:53,100
+we do all right it's really powerful
+
+00:38:51,330 --> 00:38:54,750
+okay um you know how to use it
+
+00:38:53,100 --> 00:38:56,640
+everywhere but using the small bits yes
+
+00:38:54,750 --> 00:39:00,210
+your core parts of your system can give
+
+00:38:56,640 --> 00:39:02,670
+you massive benefits right and secondly
+
+00:39:00,210 --> 00:39:04,200
+I'll give you a couple links so we've
+
+00:39:02,670 --> 00:39:05,850
+open source our weapons our ban source
+
+00:39:04,200 --> 00:39:07,350
+library so you can have a look at that
+
+00:39:05,850 --> 00:39:09,900
+there was so we're still actively
+
+00:39:07,350 --> 00:39:11,910
+developing that the dynamo bits that
+
+00:39:09,900 --> 00:39:13,110
+obviously rely on our NWR scholar
+
+00:39:11,910 --> 00:39:15,570
+library which is a essentially a
+
+00:39:13,110 --> 00:39:19,350
+functional wrapper around the AOS AWS
+
+00:39:15,570 --> 00:39:21,540
+SDK so have a look at that as well and
+
+00:39:19,350 --> 00:39:24,110
+that note thank you for time and I'll do
+
+00:39:21,540 --> 00:39:24,110
+you have any questions
+
+00:39:33,980 --> 00:39:44,220
+yep
+
+00:39:35,190 --> 00:39:45,840
+I'll just repeat the question sir in
+
+00:39:44,220 --> 00:39:49,530
+some domains you sort of want the user
+
+00:39:45,840 --> 00:39:52,770
+to do something that for example if a
+
+00:39:49,530 --> 00:39:54,869
+manager approves a budget then he he
+
+00:39:52,770 --> 00:39:56,910
+does not mean to approve the budget if
+
+00:39:54,869 --> 00:40:01,920
+someone else added something to the
+
+00:39:56,910 --> 00:40:03,300
+budget since you read it so but yeah and
+
+00:40:01,920 --> 00:40:04,920
+then your solution here is sort of to
+
+00:40:03,300 --> 00:40:06,390
+cut up the event streams but can you
+
+00:40:04,920 --> 00:40:08,610
+maybe go into a little more detail on
+
+00:40:06,390 --> 00:40:10,350
+how that solves the problem
+
+00:40:08,610 --> 00:40:11,910
+yeah so it's interesting with yes so I
+
+00:40:10,350 --> 00:40:13,710
+guess all of our transactions are very
+
+00:40:11,910 --> 00:40:17,250
+short-lived right so I'm longer-term
+
+00:40:13,710 --> 00:40:19,650
+transactions I probably end up putting
+
+00:40:17,250 --> 00:40:21,840
+on top of like as an extra layer on top
+
+00:40:19,650 --> 00:40:23,190
+of like a court like a workflow system
+
+00:40:21,840 --> 00:40:24,840
+on top of it all right so rather than
+
+00:40:23,190 --> 00:40:26,580
+using event sourcing transaction
+
+00:40:24,840 --> 00:40:28,110
+directly for that so you might use the
+
+00:40:26,580 --> 00:40:29,940
+vents I don't know if you do even you
+
+00:40:28,110 --> 00:40:31,260
+need to used events or transactions for
+
+00:40:29,940 --> 00:40:33,570
+story you'd probably store the
+
+00:40:31,260 --> 00:40:36,390
+individual data elements so each phase
+
+00:40:33,570 --> 00:40:38,100
+of your workflow you'd have event source
+
+00:40:36,390 --> 00:40:39,810
+you know data and we're not you need
+
+00:40:38,100 --> 00:40:42,240
+transactions each of those maybe maybe
+
+00:40:39,810 --> 00:40:43,800
+not but the overarching one you don't
+
+00:40:42,240 --> 00:40:45,900
+lock for that for example yeah that
+
+00:40:43,800 --> 00:40:47,070
+might well be individual stream of
+
+00:40:45,900 --> 00:40:49,650
+please make sure you know you might have
+
+00:40:47,070 --> 00:40:51,240
+a master stream of a workflow step to
+
+00:40:49,650 --> 00:40:53,670
+something what's where you'd lock on
+
+00:40:51,240 --> 00:40:57,390
+essentially to give that capability some
+
+00:40:53,670 --> 00:40:59,760
+more that would work hello hello yep I
+
+00:40:57,390 --> 00:41:02,070
+will consider he was a persistent actor
+
+00:40:59,760 --> 00:41:05,310
+for the event so soon I knew I was going
+
+00:41:02,070 --> 00:41:07,800
+to come up so the thing with actor and
+
+00:41:05,310 --> 00:41:10,380
+stuff we don't actor doesn't really fit
+
+00:41:07,800 --> 00:41:12,900
+in terms away we deploy our code and
+
+00:41:10,380 --> 00:41:15,390
+also the way so we deploy our code on
+
+00:41:12,900 --> 00:41:17,880
+our apps a basic stateless we use 12
+
+00:41:15,390 --> 00:41:19,350
+factor app stalls so having clusters and
+
+00:41:17,880 --> 00:41:21,150
+stuff wasn't really out kind of out of
+
+00:41:19,350 --> 00:41:23,970
+the question so that and I guess the
+
+00:41:21,150 --> 00:41:26,910
+second part of that is the way we code
+
+00:41:23,970 --> 00:41:28,650
+we're kind of like we were a function of
+
+00:41:26,910 --> 00:41:30,210
+our code so the way a car and the actor
+
+00:41:28,650 --> 00:41:32,730
+model doesn't really show the way we
+
+00:41:30,210 --> 00:41:34,710
+code you think about we use Scala but
+
+00:41:32,730 --> 00:41:35,970
+more like the Haskell way okay so we
+
+00:41:34,710 --> 00:41:37,890
+sequence things our future that's like
+
+00:41:35,970 --> 00:41:39,060
+that so we're out of have you know depth
+
+00:41:37,890 --> 00:41:41,340
+so that's the reason why we didn't
+
+00:41:39,060 --> 00:41:42,869
+really consider it and plus I guess you
+
+00:41:41,340 --> 00:41:43,980
+know we didn't for a lot of application
+
+00:41:42,869 --> 00:41:45,600
+there really simple right
+
+00:41:43,980 --> 00:41:47,490
+so what we didn't really want to bring
+
+00:41:45,600 --> 00:41:49,170
+in big new frameworks just for
+
+00:41:47,490 --> 00:41:51,570
+essentially is fairly small component
+
+00:41:49,170 --> 00:41:55,290
+like this cool
+
+00:41:51,570 --> 00:41:57,360
+any other questions I'm the right store
+
+00:41:55,290 --> 00:41:58,530
+in the restore when changes you know the
+
+00:41:57,360 --> 00:42:00,660
+changes coming into the right store
+
+00:41:58,530 --> 00:42:02,040
+coming in very quickly yep have you run
+
+00:42:00,660 --> 00:42:06,570
+into a problem where the restore can't
+
+00:42:02,040 --> 00:42:07,800
+keep up not yet I guess okay so I guess
+
+00:42:06,570 --> 00:42:10,020
+it's interesting right you mentioned so
+
+00:42:07,800 --> 00:42:11,550
+for our rights we our rights are a much
+
+00:42:10,020 --> 00:42:12,600
+lower level than our rates all right
+
+00:42:11,550 --> 00:42:14,040
+because you imagine that you don't
+
+00:42:12,600 --> 00:42:14,280
+change your user profile that often all
+
+00:42:14,040 --> 00:42:17,010
+right
+
+00:42:14,280 --> 00:42:18,180
+are you add new users a lot sure so we
+
+00:42:17,010 --> 00:42:20,610
+don't really have that problem so I
+
+00:42:18,180 --> 00:42:22,200
+guess we so one of the things we would
+
+00:42:20,610 --> 00:42:24,720
+probably look at doing is essentially
+
+00:42:22,200 --> 00:42:26,460
+batching up events when when we on that
+
+00:42:24,720 --> 00:42:28,560
+read side so the moment we're doing
+
+00:42:26,460 --> 00:42:31,020
+pretty dumb essentially for each event
+
+00:42:28,560 --> 00:42:32,640
+do some statements right we can actually
+
+00:42:31,020 --> 00:42:33,630
+be a lot more smarter and batch up
+
+00:42:32,640 --> 00:42:35,790
+events and brought them outs
+
+00:42:33,630 --> 00:42:37,860
+well essentially when you've read from
+
+00:42:35,790 --> 00:42:39,030
+Kinesis you poll every once a second
+
+00:42:37,860 --> 00:42:40,380
+right and you get a whole bunch here up
+
+00:42:39,030 --> 00:42:42,120
+to a hundred events I think it is and
+
+00:42:40,380 --> 00:42:43,680
+you can process all those in one big
+
+00:42:42,120 --> 00:42:45,210
+batch to get some more performance out
+
+00:42:43,680 --> 00:42:47,040
+of it but I mean to know we haven't hit
+
+00:42:45,210 --> 00:42:49,340
+that problem just yet so we have lots of
+
+00:42:47,040 --> 00:42:57,860
+other things we can tune before that
+
+00:42:49,340 --> 00:42:57,860
+cool in other questions oh yes your hand
+
+00:43:00,980 --> 00:43:07,290
+this whole event sourcing stuff sounds
+
+00:43:04,290 --> 00:43:09,600
+very nice but when would you apply it
+
+00:43:07,290 --> 00:43:12,170
+and men were to not apply it because
+
+00:43:09,600 --> 00:43:13,740
+there's probably not a self ability ah
+
+00:43:12,170 --> 00:43:16,860
+it's a good question
+
+00:43:13,740 --> 00:43:19,320
+um I guess I'm kind of leaning more
+
+00:43:16,860 --> 00:43:21,210
+towards when would I not apply it at
+
+00:43:19,320 --> 00:43:22,530
+least think about it because you look a
+
+00:43:21,210 --> 00:43:24,450
+lot it comes down to your business use
+
+00:43:22,530 --> 00:43:27,150
+case right so whenever you start doing
+
+00:43:24,450 --> 00:43:30,450
+things like I want history of data I
+
+00:43:27,150 --> 00:43:32,510
+want I want to order trails those kind
+
+00:43:30,450 --> 00:43:34,980
+of things it becomes a very natural fit
+
+00:43:32,510 --> 00:43:37,440
+admittedly yet look for a lot of a lot
+
+00:43:34,980 --> 00:43:40,110
+of simple crud style applications though
+
+00:43:37,440 --> 00:43:41,070
+to be honest just stick it into dynamite
+
+00:43:40,110 --> 00:43:43,560
+directly or something all right you
+
+00:43:41,070 --> 00:43:45,120
+don't need event sourcing but I think
+
+00:43:43,560 --> 00:43:47,130
+for the core parts of your system I
+
+00:43:45,120 --> 00:43:48,330
+think that becomes that's probably where
+
+00:43:47,130 --> 00:43:49,470
+you start looking at you know because
+
+00:43:48,330 --> 00:43:50,850
+these are things you don't want to
+
+00:43:49,470 --> 00:43:52,830
+change very often and you do want that
+
+00:43:50,850 --> 00:43:56,970
+safety and flexibility so that's where
+
+00:43:52,830 --> 00:44:01,100
+it's not looking at event sourcing cool
+
+00:43:56,970 --> 00:44:01,100
+anything else all right
+
+00:44:04,100 --> 00:44:10,830
+hi just having a hard time trying to
+
+00:44:08,760 --> 00:44:12,420
+understand why the events needs to be
+
+00:44:10,830 --> 00:44:15,060
+they're smaller how to decompose that
+
+00:44:12,420 --> 00:44:17,370
+from a normal REST API with normal
+
+00:44:15,060 --> 00:44:18,720
+parties puts and everything down to
+
+00:44:17,370 --> 00:44:21,360
+small events and what's the benefit that
+
+00:44:18,720 --> 00:44:22,800
+that actually brings sure could you
+
+00:44:21,360 --> 00:44:25,320
+elaborate a bit more yeah sure so I
+
+00:44:22,800 --> 00:44:27,720
+guess first bit is I'm using set events
+
+00:44:25,320 --> 00:44:30,150
+sip payloads all events so to encourage
+
+00:44:27,720 --> 00:44:33,180
+a bit process it is
+
+00:44:30,150 --> 00:44:35,490
+I guess one part the reason why you
+
+00:44:33,180 --> 00:44:37,440
+don't want to have big events is you say
+
+00:44:35,490 --> 00:44:39,750
+imagine I want to have a ride on having
+
+00:44:37,440 --> 00:44:42,570
+set user email and said you know use a
+
+00:44:39,750 --> 00:44:44,400
+display name small events you have a set
+
+00:44:42,570 --> 00:44:46,980
+user profile which includes email
+
+00:44:44,400 --> 00:44:48,990
+username you know address comfort all
+
+00:44:46,980 --> 00:44:51,390
+those kind of things in one big payload
+
+00:44:48,990 --> 00:44:53,970
+right the only way you can ever sit
+
+00:44:51,390 --> 00:44:55,980
+there the only way a consumer or client
+
+00:44:53,970 --> 00:44:57,780
+can ever write that event is to have the
+
+00:44:55,980 --> 00:45:00,440
+entire payload alright because a certain
+
+00:44:57,780 --> 00:45:03,090
+event is the entire thing and so
+
+00:45:00,440 --> 00:45:04,650
+therefore to get the entire payload you
+
+00:45:03,090 --> 00:45:06,510
+essentially have to read a version of it
+
+00:45:04,650 --> 00:45:09,120
+from somewhere like a query store from
+
+00:45:06,510 --> 00:45:10,620
+Postgres change the one little field and
+
+00:45:09,120 --> 00:45:12,870
+then save the entire payload again
+
+00:45:10,620 --> 00:45:13,500
+alright so that's the normal operation
+
+00:45:12,870 --> 00:45:15,690
+now if you
+
+00:45:13,500 --> 00:45:16,830
+imagine you have multiple riders now
+
+00:45:15,690 --> 00:45:18,870
+concurrent riders so you've got two
+
+00:45:16,830 --> 00:45:21,660
+people one person or what two and two
+
+00:45:18,870 --> 00:45:22,920
+clients changing that same person's one
+
+00:45:21,660 --> 00:45:24,210
+person to email what and the same
+
+00:45:22,920 --> 00:45:26,760
+person's display name
+
+00:45:24,210 --> 00:45:29,400
+he reads they read the same view from
+
+00:45:26,760 --> 00:45:31,890
+data from Postgres one of them changes
+
+00:45:29,400 --> 00:45:33,990
+the email one of them changes the
+
+00:45:31,890 --> 00:45:38,010
+display name both of those events get
+
+00:45:33,990 --> 00:45:40,020
+saved in some get sales events only one
+
+00:45:38,010 --> 00:45:41,910
+of those so the one that depending which
+
+00:45:40,020 --> 00:45:44,190
+one comes last is the one that will win
+
+00:45:41,910 --> 00:45:45,630
+right so if the one if the email the one
+
+00:45:44,190 --> 00:45:47,790
+with the email chance comes last
+
+00:45:45,630 --> 00:45:49,350
+it's then its payload includes the old
+
+00:45:47,790 --> 00:45:50,940
+display name right so that means that
+
+00:45:49,350 --> 00:45:53,430
+overrides the change from the other
+
+00:45:50,940 --> 00:45:55,170
+person's or the other clients display
+
+00:45:53,430 --> 00:45:56,850
+name change and that's what I mean by
+
+00:45:55,170 --> 00:45:58,890
+not but in that's why I mean by
+
+00:45:56,850 --> 00:46:00,030
+non-conflicting writes can actually get
+
+00:45:58,890 --> 00:46:02,130
+overridden because you're essentially
+
+00:46:00,030 --> 00:46:03,690
+using an old version of daughter now you
+
+00:46:02,130 --> 00:46:06,030
+can't kind of prevent that using chicken
+
+00:46:03,690 --> 00:46:07,200
+sick transactions and alike but then
+
+00:46:06,030 --> 00:46:10,020
+again then you run the problem having
+
+00:46:07,200 --> 00:46:11,250
+transactions and so forth right so you
+
+00:46:10,020 --> 00:46:12,690
+have to find that balance that's why I
+
+00:46:11,250 --> 00:46:15,300
+guess we found that having really small
+
+00:46:12,690 --> 00:46:17,340
+events and that to be honest they line
+
+00:46:15,300 --> 00:46:18,930
+up more with the way with model at least
+
+00:46:17,340 --> 00:46:20,610
+for us the way with model are the main
+
+00:46:18,930 --> 00:46:22,140
+events anyway they're pretty small so
+
+00:46:20,610 --> 00:46:25,200
+that's yeah that's the reason why we
+
+00:46:22,140 --> 00:46:26,730
+sort of have a trend towards that that's
+
+00:46:25,200 --> 00:46:28,380
+that kind of answer your question if not
+
+00:46:26,730 --> 00:46:32,280
+I can come and have it we can have chat
+
+00:46:28,380 --> 00:46:38,190
+afterwards okay we can draw it out yep
+
+00:46:32,280 --> 00:46:42,780
+sure I think why are you still using
+
+00:46:38,190 --> 00:46:43,620
+databases like post yes that was an
+
+00:46:42,780 --> 00:46:45,480
+interesting one actually we got
+
+00:46:43,620 --> 00:46:48,990
+mayonnaise to use that so it's not my
+
+00:46:45,480 --> 00:46:50,220
+choice father reason is what people
+
+00:46:48,990 --> 00:46:53,160
+comfortable Postgres right you have a
+
+00:46:50,220 --> 00:46:54,180
+sequel database it's just and that's why
+
+00:46:53,160 --> 00:46:56,190
+me having the right team is really
+
+00:46:54,180 --> 00:46:57,630
+important because you know and people
+
+00:46:56,190 --> 00:46:58,740
+comfortable certain things right and
+
+00:46:57,630 --> 00:47:00,600
+Postgres is one of those things people
+
+00:46:58,740 --> 00:47:02,190
+are comfortable with it wasn't
+
+00:47:00,600 --> 00:47:05,010
+technically I don't think was a good it
+
+00:47:02,190 --> 00:47:07,530
+was not necessary but you know there are
+
+00:47:05,010 --> 00:47:09,210
+not Oracle not all design decisions are
+
+00:47:07,530 --> 00:47:11,810
+technical unfortunately so that was one
+
+00:47:09,210 --> 00:47:11,810
+of those that was it
+
+00:47:14,760 --> 00:47:20,470
+so so okay so you may still want to have
+
+00:47:17,920 --> 00:47:22,570
+a cache of data somewhere but not it is
+
+00:47:20,470 --> 00:47:24,610
+in Postgres or we all actually gonna use
+
+00:47:22,570 --> 00:47:25,810
+Redis for example that might be more
+
+00:47:24,610 --> 00:47:27,760
+that's probably more effective whether
+
+00:47:25,810 --> 00:47:31,360
+it's fast it's cheap you know and you
+
+00:47:27,760 --> 00:47:33,130
+can replicate replicate easier you don't
+
+00:47:31,360 --> 00:47:36,190
+need Postgres or sequel
+
+00:47:33,130 --> 00:47:37,480
+I completely agree but yeah well you may
+
+00:47:36,190 --> 00:47:39,040
+choose to do it for some query
+
+00:47:37,480 --> 00:47:40,480
+capabilities right so you might want to
+
+00:47:39,040 --> 00:47:41,890
+say I want to write these tables out and
+
+00:47:40,480 --> 00:47:43,930
+I want to view sequel to query things
+
+00:47:41,890 --> 00:47:45,220
+would not use Postgres versus
+
+00:47:43,930 --> 00:47:46,870
+elasticsearch for that it's not a
+
+00:47:45,220 --> 00:47:48,340
+question but again some of those
+
+00:47:46,870 --> 00:47:49,990
+technical decisions are because of
+
+00:47:48,340 --> 00:47:52,150
+comfort because of experience and so
+
+00:47:49,990 --> 00:47:55,270
+forth so it's a bit of a mecca a mix of
+
+00:47:52,150 --> 00:47:58,770
+yeah of a few requirements there yep
+
+00:47:55,270 --> 00:47:58,770
+there's a gentleman
+
+00:47:59,620 --> 00:48:17,950
+oh good question
+
+00:48:04,200 --> 00:48:20,350
+yep yep yep yep yep good question so the
+
+00:48:17,950 --> 00:48:22,390
+I guess the think we came from about six
+
+00:48:20,350 --> 00:48:24,280
+or seven different types of changes so
+
+00:48:22,390 --> 00:48:25,630
+the way you fundamentally is what you
+
+00:48:24,280 --> 00:48:29,050
+aversion the events right so each
+
+00:48:25,630 --> 00:48:31,930
+payload has a version number and over
+
+00:48:29,050 --> 00:48:34,060
+time you build up so we use we basically
+
+00:48:31,930 --> 00:48:35,980
+have a JSON in Kodiak right and we
+
+00:48:34,060 --> 00:48:38,260
+basically have the important that the
+
+00:48:35,980 --> 00:48:43,030
+ability to delegate to the appropriate
+
+00:48:38,260 --> 00:48:44,590
+codec to try to decode existing old
+
+00:48:43,030 --> 00:48:47,320
+versions of JSON to the latest version
+
+00:48:44,590 --> 00:48:48,430
+that's fundamentally how we change it it
+
+00:48:47,320 --> 00:48:49,960
+gets more interesting when we start
+
+00:48:48,430 --> 00:48:51,940
+saying well I want to split move events
+
+00:48:49,960 --> 00:48:54,640
+arounds between streams and so forth and
+
+00:48:51,940 --> 00:48:55,840
+again the way with some care you can you
+
+00:48:54,640 --> 00:48:57,940
+can start saying well I want to read
+
+00:48:55,840 --> 00:48:59,770
+from multiple streams and process them
+
+00:48:57,940 --> 00:49:03,100
+into multiple streams and the vote and
+
+00:48:59,770 --> 00:49:04,750
+and I guess yeah you you and all join
+
+00:49:03,100 --> 00:49:06,670
+from multiple streams that you have the
+
+00:49:04,750 --> 00:49:09,040
+kind of ability to to do that to allow
+
+00:49:06,670 --> 00:49:10,510
+you to to handle that now that I guess
+
+00:49:09,040 --> 00:49:14,290
+next question is do you have that long
+
+00:49:10,510 --> 00:49:15,760
+term and you you could with what you
+
+00:49:14,290 --> 00:49:17,200
+could do is as offline operation is
+
+00:49:15,760 --> 00:49:18,700
+rewrite all your old events to your
+
+00:49:17,200 --> 00:49:21,280
+latest version over time but that's like
+
+00:49:18,700 --> 00:49:22,150
+an optional thing I guess in a sense all
+
+00:49:21,280 --> 00:49:24,550
+right so that's a kind of an
+
+00:49:22,150 --> 00:49:25,720
+optimization to avoid having to keep all
+
+00:49:24,550 --> 00:49:27,250
+the crud off
+
+00:49:25,720 --> 00:49:30,760
+different version processing in your
+
+00:49:27,250 --> 00:49:32,530
+code overtime so yeah so that's yeah I
+
+00:49:30,760 --> 00:49:34,869
+cut it's not an easy thing to do but
+
+00:49:32,530 --> 00:49:36,039
+it's definitely definitely doable I made
+
+00:49:34,869 --> 00:49:40,359
+a lot easier when you to use things like
+
+00:49:36,039 --> 00:49:43,299
+Scala jet stream and those concepts I
+
+00:49:40,359 --> 00:49:47,170
+think there was where I was okay yep
+
+00:49:43,299 --> 00:49:49,359
+just one more question
+
+00:49:47,170 --> 00:49:50,950
+when did you start researching the
+
+00:49:49,359 --> 00:49:55,750
+things and when do you plan to go in
+
+00:49:50,950 --> 00:49:56,829
+production okay so we had so we so the
+
+00:49:55,750 --> 00:49:57,940
+basic event sourcing stuff we actually
+
+00:49:56,829 --> 00:50:01,089
+have in productions been in production
+
+00:49:57,940 --> 00:50:03,819
+for about 18 months so it backs actually
+
+00:50:01,089 --> 00:50:06,099
+a lot about JIRA attachments actually in
+
+00:50:03,819 --> 00:50:08,470
+cloud this particular system we've been
+
+00:50:06,099 --> 00:50:10,869
+building for a little long about hope
+
+00:50:08,470 --> 00:50:13,720
+probably was probably about a year but
+
+00:50:10,869 --> 00:50:14,740
+now we can we should be I don't want to
+
+00:50:13,720 --> 00:50:16,539
+say when we're gonna in production guys
+
+00:50:14,740 --> 00:50:18,250
+you never know but this it will be this
+
+00:50:16,539 --> 00:50:20,260
+year I mean to be honest most of this
+
+00:50:18,250 --> 00:50:23,079
+stuff is actually kind of being it's
+
+00:50:20,260 --> 00:50:24,460
+either it's this represents one part of
+
+00:50:23,079 --> 00:50:25,539
+production or I guess that's a challenge
+
+00:50:24,460 --> 00:50:27,609
+right a lot of it is then how do you
+
+00:50:25,539 --> 00:50:30,250
+actually get things in production so you
+
+00:50:27,609 --> 00:50:31,539
+know sometime this year forth hopefully
+
+00:50:30,250 --> 00:50:33,490
+no one will notice because that's kind
+
+00:50:31,539 --> 00:50:35,770
+of it will just be out there and you
+
+00:50:33,490 --> 00:50:38,349
+guys would just use your product lasting
+
+00:50:35,770 --> 00:50:41,859
+products and you just work and you use
+
+00:50:38,349 --> 00:50:45,910
+one knows anything any other questions
+
+00:50:41,859 --> 00:50:47,049
+it's not time for one more then if not
+
+00:50:45,910 --> 00:50:49,180
+I'll be around or there so yeah
+
+00:50:47,049 --> 00:50:49,539
+come-come house to me as well all right
+
+00:50:49,180 --> 00:50:51,960
+cool
+
+00:50:49,539 --> 00:50:51,960
+
+YouTube URL: https://www.youtube.com/watch?v=S6jDJhvJrB8
+
+

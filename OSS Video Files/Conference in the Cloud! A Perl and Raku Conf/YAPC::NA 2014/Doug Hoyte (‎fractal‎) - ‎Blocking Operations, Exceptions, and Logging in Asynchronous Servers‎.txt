@@ -1,0 +1,1417 @@
+Title: Doug Hoyte (‎fractal‎) - ‎Blocking Operations, Exceptions, and Logging in Asynchronous Servers‎
+Publication date: 2014-06-24
+Playlist: YAPC::NA 2014
+Description: 
+	This talk is about lessons learned while designing, building, and operating asynchronous servers. Instead of focusing on the concepts of async programming and the benefits it provides in terms of performance and determinism, we'll discuss the problems that inevitably come up.
+
+Although not the only solutions to these problems, this talk describes three modules that your users, other developers, and operations team will appreciate:
+
+AnyEvent::Task -- Doing any sort of blocking operation in an async server will ruin your performance. AnyEvent::Task is a pre-forked worker-pool implementation that lets your async program safely and efficiently perform any sort of blocking operation, including CPU-bound tasks.
+
+Callback::Frame -- Exception handling is notoriously difficult in async servers. Callback::Frame unifies the various error-handling techniques used by different async libraries and even lets you do the right thing when exceptions are thrown in AnyEvent::Task worker processes.
+
+Log::Defer -- Because in async servers you can't use process or thread IDs to follow a connection's progress, log files are often jumbled and confusing. Log::Defer implements an async-friendly style of logging known as structured logging that also supports timing data collection, flexible queries, and the log-defer-viz visualisation tool.
+Captions: 
+	00:00:09,980 --> 00:00:18,689
+okay hello everyone my name is Doug boy
+
+00:00:14,580 --> 00:00:20,189
+and yeah I want to talk today blocking
+
+00:00:18,689 --> 00:00:23,220
+operations exceptions in logging a
+
+00:00:20,189 --> 00:00:26,009
+singer's servers so sort of the
+
+00:00:23,220 --> 00:00:28,320
+motivation behind this is a year or two
+
+00:00:26,009 --> 00:00:29,849
+ago I needed to build a server that
+
+00:00:28,320 --> 00:00:33,469
+handled authorization authentication
+
+00:00:29,849 --> 00:00:36,379
+tasks and we have we had this you know
+
+00:00:33,469 --> 00:00:38,579
+horrible crofty java python
+
+00:00:36,379 --> 00:00:40,200
+conglomeration that did it and everyone
+
+00:00:38,579 --> 00:00:41,969
+hated working with it so I decided to
+
+00:00:40,200 --> 00:00:44,969
+replace it with a you know really simple
+
+00:00:41,969 --> 00:00:47,219
+event based design and yeah as you can
+
+00:00:44,969 --> 00:00:50,550
+see we you know settled on a plaque
+
+00:00:47,219 --> 00:00:52,649
+Twiggy and then even underneath that and
+
+00:00:50,550 --> 00:00:54,449
+yeah this talk to just about a few
+
+00:00:52,649 --> 00:00:59,249
+modules that I've written for that and a
+
+00:00:54,449 --> 00:01:01,559
+few other things and yeah so first
+
+00:00:59,249 --> 00:01:03,629
+module is any event asked essentially
+
+00:01:01,559 --> 00:01:06,260
+it's a worker pool implementation so
+
+00:01:03,629 --> 00:01:08,820
+that your asynchronous program can
+
+00:01:06,260 --> 00:01:10,049
+perform blocking operations right and
+
+00:01:08,820 --> 00:01:11,310
+here's you know some examples of
+
+00:01:10,049 --> 00:01:12,990
+blocking operations we needed to do in
+
+00:01:11,310 --> 00:01:16,260
+this particular server we needed
+
+00:01:12,990 --> 00:01:19,710
+database access which is on you know a
+
+00:01:16,260 --> 00:01:21,140
+problem because dbi isn't necessarily it
+
+00:01:19,710 --> 00:01:23,490
+doesn't have an asynchronous interface
+
+00:01:21,140 --> 00:01:25,800
+we also need to do bcrypt which you know
+
+00:01:23,490 --> 00:01:27,060
+would use a cpu and therefore you can't
+
+00:01:25,800 --> 00:01:28,980
+do an event really way without blocking
+
+00:01:27,060 --> 00:01:30,840
+things and also a whole bunch of other
+
+00:01:28,980 --> 00:01:34,620
+random random interfaces that weren't
+
+00:01:30,840 --> 00:01:36,840
+didn't have a sickness interfaces second
+
+00:01:34,620 --> 00:01:39,330
+module is call back frame and yeah
+
+00:01:36,840 --> 00:01:41,340
+really error handling was a really sore
+
+00:01:39,330 --> 00:01:42,840
+point in the old system so really want
+
+00:01:41,340 --> 00:01:45,900
+to make it a lot more effective in the
+
+00:01:42,840 --> 00:01:50,610
+new one and the third module is log
+
+00:01:45,900 --> 00:01:52,260
+defer it yeah that's just some sort of
+
+00:01:50,610 --> 00:01:53,160
+module that helps flip logging and makes
+
+00:01:52,260 --> 00:01:54,720
+logging lot more convenient and
+
+00:01:53,160 --> 00:01:57,750
+asynchronous and also other servers that
+
+00:01:54,720 --> 00:01:58,980
+I think you might find interesting so
+
+00:01:57,750 --> 00:02:01,290
+first of all just want to cover is an
+
+00:01:58,980 --> 00:02:02,880
+event task essentially it's split into
+
+00:02:01,290 --> 00:02:05,280
+two components you have a server
+
+00:02:02,880 --> 00:02:06,690
+component and a client component the
+
+00:02:05,280 --> 00:02:08,759
+only thing the server does is just sit
+
+00:02:06,690 --> 00:02:11,580
+there and fork off new processes when
+
+00:02:08,759 --> 00:02:13,200
+it's been a needed by the client and the
+
+00:02:11,580 --> 00:02:15,209
+client server completely separate right
+
+00:02:13,200 --> 00:02:16,530
+so that way you can actually have POSIX
+
+00:02:15,209 --> 00:02:18,030
+threads either one of them and do
+
+00:02:16,530 --> 00:02:19,140
+forwarding right whereas you should
+
+00:02:18,030 --> 00:02:21,540
+never
+
+00:02:19,140 --> 00:02:22,950
+you know if you have threads created you
+
+00:02:21,540 --> 00:02:25,020
+should never fork after that so the
+
+00:02:22,950 --> 00:02:27,630
+complete separate so server can fork and
+
+00:02:25,020 --> 00:02:29,040
+then create threads if it wants each
+
+00:02:27,630 --> 00:02:30,959
+client keeps a pool of these workers
+
+00:02:29,040 --> 00:02:34,170
+around and you know if farms own tasks
+
+00:02:30,959 --> 00:02:35,670
+them basically and the client how it
+
+00:02:34,170 --> 00:02:36,930
+works is I'll shown in the next slide it
+
+00:02:35,670 --> 00:02:38,580
+acquires these check out objects and
+
+00:02:36,930 --> 00:02:39,840
+essentially they're like permanent locks
+
+00:02:38,580 --> 00:02:42,270
+what you've got a worker and you've got
+
+00:02:39,840 --> 00:02:44,820
+essentially / exclusive access to that
+
+00:02:42,270 --> 00:02:46,530
+worker for a while and yeah bit all
+
+00:02:44,820 --> 00:02:49,020
+requests check out acquiring and
+
+00:02:46,530 --> 00:02:50,130
+everything is cued and time olds so you
+
+00:02:49,020 --> 00:02:53,190
+can start the server client in either
+
+00:02:50,130 --> 00:03:00,870
+order and they can drop and
+
+00:02:53,190 --> 00:03:02,489
+recombination one of the ways to use it
+
+00:03:00,870 --> 00:03:04,230
+so yeah two completely separate
+
+00:03:02,489 --> 00:03:06,870
+processes you have a server and you have
+
+00:03:04,230 --> 00:03:09,050
+a client right server starts up listens
+
+00:03:06,870 --> 00:03:12,030
+on for example unix socket could be
+
+00:03:09,050 --> 00:03:13,650
+internet socket to whatever and then you
+
+00:03:12,030 --> 00:03:15,269
+provide an interface in this case I just
+
+00:03:13,650 --> 00:03:17,340
+have a hash of methods all right like a
+
+00:03:15,269 --> 00:03:18,690
+hash of subs there but there's few other
+
+00:03:17,340 --> 00:03:21,570
+ways you can look forward objects' and
+
+00:03:18,690 --> 00:03:22,980
+so on and then in another process you
+
+00:03:21,570 --> 00:03:24,360
+have the client and the client really
+
+00:03:22,980 --> 00:03:27,030
+just is like a non-blocking interface
+
+00:03:24,360 --> 00:03:28,950
+that connects to these to the server and
+
+00:03:27,030 --> 00:03:31,230
+you know acquires these for cough worker
+
+00:03:28,950 --> 00:03:33,269
+processes and at that point you have
+
+00:03:31,230 --> 00:03:35,730
+yeah you do all your acing processing
+
+00:03:33,269 --> 00:03:38,489
+stuff in the client so here's how you
+
+00:03:35,730 --> 00:03:41,160
+use the client you acquire these check
+
+00:03:38,489 --> 00:03:43,980
+out objects from the client and then you
+
+00:03:41,160 --> 00:03:45,360
+can call methods on the checkout so in
+
+00:03:43,980 --> 00:03:46,560
+this case you know I'm just doing
+
+00:03:45,360 --> 00:03:49,230
+nothing really simple I'm just adding
+
+00:03:46,560 --> 00:03:51,709
+five and ten and then the final argument
+
+00:03:49,230 --> 00:03:53,760
+is a callback and that callback is
+
+00:03:51,709 --> 00:03:55,110
+called in the client when you get the
+
+00:03:53,760 --> 00:03:56,970
+result back from the server so in this
+
+00:03:55,110 --> 00:03:59,970
+case it's really just you know send over
+
+00:03:56,970 --> 00:04:02,250
+5 and 10 over to the checkout checked
+
+00:03:59,970 --> 00:04:03,959
+out client or sorry worker worker does
+
+00:04:02,250 --> 00:04:07,170
+the operation and incense the result on
+
+00:04:03,959 --> 00:04:08,940
+back the serialization right now is JSON
+
+00:04:07,170 --> 00:04:11,190
+but I've got a branch that uses a serial
+
+00:04:08,940 --> 00:04:13,019
+no 2 that'll probably seems to work in
+
+00:04:11,190 --> 00:04:14,340
+pretty well yeah and the other critical
+
+00:04:13,019 --> 00:04:16,470
+thing is that after the chetco goes out
+
+00:04:14,340 --> 00:04:18,840
+of scope in the client the workers
+
+00:04:16,470 --> 00:04:19,850
+returned back to the worker pool of the
+
+00:04:18,840 --> 00:04:22,500
+client
+
+00:04:19,850 --> 00:04:24,240
+yeah so here's how would you do you know
+
+00:04:22,500 --> 00:04:26,250
+two nested operations basically in the
+
+00:04:24,240 --> 00:04:29,010
+simplest way right so in this case I'm
+
+00:04:26,250 --> 00:04:30,479
+adding three and four and then when that
+
+00:04:29,010 --> 00:04:32,220
+message gets sent over the server server
+
+00:04:30,479 --> 00:04:34,740
+does the operation sends a result on
+
+00:04:32,220 --> 00:04:38,160
+back to the client and then the
+
+00:04:34,740 --> 00:04:40,350
+kullback-- is called at that point the
+
+00:04:38,160 --> 00:04:41,850
+doing another thing inside the call back
+
+00:04:40,350 --> 00:04:43,139
+using that shake same check code again
+
+00:04:41,850 --> 00:04:45,300
+so that always goes roast the same
+
+00:04:43,139 --> 00:04:47,190
+process basically just multiplying those
+
+00:04:45,300 --> 00:04:49,160
+two numbers together right result x
+
+00:04:47,190 --> 00:04:51,449
+results so seven times seven alright
+
+00:04:49,160 --> 00:04:52,740
+problem with that is that you now you
+
+00:04:51,449 --> 00:04:54,539
+have two round trips to the server
+
+00:04:52,740 --> 00:04:56,760
+you've done to our PC calls back to back
+
+00:04:54,539 --> 00:05:01,979
+sequentially right so another feature
+
+00:04:56,760 --> 00:05:03,690
+that is supported in the RPC pipeline
+
+00:05:01,979 --> 00:05:04,860
+branch of any event task I have a push
+
+00:05:03,690 --> 00:05:07,110
+it up quite yet need a few write a few
+
+00:05:04,860 --> 00:05:10,229
+more tests but what sport is pipelining
+
+00:05:07,110 --> 00:05:12,090
+right it's called promised pipelining
+
+00:05:10,229 --> 00:05:15,570
+it's like also using like the e language
+
+00:05:12,090 --> 00:05:17,100
+and so on and I find it it's got a lot
+
+00:05:15,570 --> 00:05:19,770
+of benefits so I'll talk about in a
+
+00:05:17,100 --> 00:05:22,500
+second yeah the promise is module on
+
+00:05:19,770 --> 00:05:23,520
+Sipan talks about promise a promise by
+
+00:05:22,500 --> 00:05:25,740
+planning but it's different kind of
+
+00:05:23,520 --> 00:05:28,740
+pipelining this is like as implemented
+
+00:05:25,740 --> 00:05:30,720
+in IE language so yeah as you can see
+
+00:05:28,740 --> 00:05:32,789
+here you do the ad but instead of
+
+00:05:30,720 --> 00:05:35,130
+passing a sub is the final argument you
+
+00:05:32,789 --> 00:05:36,840
+actually acquire a promise which is
+
+00:05:35,130 --> 00:05:40,349
+stored in a dollar X right and that
+
+00:05:36,840 --> 00:05:43,229
+promise can actually be passed into
+
+00:05:40,349 --> 00:05:44,490
+subsequent method calls right so here
+
+00:05:43,229 --> 00:05:46,470
+essentially what you've done is you've
+
+00:05:44,490 --> 00:05:47,490
+you're sending a message that says over
+
+00:05:46,470 --> 00:05:49,260
+the server add these two numbers
+
+00:05:47,490 --> 00:05:50,729
+together with the add method and then
+
+00:05:49,260 --> 00:05:52,410
+take both those things multiply them
+
+00:05:50,729 --> 00:05:55,020
+together with the multiply method and
+
+00:05:52,410 --> 00:05:58,440
+then returns result so that's got a few
+
+00:05:55,020 --> 00:06:01,169
+advantages number one you've eliminated
+
+00:05:58,440 --> 00:06:02,610
+one round trip you took the only one you
+
+00:06:01,169 --> 00:06:05,849
+know loose the latency of your RPC
+
+00:06:02,610 --> 00:06:06,870
+operations and number two it's you know
+
+00:06:05,849 --> 00:06:08,460
+makes it so you don't have to like
+
+00:06:06,870 --> 00:06:10,080
+clutter your API with crazy useless
+
+00:06:08,460 --> 00:06:11,460
+methods like Adam square in this case
+
+00:06:10,080 --> 00:06:15,060
+right you can just have a very simple
+
+00:06:11,460 --> 00:06:18,020
+lockdown API that you know without
+
+00:06:15,060 --> 00:06:19,650
+sacrificing any latency and it's some
+
+00:06:18,020 --> 00:06:22,370
+some respects feels that you're
+
+00:06:19,650 --> 00:06:24,810
+programming a synchronous go do so
+
+00:06:22,370 --> 00:06:27,120
+here's another thing that I'm working on
+
+00:06:24,810 --> 00:06:29,190
+is a it's basically related to that but
+
+00:06:27,120 --> 00:06:30,719
+not not only can you pass promises in
+
+00:06:29,190 --> 00:06:31,860
+his arguments to other methods but you
+
+00:06:30,719 --> 00:06:33,330
+can do all kinds of things on them right
+
+00:06:31,860 --> 00:06:35,939
+you like for example you can call
+
+00:06:33,330 --> 00:06:37,439
+themselves you can dereference them and
+
+00:06:35,939 --> 00:06:38,729
+I've got like some crazy pearl overload
+
+00:06:37,439 --> 00:06:41,969
+magic that kind of like just makes it
+
+00:06:38,729 --> 00:06:44,310
+work and yeah it's yeah you can do like
+
+00:06:41,969 --> 00:06:45,569
+dbi pretty well basically I every
+
+00:06:44,310 --> 00:06:47,400
+promise you do an operation it like
+
+00:06:45,569 --> 00:06:48,870
+globs on becomes a larger promise and
+
+00:06:47,400 --> 00:06:50,460
+promise promise and then you pass that
+
+00:06:48,870 --> 00:06:55,639
+whole thing over the network in one
+
+00:06:50,460 --> 00:06:55,639
+latency thank ya composability for her
+
+00:06:55,969 --> 00:07:04,020
+second module is call back frame sort of
+
+00:06:59,849 --> 00:07:06,409
+the motivation for this is that I want
+
+00:07:04,020 --> 00:07:08,400
+to associate the air handlers and
+
+00:07:06,409 --> 00:07:09,690
+various other dynamic state with the
+
+00:07:08,400 --> 00:07:11,460
+callbacks themselves so that when the
+
+00:07:09,690 --> 00:07:14,430
+callbacks are Rica invoked you can bring
+
+00:07:11,460 --> 00:07:16,879
+the back into existence right I have
+
+00:07:14,430 --> 00:07:19,770
+local in quotes there because actually
+
+00:07:16,879 --> 00:07:24,590
+pearls local actually creates temporally
+
+00:07:19,770 --> 00:07:28,469
+scope by nick's not local huh but anyway
+
+00:07:24,590 --> 00:07:29,789
+six and six good to hear but yeah so
+
+00:07:28,469 --> 00:07:31,860
+basically you create these callback
+
+00:07:29,789 --> 00:07:34,409
+frames and when they're invoked the
+
+00:07:31,860 --> 00:07:36,990
+dynamic state is reinstated and really
+
+00:07:34,409 --> 00:07:39,509
+the way I think what is its kind of you
+
+00:07:36,990 --> 00:07:40,830
+know it allows you to do a exception
+
+00:07:39,509 --> 00:07:42,539
+sort of code instead of returning code
+
+00:07:40,830 --> 00:07:43,860
+I'll show an example a second but one
+
+00:07:42,539 --> 00:07:46,110
+thing i really like it i actually really
+
+00:07:43,860 --> 00:07:47,789
+like call back style right a lot of
+
+00:07:46,110 --> 00:07:49,830
+people want to like abstracted away i
+
+00:07:47,789 --> 00:07:51,270
+really like it and call back frame is
+
+00:07:49,830 --> 00:07:55,020
+kind of an intrusive sort of way of
+
+00:07:51,270 --> 00:07:58,440
+doing call back style so here's like you
+
+00:07:55,020 --> 00:08:02,129
+know the like a classic example of why
+
+00:07:58,440 --> 00:08:04,289
+how exceptions are complicated in in an
+
+00:08:02,129 --> 00:08:06,449
+event handling program right in a secret
+
+00:08:04,289 --> 00:08:08,339
+program so in this case as you can see
+
+00:08:06,449 --> 00:08:10,620
+like i'm creating just a timer that's
+
+00:08:08,339 --> 00:08:11,789
+going to trigger in 100 milliseconds and
+
+00:08:10,620 --> 00:08:13,589
+then it's going to call this callback
+
+00:08:11,789 --> 00:08:15,509
+right and the callbacks in a throw an
+
+00:08:13,589 --> 00:08:17,460
+error right that vowel is obviously
+
+00:08:15,509 --> 00:08:19,259
+intending to catch that air and handle
+
+00:08:17,460 --> 00:08:21,569
+it in some fashion right however that
+
+00:08:19,259 --> 00:08:22,800
+won't work because a timer all does
+
+00:08:21,569 --> 00:08:24,440
+install something in event loop and
+
+00:08:22,800 --> 00:08:27,479
+immediately return without failing right
+
+00:08:24,440 --> 00:08:29,190
+so that you know that handler won't get
+
+00:08:27,479 --> 00:08:30,449
+called will enter the event loop and at
+
+00:08:29,190 --> 00:08:32,130
+some point the future hunter mill
+
+00:08:30,449 --> 00:08:34,320
+seconds from how exceptional get thrown
+
+00:08:32,130 --> 00:08:35,820
+boom it's sewn in the belt loops there's
+
+00:08:34,320 --> 00:08:37,229
+no way to tie it back to the error
+
+00:08:35,820 --> 00:08:40,349
+handler that you wanted to actually call
+
+00:08:37,229 --> 00:08:43,060
+right here's how you handle that with
+
+00:08:40,349 --> 00:08:45,610
+call back frame right so
+
+00:08:43,060 --> 00:08:48,730
+basically have these two you have a few
+
+00:08:45,610 --> 00:08:50,560
+new functions you can call use frame try
+
+00:08:48,730 --> 00:08:52,750
+and frame catch their kind of like you
+
+00:08:50,560 --> 00:08:55,590
+know try tiny cat sort of like
+
+00:08:52,750 --> 00:08:58,270
+operations and also you have this
+
+00:08:55,590 --> 00:09:00,550
+function called fob right it's kind of
+
+00:08:58,270 --> 00:09:02,710
+yeah this is the intent is that you can
+
+00:09:00,550 --> 00:09:04,180
+take like a normal call back based
+
+00:09:02,710 --> 00:09:08,529
+program and just change your subs in two
+
+00:09:04,180 --> 00:09:10,180
+fobs right and then when it looks a
+
+00:09:08,529 --> 00:09:12,550
+little weird now but it kind of makes
+
+00:09:10,180 --> 00:09:14,430
+sense you'll see so in this case yeah
+
+00:09:12,550 --> 00:09:19,390
+what happens is frame try creates this a
+
+00:09:14,430 --> 00:09:21,220
+new call box frame and then any new
+
+00:09:19,390 --> 00:09:25,300
+frames for example one sprayed with flub
+
+00:09:21,220 --> 00:09:26,680
+are tied to that frame right so in this
+
+00:09:25,300 --> 00:09:27,550
+case the frame has a catch handler
+
+00:09:26,680 --> 00:09:30,279
+installed but you can also withstand
+
+00:09:27,550 --> 00:09:32,410
+have like vocal like dynamic variable
+
+00:09:30,279 --> 00:09:34,000
+bindings and so on right and in this
+
+00:09:32,410 --> 00:09:35,920
+case when the exception is thrown the
+
+00:09:34,000 --> 00:09:37,870
+frame catch handler will run as expected
+
+00:09:35,920 --> 00:09:39,910
+right so if you know typically you have
+
+00:09:37,870 --> 00:09:41,680
+like without you know it would be a
+
+00:09:39,910 --> 00:09:43,240
+closure that binds to that's got like
+
+00:09:41,680 --> 00:09:44,800
+the connection data structure and so you
+
+00:09:43,240 --> 00:09:46,600
+can send a message to the client and log
+
+00:09:44,800 --> 00:09:49,870
+nice things like client X did this air
+
+00:09:46,600 --> 00:09:51,400
+or whatever and yeah so the nice thing
+
+00:09:49,870 --> 00:09:55,350
+is that you can pretty much take any
+
+00:09:51,400 --> 00:09:58,180
+sort of callback based API and you can
+
+00:09:55,350 --> 00:10:00,790
+more or less just not change your code
+
+00:09:58,180 --> 00:10:02,230
+and get these sort of benefits right so
+
+00:10:00,790 --> 00:10:03,610
+in this case I'm using any event HTTP
+
+00:10:02,230 --> 00:10:05,610
+which gives you these sort of
+
+00:10:03,610 --> 00:10:07,690
+quote-unquote in-band signaling errors
+
+00:10:05,610 --> 00:10:09,339
+where it will actually call your call
+
+00:10:07,690 --> 00:10:12,040
+back when there's air but set some sort
+
+00:10:09,339 --> 00:10:13,480
+of state or whatever right in this case
+
+00:10:12,040 --> 00:10:15,910
+it's you know the status is something
+
+00:10:13,480 --> 00:10:17,800
+other than 200 right but it's like you
+
+00:10:15,910 --> 00:10:19,570
+know that could be DNS failure whatever
+
+00:10:17,800 --> 00:10:21,100
+right the main point is I don't want to
+
+00:10:19,570 --> 00:10:23,080
+handle it my callback I want you know I
+
+00:10:21,100 --> 00:10:24,310
+might have many callbacks nested doing
+
+00:10:23,080 --> 00:10:26,380
+all kinds of other things I want to
+
+00:10:24,310 --> 00:10:27,760
+kinda lit in one place right that's
+
+00:10:26,380 --> 00:10:29,980
+where it I just you know if I create
+
+00:10:27,760 --> 00:10:31,600
+everything the clubs and yeah if you
+
+00:10:29,980 --> 00:10:33,580
+have like nested clubs then the frame
+
+00:10:31,600 --> 00:10:35,050
+gets track and obviously I eats you know
+
+00:10:33,580 --> 00:10:37,180
+works like a stack you have multiple
+
+00:10:35,050 --> 00:10:39,279
+frames so you can like try one operation
+
+00:10:37,180 --> 00:10:41,529
+retry it if there's exceptions all these
+
+00:10:39,279 --> 00:10:43,180
+sort of things right so yeah in this
+
+00:10:41,529 --> 00:10:45,070
+case you can tie it back and handle it
+
+00:10:43,180 --> 00:10:47,920
+where you actually want to handle it so
+
+00:10:45,070 --> 00:10:51,270
+that's that's called that frame final
+
+00:10:47,920 --> 00:10:53,920
+module and talk about log differ
+
+00:10:51,270 --> 00:10:56,170
+personally I think like a lot of Lake I
+
+00:10:53,920 --> 00:10:58,720
+mean how would really only view people
+
+00:10:56,170 --> 00:11:00,700
+have written log parsers right like
+
+00:10:58,720 --> 00:11:02,680
+everyone's done that right written like
+
+00:11:00,700 --> 00:11:05,560
+some rags to parse out whatever and you
+
+00:11:02,680 --> 00:11:07,300
+know I think personally a lot of log
+
+00:11:05,560 --> 00:11:09,100
+processing is done too early right and
+
+00:11:07,300 --> 00:11:11,500
+if we kind of like defer the processing
+
+00:11:09,100 --> 00:11:13,420
+to later there's a lot of benefits so
+
+00:11:11,500 --> 00:11:17,950
+log defer does two types of deferring
+
+00:11:13,420 --> 00:11:19,570
+right the first type is that if you have
+
+00:11:17,950 --> 00:11:21,640
+some sort of like transaction
+
+00:11:19,570 --> 00:11:23,740
+quote-unquote like a heb request or cron
+
+00:11:21,640 --> 00:11:28,660
+job or whatever all the messages that
+
+00:11:23,740 --> 00:11:30,100
+are logged in that transaction should be
+
+00:11:28,660 --> 00:11:32,050
+stored like a tamil be together and not
+
+00:11:30,100 --> 00:11:33,430
+like intermingled right so you should be
+
+00:11:32,050 --> 00:11:35,649
+able to look at all messages that happen
+
+00:11:33,430 --> 00:11:37,120
+in that one transaction right and an
+
+00:11:35,649 --> 00:11:38,440
+async app that's really important
+
+00:11:37,120 --> 00:11:40,120
+because you know there's like not like
+
+00:11:38,440 --> 00:11:43,450
+the conventional process ID or threaded
+
+00:11:40,120 --> 00:11:44,970
+you can look at and the the second way
+
+00:11:43,450 --> 00:11:48,540
+that logged it for the first messages is
+
+00:11:44,970 --> 00:11:52,630
+delays the first the rendering right so
+
+00:11:48,540 --> 00:11:54,930
+it requires them in these structured in
+
+00:11:52,630 --> 00:11:57,190
+this sort of structured format so that
+
+00:11:54,930 --> 00:11:59,560
+you can render it however you want later
+
+00:11:57,190 --> 00:12:02,260
+right so if you want to solve it yeah
+
+00:11:59,560 --> 00:12:04,899
+just go to hear ya so so here's here's
+
+00:12:02,260 --> 00:12:05,980
+an example of how log for implement
+
+00:12:04,899 --> 00:12:06,940
+structured logging there's obviously a
+
+00:12:05,980 --> 00:12:09,070
+whole bunch other ways I just want to
+
+00:12:06,940 --> 00:12:11,170
+mainly get the idea into it I get the
+
+00:12:09,070 --> 00:12:13,810
+idea out here right so in this case I've
+
+00:12:11,170 --> 00:12:16,680
+got it what log defer does is a right so
+
+00:12:13,810 --> 00:12:19,839
+you know minified message per line JSON
+
+00:12:16,680 --> 00:12:21,100
+and as you can see that big blob at the
+
+00:12:19,839 --> 00:12:22,390
+top is what it logs right so it's
+
+00:12:21,100 --> 00:12:24,310
+impossible to read no one's ever gonna
+
+00:12:22,390 --> 00:12:28,149
+read it right however a completely
+
+00:12:24,310 --> 00:12:30,850
+separate distro called log defer vis is
+
+00:12:28,149 --> 00:12:32,500
+one way you can visualize them right and
+
+00:12:30,850 --> 00:12:34,120
+yeah so here's if you just like run that
+
+00:12:32,500 --> 00:12:36,430
+on the the log file right it gives you
+
+00:12:34,120 --> 00:12:37,899
+like a nice sort of human readable lee
+
+00:12:36,430 --> 00:12:40,570
+message kind of thing and you got colors
+
+00:12:37,899 --> 00:12:42,810
+and timers are also recorded in all this
+
+00:12:40,570 --> 00:12:44,649
+kind of clip there but ignore that and
+
+00:12:42,810 --> 00:12:48,100
+you know they're shown in like a nice
+
+00:12:44,649 --> 00:12:49,779
+way and one of the critical things that
+
+00:12:48,100 --> 00:12:51,760
+it's customizable to write you don't
+
+00:12:49,779 --> 00:12:53,470
+like log defer biz bang you know we're
+
+00:12:51,760 --> 00:12:54,850
+working on like web services that will
+
+00:12:53,470 --> 00:12:55,630
+show you the logs of stuff do the
+
+00:12:54,850 --> 00:12:57,100
+critical thing is that they're
+
+00:12:55,630 --> 00:12:58,270
+structured so you don't have never
+
+00:12:57,100 --> 00:13:00,259
+straight parses again just write these
+
+00:12:58,270 --> 00:13:02,809
+reusable display sort of
+
+00:13:00,259 --> 00:13:04,129
+interfaces with structured logging so
+
+00:13:02,809 --> 00:13:06,739
+here's some like just examples of things
+
+00:13:04,129 --> 00:13:07,459
+you can do it logged a service so let's
+
+00:13:06,739 --> 00:13:09,559
+say you just you're not interested
+
+00:13:07,459 --> 00:13:12,470
+warnings you can just filter them out no
+
+00:13:09,559 --> 00:13:15,079
+earns its got like a tailed a few kind
+
+00:13:12,470 --> 00:13:17,299
+of mode also just does what I mean with
+
+00:13:15,079 --> 00:13:20,179
+compressed files so you know it figures
+
+00:13:17,299 --> 00:13:21,799
+out other another thing is that yeah
+
+00:13:20,179 --> 00:13:23,689
+often time stance are really confusing
+
+00:13:21,799 --> 00:13:24,979
+log files right like you got an office
+
+00:13:23,689 --> 00:13:26,869
+on their side of the world they're like
+
+00:13:24,979 --> 00:13:30,589
+looking at it it's like what's this EST
+
+00:13:26,869 --> 00:13:32,629
+junk i want singapore time ever you can
+
+00:13:30,589 --> 00:13:35,470
+change x 0 easily and just looks nice
+
+00:13:32,629 --> 00:13:37,939
+right and also by default local time do
+
+00:13:35,470 --> 00:13:40,249
+yeah also yeah you can like sort merge
+
+00:13:37,939 --> 00:13:41,929
+them really easily by like various
+
+00:13:40,249 --> 00:13:43,160
+courage that criteria in this case time
+
+00:13:41,929 --> 00:13:44,119
+if you have a bunch of servers you can
+
+00:13:43,160 --> 00:13:48,499
+merge them together and look at it
+
+00:13:44,119 --> 00:13:50,149
+actually sequentially another thing is
+
+00:13:48,499 --> 00:13:51,439
+yet the you know filtering and
+
+00:13:50,149 --> 00:13:53,149
+processing and running queries and so on
+
+00:13:51,439 --> 00:13:54,949
+right so there's these two arguments
+
+00:13:53,149 --> 00:13:58,609
+wrapping that that are you know pretty
+
+00:13:54,949 --> 00:14:00,470
+similar to pearls grab map and the way
+
+00:13:58,609 --> 00:14:02,029
+it works is that after decoding each one
+
+00:14:00,470 --> 00:14:04,970
+of these messages it stores them in
+
+00:14:02,029 --> 00:14:06,499
+dollar underscore and then evaluates
+
+00:14:04,970 --> 00:14:09,889
+this expression either your wrapper map
+
+00:14:06,499 --> 00:14:11,839
+so in this case uh the the way that
+
+00:14:09,889 --> 00:14:13,939
+logged for the store is the like
+
+00:14:11,839 --> 00:14:18,799
+duration of the request stores it in the
+
+00:14:13,939 --> 00:14:20,209
+end a field of the message so really if
+
+00:14:18,799 --> 00:14:21,859
+you want to like filter out all messages
+
+00:14:20,209 --> 00:14:23,809
+that took long and half a second that's
+
+00:14:21,859 --> 00:14:25,399
+an easy way to grab for it right as you
+
+00:14:23,809 --> 00:14:29,539
+know completely a lot reliable no false
+
+00:14:25,399 --> 00:14:30,619
+positives and so on and you don't aside
+
+00:14:29,539 --> 00:14:32,529
+enough to write a parser there at all
+
+00:14:30,619 --> 00:14:35,720
+right I just wrote the display
+
+00:14:32,529 --> 00:14:38,629
+expression however you know decoding
+
+00:14:35,720 --> 00:14:40,850
+JSON is often really slow so one other
+
+00:14:38,629 --> 00:14:43,399
+sort of like design feature of the
+
+00:14:40,850 --> 00:14:45,259
+logging for structured format is that
+
+00:14:43,399 --> 00:14:46,999
+you can pre grab it right so you can
+
+00:14:45,259 --> 00:14:49,369
+anywhere that string appears in there
+
+00:14:46,999 --> 00:14:50,659
+you can output it right although this
+
+00:14:49,369 --> 00:14:52,459
+case always keep track of false
+
+00:14:50,659 --> 00:14:54,319
+positives and so on right but it's just
+
+00:14:52,459 --> 00:14:57,259
+like you know often necessary sort of
+
+00:14:54,319 --> 00:14:59,419
+thing also you know there's other ways
+
+00:14:57,259 --> 00:15:00,739
+you can store structure form logs to tie
+
+00:14:59,419 --> 00:15:02,629
+doesn't have to be JSON there's all
+
+00:15:00,739 --> 00:15:04,339
+kinds of other serialization formats you
+
+00:15:02,629 --> 00:15:06,829
+might choose that are more efficient
+
+00:15:04,339 --> 00:15:09,439
+um it was just like a fine example of
+
+00:15:06,829 --> 00:15:11,660
+like you know just you know Oh eunuch
+
+00:15:09,439 --> 00:15:13,249
+stuff you can do like typical UNIX come
+
+00:15:11,660 --> 00:15:15,649
+up pipelining components and so on like
+
+00:15:13,249 --> 00:15:17,240
+you in this case I'm mapping each one of
+
+00:15:15,649 --> 00:15:19,009
+these messages and just extracting like
+
+00:15:17,240 --> 00:15:20,240
+username that was recorded and then I
+
+00:15:19,009 --> 00:15:21,829
+can you know do the standard UNIX
+
+00:15:20,240 --> 00:15:24,620
+tallying sort of get nice report and
+
+00:15:21,829 --> 00:15:26,689
+that kind of thing and that's basically
+
+00:15:24,620 --> 00:15:28,639
+all effed up oh all the stuffs on see
+
+00:15:26,689 --> 00:15:31,730
+Pam if you want to check it out we've
+
+00:15:28,639 --> 00:15:32,749
+been using it for quite a while I you
+
+00:15:31,730 --> 00:15:34,790
+have to write a few more tests before
+
+00:15:32,749 --> 00:15:36,259
+the RPC pipelining stuff is good to go
+
+00:15:34,790 --> 00:15:40,490
+in my opinion but I think it's gonna be
+
+00:15:36,259 --> 00:15:41,870
+pretty cool it does and yeah thanks very
+
+00:15:40,490 --> 00:15:49,180
+much for listen to me I'll take any
+
+00:15:41,870 --> 00:15:49,180
+questions ah sure
+
+00:15:50,560 --> 00:15:59,500
+um it's usually not but if you sometimes
+
+00:15:56,820 --> 00:16:01,330
+the clients like an asynchronous client
+
+00:15:59,500 --> 00:16:04,330
+wants to spawn threads in the background
+
+00:16:01,330 --> 00:16:05,560
+to do things like aio kind of stuff so
+
+00:16:04,330 --> 00:16:07,089
+the main problem is like if the client
+
+00:16:05,560 --> 00:16:08,560
+itself did the forking then that would
+
+00:16:07,089 --> 00:16:10,779
+be you know very bad cuz you're forking
+
+00:16:08,560 --> 00:16:13,150
+a threaded application right however the
+
+00:16:10,779 --> 00:16:14,710
+the separation of server and client is
+
+00:16:13,150 --> 00:16:16,000
+nice because the server is the only one
+
+00:16:14,710 --> 00:16:17,440
+that has to be the forking the client
+
+00:16:16,000 --> 00:16:19,060
+never do before Hank so it can use
+
+00:16:17,440 --> 00:16:21,360
+threads sir I should remark later good
+
+00:16:19,060 --> 00:16:21,360
+question
+
+00:16:23,510 --> 00:16:31,340
+um in yeah that's a that's a valid
+
+00:16:29,690 --> 00:16:35,180
+concern for sure luckily there's sorting
+
+00:16:31,340 --> 00:16:36,200
+features but yeah no absolutely it's you
+
+00:16:35,180 --> 00:16:37,880
+have to worry about that anyway right
+
+00:16:36,200 --> 00:16:41,000
+look if you have to two processes or
+
+00:16:37,880 --> 00:16:42,410
+whatever logging it's kind of Nam
+
+00:16:41,000 --> 00:16:44,000
+determinist which one's gonna be first
+
+00:16:42,410 --> 00:16:48,620
+right so that's why you have time stamp
+
+00:16:44,000 --> 00:16:50,540
+so you can start on and so on I guess is
+
+00:16:48,620 --> 00:16:53,930
+work true devotion that when it comes to
+
+00:16:50,540 --> 00:16:56,019
+out your laws you have to understand one
+
+00:16:53,930 --> 00:16:58,119
+ended up losing Jason or here
+
+00:16:56,019 --> 00:17:00,149
+we have two encoded before using it to
+
+00:16:58,119 --> 00:17:02,410
+the poor
+
+00:17:00,149 --> 00:17:04,929
+a good question yeah I kind of glossed
+
+00:17:02,410 --> 00:17:06,670
+over the log defer interface essentially
+
+00:17:04,929 --> 00:17:08,589
+what it all is like a call back right
+
+00:17:06,670 --> 00:17:10,179
+the funny thing is that log diffraction
+
+00:17:08,589 --> 00:17:11,679
+doesn't do any logging itself it just
+
+00:17:10,179 --> 00:17:13,000
+gives you a call back and then typically
+
+00:17:11,679 --> 00:17:16,660
+you would JSON encode that and right
+
+00:17:13,000 --> 00:17:17,860
+into a file wait a few if I had cut a
+
+00:17:16,660 --> 00:17:19,510
+little bit out just for the brevity but
+
+00:17:17,860 --> 00:17:22,000
+yeah if you check out the log defer pod
+
+00:17:19,510 --> 00:17:23,559
+then it describes interface there and
+
+00:17:22,000 --> 00:17:25,240
+yeah you could do any format other
+
+00:17:23,559 --> 00:17:33,059
+format you want if you don't like JSON
+
+00:17:25,240 --> 00:17:33,059
+
+YouTube URL: https://www.youtube.com/watch?v=bmKiiqk8XKw
+
+

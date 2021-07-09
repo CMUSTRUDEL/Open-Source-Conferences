@@ -1,0 +1,2001 @@
+Title: Larry Hastings - Removing Python's GIL: The Gilectomy - PyCon 2016
+Publication date: 2016-06-01
+Playlist: PyCon 2016
+Description: 
+	Speaker: Larry Hastings
+
+You've heard of Python's ""GIL""... but what is it?  What problems does it solve?  How does it work?  What are the ramifications of its design?   Attendees should have a basic knowledge of multithreaded programming.  Understanding C is helpful but not required.
+
+Slides can be found at: https://speakerdeck.com/pycon2016 and https://github.com/PyCon/2016-slides
+Captions: 
+	00:00:00,000 --> 00:00:06,760
+[applause]
+
+00:00:06,760 --> 00:00:09,180
+(Larry Hastings) Thank you. Yes, this talk has changed.
+
+00:00:09,180 --> 00:00:12,540
+If you're looking for my talk about the GIL, this isn't it.
+
+00:00:12,540 --> 00:00:14,700
+This is a talk about removing Python's GIL.
+
+00:00:14,700 --> 00:00:19,600
+And thank you all for practicing getting your planes for later tonight.
+
+00:00:19,600 --> 00:00:22,580
+So, as a preface for this talk, I want to warn you:
+
+00:00:22,580 --> 00:00:25,440
+this talk is going to be exceedingly technical.
+
+00:00:25,440 --> 00:00:27,660
+I was encouraged to make this talk very technical, actually,
+
+00:00:27,660 --> 00:00:29,540
+by the program committee.
+
+00:00:29,540 --> 00:00:32,180
+So I'm going to talk about a lot of technical topics
+
+00:00:32,180 --> 00:00:34,580
+and I don't really have that much time to introduce them.
+
+00:00:34,580 --> 00:00:37,360
+So, I'm assuming that you're pretty familiar
+
+00:00:37,360 --> 00:00:39,940
+or comfortable at least with me talking about multithreading
+
+00:00:39,940 --> 00:00:42,820
+and about CPython internals from a very high level.
+
+00:00:42,820 --> 00:00:45,640
+I'm not going to be digging way down, but you have to understand
+
+00:00:45,640 --> 00:00:50,340
+kind of the basics of CPython internals, like reference counting.
+
+00:00:50,340 --> 00:00:53,080
+If you're not familiar with that stuff, a good refresher course
+
+00:00:53,080 --> 00:00:56,080
+or an introduction would be my previous talk,
+
+00:00:56,080 --> 00:00:57,900
+called "Python's Infamous GIL", which, again,
+
+00:00:57,900 --> 00:01:00,720
+I was supposed to give here, but then we switched it.
+
+00:01:00,720 --> 00:01:03,140
+There's videos of that online. So let's start with
+
+00:01:03,140 --> 00:01:07,200
+a little history about the GIL. The GIL was added in 1992.
+
+00:01:07,200 --> 00:01:09,560
+Guido wanted to add support for this new thing
+
+00:01:09,560 --> 00:01:12,760
+that operating systems are starting to do, called threading.
+
+00:01:12,760 --> 00:01:17,119
+And he needed a way of protecting the global and static variables
+
+00:01:17,120 --> 00:01:21,200
+inside of CPython so that you couldn't have races between multiple threads.
+
+00:01:21,200 --> 00:01:26,160
+And so he added this thing called the GIL 24 years ago.
+
+00:01:28,040 --> 00:01:30,759
+Let's make no mistake, this was a lovely design
+
+00:01:30,760 --> 00:01:35,100
+and it has served us very well that has a lot of wonderful positive attributes.
+
+00:01:35,100 --> 00:01:38,740
+I'm not in the camp of GIL haters. I think that that's --
+
+00:01:38,740 --> 00:01:41,300
+I think people who are GIL haters are kind of misinformed.
+
+00:01:41,300 --> 00:01:44,020
+So let's talk about the ramifications of this design.
+
+00:01:44,020 --> 00:01:46,480
+First of all, the GIL was incredibly simple,
+
+00:01:46,480 --> 00:01:49,920
+which meant it was easy to get right, both for us and it was easy
+
+00:01:49,920 --> 00:01:54,240
+for CPython -- C extension authors to get right.
+
+00:01:54,240 --> 00:01:57,700
+It had no deadlocks because there's only one lock.
+
+00:01:57,700 --> 00:01:59,720
+So you can't have deadlocks between two locks
+
+00:01:59,720 --> 00:02:01,840
+because there aren't two locks.
+
+00:02:01,840 --> 00:02:06,460
+It had very little overhead. You touch the GIL infrequently.
+
+00:02:06,460 --> 00:02:10,520
+And if you had single-threaded code,
+
+00:02:10,530 --> 00:02:13,130
+it ran incredibly fast because, again, we didn't have
+
+00:02:13,130 --> 00:02:16,480
+any synchronization overhead, we didn't have any locking and unlocking.
+
+00:02:16,480 --> 00:02:20,000
+Your code just ran, almost no overhead, and it ensured that --
+
+00:02:20,000 --> 00:02:23,480
+it sort of paved the way for your code to run very, very quickly.
+
+00:02:23,480 --> 00:02:25,460
+If you -- if your program is I/O bound
+
+00:02:25,460 --> 00:02:28,000
+and you use multiple threads, then everything worked great,
+
+00:02:28,000 --> 00:02:30,400
+and this is actually the original use case of threading
+
+00:02:30,400 --> 00:02:33,360
+because computers didn't develop multiple cores until very recently --
+
+00:02:33,360 --> 00:02:37,380
+or at least, you know, consumer-level hardware.
+
+00:02:37,380 --> 00:02:39,780
+The problem is, of course, if you run multiple threads
+
+00:02:39,780 --> 00:02:42,220
+and your program is CPU bound, you're kind of out of luck.
+
+00:02:42,220 --> 00:02:44,960
+The GIL ensures that your code is only going to run on a single core
+
+00:02:44,960 --> 00:02:48,420
+at a time, which was fine in 1992.
+
+00:02:48,420 --> 00:02:51,620
+It was rare that you would see a multi-core computer back then.
+
+00:02:51,620 --> 00:02:55,240
+But the world has changed around us over the subsequent 24 years.
+
+00:02:55,240 --> 00:02:58,540
+So these days, our wonderfully thin and light laptops
+
+00:02:58,540 --> 00:03:01,640
+and our phones and our watches
+
+00:03:01,640 --> 00:03:04,900
+and our eyeglasses have all gone multi-core.
+
+00:03:04,900 --> 00:03:12,320
+We live in a deeply multi-core world and Python is still doing single core.
+
+00:03:12,320 --> 00:03:14,680
+I have a workstation at home that has 28 cores in it.
+
+00:03:14,680 --> 00:03:18,660
+Like, I want multi-core stuff. But Python just isn't ready for it.
+
+00:03:18,660 --> 00:03:22,420
+This is a comment actually, sitting in the Python source code right now.
+
+00:03:22,420 --> 00:03:24,420
+My suggestion is that it's time to consider
+
+00:03:24,420 --> 00:03:26,700
+moving beyond rudimentary thread support.
+
+00:03:26,700 --> 00:03:29,880
+After all, your computer has all these wonderful resources
+
+00:03:29,880 --> 00:03:33,680
+and Python is able to take advantage of all of them...
+
+00:03:34,360 --> 00:03:36,380
+...except for the multiple cores.
+
+00:03:37,140 --> 00:03:39,780
+And this is kind of a sore point. A lot of people, yeah,
+
+00:03:39,780 --> 00:03:42,480
+if you have a problem, you can go multi-process, and of course, yes,
+
+00:03:42,480 --> 00:03:45,200
+you can take advantage of multiple cores,
+
+00:03:45,200 --> 00:03:47,780
+but there are definitely problem domains where that's not true.
+
+00:03:47,780 --> 00:03:50,280
+And those people would maybe love to use Python
+
+00:03:50,280 --> 00:03:52,320
+and they just kind of can't.
+
+00:03:52,320 --> 00:03:54,440
+Now there was an attempt to remove the GIL before.
+
+00:03:54,440 --> 00:03:56,420
+And when I say "attempt," what I mean is,
+
+00:03:56,420 --> 00:03:58,880
+they successfully removed the GIL.
+
+00:03:58,880 --> 00:04:01,360
+This was back in Python 1.4 days in 1999.
+
+00:04:01,360 --> 00:04:04,240
+It was literally, like, December of 1999 the patch was posted.
+
+00:04:04,240 --> 00:04:07,840
+So, right before the Y2K bug and everyone was nervous.
+
+00:04:07,840 --> 00:04:10,260
+This change did not require changing the CAPI,
+
+00:04:10,260 --> 00:04:14,520
+so your code usually would still just run.
+
+00:04:14,520 --> 00:04:19,300
+It took all of those global variables that were in the Python core
+
+00:04:19,300 --> 00:04:21,900
+that Guido was protecting with the GIL and moved them into a single struct
+
+00:04:21,900 --> 00:04:26,540
+called PyThreadState, which we actually -- that that got merged. We have that today.
+
+00:04:26,540 --> 00:04:30,320
+It added a single mutex lock around incr and decr.
+
+00:04:30,320 --> 00:04:34,720
+On Windows it used something smarter called interlocked increment.
+
+00:04:34,720 --> 00:04:37,280
+And it made your code between four and seven times slower.
+
+00:04:37,280 --> 00:04:41,660
+So again, I want to just make this point: the GIL makes your code run fast,
+
+00:04:41,660 --> 00:04:44,280
+and removing the GIL makes your code run more slowly,
+
+00:04:44,280 --> 00:04:47,120
+and that's the challenge of removing the GIL.
+
+00:04:47,120 --> 00:04:49,440
+So if you want to know more about this free-threading patch,
+
+00:04:49,440 --> 00:04:51,400
+David Beazley wrote a wonderful blog post
+
+00:04:51,400 --> 00:04:54,560
+called "An Inside Look at the GIL Removal Patch of Lore."
+
+00:04:54,569 --> 00:04:57,020
+Very easy to find on the internet.
+
+00:04:57,020 --> 00:05:00,860
+I've referred to it a lot. But even that is 15 years ago.
+
+00:05:00,860 --> 00:05:03,290
+I feel like it's time to try again, so I have this project
+
+00:05:03,290 --> 00:05:07,880
+I'm calling the Gilectomy. That's the surgical removal of the GIL.
+
+00:05:07,880 --> 00:05:09,780
+And I've thought about the problem a lot.
+
+00:05:09,780 --> 00:05:12,500
+So, I would say that there are four technical considerations
+
+00:05:12,500 --> 00:05:15,280
+you must take into account when you try to remove the GIL.
+
+00:05:15,280 --> 00:05:17,980
+Those are: reference counting, of course.
+
+00:05:17,980 --> 00:05:19,800
+Python objects are reference counted
+
+00:05:19,800 --> 00:05:22,780
+in order to keep track of their lifetimes. Very quickly:
+
+00:05:22,780 --> 00:05:25,020
+every Python object has a number associated with it
+
+00:05:25,020 --> 00:05:28,560
+called the reference count. If that object is stored in three places --
+
+00:05:28,560 --> 00:05:32,360
+like, it's a member of a module, and it's stored in a list,
+
+00:05:32,360 --> 00:05:35,500
+and something else -- it'll have a reference count of 3.
+
+00:05:35,500 --> 00:05:37,660
+Every time you drop your reference, like if you say --
+
+00:05:37,660 --> 00:05:40,200
+if you remove it from the list, then you decrement the reference count,
+
+00:05:40,200 --> 00:05:42,100
+so it would have a reference count of 2.
+
+00:05:42,100 --> 00:05:44,060
+When the reference count reaches 0,
+
+00:05:44,060 --> 00:05:46,660
+you free the object because no one's interested in it anymore.
+
+00:05:46,660 --> 00:05:49,380
+So that's when you DEL and that's when you reclaim the memory.
+
+00:05:49,380 --> 00:05:52,380
+Python objects use this, and if you have multiple threads
+
+00:05:52,380 --> 00:05:55,540
+that are both trying to access the object at the same time,
+
+00:05:55,540 --> 00:05:57,819
+you could have a race between them trying to update the reference count.
+
+00:05:57,820 --> 00:06:00,020
+You could result in an incorrect reference count and then you're
+
+00:06:00,020 --> 00:06:03,860
+freeing memory too early or freeing it too late and it's a memory leak.
+
+00:06:03,860 --> 00:06:06,400
+We need to address reference counting in order to run Python
+
+00:06:06,400 --> 00:06:08,760
+on multiple cores simultaneously.
+
+00:06:08,760 --> 00:06:12,020
+Globals and static variables: there are a fair number of them.
+
+00:06:12,020 --> 00:06:15,020
+Like, specifically there's a bunch of per-thread information
+
+00:06:15,020 --> 00:06:19,069
+that we would need to ensure was kept separate --
+
+00:06:19,069 --> 00:06:21,660
+the different threads were kept separate from each other.
+
+00:06:21,660 --> 00:06:25,000
+And there are a bunch of shared singleton objects like a string,
+
+00:06:25,000 --> 00:06:28,219
+or a module, or the small integers.
+
+00:06:28,220 --> 00:06:31,000
+Python pre-creates all the small integers and shares those.
+
+00:06:31,000 --> 00:06:34,340
+And those would of course need to work across multiple threads.
+
+00:06:34,340 --> 00:06:36,920
+C extensions run in a world right now --
+
+00:06:36,920 --> 00:06:39,080
+the GIL guarantees that a C extension
+
+00:06:39,080 --> 00:06:42,180
+will only ever run one thread at a time,
+
+00:06:42,180 --> 00:06:44,240
+unless they explicitly say, "You know what?
+
+00:06:44,240 --> 00:06:46,340
+"Threads are okay right now."
+
+00:06:47,700 --> 00:06:50,340
+A C extension has never lived in a world where more than one thread
+
+00:06:50,340 --> 00:06:52,220
+can be running inside it at a time,
+
+00:06:52,220 --> 00:06:54,440
+and they make assumptions about this all the time.
+
+00:06:54,440 --> 00:06:57,020
+And allowing multiple threads to run inside of a C extension
+
+00:06:57,020 --> 00:07:00,000
+is going to break it, so we needed to address that.
+
+00:07:00,000 --> 00:07:03,480
+And finally, the atomicity of operations.
+
+00:07:03,480 --> 00:07:06,240
+If you have a Python dict and you add to it
+
+00:07:06,240 --> 00:07:08,840
+or if you have a Python list and you append to it,
+
+00:07:08,840 --> 00:07:11,040
+there are a bunch of steps that have to happen
+
+00:07:11,040 --> 00:07:13,160
+in order for that to occur.
+
+00:07:13,160 --> 00:07:18,020
+And in Python right now, we just guarantee that no other thread
+
+00:07:18,020 --> 00:07:20,280
+can interrupt you while you're doing those operations.
+
+00:07:20,280 --> 00:07:22,979
+But if we have multiple threads, and a second thread tried to examine
+
+00:07:22,980 --> 00:07:25,260
+that object when you were in one of these incomplete states
+
+00:07:25,260 --> 00:07:28,660
+where you hadn't finished the append to the list, say,
+
+00:07:28,660 --> 00:07:31,080
+it could see the object in an incomplete state.
+
+00:07:31,080 --> 00:07:34,280
+So we need to guarantee that objects don't examine --
+
+00:07:34,280 --> 00:07:37,360
+other threads don't examine objects while they're in these incomplete states.
+
+00:07:37,370 --> 00:07:39,470
+We need to guarantee that those operations are atomic
+
+00:07:39,470 --> 00:07:41,920
+from the perspective of a Python program.
+
+00:07:41,920 --> 00:07:44,360
+But in addition to these four technical considerations,
+
+00:07:44,360 --> 00:07:46,420
+I say that there are three political considerations.
+
+00:07:46,420 --> 00:07:50,020
+Political, kind of a bad word, but it was the best I could come up with.
+
+00:07:50,020 --> 00:07:53,460
+These are not technical considerations,
+
+00:07:53,460 --> 00:07:57,520
+but these are considerations that are imposed on us by the community
+
+00:07:57,520 --> 00:08:00,160
+or by things that aren't necessarily a technical thing.
+
+00:08:00,160 --> 00:08:02,600
+So the first one, Guido has said --
+
+00:08:02,600 --> 00:08:05,240
+he wrote a blog post in 2007 I'll talk about later,
+
+00:08:05,240 --> 00:08:08,140
+where he said, "I would welcome a patch that removed the GIL
+
+00:08:08,140 --> 00:08:11,320
+"only if it does not hurt single-threaded code,
+
+00:08:11,320 --> 00:08:14,780
+"or it did not hurt multi-threaded code that was I/O bound."
+
+00:08:14,780 --> 00:08:17,680
+That's a very high bar to reach.
+
+00:08:17,680 --> 00:08:19,780
+I say that we also shouldn't break C extensions.
+
+00:08:19,780 --> 00:08:23,140
+We broke every C extension out there with the introduction of Python 3.0,
+
+00:08:23,140 --> 00:08:27,000
+and it's taken us a long time for the C extensions to get ported up to it.
+
+00:08:27,000 --> 00:08:29,740
+If we release a new version of Python and we say, "We removed the GIL.
+
+00:08:29,740 --> 00:08:32,680
+"You're welcome. Oh, all of your C extensions broke. You're welcome,"
+
+00:08:32,680 --> 00:08:35,640
+people are going to get annoyed with us. So let's not do that.
+
+00:08:35,640 --> 00:08:40,860
+Let's not break the C extensions to the degree that we can preserve them.
+
+00:08:40,860 --> 00:08:43,940
+And finally, don't make it too complicated.
+
+00:08:43,940 --> 00:08:45,900
+And of course this is pretty fuzzy,
+
+00:08:45,900 --> 00:08:49,040
+but the idea here is that CPython is very easy to work on.
+
+00:08:49,040 --> 00:08:51,060
+The code is very clear, it's very straightforward,
+
+00:08:51,060 --> 00:08:53,460
+it's very easy to modify,
+
+00:08:53,460 --> 00:08:56,000
+it's very easy to read and understand and reason about.
+
+00:08:56,000 --> 00:08:58,600
+And if we complicate it by adding multi-core support,
+
+00:08:58,600 --> 00:09:01,760
+then that's going to hurt our ability to keep evolving
+
+00:09:01,760 --> 00:09:04,900
+in the future, to modify it, fix bugs, maintain it, all those things.
+
+00:09:04,900 --> 00:09:08,420
+So let's try to minimize the complexity that we introduce
+
+00:09:08,420 --> 00:09:10,460
+by getting rid of the GIL.
+
+00:09:10,460 --> 00:09:12,420
+So, a quick detour: I want to talk about
+
+00:09:12,420 --> 00:09:14,620
+a couple of approaches I don't think will work.
+
+00:09:14,620 --> 00:09:16,620
+People have said for years, "If only we could get rid
+
+00:09:16,620 --> 00:09:18,980
+"of reference counting and go to --"
+
+00:09:18,980 --> 00:09:21,320
+the correct term is "tracing garbage collection."
+
+00:09:21,320 --> 00:09:25,300
+This is what everybody else does: Java, C# and the CLR,
+
+00:09:25,300 --> 00:09:28,040
+I think Rust, Go, D --
+
+00:09:28,040 --> 00:09:30,120
+all the modern languages use garbage collection
+
+00:09:30,120 --> 00:09:32,220
+to reclaim objects, to manage object lifetime.
+
+00:09:32,220 --> 00:09:35,940
+It's Python and just a couple others that use reference counting.
+
+00:09:35,940 --> 00:09:38,600
+And conventional wisdom is that garbage collection --
+
+00:09:38,600 --> 00:09:41,720
+tracing garbage collection is about as fast as reference counting.
+
+00:09:41,720 --> 00:09:43,800
+So that's not going to hurt us.
+
+00:09:43,800 --> 00:09:46,160
+Where it hurts us is, it's going to break all the C extensions.
+
+00:09:46,160 --> 00:09:49,640
+This is a major change to the API. All the C extensions work.
+
+00:09:49,640 --> 00:09:52,280
+It's also a more complicated API than reference counting.
+
+00:09:52,280 --> 00:09:55,380
+Reference counting is actually a very simple API, very easy to get right.
+
+00:09:55,380 --> 00:09:57,440
+And even there, we still have C extensions
+
+00:09:57,440 --> 00:09:59,600
+that are getting it wrong. It happens all the time.
+
+00:09:59,600 --> 00:10:02,620
+If we introduce an even more complicated API
+
+00:10:02,620 --> 00:10:04,700
+that C extension authors have to use,
+
+00:10:04,700 --> 00:10:06,640
+we're going to make it harder to write C extensions,
+
+00:10:06,640 --> 00:10:08,690
+we're going to make it harder for them to get correct,
+
+00:10:08,690 --> 00:10:11,500
+which is really going to add bugs, essentially.
+
+00:10:11,500 --> 00:10:14,660
+So I would say, I don't think we can consider this for now.
+
+00:10:14,660 --> 00:10:17,840
+Maybe it's something we can talk about in the future, but not now.
+
+00:10:17,840 --> 00:10:20,660
+Software transactional memory: this is way cooler!
+
+00:10:20,660 --> 00:10:24,740
+This is the coolest thing. Software transactional memory is amazing.
+
+00:10:24,740 --> 00:10:28,480
+But it's also very early. So if you followed the work at all
+
+00:10:28,480 --> 00:10:32,029
+of Armin Rigo, he's been working on a branch of PyPy for a number of years
+
+00:10:32,029 --> 00:10:34,420
+to add software transactional memory.
+
+00:10:34,420 --> 00:10:36,640
+When he walks in the room, he's the smartest person in the room.
+
+00:10:36,640 --> 00:10:40,500
+He's brilliant, and he's having trouble with it.
+
+00:10:40,500 --> 00:10:42,540
+I think us mortals don't have a chance.
+
+00:10:42,540 --> 00:10:46,300
+So, while performance would be amazing
+
+00:10:46,300 --> 00:10:49,850
+in software transactional memory and it would fix all sorts of problems,
+
+00:10:49,850 --> 00:10:53,480
+it would obviously break every C extension out there to a crazy degree
+
+00:10:53,480 --> 00:10:57,540
+because it has an incredibly complicated and hard-to-get-right API.
+
+00:10:57,540 --> 00:11:01,520
+I asked Armin, I was like, "Could we put the CPython on STM?"
+
+00:11:01,520 --> 00:11:04,600
+And he was like, "You don't want to do it. It's so hard to get right."
+
+00:11:04,600 --> 00:11:06,560
+So I don't think that's approachable.
+
+00:11:06,560 --> 00:11:10,440
+So instead, let's talk about what I proposed with the Gilectomy.
+
+00:11:11,120 --> 00:11:13,380
+And I want to make it clear, by the way -- so, people say,
+
+00:11:13,380 --> 00:11:16,820
+"Oh you're removing the GIL?" I'm like, "No, I removed the GIL in April.
+
+00:11:16,820 --> 00:11:19,680
+"Now I'm working on making it faster." So, all of these things have happened,
+
+00:11:19,680 --> 00:11:21,819
+and I have a Python interpreter that doesn't have a GIL
+
+00:11:21,820 --> 00:11:24,580
+that can run some Python programs.
+
+00:11:24,580 --> 00:11:26,280
+[laughter]
+
+00:11:26,290 --> 00:11:31,940
+Very few. So, reference counting: we keep reference counting.
+
+00:11:31,940 --> 00:11:34,460
+Reference counting -- that's the API everybody expects,
+
+00:11:34,460 --> 00:11:37,340
+so it's not going to break any code.
+
+00:11:37,340 --> 00:11:41,880
+And it is going to slow down. That's really the problem.
+
+00:11:41,880 --> 00:11:44,760
+I'm using something called atomic incr and decr.
+
+00:11:44,760 --> 00:11:48,060
+This is functionality you get free with every Intel processor.
+
+00:11:48,060 --> 00:11:51,259
+This is the ability to add or subtract a number
+
+00:11:51,259 --> 00:11:54,920
+from any integer stored in your computer's RAM
+
+00:11:54,920 --> 00:11:57,640
+in such a way that no other thread can fight you
+
+00:11:57,640 --> 00:11:59,640
+and have a race condition at the same time.
+
+00:11:59,640 --> 00:12:03,420
+It guarantees that this increment or decrement will be atomic.
+
+00:12:03,420 --> 00:12:06,900
+But it costs us a lot: it's 30% slower off the top.
+
+00:12:06,900 --> 00:12:09,220
+I'm going to explore alternate approaches
+
+00:12:09,220 --> 00:12:12,960
+because this is hurting us a great deal with the Gilectomy.
+
+00:12:12,960 --> 00:12:15,620
+Globals and static variables: it turns out this wasn't really a big deal.
+
+00:12:15,620 --> 00:12:18,340
+First of all, the per-thread stuff had already, years ago,
+
+00:12:18,340 --> 00:12:20,200
+been moved into this PyThreadState variable.
+
+00:12:20,200 --> 00:12:22,120
+I looked and I was like, "Oh, the work is done.
+
+00:12:22,120 --> 00:12:24,760
+"I don't have to do anything here." These shared singletons:
+
+00:12:24,760 --> 00:12:26,680
+that's kind of the whole point of the Gilectomy.
+
+00:12:26,680 --> 00:12:29,980
+Python, everything is public all the time. In order for Python
+
+00:12:29,980 --> 00:12:33,000
+to work, you have to be able to share stuff between threads.
+
+00:12:33,000 --> 00:12:37,040
+So, yes, that just -- that's part of the package of the Gilectomy.
+
+00:12:37,040 --> 00:12:39,160
+We don't have a problem here.
+
+00:12:39,760 --> 00:12:43,060
+C extension parallelism and reentrancy, there's really no way around it.
+
+00:12:43,060 --> 00:12:46,320
+It's -- we're going to break code and it's kind of the point
+
+00:12:46,320 --> 00:12:50,620
+to change the interpreter, and C extensions are going to break
+
+00:12:50,620 --> 00:12:53,540
+when they first try to run under the Gilectomy.
+
+00:12:53,540 --> 00:12:57,020
+And as far as the atomicity of operations,
+
+00:12:57,020 --> 00:13:00,300
+this is where we replace the one giant lock in Python
+
+00:13:00,300 --> 00:13:02,540
+with millions, and I literally mean millions,
+
+00:13:02,540 --> 00:13:06,160
+of locks all over the place, little tiny locks.
+
+00:13:06,160 --> 00:13:09,000
+So there's going to be a new lock API, at least internally.
+
+00:13:09,000 --> 00:13:10,940
+That's what I've done in the Gilectomy.
+
+00:13:10,940 --> 00:13:13,200
+I have macros called Py_LOCK and UNLOCK that you use
+
+00:13:13,200 --> 00:13:15,360
+kind of like Py_INCR and Py_DECR.
+
+00:13:15,360 --> 00:13:19,180
+And then the PyTypeObject has sprouted an ob_lock method.
+
+00:13:19,180 --> 00:13:22,680
+I don't know if it's exposed yet. I expect it to someday be exposed
+
+00:13:22,680 --> 00:13:26,560
+to functions and probably be called __lock__ and __unlock__.
+
+00:13:26,560 --> 00:13:28,380
+Oh, sorry.
+
+00:13:29,220 --> 00:13:31,780
+So what objects need to be locked?
+
+00:13:31,780 --> 00:13:34,220
+Any mutable object. And when I say "mutable,"
+
+00:13:34,220 --> 00:13:37,120
+I don't actually mean Python mutable, I mean C mutable.
+
+00:13:37,120 --> 00:13:39,340
+So consider, for instance, the str object.
+
+00:13:39,340 --> 00:13:41,940
+As Python programmers, you're like, "Oh, well, strs are immutable."
+
+00:13:41,940 --> 00:13:45,200
+And of course they are. But internally inside of CPython,
+
+00:13:45,200 --> 00:13:47,620
+there are a bunch of lazily computed fields.
+
+00:13:47,620 --> 00:13:51,120
+Like for instance, the hash value. We don't know the hash when we start up.
+
+00:13:51,120 --> 00:13:53,260
+It's actually, we store a -1 as the hash value.
+
+00:13:53,260 --> 00:13:55,620
+That's why -1 is an illegal value for hash.
+
+00:13:55,620 --> 00:13:57,540
+So we store a -1 and we look and see,
+
+00:13:57,540 --> 00:13:59,960
+"Oh, it's -1 right now. We need to compute the hash."
+
+00:13:59,960 --> 00:14:02,320
+If two threads came along and they both saw the -1,
+
+00:14:02,320 --> 00:14:05,420
+they would both compute the hash, and then both of them would overwrite it.
+
+00:14:05,420 --> 00:14:07,600
+And in this case, it's not going to hurt anything. Like, two threads
+
+00:14:07,600 --> 00:14:09,920
+wasting a little time and overwriting each other's values
+
+00:14:09,920 --> 00:14:12,740
+with the same computed value -- that's fine.
+
+00:14:12,740 --> 00:14:15,340
+But there are two other fields, utf8 and wstr,
+
+00:14:15,340 --> 00:14:17,840
+that are internal representations of the string.
+
+00:14:17,840 --> 00:14:20,860
+Those are computed lazily, and those both allocate memory.
+
+00:14:20,860 --> 00:14:23,720
+And so if we had two threads that both computed those and overwrote,
+
+00:14:23,720 --> 00:14:25,660
+we're going to leak memory. That's bad.
+
+00:14:25,670 --> 00:14:27,710
+So we would need some locking here. I don't know if we need
+
+00:14:27,710 --> 00:14:31,360
+a lock per string, or some global locks, or something.
+
+00:14:31,360 --> 00:14:33,780
+but eventually, we're going to need to lock str objects.
+
+00:14:33,780 --> 00:14:36,360
+I haven't done it right now so you can't use strs very much
+
+00:14:36,360 --> 00:14:38,120
+inside of the Gilectomy.
+
+00:14:38,120 --> 00:14:39,560
+[laughter]
+
+00:14:39,560 --> 00:14:41,440
+Now, what kind of lock do you need?
+
+00:14:41,440 --> 00:14:43,960
+You need what I'm going to call a userspace lock.
+
+00:14:43,960 --> 00:14:46,420
+This is not technically -- like, people said, "Oh, userspace lock?
+
+00:14:46,420 --> 00:14:48,400
+"That doesn't exist." What I mean here is,
+
+00:14:48,400 --> 00:14:51,460
+this is a lock that only uses userspace resources
+
+00:14:51,460 --> 00:14:54,640
+like RAM until there is contention.
+
+00:14:54,640 --> 00:14:56,620
+At the point that you have contention and you're talking about threads
+
+00:14:56,620 --> 00:14:58,600
+and scheduling, you need to involve the kernel.
+
+00:14:58,600 --> 00:15:01,540
+And so you consume some kernel resources while there is contention.
+
+00:15:01,540 --> 00:15:04,200
+Once the contention is gone, those resources should go away
+
+00:15:04,200 --> 00:15:06,260
+and you're back to only consuming RAM.
+
+00:15:06,260 --> 00:15:08,980
+So, userspace locks are pretty common, actually.
+
+00:15:08,980 --> 00:15:11,280
+Under Linux we have this onderful thing called the futex,
+
+00:15:11,280 --> 00:15:13,820
+which is a fast userspace lock. It's not actually a lock,
+
+00:15:13,820 --> 00:15:16,560
+it's a lock primitive that you can use to make your own locking.
+
+00:15:16,560 --> 00:15:20,319
+And I'm doing all my development under 64-bit Linux,
+
+00:15:20,320 --> 00:15:22,760
+so this is what I've been using.
+
+00:15:22,760 --> 00:15:24,760
+Under Windows, there is a long-standing thing
+
+00:15:24,760 --> 00:15:27,300
+called the critical_section that I'm assured is userspace-only
+
+00:15:27,300 --> 00:15:31,400
+until there's contention. And under OS X,
+
+00:15:31,400 --> 00:15:34,780
+I'm told that the standard pthread library from POSIX,
+
+00:15:34,780 --> 00:15:38,500
+the pthread_mutex under OS X, is a userspace-only lock
+
+00:15:38,500 --> 00:15:41,180
+until there's contention. So I think we're already good
+
+00:15:41,180 --> 00:15:43,900
+for a lot of the major platforms that we care about.
+
+00:15:43,900 --> 00:15:45,940
+And the other platforms, I don't know what the answers are.
+
+00:15:45,940 --> 00:15:48,200
+Again, it's very early days for the Gilectomy.
+
+00:15:48,200 --> 00:15:52,220
+I'm assuming that they have similar answers here as well.
+
+00:15:52,220 --> 00:15:55,280
+Now as far as these political constraints I talked about,
+
+00:15:55,290 --> 00:15:57,569
+I say that I can deliver a Gilectomy branch
+
+00:15:57,569 --> 00:15:59,660
+that doesn't hurt single-threaded performance
+
+00:15:59,660 --> 00:16:02,320
+and doesn't break C extensions. Now you may remember,
+
+00:16:02,320 --> 00:16:05,620
+mere slides ago I said we made it 30% slower off the top
+
+00:16:05,620 --> 00:16:08,700
+and every C extension breaks. So how can I claim this?
+
+00:16:08,700 --> 00:16:10,240
+[laughter]
+
+00:16:10,240 --> 00:16:12,360
+The answer is: we have two builds.
+
+00:16:12,360 --> 00:16:15,060
+You can build -- if we ever merge this -- and again,
+
+00:16:15,060 --> 00:16:18,340
+I don't know when it will happen -- we should be able to build Python
+
+00:16:18,340 --> 00:16:20,540
+both with the GIL and without the GIL,
+
+00:16:20,540 --> 00:16:22,800
+and the "with-GIL" build would remain the default
+
+00:16:22,800 --> 00:16:24,980
+for probably a very long time.
+
+00:16:24,980 --> 00:16:27,940
+So, "with the GIL" is what the Python we have today,
+
+00:16:27,940 --> 00:16:30,550
+and everything works exactly the same: your C extensions still work,
+
+00:16:30,550 --> 00:16:33,840
+you still have the GIL, and your code doesn't break, which is great.
+
+00:16:33,840 --> 00:16:38,560
+And then for the crazy futurists, we can compile it without the GIL,
+
+00:16:38,560 --> 00:16:40,580
+and that's when things like locking start happening.
+
+00:16:40,580 --> 00:16:43,760
+So, we would have these -- these are all macros in C,
+
+00:16:43,760 --> 00:16:45,940
+which means that we can compile them away into nothing.
+
+00:16:45,940 --> 00:16:49,820
+So Py_LOCK and Py_UNLOCK in the GIL build would do nothing.
+
+00:16:49,820 --> 00:16:52,680
+And with the "without-GIL" build, they would now do something.
+
+00:16:52,680 --> 00:16:55,920
+So, this means that we're complicating the CPython source code
+
+00:16:55,920 --> 00:16:59,480
+by having support for both "with the GIL" and "without the GIL"
+
+00:16:59,480 --> 00:17:01,400
+on different lines, and you're going to have to read the code
+
+00:17:01,400 --> 00:17:04,820
+and understand in different contexts it means different things.
+
+00:17:04,820 --> 00:17:07,760
+Now, in order to keep some sanity in the world,
+
+00:17:07,760 --> 00:17:10,940
+I propose that we also have two entry points on shared libraries.
+
+00:17:10,940 --> 00:17:13,480
+So if you compile with the GIL, then you're going to have
+
+00:17:13,480 --> 00:17:16,700
+the same entry point you have today for a shared library, for a C extension.
+
+00:17:16,700 --> 00:17:19,700
+And in the future you would have a different named entry point,
+
+00:17:19,700 --> 00:17:23,340
+which means that the "without-GIL" build is strictly opt-in.
+
+00:17:23,340 --> 00:17:25,660
+This means that nobody's code breaks. You have to --
+
+00:17:25,660 --> 00:17:27,680
+as an extension author, you have to say,
+
+00:17:27,680 --> 00:17:30,080
+"I'm ready for no GIL. Here is the extension --
+
+00:17:30,080 --> 00:17:32,640
+"here is the entry point that you can call
+
+00:17:32,640 --> 00:17:35,220
+"that means that you can load me in a no-GIL build."
+
+00:17:35,220 --> 00:17:37,960
+This also has the nice feature of: you can examine a shared library
+
+00:17:37,960 --> 00:17:41,780
+externally and determine whether or not it supports no-GIL builds.
+
+00:17:41,780 --> 00:17:44,760
+It might be possible in the future -- again, I haven't explored this yet --
+
+00:17:44,760 --> 00:17:47,120
+but this is just sort of a note to myself.
+
+00:17:47,120 --> 00:17:49,400
+If we took those macros and turned them into C functions
+
+00:17:49,400 --> 00:17:51,740
+and allowed you to call into them, we might be able to make it
+
+00:17:51,740 --> 00:17:55,520
+so that you could write a single .so that supported both kinds of builds.
+
+00:17:55,520 --> 00:17:58,140
+And it would just be like, oh, you call this one when you're in no-GIL
+
+00:17:58,140 --> 00:18:00,400
+and you call that one when you're with-GIL,
+
+00:18:00,400 --> 00:18:02,420
+and you'd just have both of them in your code,
+
+00:18:02,420 --> 00:18:04,960
+kind of like we're going to have in CPython itself.
+
+00:18:04,960 --> 00:18:07,780
+And that would let extension authors only compile once
+
+00:18:07,780 --> 00:18:11,800
+and not have to face as much complexity and just understand both.
+
+00:18:11,800 --> 00:18:15,080
+But they wouldn't have to compile it twice and ship two different binaries.
+
+00:18:15,080 --> 00:18:18,200
+Now, since effectively this is a new CAPI,
+
+00:18:18,200 --> 00:18:21,060
+it looks almost exactly like the existing CAPI,
+
+00:18:21,060 --> 00:18:23,800
+but we have this new locking stuff and some of the semantics are different.
+
+00:18:23,800 --> 00:18:26,020
+Arguably this is kind of a different CAPI,
+
+00:18:26,020 --> 00:18:28,400
+and so this might be a good opportunity to say --
+
+00:18:28,400 --> 00:18:31,200
+there are a bunch of things that are recommended practices in Python.
+
+00:18:31,200 --> 00:18:33,300
+These are best practices for C extension authors,
+
+00:18:33,300 --> 00:18:36,020
+but they're not required. And it hurts us because
+
+00:18:36,020 --> 00:18:39,580
+we have to support all this nasty old backwards compatibility behavior.
+
+00:18:39,580 --> 00:18:42,140
+This might be a good opportunity to shed that and say, "You know what?
+
+00:18:42,140 --> 00:18:44,680
+"Now, PyType_Ready -- that's no longer optional."
+
+00:18:44,680 --> 00:18:48,460
+This is something -- it's possible to create a type in Python
+
+00:18:48,460 --> 00:18:50,580
+and introduce objects into the Python runtime
+
+00:18:50,580 --> 00:18:53,280
+without ever telling Python, "Hey, I have a new type for you."
+
+00:18:53,280 --> 00:18:55,720
+This is what tells Python, "I have a new type for you."
+
+00:18:55,720 --> 00:18:58,360
+We might say, "Okay, it's required in no-GIL builds."
+
+00:18:58,360 --> 00:19:00,760
+PEP 489 is this thing I don't quite understand,
+
+00:19:00,760 --> 00:19:03,480
+but it's a multiphase C extension initialization.
+
+00:19:03,480 --> 00:19:06,080
+Again, it seems like it's a good idea. It might be a good time to say,
+
+00:19:06,080 --> 00:19:08,120
+"That's not optional anymore either."
+
+00:19:08,120 --> 00:19:10,160
+Now remember when I said don't make it too complicated?
+
+00:19:10,160 --> 00:19:12,380
+This is kind of where the Gilectomy is falling down a little bit.
+
+00:19:12,380 --> 00:19:14,340
+Now we're going to have these two different builds,
+
+00:19:14,340 --> 00:19:17,020
+we're going to have code interleaved where this is with-GIL
+
+00:19:17,020 --> 00:19:20,060
+and this is without-GIL. People have said,
+
+00:19:20,060 --> 00:19:22,950
+"We can live with this, Larry, if you can make it fast enough."
+
+00:19:22,950 --> 00:19:25,480
+Now, I have been working on this for a couple of months.
+
+00:19:25,480 --> 00:19:28,540
+My original codename was "Confuse-a-Cat."
+
+00:19:28,540 --> 00:19:30,760
+Then I thought of "Gilectomy" and I was like,
+
+00:19:30,760 --> 00:19:33,020
+"Oh, no, that's the name. We're done."
+
+00:19:33,020 --> 00:19:36,240
+So, I've gone back a lot of times to this essay
+
+00:19:36,240 --> 00:19:39,640
+that Guido wrote in 2007 titled, "It isn't Easy to Remove the GIL"
+
+00:19:39,640 --> 00:19:42,380
+on his old Artima blog. And I've reread it and reread it
+
+00:19:42,390 --> 00:19:45,100
+and I keep finding new things that he said.
+
+00:19:45,100 --> 00:19:47,299
+It's really worth reading, and I agree with everything
+
+00:19:47,300 --> 00:19:49,980
+that he says, except the title,
+
+00:19:49,980 --> 00:19:52,440
+because it turns out, if you know where to start,
+
+00:19:52,440 --> 00:19:54,600
+you can actually remove the GIL in about a week.
+
+00:19:54,600 --> 00:19:56,580
+So, here is the list of all the things
+
+00:19:56,590 --> 00:19:58,400
+you need to do in order to remove the GIL.
+
+00:19:58,400 --> 00:20:02,760
+Step 0: switch Py_INCR and Py_INCR to atomic incr and decr.
+
+00:20:02,760 --> 00:20:07,080
+That's real easy. Step 2 -- step 1, I should say:
+
+00:20:07,080 --> 00:20:10,060
+decide on what locking mechanism you're going to use.
+
+00:20:10,060 --> 00:20:12,820
+It has to be recursive.
+
+00:20:12,820 --> 00:20:17,040
+It has to be userspace-only because you're going to have a lot of them.
+
+00:20:17,040 --> 00:20:19,800
+Step 3: you have to add locking to the dictobject.
+
+00:20:19,800 --> 00:20:23,880
+You go from top to bottom in the dictobject.c,
+
+00:20:23,880 --> 00:20:26,640
+everything that is an external entry point
+
+00:20:26,640 --> 00:20:29,520
+for anybody calling into it from an exterior module,
+
+00:20:29,520 --> 00:20:31,680
+you have to add locking code. You have to lock at the top
+
+00:20:31,680 --> 00:20:33,940
+and unlock at every exit.
+
+00:20:33,940 --> 00:20:36,220
+Step 3: same thing for the list object.
+
+00:20:36,220 --> 00:20:39,640
+You cannot run a Python interpreter without working dicts and lists,
+
+00:20:39,640 --> 00:20:42,500
+because CPython uses those internally
+
+00:20:42,500 --> 00:20:47,180
+as part of the running mechanism of Python all over the place.
+
+00:20:47,580 --> 00:20:50,500
+Step 4: there are ten freelists that are at global scope
+
+00:20:50,500 --> 00:20:53,060
+inside of CPython and you have to add locks around all of those.
+
+00:20:53,060 --> 00:20:58,500
+Like, tuples, and I think integers, and PyFrame objects.
+
+00:20:58,500 --> 00:21:00,700
+You just need to make sure that any time someone accesses
+
+00:21:00,700 --> 00:21:03,160
+that freelist, you have to lock and unlock.
+
+00:21:03,160 --> 00:21:07,840
+Step 5: you have to totally disable the cyclic GC, the garbage collector.
+
+00:21:07,840 --> 00:21:10,320
+And in particular, there are these track and untrack macros
+
+00:21:10,320 --> 00:21:13,160
+and you just have to stub those out, those have to be empty,
+
+00:21:13,160 --> 00:21:15,200
+because they're -- those are called all the time.
+
+00:21:15,200 --> 00:21:17,660
+Actually I originally had locking there and that was costing me 15%
+
+00:21:17,660 --> 00:21:21,700
+and causing crashes, and I just threw my hands in the air.
+
+00:21:21,700 --> 00:21:24,240
+Step 6: finally it's time to remove the GIL.
+
+00:21:24,240 --> 00:21:26,460
+You literally can just go and comment it out
+
+00:21:26,460 --> 00:21:28,440
+and you go and find the macros that are referring to it
+
+00:21:28,440 --> 00:21:30,860
+and you just make them no-ops. You don't have a GIL anymore.
+
+00:21:30,860 --> 00:21:34,900
+You can't run code quite yet, because step 7, you need to --
+
+00:21:34,900 --> 00:21:36,960
+there's this PyThreadState that's storing the state
+
+00:21:36,960 --> 00:21:40,300
+of the running interpreter, and you need to change it.
+
+00:21:40,300 --> 00:21:43,060
+Right now in CPython, that's stored in a global variable, and it's just like,
+
+00:21:43,060 --> 00:21:45,020
+"That's the one. That's the thread state right now,"
+
+00:21:45,020 --> 00:21:48,340
+and everyone refers to it. And whenever you switch threads,
+
+00:21:48,340 --> 00:21:50,660
+we overwrite that variable with the new thread state.
+
+00:21:50,660 --> 00:21:53,840
+Instead, change it. It's already stored in thread-local storage,
+
+00:21:53,840 --> 00:21:55,860
+you just change the macros in the function so they return
+
+00:21:55,860 --> 00:21:58,540
+the version that's in thread-local storage, and that works.
+
+00:21:58,540 --> 00:22:01,260
+And finally there's just a couple of tests you need to fix.
+
+00:22:01,260 --> 00:22:03,320
+Obviously all the multi-threaded tests aren't going to work.
+
+00:22:03,320 --> 00:22:05,320
+Most of the multi -- most of the single-threaded tests
+
+00:22:05,320 --> 00:22:07,920
+actually still work. There are a couple of tests
+
+00:22:07,920 --> 00:22:10,840
+that assert the size of dictobject and listobject,
+
+00:22:10,840 --> 00:22:13,000
+and we just change those by adding the lock to it.
+
+00:22:13,000 --> 00:22:15,440
+So you just need to fix those so that the size is correct
+
+00:22:15,440 --> 00:22:17,580
+and then those tests will start running.
+
+00:22:17,580 --> 00:22:20,799
+Yeah, people who are taking pictures, this is the final version of the slide.
+
+00:22:20,800 --> 00:22:23,600
+I'm also uploading the slides so you can see this later.
+
+00:22:23,600 --> 00:22:26,200
+Now, at the Language Summit I presented about this and I said,
+
+00:22:26,200 --> 00:22:28,180
+it's 3.5 times slower on wall time
+
+00:22:28,180 --> 00:22:30,500
+and it's about 25 times slower on CPU time.
+
+00:22:30,500 --> 00:22:32,460
+First, let me tell you, those numbers aren't correct.
+
+00:22:32,460 --> 00:22:34,340
+Of course, I don't have correct numbers
+
+00:22:34,340 --> 00:22:36,460
+because the benchmarking is so terrible.
+
+00:22:36,460 --> 00:22:38,460
+But let me explain what these numbers mean.
+
+00:22:38,460 --> 00:22:41,660
+"Wall time" means: if you start the program and watch the wall --
+
+00:22:41,660 --> 00:22:44,040
+the clock on the wall, that's how long it took.
+
+00:22:44,040 --> 00:22:46,460
+So that's how long everything took to finish.
+
+00:22:46,460 --> 00:22:49,700
+CPU time: my version is using multiple cores.
+
+00:22:49,700 --> 00:22:52,960
+And so, if I'm using 6 cores at the same time,
+
+00:22:52,960 --> 00:22:55,040
+if it takes 3 seconds and I'm using 6 cores,
+
+00:22:55,040 --> 00:22:57,680
+it's used 18 seconds of CPU time, right?
+
+00:22:57,680 --> 00:23:02,000
+So, 25x, that's how much time we're actually spending --
+
+00:23:02,000 --> 00:23:05,340
+that's the real CPU time. So, just to drive it home:
+
+00:23:05,340 --> 00:23:11,160
+at 25x slower, that means that 4% of the time it's doing your work,
+
+00:23:11,160 --> 00:23:15,020
+and 96% of the time it's doing something else.
+
+00:23:15,860 --> 00:23:19,140
+Now, just to show you what I've been doing,
+
+00:23:19,140 --> 00:23:22,660
+here is Gilectomy's official benchmark. It is a terrible Fibonacci function.
+
+00:23:22,660 --> 00:23:24,340
+[laughter]
+
+00:23:24,340 --> 00:23:27,480
+Again, I can run very little code inside of the Gilectomy version
+
+00:23:27,480 --> 00:23:30,350
+of Python without it breaking. I can run integers,
+
+00:23:30,350 --> 00:23:34,860
+I can run function calls, I can look things up in dicts,
+
+00:23:34,860 --> 00:23:37,300
+and in particular this is looking up fib in the module dict
+
+00:23:37,300 --> 00:23:39,440
+over and over and over.
+
+00:23:40,000 --> 00:23:42,380
+You can use strings if you're gentle.
+
+00:23:43,340 --> 00:23:45,640
+There's a lot of stuff that I wouldn't try.
+
+00:23:46,960 --> 00:23:50,840
+So, here are benchmarks that I ran on my computer the other night.
+
+00:23:50,840 --> 00:23:56,240
+I actually ran these last night and on a computer that has 28 cores,
+
+00:23:56,240 --> 00:23:58,760
+so I'm not running out of cores. These are all hardware cores.
+
+00:23:58,760 --> 00:24:02,720
+So, the number along the bottom is how many instances. It's fib 30.
+
+00:24:02,720 --> 00:24:06,180
+So that's how many fib 30s I'm running on separate threads.
+
+00:24:06,180 --> 00:24:08,880
+So I'm running threads in both CPython normal
+
+00:24:08,880 --> 00:24:12,380
+and the Gilectomy branch. The fast one is lower.
+
+00:24:12,380 --> 00:24:15,820
+That's -- the y-axis is number of seconds.
+
+00:24:15,820 --> 00:24:20,060
+The blue line is standard CPython, and the red line is the Gilectomy.
+
+00:24:20,060 --> 00:24:24,000
+And I want to point out, first of all, the Gilectomy is way slower.
+
+00:24:24,000 --> 00:24:26,940
+Second of all, there's this dip at four cores I don't understand.
+
+00:24:26,940 --> 00:24:29,380
+It's just one of these things where probably everything meshed
+
+00:24:29,380 --> 00:24:31,520
+really well and I got lucky. It was consistent
+
+00:24:31,520 --> 00:24:34,080
+so I couldn't get rid of it, so I'm just leaving it in the slides.
+
+00:24:34,080 --> 00:24:35,560
+[laughter]
+
+00:24:35,560 --> 00:24:38,860
+I think the shape of the GIL --
+
+00:24:38,860 --> 00:24:42,680
+the standard Python branch is linear and much faster,
+
+00:24:42,680 --> 00:24:45,840
+and the shape of the Gilectomy version appears like,
+
+00:24:45,840 --> 00:24:48,400
+maybe it's sort of curving up?
+
+00:24:48,400 --> 00:24:51,620
+I think it's probably going to keep going up. I don't know.
+
+00:24:51,620 --> 00:24:54,371
+At one thread, you'll notice that the Gilectomy
+
+00:24:54,380 --> 00:24:58,820
+is actually not that much slower. It's only about twice as slow.
+
+00:24:58,820 --> 00:25:02,780
+Which is great for me, but again, this is wall time,
+
+00:25:02,780 --> 00:25:06,200
+and I think CPU time is much more telling of the tale.
+
+00:25:06,200 --> 00:25:13,220
+So, again, the Gilectomy version is about twice as slow at one thread.
+
+00:25:13,220 --> 00:25:15,480
+At two threads, it jumps to 10x slower,
+
+00:25:15,480 --> 00:25:18,860
+and then it just keeps going up and up. Again, there's this anomaly at four.
+
+00:25:18,860 --> 00:25:23,280
+when we get to 19 -- when we get to seven cores, it's a --
+
+00:25:23,280 --> 00:25:25,480
+actually, I have a slide for this.
+
+00:25:25,480 --> 00:25:28,340
+So, again, twice as slow on one core.
+
+00:25:28,340 --> 00:25:30,860
+This is CPU time for the Gilectomy version
+
+00:25:30,860 --> 00:25:33,230
+divided by the CPU time for the GIL version.
+
+00:25:33,230 --> 00:25:36,540
+So this is -- effectively the y-axis is now "how many x slower,"
+
+00:25:36,540 --> 00:25:40,720
+and you can see at seven cores I am now 19x slower.
+
+00:25:41,880 --> 00:25:45,360
+That hurts. Why is it so slow. Now, a lot of people,
+
+00:25:45,360 --> 00:25:47,400
+their first guess is, "Oh, that's going to be lock contention."
+
+00:25:47,400 --> 00:25:49,860
+The answer is: there is a little bit of lock contention.
+
+00:25:49,860 --> 00:25:52,180
+It's not actually that much.
+
+00:25:52,180 --> 00:25:55,660
+The runtime of my program -- let me bring this back --
+
+00:25:55,660 --> 00:25:57,760
+wall time -- CPU time,
+
+00:25:57,760 --> 00:26:01,380
+at seven cores I used, like, 90 seconds of CPU time, right?
+
+00:26:01,380 --> 00:26:05,460
+So, lock contention, probably like five seconds of that.
+
+00:26:05,460 --> 00:26:08,500
+It's measurable, it's noticeable, but it's not the major thing.
+
+00:26:08,500 --> 00:26:10,820
+It's not costing us 96% of our time.
+
+00:26:10,820 --> 00:26:13,380
+The major thing is really synchronization and cache misses.
+
+00:26:13,380 --> 00:26:16,340
+What's going on here is that we're doing this atomic incr and decr.
+
+00:26:16,340 --> 00:26:18,320
+Atomic incr and decr, in order to be safe, says,
+
+00:26:18,320 --> 00:26:21,480
+"You know what? Everyone's cache, you have to throw away this cache line
+
+00:26:21,480 --> 00:26:24,640
+"for this object over here that's storing the reference count.
+
+00:26:24,640 --> 00:26:26,920
+"Oh, and we just did it again because we changed the reference count.
+
+00:26:26,920 --> 00:26:29,100
+"Oh, we just did it again because we changed the reference count."
+
+00:26:29,100 --> 00:26:34,700
+My test program on seven threads runs a half billion reference count changes.
+
+00:26:34,700 --> 00:26:38,640
+And so we have effectively blown away the cache a half a billion times.
+
+00:26:38,640 --> 00:26:40,680
+CPython didn't have to bother to do that, so it can do it
+
+00:26:40,680 --> 00:26:43,380
+in whatever it is, 6 seconds.
+
+00:26:43,380 --> 00:26:45,860
+I'm blowing away the cache all the time so it takes me 90 seconds.
+
+00:26:45,860 --> 00:26:48,980
+That's how important caching is on a modern computer.
+
+00:26:48,980 --> 00:26:51,000
+The real problem here is that nothing is private
+
+00:26:51,000 --> 00:26:53,020
+inside of a Python interpreter.
+
+00:26:53,020 --> 00:26:57,400
+So I'm doing the safe multi-threaded thing at every step
+
+00:26:57,400 --> 00:27:00,000
+in an attempt to make the Python code correct
+
+00:27:00,000 --> 00:27:03,500
+and produce the correct result, and not crash.
+
+00:27:03,500 --> 00:27:07,860
+But I have to do everything in the public, safe, multi-threaded way.
+
+00:27:07,860 --> 00:27:10,780
+CPython, of course, doesn't have to bother. It's doing the fast, unsynchronized way
+
+00:27:10,780 --> 00:27:13,540
+because it's assured that only one thread is running at a time.
+
+00:27:13,540 --> 00:27:16,520
+So that's really the challenge. Where we go from here:
+
+00:27:16,520 --> 00:27:19,860
+in general, I and the other people who are volunteering
+
+00:27:19,860 --> 00:27:22,400
+to work on the Gilectomy, what we need to do is
+
+00:27:22,400 --> 00:27:24,520
+change the approach that we're doing.
+
+00:27:24,520 --> 00:27:26,680
+So instead of doing the safe multi-threaded way,
+
+00:27:26,680 --> 00:27:29,900
+instead we modify the code so that we can guarantee
+
+00:27:29,900 --> 00:27:32,780
+that we're only doing this work from a particular thread.
+
+00:27:32,780 --> 00:27:34,980
+And then once we've guaranteed that,
+
+00:27:34,990 --> 00:27:37,480
+we can do it in the unsafe, unsynchronized way
+
+00:27:37,480 --> 00:27:41,080
+that is enormously faster, and we can reclaim that speed back.
+
+00:27:41,080 --> 00:27:43,260
+So there are a bunch of techniques that I could talk about.
+
+00:27:43,260 --> 00:27:45,620
+Under reference counting, the next thing I want to try
+
+00:27:45,630 --> 00:27:47,600
+is called buffered reference counting.
+
+00:27:47,600 --> 00:27:50,420
+This is, very quickly, just the idea
+
+00:27:50,420 --> 00:27:52,660
+that instead of doing the reference count changes immediately,
+
+00:27:52,660 --> 00:27:55,280
+instead you write them down and you send them off to a separate thread,
+
+00:27:55,280 --> 00:27:57,720
+and that thread is the guy who commits all the reference counts.
+
+00:27:57,720 --> 00:28:01,500
+Since it's only one thread doing it, he can do it unsynchronized and he's fine.
+
+00:28:02,380 --> 00:28:04,820
+We could try immortal objects.
+
+00:28:04,820 --> 00:28:07,000
+Immortal objects would be
+
+00:28:07,000 --> 00:28:09,650
+a reference count that never changes, and you just look at that and you say,
+
+00:28:09,650 --> 00:28:11,500
+"Oh, that's a reference count that never changes,"
+
+00:28:11,500 --> 00:28:13,420
+and you don't change it. That means you don't have to change it,
+
+00:28:13,420 --> 00:28:15,300
+which means you don't have any synchronization.
+
+00:28:15,300 --> 00:28:17,900
+You get it for free, except for the 'if' statement.
+
+00:28:17,900 --> 00:28:20,540
+Coalesced reference counting: that's where, instead of writing
+
+00:28:20,540 --> 00:28:22,740
+reference count changes right away, you just sort of keep a tally.
+
+00:28:22,740 --> 00:28:26,640
+It's like, "Object O, I have added two references to it, so it's +2,"
+
+00:28:26,640 --> 00:28:29,520
+and then I decrement it. Most of the time in C code,
+
+00:28:29,520 --> 00:28:31,500
+you take a reference to an object, you play with it,
+
+00:28:31,500 --> 00:28:35,380
+and then you drop your reference. So the total delta over time is zero.
+
+00:28:35,380 --> 00:28:38,500
+And so this would throw that away. But the overhead of that
+
+00:28:38,500 --> 00:28:41,360
+is kind of expensive, so I don't know if we would do that.
+
+00:28:41,360 --> 00:28:45,400
+Thread private locking: again, we're adding thread locks
+
+00:28:45,400 --> 00:28:48,000
+to millions of objects.
+
+00:28:48,000 --> 00:28:50,320
+Most of the time, an object never leaves
+
+00:28:50,320 --> 00:28:52,990
+the thread where it was created. And so if we can --
+
+00:28:52,990 --> 00:28:54,940
+anything that we can do to recognize that
+
+00:28:54,940 --> 00:28:58,940
+and have the object behave in a thread-private way,
+
+00:28:58,940 --> 00:29:00,800
+we can save some time.
+
+00:29:00,800 --> 00:29:04,180
+So, I have an idea to modify the futex-based lock that I'm writing
+
+00:29:04,180 --> 00:29:06,880
+to make it initially privately locked to the thread,
+
+00:29:06,880 --> 00:29:09,120
+and when a second thread comes along and says, "I want to lock that,"
+
+00:29:09,120 --> 00:29:12,000
+it'll be promoted to a public lock. But while it's a private lock,
+
+00:29:12,000 --> 00:29:14,560
+we can do the unsynchronized fast operations on it
+
+00:29:14,560 --> 00:29:17,080
+and get the locking effectively for free, because, again,
+
+00:29:17,080 --> 00:29:21,260
+it behaves like it's locked to the original thread.
+
+00:29:21,260 --> 00:29:24,840
+Under garbage collection, there's people like Mark Shannon
+
+00:29:24,840 --> 00:29:26,800
+who tells me, "Oh, there's all sorts of research
+
+00:29:26,800 --> 00:29:28,810
+"into concurrent garbage collection," and I absolutely believe him.
+
+00:29:28,810 --> 00:29:31,120
+I don't understand any of that. I think I can take
+
+00:29:31,120 --> 00:29:33,830
+the current garbage collector, the cyclical garbage collector,
+
+00:29:33,830 --> 00:29:36,580
+and beat on it and make it work under the Gilectomy.
+
+00:29:36,580 --> 00:29:39,380
+The idea is that I would force all of the threads to stop,
+
+00:29:39,380 --> 00:29:41,440
+so we'd stop the world garbage collection.
+
+00:29:41,440 --> 00:29:44,440
+and then the track and untrack macros that we're doing
+
+00:29:44,440 --> 00:29:47,500
+that was hurting me before, we would change that into being buffered,
+
+00:29:47,500 --> 00:29:49,500
+kind of like the buffered reference counting above,
+
+00:29:49,500 --> 00:29:52,600
+so that it didn't hurt performance on those individual threads.
+
+00:29:52,600 --> 00:29:54,980
+My final thought for you -- oh, wait. Oh, that's right.
+
+00:29:54,980 --> 00:29:57,660
+Eric Snow, I think, during the Language Summit suggested:
+
+00:29:57,660 --> 00:30:00,100
+what if we added an automatic lock around C extensions?
+
+00:30:00,100 --> 00:30:03,220
+That would allow a C extension to run in the Gilectomy,
+
+00:30:03,220 --> 00:30:05,220
+and they'd kind of have a little private GIL
+
+00:30:05,220 --> 00:30:07,120
+that would at least guarantee that multiple threads
+
+00:30:07,120 --> 00:30:09,060
+wouldn't be accessing them at the same time.
+
+00:30:09,060 --> 00:30:11,060
+Maybe it'll help, I'm not sure.
+
+00:30:11,070 --> 00:30:13,789
+So my final thought for you is:
+
+00:30:13,789 --> 00:30:16,850
+the journey of a thousand miles begins with a single step.
+
+00:30:16,850 --> 00:30:19,230
+I don't know if the Gilectomy is actually going to work.
+
+00:30:19,230 --> 00:30:22,510
+It's not going to be interesting until the point that adding threads
+
+00:30:22,510 --> 00:30:25,560
+and adding cores makes it go faster rather than slower.
+
+00:30:25,560 --> 00:30:27,080
+[laughter]
+
+00:30:27,080 --> 00:30:30,620
+That's going to take a while, but we're never going to achieve that
+
+00:30:30,620 --> 00:30:35,600
+until we try, and nobody has tried for 15 years, so I'm trying right now.
+
+00:30:35,600 --> 00:30:37,919
+One last thought: I have enormous quantities --
+
+00:30:37,920 --> 00:30:40,860
+I have these t-shirts which I'm going to give to people who can sprint on it.
+
+00:30:40,860 --> 00:30:43,120
+You have to know a lot about CPython in order to sprint on it,
+
+00:30:43,120 --> 00:30:45,400
+so "you have to be this tall to ride the Gilectomy."
+
+00:30:45,400 --> 00:30:47,640
+But I have enormous quantities of stickers.
+
+00:30:47,640 --> 00:30:50,100
+I don't want to take them home. What am I going to do
+
+00:30:50,100 --> 00:30:53,240
+with all these stickers? So certainly, if you --
+
+00:30:53,240 --> 00:30:55,260
+maybe I'll put them on the stage and come to the front
+
+00:30:55,260 --> 00:30:57,840
+and you can grab a couple of stickers.
+
+00:30:57,840 --> 00:31:01,240
+Thank you all, and you tell me if I have time for questions.
+
+00:31:02,480 --> 00:31:04,280
+Oh, thank you.
+
+00:31:04,280 --> 00:31:14,820
+[applause]
+
+00:31:20,700 --> 00:31:23,540
+How could I resist? Do we have time for questions?
+
+00:31:23,540 --> 00:31:25,360
+(session chair) One question.
+
+00:31:25,360 --> 00:31:27,320
+(Larry Hastings) One question.
+
+00:31:28,080 --> 00:31:30,080
+(session chair) Only one question.
+
+00:31:30,080 --> 00:31:32,020
+(Larry Hastings) Only one question? Okay.
+
+00:31:33,980 --> 00:31:36,560
+(audience member) This is awesome and incredibly clever
+
+00:31:36,560 --> 00:31:40,640
+and super nifty, but wouldn't it be, like, a lot easier
+
+00:31:40,640 --> 00:31:42,820
+just to use Python for the things it's good at
+
+00:31:42,820 --> 00:31:46,500
+and use Rust or Go or D for the things that they're good at?
+
+00:31:46,500 --> 00:31:47,820
+[booing]
+
+00:31:47,820 --> 00:31:49,600
+(Larry Hastings) You want the conference
+
+00:31:49,600 --> 00:31:51,460
+down the street, my friend.
+
+00:31:51,460 --> 00:31:53,340
+[laughter]
+
+00:31:53,340 --> 00:31:55,240
+(session chair) So, the session is closed.
+
+00:31:55,240 --> 00:31:57,180
+Thank you, everybody, and thanks, Larry.
+
+00:31:57,180 --> 00:32:02,360
+
+YouTube URL: https://www.youtube.com/watch?v=P3AyI_u66Bw
+
+

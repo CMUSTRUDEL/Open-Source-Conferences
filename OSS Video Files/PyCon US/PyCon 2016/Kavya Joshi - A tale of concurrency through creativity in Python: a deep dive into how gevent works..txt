@@ -1,0 +1,1575 @@
+Title: Kavya Joshi - A tale of concurrency through creativity in Python: a deep dive into how gevent works.
+Publication date: 2016-05-30
+Playlist: PyCon 2016
+Description: 
+	Speaker: Kavya Joshi
+
+gevent is an open source Python library for asynchronous I/O. It provides a powerful construct to build concurrent applications; think threads, except lightweight and cooperatively scheduled. We will delve into how gevent is architected from its building blocks — sophisticated coroutines, an event loop, and a dash of creativity to neatly integrate them.
+
+Slides can be found at: https://speakerdeck.com/pycon2016 and https://github.com/PyCon/2016-slides
+Captions: 
+	00:00:00,570 --> 00:00:02,880
+(presenter) Hello everyone, please take your seats.
+
+00:00:02,880 --> 00:00:05,320
+I'd like to introduce Kavya Joshi.
+
+00:00:05,320 --> 00:00:10,200
+She's going to talk about gevent, so please give a big hand for Kavya.
+
+00:00:10,200 --> 00:00:16,200
+[applause]
+
+00:00:18,200 --> 00:00:20,600
+(Kavya Joshi) Good morning.
+
+00:00:20,600 --> 00:00:24,519
+My name is Kavya, pronounced like caviar without the R
+
+00:00:24,519 --> 00:00:26,859
+or caveat without the T, if you prefer.
+
+00:00:26,859 --> 00:00:31,330
+And today, I'm here to talk to you about gevent
+
+00:00:31,330 --> 00:00:34,410
+which is a Python library for asynchronous I/O.
+
+00:00:35,320 --> 00:00:37,200
+More specifically, I'm here to tell you
+
+00:00:37,210 --> 00:00:40,170
+about how gevent works under the hood.
+
+00:00:40,170 --> 00:00:41,950
+Before we do that,
+
+00:00:41,950 --> 00:00:44,230
+there are two important questions to answer.
+
+00:00:44,780 --> 00:00:49,500
+First, what is asynchronous I/O and why do we care about it?
+
+00:00:49,510 --> 00:00:52,170
+And second, what is gevent specifically,
+
+00:00:52,170 --> 00:00:53,950
+and why do we care about it?
+
+00:00:55,420 --> 00:00:58,500
+To answer both questions, let me tell you a story.
+
+00:00:59,500 --> 00:01:02,620
+Once upon a time in a land far, far away,
+
+00:01:03,780 --> 00:01:06,580
+life was simple, and you could run a service
+
+00:01:06,580 --> 00:01:10,060
+to download Facebook photos and do something with them,
+
+00:01:10,060 --> 00:01:12,320
+display them in some funky way later
+
+00:01:12,320 --> 00:01:16,740
+with a simple program that did just this.
+
+00:01:16,740 --> 00:01:20,640
+You fetched the photos from Facebook, over the network,
+
+00:01:20,640 --> 00:01:24,840
+and you stored them locally and displayed them later.
+
+00:01:24,840 --> 00:01:26,880
+You can imagine the code for such a program
+
+00:01:26,880 --> 00:01:28,850
+is also pretty simple.
+
+00:01:28,850 --> 00:01:33,470
+Your function, download_photos, opens the connection to the server,
+
+00:01:33,470 --> 00:01:35,770
+downloads the photos and saves it.
+
+00:01:37,200 --> 00:01:42,080
+So far, so good, but then life got complicated.
+
+00:01:42,080 --> 00:01:45,020
+Your service exploded.
+
+00:01:45,020 --> 00:01:48,869
+Your user base grew to hundreds and thousands of users,
+
+00:01:48,869 --> 00:01:52,889
+and suddenly you have to do this for all of them.
+
+00:01:53,800 --> 00:01:55,780
+I hope you see what the problem is.
+
+00:01:55,780 --> 00:02:00,700
+The problem is the network request, the blocking HTTP request.
+
+00:02:00,700 --> 00:02:03,080
+The big problem with this implementation is
+
+00:02:03,080 --> 00:02:06,000
+that for each user, you're going to open a connection,
+
+00:02:06,000 --> 00:02:08,450
+send a request, wait for it to complete,
+
+00:02:08,450 --> 00:02:10,230
+and then proceed to the next user.
+
+00:02:10,230 --> 00:02:12,020
+It's just not scalable.
+
+00:02:12,620 --> 00:02:15,820
+Now, there are a few standard ways around the problem.
+
+00:02:15,830 --> 00:02:20,350
+There's multiprocessing, there's multithreading,
+
+00:02:20,350 --> 00:02:22,270
+there's event-driven programming
+
+00:02:22,270 --> 00:02:25,930
+using libraries like Twisted, Tornado, asyncore,
+
+00:02:26,760 --> 00:02:29,240
+and then there are green threads.
+
+00:02:31,120 --> 00:02:33,380
+Let's understand each of our options.
+
+00:02:33,380 --> 00:02:35,900
+First up: multiprocessing.
+
+00:02:35,910 --> 00:02:40,110
+This is what your server program would look like under multiprocessing.
+
+00:02:40,110 --> 00:02:43,500
+For each user, you spawn a new process
+
+00:02:43,500 --> 00:02:46,190
+to run the download_photos function.
+
+00:02:46,190 --> 00:02:49,450
+Note, each network request is still blocking,
+
+00:02:49,450 --> 00:02:52,380
+but it only blocks the process for that user
+
+00:02:52,380 --> 00:02:55,230
+and so, the end result is your network is --
+
+00:02:55,230 --> 00:03:00,040
+your program is still concurrent in terms of network requests.
+
+00:03:00,040 --> 00:03:03,100
+Now, this solution gives you the desired concurrency --
+
+00:03:03,100 --> 00:03:05,120
+in addition, it gets you parallelism,
+
+00:03:05,120 --> 00:03:08,360
+or the ability to take advantage of multiple cores
+
+00:03:08,370 --> 00:03:10,870
+if you are running on such a machine.
+
+00:03:10,870 --> 00:03:13,760
+But processes have a high overhead
+
+00:03:13,760 --> 00:03:16,500
+so the solution is super unscalable,
+
+00:03:17,560 --> 00:03:21,700
+which brings us to our next solution: multithreading.
+
+00:03:21,700 --> 00:03:24,040
+In multithreading, the idea is the same,
+
+00:03:24,040 --> 00:03:27,200
+where you spawn a thread for each product -- for each user.
+
+00:03:29,520 --> 00:03:31,520
+And the good thing about threads
+
+00:03:31,530 --> 00:03:35,450
+is that they're lighter weight than processes and so, in general,
+
+00:03:35,450 --> 00:03:38,490
+this is a better concurrency model than multiprocessing.
+
+00:03:39,440 --> 00:03:41,341
+The problem with threads, though, is --
+
+00:03:41,341 --> 00:03:45,120
+as any as any of you who have done multithreaded programming knows,
+
+00:03:45,120 --> 00:03:49,360
+multithreaded programming is hard, writing correct code is difficult,
+
+00:03:49,360 --> 00:03:51,900
+and debugging incorrect code is even harder.
+
+00:03:52,740 --> 00:03:56,980
+The second problem with this solution has to do with the fact
+
+00:03:56,980 --> 00:04:01,620
+that our far, far away land is called C Python Land...
+
+00:04:01,620 --> 00:04:04,020
+and you've heard about the GIL.
+
+00:04:04,030 --> 00:04:05,971
+I won't go into detail, because I hear
+
+00:04:05,971 --> 00:04:07,771
+talking about the GIL is so passé,
+
+00:04:07,780 --> 00:04:09,000
+[audience chuckles]
+
+00:04:09,000 --> 00:04:12,520
+But if you're interested in the gritty details,
+
+00:04:12,530 --> 00:04:14,930
+I encourage you to check out David Beazley's
+
+00:04:14,930 --> 00:04:16,910
+excellent talk on the topic.
+
+00:04:18,780 --> 00:04:20,780
+Now, for our third solution
+
+00:04:20,780 --> 00:04:24,420
+which is event-driven programming using Twisted, asyncore, etc.
+
+00:04:25,300 --> 00:04:32,340
+Now, event-driven programming gives you the desired concurrency,
+
+00:04:32,340 --> 00:04:34,550
+and it gives you the desired concurrency
+
+00:04:34,550 --> 00:04:36,560
+in a manner that scalable.
+
+00:04:36,560 --> 00:04:39,180
+But the big problem with it is the code.
+
+00:04:39,190 --> 00:04:40,690
+It's complicated.
+
+00:04:40,690 --> 00:04:42,420
+In fact, the code is so complicated,
+
+00:04:42,420 --> 00:04:44,820
+my example didn't even fit into the slide
+
+00:04:44,820 --> 00:04:47,160
+because you have to run the event loop,
+
+00:04:47,160 --> 00:04:49,940
+you have to register call backs into the event loop,
+
+00:04:49,950 --> 00:04:53,650
+and if you've heard of callback hell, that's all very real.
+
+00:04:54,560 --> 00:04:59,340
+Which brings us to our fourth solution: green threads.
+
+00:04:59,340 --> 00:05:02,100
+By show of hands, how many of you have heard of green threads?
+
+00:05:03,160 --> 00:05:07,260
+Whoa, awesome, way more than I was expecting.
+
+00:05:07,270 --> 00:05:09,230
+But if you've heard about green threads,
+
+00:05:09,230 --> 00:05:11,950
+you know they're great for a lot of reasons.
+
+00:05:11,950 --> 00:05:15,040
+First of all, their user space, the operating system,
+
+00:05:15,040 --> 00:05:17,520
+does not create them or manage them.
+
+00:05:18,480 --> 00:05:22,040
+Secondly, they are cooperatively scheduled
+
+00:05:22,050 --> 00:05:25,340
+which means that the operating system does not even schedule them,
+
+00:05:25,340 --> 00:05:28,610
+and the fact that they're cooperative means that they cannot be preempted.
+
+00:05:28,610 --> 00:05:31,730
+They have to explicitly yield control to one another.
+
+00:05:32,440 --> 00:05:34,540
+As a result of both of these two,
+
+00:05:34,550 --> 00:05:38,180
+they're extremely lightweight compared to threads.
+
+00:05:38,180 --> 00:05:40,100
+How lightweight are we talking?
+
+00:05:40,100 --> 00:05:42,870
+Well, with green threads
+
+00:05:42,870 --> 00:05:48,670
+you can handle about 20-30,000 concurrent connections, no problem.
+
+00:05:48,670 --> 00:05:52,000
+That's impressive, and that's something that threads in Python
+
+00:05:52,000 --> 00:05:55,520
+just doesn't give you because of the memory overhead.
+
+00:05:55,520 --> 00:05:59,380
+Now green threads are the concurrency construct
+
+00:05:59,380 --> 00:06:01,190
+that gevent gives you.
+
+00:06:01,190 --> 00:06:05,810
+Gevent calls them greenlets, and this is how you'd use them.
+
+00:06:07,160 --> 00:06:10,800
+Now, the thing to note here is that the gevent solution
+
+00:06:10,810 --> 00:06:15,110
+reads as simple as the solution with threads or processes,
+
+00:06:15,110 --> 00:06:18,750
+the API exposed as a synchronous API.
+
+00:06:20,030 --> 00:06:24,170
+But what I've just told you is that gevent's greenlets
+
+00:06:24,170 --> 00:06:28,550
+are also extremely lightweight, which brings us to the question:
+
+00:06:28,550 --> 00:06:33,870
+How does gevent provide this execution unit, this greenlet
+
+00:06:33,870 --> 00:06:37,690
+that gives you the desired asynchronous I/O
+
+00:06:37,690 --> 00:06:40,470
+but is also lightweight and so simple to use?
+
+00:06:41,300 --> 00:06:43,340
+I certainly thought it was amazing,
+
+00:06:43,340 --> 00:06:45,380
+and that's why I'm here giving this talk.
+
+00:06:45,390 --> 00:06:47,890
+And that brings us to the next half of the talk.
+
+00:06:48,960 --> 00:06:53,770
+We will first learn about gevent's core building blocks,
+
+00:06:53,770 --> 00:06:57,290
+the greenlet library, and the lib EV library,
+
+00:06:57,290 --> 00:06:59,960
+we will then learn about how gevent integrates them
+
+00:06:59,960 --> 00:07:03,960
+or ties them together, and then we'll do a wrap-up and Q&A.
+
+00:07:07,120 --> 00:07:10,780
+Now, in the world of programming, the best way, usually,
+
+00:07:10,790 --> 00:07:13,690
+to answer the, "How does X work?" question
+
+00:07:13,690 --> 00:07:15,720
+is to go to the source code.
+
+00:07:15,720 --> 00:07:18,080
+Luckily for us, gevent is open source,
+
+00:07:18,080 --> 00:07:20,560
+it's on GITHUB, so, that's exactly what I did.
+
+00:07:21,380 --> 00:07:23,320
+And this is what I saw.
+
+00:07:23,920 --> 00:07:29,180
+When you call greenlet, this is what happens.
+
+00:07:29,180 --> 00:07:31,720
+These are lines from the greenlet.py file.
+
+00:07:32,560 --> 00:07:34,520
+Well, let's see.
+
+00:07:34,520 --> 00:07:38,160
+Greenlet seems to inherit from a small g greenlet
+
+00:07:38,169 --> 00:07:40,349
+which is imported from elsewhere.
+
+00:07:41,340 --> 00:07:43,100
+What's going on?
+
+00:07:43,100 --> 00:07:47,580
+Well, gevent's Greenlets, the big G Greenlet,
+
+00:07:47,580 --> 00:07:50,400
+are built on top of -- are an augmented version
+
+00:07:50,400 --> 00:07:52,510
+of the small g greenlet,
+
+00:07:52,510 --> 00:07:55,630
+which comes from the greenlet library.
+
+00:07:55,630 --> 00:07:57,780
+So let's ask again:
+
+00:07:57,780 --> 00:08:01,080
+what are the small g greenlets and how do they work?
+
+00:08:02,400 --> 00:08:05,120
+Here's a simple example to help us understand.
+
+00:08:06,400 --> 00:08:10,320
+Here I am using the greenlet library directly.
+
+00:08:10,330 --> 00:08:14,850
+I create one greenlet, I create another greenlet.
+
+00:08:14,850 --> 00:08:19,260
+This is what those greenlets do: they call two print functions.
+
+00:08:19,260 --> 00:08:22,380
+And then to start the execution of this program,
+
+00:08:22,380 --> 00:08:25,320
+I'm going to call greenlet.switch.
+
+00:08:26,150 --> 00:08:29,970
+To understand what switch does, let's actually run through the code.
+
+00:08:30,780 --> 00:08:34,740
+So greenlet 1 switches into the greenlet
+
+00:08:34,750 --> 00:08:37,210
+that's running print_red, so we start to run it.
+
+00:08:38,450 --> 00:08:40,669
+We hit greenlet2.switch
+
+00:08:40,669 --> 00:08:43,629
+which switches into the blue greenlet,
+
+00:08:44,540 --> 00:08:46,680
+so that runs and we hit --
+
+00:08:46,690 --> 00:08:50,700
+we print blue and then we hit greenlet1.switch.
+
+00:08:50,700 --> 00:08:52,700
+Now, this is where it gets cool,
+
+00:08:52,700 --> 00:08:55,430
+because the second time we hit that line,
+
+00:08:55,430 --> 00:08:57,700
+it doesn't restart the function.
+
+00:08:57,700 --> 00:09:00,940
+It just resumes it, and so we get red done.
+
+00:09:02,940 --> 00:09:05,400
+Let's take a second to see what happens.
+
+00:09:06,040 --> 00:09:11,020
+Basically, what .switch did is it paused at the current greenlet
+
+00:09:11,020 --> 00:09:14,760
+and yielded control flow to the next greenlet.
+
+00:09:16,520 --> 00:09:20,940
+And the next time you call switch, it resumes, it picks up execution
+
+00:09:20,940 --> 00:09:22,780
+rather than restarting it.
+
+00:09:23,500 --> 00:09:25,380
+This might look familiar to some of you
+
+00:09:25,390 --> 00:09:28,170
+because these are just coroutines.
+
+00:09:29,440 --> 00:09:33,600
+Now we understand the "what" question: What are the small g greenlets?
+
+00:09:33,610 --> 00:09:35,420
+They're just coroutines.
+
+00:09:35,420 --> 00:09:37,900
+Now for the "how": How do they work?
+
+00:09:39,460 --> 00:09:43,181
+Now the greenlet library is written in C
+
+00:09:43,181 --> 00:09:47,260
+and it's available as a C extension module.
+
+00:09:47,260 --> 00:09:49,080
+The fact that it's written in C
+
+00:09:49,080 --> 00:09:51,720
+is extremely important to how it works,
+
+00:09:51,720 --> 00:09:55,340
+because it works by manipulating the C stack.
+
+00:09:55,340 --> 00:09:58,740
+A little background on the C Python interpreter.
+
+00:09:58,740 --> 00:10:01,830
+In C Python, the interpreter is a C program.
+
+00:10:01,830 --> 00:10:04,470
+It's a C virtual machine.
+
+00:10:04,470 --> 00:10:06,200
+And so there are two stacks.
+
+00:10:06,210 --> 00:10:08,070
+There is the notion of the interpreter's stack
+
+00:10:08,070 --> 00:10:10,890
+which is the machine stack or the C stack,
+
+00:10:10,890 --> 00:10:12,880
+also called the program stack.
+
+00:10:12,880 --> 00:10:16,899
+And then your actual Python code and Python call frames
+
+00:10:16,899 --> 00:10:20,859
+live on the interpreter's virtual stack
+
+00:10:20,860 --> 00:10:24,340
+called the Python stack, which is not the real stack.
+
+00:10:24,340 --> 00:10:26,940
+So in this case, we're talking about the C stack,
+
+00:10:26,950 --> 00:10:28,970
+the actual machine stack.
+
+00:10:29,840 --> 00:10:31,960
+Cool, let's see how it works.
+
+00:10:32,640 --> 00:10:34,640
+So, first things first.
+
+00:10:34,640 --> 00:10:38,300
+When you create a greenlet with a "run" function,
+
+00:10:38,300 --> 00:10:40,720
+it allocates a struct on the heap.
+
+00:10:42,920 --> 00:10:44,840
+You can think of this as a container
+
+00:10:44,840 --> 00:10:47,000
+for the greenlet state.
+
+00:10:47,000 --> 00:10:50,160
+At this point, it has a "run" function,
+
+00:10:50,170 --> 00:10:52,070
+which is the function you want it to run,
+
+00:10:52,070 --> 00:10:53,839
+and it has a parent.
+
+00:10:53,839 --> 00:10:55,980
+Every greenlet has a parent,
+
+00:10:55,980 --> 00:10:58,660
+and that's all you need to know at this point.
+
+00:10:58,660 --> 00:11:04,940
+Now when you call greenlet1.switch, and this is your C stack,
+
+00:11:04,940 --> 00:11:07,279
+what happens is the current stack pointer
+
+00:11:07,279 --> 00:11:10,420
+is saved away in the Greenlet struct
+
+00:11:10,420 --> 00:11:13,680
+and then your greenlet 1 starts to run.
+
+00:11:14,950 --> 00:11:19,670
+Then you call greenlet2.switch, and two things happen.
+
+00:11:20,660 --> 00:11:23,540
+The current stack pointer is saved away,
+
+00:11:23,540 --> 00:11:26,440
+as the greenlet 1 -- like, at its end point
+
+00:11:26,440 --> 00:11:28,170
+where it stopped running,
+
+00:11:28,170 --> 00:11:31,640
+and it's also saved away for the blue greenlet,
+
+00:11:31,640 --> 00:11:34,300
+and then greenlet 2 starts to run.
+
+00:11:35,040 --> 00:11:38,660
+Then you call greenlet1.switch again.
+
+00:11:38,660 --> 00:11:40,440
+And this is where it gets mad impressive,
+
+00:11:40,440 --> 00:11:42,260
+so stay with me.
+
+00:11:42,260 --> 00:11:44,600
+What we need to happen is, we want --
+
+00:11:44,610 --> 00:11:50,410
+that's the slice of stack between the current stack pointer
+
+00:11:50,410 --> 00:11:54,529
+and the pointer that greenlet 1 left off at.
+
+00:11:54,529 --> 00:11:58,470
+We need to resume, or reclaim, that slice of stack
+
+00:11:58,470 --> 00:12:01,670
+so greenlet 1 can resume its execution.
+
+00:12:02,500 --> 00:12:07,300
+Now, to do that, greenlet uses a neat technique
+
+00:12:07,300 --> 00:12:12,430
+called stack slicing, which is implemented in assembly,
+
+00:12:12,430 --> 00:12:15,610
+and what it does is it takes that slice of stack
+
+00:12:15,610 --> 00:12:19,310
+that we need for greenlet 1 to continue
+
+00:12:19,310 --> 00:12:21,570
+and it just copies it off to the heap.
+
+00:12:22,400 --> 00:12:25,360
+Then it resets the stack pointer
+
+00:12:25,370 --> 00:12:28,410
+to the point where greenlet 1 left it off,
+
+00:12:29,620 --> 00:12:32,320
+and then greenlet 1 can continue execution.
+
+00:12:33,560 --> 00:12:36,700
+Let's take a second to appreciate what happened.
+
+00:12:36,700 --> 00:12:38,520
+We just changed the stack
+
+00:12:38,529 --> 00:12:41,120
+from under the Python interpreter's nose.
+
+00:12:41,120 --> 00:12:44,339
+It has no idea that the stack switch just happened
+
+00:12:44,339 --> 00:12:46,559
+and it just continues execution.
+
+00:12:47,640 --> 00:12:50,740
+If you don't think that's cool, I don't know what is.
+
+00:12:50,740 --> 00:12:52,860
+[laughter]
+
+00:12:53,900 --> 00:12:58,940
+Cool, so that brings us to the end of our first building block.
+
+00:12:58,940 --> 00:13:02,100
+Gevent uses greenlets
+
+00:13:02,100 --> 00:13:06,500
+to get these lightweight cooperative execution units
+
+00:13:06,500 --> 00:13:09,040
+in the form of greenlet's coroutines.
+
+00:13:12,760 --> 00:13:16,960
+Now, let's go back to our gevent server program.
+
+00:13:16,970 --> 00:13:19,410
+We understand what that first line does.
+
+00:13:19,410 --> 00:13:23,270
+Now let's look at what that second line, g.start, does.
+
+00:13:23,270 --> 00:13:30,410
+For that, we go back to the source, and, hey, there's a loop.
+
+00:13:30,410 --> 00:13:32,220
+It's an event loop.
+
+00:13:32,220 --> 00:13:34,700
+Gevent uses libev
+
+00:13:34,700 --> 00:13:39,140
+which is a high-performance event loop written in C.
+
+00:13:39,140 --> 00:13:42,019
+For those who are not familiar with libev,
+
+00:13:42,019 --> 00:13:47,850
+libev essentially gives you an API to register event_handler callbacks.
+
+00:13:47,850 --> 00:13:50,380
+So if there's an event you're interested in,
+
+00:13:50,380 --> 00:13:53,589
+like a file descriptor -- like a socket file descriptor
+
+00:13:53,589 --> 00:13:57,149
+being read or written to a certain time out occurring,
+
+00:13:57,149 --> 00:13:59,269
+you can register your interest in the event
+
+00:13:59,269 --> 00:14:02,100
+and give it a call back.
+
+00:14:02,100 --> 00:14:06,480
+Libev's event loop takes care of watching for these events.
+
+00:14:06,480 --> 00:14:11,050
+The way it does this, depending on the particular event is --
+
+00:14:11,050 --> 00:14:15,440
+in the case of socket file descriptors, which is what we care about,
+
+00:14:15,440 --> 00:14:20,320
+it uses k-pull, pull, kq -- whatever is available.
+
+00:14:21,140 --> 00:14:25,360
+And then when these events occur, it calls your registered callbacks.
+
+00:14:26,880 --> 00:14:29,400
+Now, say, for example, this is what you want to do:
+
+00:14:29,400 --> 00:14:33,040
+You want to say, "Hey loop, wait for a write on this socket
+
+00:14:33,040 --> 00:14:35,420
+"and call my call back, when this happens."
+
+00:14:36,500 --> 00:14:38,480
+This is how you do it.
+
+00:14:39,520 --> 00:14:43,560
+First, you have to make your socket non-blocking.
+
+00:14:43,560 --> 00:14:47,000
+The difference between blocking and non-blocking sockets is,
+
+00:14:47,000 --> 00:14:52,120
+non-blocking sockets don't block, whereas blocking sockets do.
+
+00:14:52,120 --> 00:14:53,960
+[laughter]
+
+00:14:53,960 --> 00:14:58,339
+So, in the case of a blocking socket, your program actually --
+
+00:14:58,339 --> 00:15:00,170
+it's the difference between saying,
+
+00:15:00,170 --> 00:15:03,690
+"Wait 'til an event occurs on the socket,"
+
+00:15:03,690 --> 00:15:08,160
+versus, "Throw an exception."
+
+00:15:08,170 --> 00:15:13,000
+The exception thrown is like "event not available," I think,
+
+00:15:13,000 --> 00:15:16,040
+or something along those lines, and moving on with your life.
+
+00:15:18,380 --> 00:15:19,940
+Whoops.
+
+00:15:22,060 --> 00:15:26,820
+The second thing you do is you'd register your interest in the event
+
+00:15:26,820 --> 00:15:31,680
+by calling loop.io_watch and giving it your callback function,
+
+00:15:31,680 --> 00:15:33,880
+and then you run the loop.
+
+00:15:33,880 --> 00:15:36,380
+Now, when you run the loop,
+
+00:15:36,380 --> 00:15:38,829
+this is pretty standard of event loops.
+
+00:15:38,829 --> 00:15:42,800
+They block the process waiting for these events of interest
+
+00:15:42,800 --> 00:15:46,640
+and then when they occur, they call the pending callbacks.
+
+00:15:47,200 --> 00:15:50,440
+Now libev adds two steps to this loop
+
+00:15:50,440 --> 00:15:53,380
+which allows you to customize the event loop.
+
+00:15:56,920 --> 00:16:01,700
+Before blocking the process, it calls pre_block_watchers,
+
+00:16:01,700 --> 00:16:06,140
+and after blocking the process, it calls post_block_watchers.
+
+00:16:06,140 --> 00:16:09,860
+Now, the names are not important, but the idea is powerful.
+
+00:16:10,660 --> 00:16:16,100
+What this allows you to do is it essentially gives you a hook
+
+00:16:16,110 --> 00:16:19,730
+to integrate other event mechanisms into your event loop.
+
+00:16:20,640 --> 00:16:23,300
+"What event mechanisms?" may you wonder.
+
+00:16:23,310 --> 00:16:27,920
+Well, for example, if you care about integrating coroutines
+
+00:16:27,920 --> 00:16:30,769
+into your event loop, this is one way to do it.
+
+00:16:30,769 --> 00:16:33,440
+You basically change the statement to, "Hey loop,
+
+00:16:33,440 --> 00:16:35,640
+"if there are coroutines waiting to run,
+
+00:16:35,640 --> 00:16:39,300
+"if they are ready to run, run them first and then block."
+
+00:16:40,820 --> 00:16:44,580
+And that brings us to the end of our second building block: libev.
+
+00:16:44,580 --> 00:16:47,720
+Gevent uses libev for an event loop.
+
+00:16:51,900 --> 00:16:55,120
+Now, if we go back to our server program,
+
+00:16:55,120 --> 00:16:59,200
+we notice that there are no explicit switches,
+
+00:16:59,200 --> 00:17:02,870
+and there are no explicit loop.runs.
+
+00:17:02,870 --> 00:17:04,959
+But we do know that there are greenlets
+
+00:17:04,959 --> 00:17:07,769
+and there's an event loop under the hood,
+
+00:17:07,769 --> 00:17:11,289
+and that brings us to the second half of our story:
+
+00:17:11,289 --> 00:17:13,469
+how gevent ties them together.
+
+00:17:15,339 --> 00:17:19,269
+To do that, let's dig a little deeper into the source code.
+
+00:17:19,269 --> 00:17:25,439
+Now this first line instantiates a small g greenlet,
+
+00:17:25,439 --> 00:17:31,759
+and it sets its parent to the special, and very important, hub greenlet.
+
+00:17:32,780 --> 00:17:36,880
+The hub greenlet is special and important
+
+00:17:36,889 --> 00:17:38,890
+because it's the hub -- it's the greenlet
+
+00:17:38,890 --> 00:17:41,050
+that contains and runs the event loop.
+
+00:17:42,120 --> 00:17:45,700
+There is one of hub greenlet or one event loop per thread.
+
+00:17:47,780 --> 00:17:54,240
+And basically, when you call greenlet, when you instantiate a greenlet,
+
+00:17:54,249 --> 00:17:56,040
+it creates the two building blocks.
+
+00:17:56,040 --> 00:18:00,489
+It creates the small g greenlet to run your download photos function,
+
+00:18:00,489 --> 00:18:02,669
+and it creates the event loop.
+
+00:18:04,940 --> 00:18:07,200
+Now let's look at what that second line does
+
+00:18:07,210 --> 00:18:09,030
+in closer detail.
+
+00:18:11,780 --> 00:18:13,800
+When you call g.start,
+
+00:18:14,720 --> 00:18:19,379
+it registers your greenlet's "start" or "resume" function,
+
+00:18:19,379 --> 00:18:22,489
+its "switch" function, into the event loop,
+
+00:18:22,489 --> 00:18:27,360
+and it registers it as one of those pre_block_watchers.
+
+00:18:27,360 --> 00:18:30,580
+Now, remember what the pre_block_watchers did.
+
+00:18:30,580 --> 00:18:33,600
+They were called before the event loop block.
+
+00:18:35,640 --> 00:18:39,880
+So, basically, the .start function allows you to say,
+
+00:18:39,889 --> 00:18:41,980
+"Hey loop, this coroutine,
+
+00:18:41,980 --> 00:18:45,760
+"the coroutine that's going to run download photos, is ready to run.
+
+00:18:45,760 --> 00:18:47,540
+"Run it before you block."
+
+00:18:49,100 --> 00:18:52,080
+So, now at this point,
+
+00:18:52,080 --> 00:18:56,140
+we have our greenlet and our event loop set up,
+
+00:18:56,140 --> 00:18:59,500
+and we've registered one into the other.
+
+00:18:59,509 --> 00:19:01,950
+All we have to do is run the damn loop,
+
+00:19:01,950 --> 00:19:05,330
+and that's what this next call -- this next line does.
+
+00:19:05,330 --> 00:19:08,900
+Gevent.joinall runs the event loop.
+
+00:19:08,900 --> 00:19:11,340
+There are a few other ways to run the loop,
+
+00:19:11,350 --> 00:19:16,170
+and we're going to look at a simplified version which is g.join.
+
+00:19:17,200 --> 00:19:23,420
+What this line does is, it switches into the hub greenlet.
+
+00:19:25,269 --> 00:19:28,340
+When you switch into the hub greenlet,
+
+00:19:28,340 --> 00:19:31,299
+its run function is set to be the function --
+
+00:19:31,299 --> 00:19:33,539
+is set to run the event loop.
+
+00:19:33,540 --> 00:19:37,739
+So basically, what we've done is: .join runs the loop.
+
+00:19:37,740 --> 00:19:39,700
+It puts things in motion.
+
+00:19:41,620 --> 00:19:43,840
+What exactly does it put in motion?
+
+00:19:43,840 --> 00:19:47,300
+Let's quickly walk backwards and see how this all works.
+
+00:19:48,700 --> 00:19:51,859
+.join will run the loop.
+
+00:19:51,859 --> 00:19:56,690
+The loop will call all pending pre_block_watchers,
+
+00:19:56,690 --> 00:20:00,119
+namely your switch -- your greenlet switch method,
+
+00:20:00,119 --> 00:20:02,279
+and then download_photos is called.
+
+00:20:03,260 --> 00:20:08,060
+So, what we've seen is that the hub, which is a gevent construct,
+
+00:20:08,060 --> 00:20:11,619
+helps you tie together the greenlet and the event loop.
+
+00:20:13,060 --> 00:20:15,480
+Now, all of this is well and good,
+
+00:20:15,489 --> 00:20:19,440
+but it still doesn't answer our big question:
+
+00:20:19,440 --> 00:20:22,860
+How does using gevent give us asynchronous I/O?
+
+00:20:22,860 --> 00:20:24,660
+Because the big problem is
+
+00:20:24,660 --> 00:20:27,460
+when you call download_photos, guess what?
+
+00:20:27,470 --> 00:20:30,450
+It's still going to make a blocking network request.
+
+00:20:31,520 --> 00:20:34,460
+Well, let's see, we have an event loop.
+
+00:20:34,460 --> 00:20:37,009
+Can we leverage it in some way?
+
+00:20:37,009 --> 00:20:41,869
+Why yes we can, and thanks to gevent, we can with one line.
+
+00:20:43,300 --> 00:20:49,180
+Gevent monkeypatches, or replaces, parts of the standard library,
+
+00:20:49,180 --> 00:20:50,920
+so calling that line,
+
+00:20:50,920 --> 00:20:55,260
+automatically, under the hood, replaces socket
+
+00:20:55,269 --> 00:20:59,389
+with gevent's version of socket, which is cooperative.
+
+00:21:00,420 --> 00:21:04,080
+Specifically, what Gevent's version does is,
+
+00:21:04,090 --> 00:21:08,179
+when you create a socket, it makes it non-blocking for you
+
+00:21:08,179 --> 00:21:10,590
+and then when you call socket functions like "send,"
+
+00:21:10,590 --> 00:21:12,669
+or "receive," or "accept,"
+
+00:21:12,669 --> 00:21:17,729
+it registers it into the event loop and it runs the loop.
+
+00:21:20,760 --> 00:21:24,260
+And that answers the, "How does gevent give us asynchronous I/O?"
+
+00:21:24,260 --> 00:21:27,840
+A large part of it comes from this technique called monkey patching.
+
+00:21:28,600 --> 00:21:30,080
+Cool.
+
+00:21:30,080 --> 00:21:32,769
+Now that we understand, or mostly understand,
+
+00:21:32,769 --> 00:21:34,909
+how our gevent server program works,
+
+00:21:34,909 --> 00:21:36,840
+let's quickly run through it
+
+00:21:36,850 --> 00:21:39,050
+and make sure we have all the pieces down.
+
+00:21:40,120 --> 00:21:44,500
+Assume for this purpose that we have two users.
+
+00:21:44,500 --> 00:21:48,799
+Now, at the end of this loop, we have an event loop set up
+
+00:21:48,799 --> 00:21:51,989
+with pre_block_watchers set to greenlet 1
+
+00:21:51,989 --> 00:21:54,069
+and greenlet 2's switch methods.
+
+00:21:55,260 --> 00:21:58,900
+Then this line switches into the loop.
+
+00:21:59,980 --> 00:22:06,080
+Since we have pre_block_watchers, we call one of them.
+
+00:22:06,080 --> 00:22:08,520
+And so, we switch into greenlet 1,
+
+00:22:10,400 --> 00:22:13,260
+and we run the download_photos function.
+
+00:22:13,260 --> 00:22:17,320
+Now, this download_photos is going to make a network request.
+
+00:22:17,330 --> 00:22:19,680
+This is where the monkeypatching kicks in.
+
+00:22:19,680 --> 00:22:23,619
+So, it sets up the I/O watchers and it switches back to the hub.
+
+00:22:23,619 --> 00:22:26,889
+Now, we're in iteration 2 of the event loop.
+
+00:22:26,889 --> 00:22:29,649
+There's still one pre_block_watcher,
+
+00:22:29,649 --> 00:22:33,829
+so we switch into greenlet 2, repeat.
+
+00:22:35,300 --> 00:22:38,899
+Now, in iteration 3 of the event loop,
+
+00:22:38,899 --> 00:22:42,230
+there are no pre_block_watchers left,
+
+00:22:42,230 --> 00:22:45,360
+so now the loop actually blocks for I/O.
+
+00:22:45,360 --> 00:22:47,900
+Now, say there's an event on socket 1
+
+00:22:48,980 --> 00:22:52,340
+Our pending io_watchers is greenlet 1,
+
+00:22:52,350 --> 00:22:57,670
+so we switch into it and greenlet 1 resumes download photos.
+
+00:22:59,320 --> 00:23:01,580
+Sounds like asynchronous I/O to me.
+
+00:23:03,139 --> 00:23:04,419
+Cool.
+
+00:23:04,420 --> 00:23:07,860
+So, that brings us to the end of our talk.
+
+00:23:07,869 --> 00:23:09,709
+To wrap things up,
+
+00:23:09,709 --> 00:23:12,960
+I want to make note of a couple of things.
+
+00:23:12,960 --> 00:23:16,549
+First of all, gevent, amazing as it is, is not perfect,
+
+00:23:16,549 --> 00:23:20,980
+nor is it ideal for all your I/O problems.
+
+00:23:20,980 --> 00:23:22,700
+It has a few shortcomings.
+
+00:23:22,700 --> 00:23:25,580
+First of all, it doesn't give you parallelism.
+
+00:23:25,580 --> 00:23:29,960
+Secondly non-cooperative code will block your entire process
+
+00:23:29,970 --> 00:23:31,690
+if you're not careful.
+
+00:23:31,690 --> 00:23:36,790
+What this means is, C extensions, like database drivers,
+
+00:23:36,790 --> 00:23:38,440
+are not directly available.
+
+00:23:38,450 --> 00:23:40,669
+You have to use the pure Python versions
+
+00:23:40,669 --> 00:23:43,209
+which can take advantage of monkeypatching.
+
+00:23:44,200 --> 00:23:47,840
+Secondly, compute-bound greenlets will also cause problems.
+
+00:23:47,840 --> 00:23:49,800
+So, if you have a greenlet that's just running
+
+00:23:49,800 --> 00:23:52,899
+some CPU-intensive number-crunching algorithm,
+
+00:23:52,899 --> 00:23:56,080
+unless you insert these gevent.sleeps
+
+00:23:56,080 --> 00:24:00,260
+to make it explicitly yield, that one greenlet will hog your CPU.
+
+00:24:01,140 --> 00:24:04,700
+You can also use greenlet blocking detection tools.
+
+00:24:04,700 --> 00:24:08,899
+And thirdly, monkeypatching may have confusing implications,
+
+00:24:08,899 --> 00:24:11,559
+like, the order of imports matters.
+
+00:24:13,560 --> 00:24:15,760
+And we can talk about this if you have questions.
+
+00:24:17,800 --> 00:24:20,599
+That said, for the workloads that --
+
+00:24:20,599 --> 00:24:25,159
+gevent is a good solution, it's an excellent solution.
+
+00:24:25,160 --> 00:24:31,240
+We're talking about I/O bound apps that need to be highly concurrent.
+
+00:24:31,249 --> 00:24:34,710
+In lots of benchmark tests,
+
+00:24:34,710 --> 00:24:40,840
+gevent successfully handled 20-30,000 concurrent connections,
+
+00:24:40,840 --> 00:24:42,640
+which is hella impressive.
+
+00:24:43,640 --> 00:24:46,520
+And it is, in fact, used at web scale
+
+00:24:46,529 --> 00:24:51,829
+at companies like Pinterest, Facebook, Mixpanel, Paypal, etc.
+
+00:24:53,820 --> 00:24:56,599
+And that brings us to the end of our talk.
+
+00:24:56,599 --> 00:25:00,450
+I hope you've gained an understanding and an appreciation
+
+00:25:00,450 --> 00:25:03,590
+for the ingenuity of gevent,
+
+00:25:03,590 --> 00:25:08,669
+and how it takes greenlets and the libev event loop
+
+00:25:08,669 --> 00:25:13,569
+and integrates them using the hub and monkeypatching.
+
+00:25:13,569 --> 00:25:15,309
+Thank you.
+
+00:25:15,309 --> 00:25:21,309
+[applause]
+
+00:25:23,660 --> 00:25:25,620
+(presenter) OK, thank you, Kavya.
+
+00:25:25,630 --> 00:25:27,879
+If you have questions, we have a microphone over here.
+
+00:25:27,879 --> 00:25:31,649
+We have two or three minutes left, so if you have a question,
+
+00:25:31,649 --> 00:25:33,789
+please come to the microphone and ask.
+
+00:25:37,980 --> 00:25:40,000
+Yes, please.
+
+00:25:40,000 --> 00:25:42,480
+(audience member 1) Is it working?
+
+00:25:42,480 --> 00:25:44,560
+So thank you; thank you for your talk.
+
+00:25:44,560 --> 00:25:45,800
+I appreciated it.
+
+00:25:45,800 --> 00:25:48,580
+I was just curious if there are any major functional differences
+
+00:25:48,590 --> 00:25:50,920
+between gevent and eventlet.
+
+00:25:50,920 --> 00:25:52,740
+(presenter) Can you speak up a little bit?
+
+00:25:52,740 --> 00:25:54,500
+(audience member 1) Are there any major functional differences
+
+00:25:54,500 --> 00:25:56,320
+between gevent and eventlet,
+
+00:25:56,320 --> 00:25:58,500
+or reasons that you might want to choose one over the other?
+
+00:25:59,420 --> 00:26:02,640
+(Kavya Joshi) Yeah, so greenlet,
+
+00:26:02,649 --> 00:26:06,200
+which is what gevent is built on top of,
+
+00:26:06,200 --> 00:26:09,229
+came off of eventlet,
+
+00:26:09,229 --> 00:26:13,920
+and I believe that it is -- it makes certain optimizations
+
+00:26:13,920 --> 00:26:17,640
+with the stack slicing, with the stack switching.
+
+00:26:17,649 --> 00:26:19,669
+I'm not too familiar with the details,
+
+00:26:19,669 --> 00:26:23,129
+or I don't remember them rather, but there's an excellent thread
+
+00:26:23,129 --> 00:26:26,220
+between the creator of eventlet and greenlet
+
+00:26:26,220 --> 00:26:29,429
+that is available on the Internet if you want to read up on it.
+
+00:26:29,429 --> 00:26:31,249
+(audience member 1) OK, thank you.
+
+00:26:32,680 --> 00:26:34,460
+(audience member 2) Thank you.
+
+00:26:34,460 --> 00:26:35,929
+I was curious if it was possible
+
+00:26:35,929 --> 00:26:39,570
+to combine multiprocessing and greenlet
+
+00:26:39,570 --> 00:26:44,750
+so that you could have one event loop per CPU on your server?
+
+00:26:45,860 --> 00:26:49,559
+(Kavya Joshi) So, as of gevent version 1.1
+
+00:26:49,559 --> 00:26:54,830
+that came out earlier in May this year, it might be possible to do so.
+
+00:26:54,830 --> 00:26:58,320
+In the previous versions of gevent, because of the monkeypatching
+
+00:26:58,320 --> 00:27:03,009
+and its interaction with the multiprocessing module,
+
+00:27:03,009 --> 00:27:05,249
+it was more complicated to do.
+
+00:27:05,480 --> 00:27:06,700
+(audience member) Thank you.
+
+00:27:06,700 --> 00:27:07,900
+(Kavya Joshi) Yep.
+
+00:27:07,900 --> 00:27:09,320
+(audience member 3) Yey there, hello?
+
+00:27:09,320 --> 00:27:10,640
+(Kavya Joshi) Yeah.
+
+00:27:10,640 --> 00:27:12,480
+(audience member 3) Do you have any recommendations
+
+00:27:12,480 --> 00:27:14,200
+for greenlet blocking and detection tools?
+
+00:27:14,200 --> 00:27:18,039
+(Kavya Joshi) Yeah, so Nilus,
+
+00:27:18,039 --> 00:27:22,450
+which is the company I work at, uses Greenlet heavily.
+
+00:27:22,450 --> 00:27:26,100
+And the sync-engine repo, the Nylas sync-engine repo,
+
+00:27:26,100 --> 00:27:30,109
+is open source, and we have a snippet
+
+00:27:30,109 --> 00:27:35,779
+in the instrumentation.py file or the profiling.py file,
+
+00:27:35,779 --> 00:27:38,529
+and you can just use that code snippet, as is.
+
+00:27:38,529 --> 00:27:45,509
+What it does is, it spawns a POSIX thread, a monitoring thread,
+
+00:27:45,509 --> 00:27:49,060
+and then it uses greenlet's set trace.
+
+00:27:49,060 --> 00:27:50,580
+(audience member 3) Interesting, thank you.
+
+00:27:50,580 --> 00:27:52,340
+(Kavya Joshi) Yeah, you can get
+
+00:27:52,340 --> 00:27:53,540
+the entire code snippet online.
+
+00:27:53,549 --> 00:27:55,309
+(presenter) Two more questions.
+
+00:27:55,309 --> 00:27:57,619
+(audience member 4) 20 to 30,000 concurrent connections,
+
+00:27:57,619 --> 00:28:01,539
+the hardware and source for that, and what kind of workload?
+
+00:28:01,540 --> 00:28:04,060
+(Kavya Joshi) Great question.
+
+00:28:04,060 --> 00:28:08,920
+So, the specific benchmark was a standard,
+
+00:28:08,929 --> 00:28:12,979
+like ApacheBench for HTTP servers where you had a web server,
+
+00:28:12,979 --> 00:28:16,959
+a simple HTTP server would serve something over the network.
+
+00:28:18,460 --> 00:28:20,220
+What was the second part of the question?
+
+00:28:20,220 --> 00:28:22,000
+(audience member) Do you have a source for it,
+
+00:28:22,000 --> 00:28:23,860
+the article/the analysis?
+
+00:28:23,860 --> 00:28:25,979
+(Kavya Joshi) Yes, there's a blog post
+
+00:28:25,979 --> 00:28:29,939
+by Mixpanel, from 2010, that performs this comparison,
+
+00:28:29,940 --> 00:28:33,000
+and more recently, as of 2012,
+
+00:28:33,000 --> 00:28:35,639
+there's another blog post that David Beasley
+
+00:28:35,639 --> 00:28:38,559
+has left a few intelligent comments on, as well.
+
+00:28:38,560 --> 00:28:40,560
+(audience member 4) All right thank you.
+
+00:28:40,880 --> 00:28:42,680
+(audience member 5) Hi.
+
+00:28:42,680 --> 00:28:44,659
+So, earlier you show that there's a pre_block_watcher
+
+00:28:44,659 --> 00:28:46,539
+in the pending block_watcher,
+
+00:28:46,540 --> 00:28:50,100
+so how does gevent choose between which one to pick on?
+
+00:28:50,740 --> 00:28:53,180
+So, how does the gevent implementation choose, like,
+
+00:28:53,180 --> 00:28:59,460
+"Hey," because you have both items in the preblock and pending block,
+
+00:28:59,460 --> 00:29:03,899
+so, what gevent will choose from which one first?
+
+00:29:05,260 --> 00:29:08,639
+(Kavya Joshi) Once it starts a new iteration of the loop,
+
+00:29:08,639 --> 00:29:11,169
+it will always run the pre_block_watchers first.
+
+00:29:12,680 --> 00:29:16,940
+(audience member 5) OK, so if I have like millions of items
+
+00:29:16,940 --> 00:29:18,820
+in the pre_block
+
+00:29:18,820 --> 00:29:22,360
+and there's another set in the pending block --
+
+00:29:22,360 --> 00:29:24,719
+so the pending block will have to wait
+
+00:29:24,719 --> 00:29:28,279
+for the gevent to consume everything from the pre_block first?
+
+00:29:28,279 --> 00:29:31,659
+(Kavya Joshi) Yes, and that that is a problem
+
+00:29:31,659 --> 00:29:33,649
+that you do see if you have --
+
+00:29:33,649 --> 00:29:38,089
+if you spawn lots and lots of greenlets
+
+00:29:38,089 --> 00:29:40,920
+and don't run them soon enough.
+
+00:29:40,920 --> 00:29:43,480
+Because what that does is it grows the pending cue
+
+00:29:43,489 --> 00:29:45,580
+and the pending count
+
+00:29:45,580 --> 00:29:47,409
+and that's exactly the problem you see.
+
+00:29:47,409 --> 00:29:49,209
+(audience member 5) I got it thanks.
+
+00:29:49,209 --> 00:29:51,000
+(Kavya Joshi) Mmm-hmm.
+
+00:29:51,000 --> 00:29:52,840
+(presenter) OK, thank you Kavya.
+
+00:29:52,840 --> 00:29:54,700
+Please give a big hand.
+
+00:29:54,700 --> 00:29:58,960
+[applause]
+
+00:29:58,960 --> 00:30:01,700
+
+YouTube URL: https://www.youtube.com/watch?v=GunMToxbE0E
+
+

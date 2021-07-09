@@ -1,0 +1,2036 @@
+Title: rust-analyzer type-checker overview by flodiebold
+Publication date: 2019-04-25
+Playlist: rustc lecture series
+Description: 
+	flodiebold introduces how the rust-analyzer type checker works, and we discuss various possible next steps towards integrating chalk with RLS 2.0.
+Captions: 
+	00:00:00,709 --> 00:00:06,410
+okay I started a recording session so we
+
+00:00:03,929 --> 00:00:06,410
+get going
+
+00:00:06,529 --> 00:00:14,360
+things like skill exam I'll be a little
+
+00:00:08,760 --> 00:00:14,360
+late but I guess we could start okay
+
+00:00:14,450 --> 00:00:19,710
+so yeah I guess just a brief
+
+00:00:17,940 --> 00:00:22,590
+introduction I mean what I had hoped to
+
+00:00:19,710 --> 00:00:25,949
+do this meeting see how far we get or I
+
+00:00:22,590 --> 00:00:29,939
+hope to do longer term is to understand
+
+00:00:25,949 --> 00:00:33,050
+what the RLS 2.0 type checker is
+
+00:00:29,939 --> 00:00:37,980
+currently doing and hopefully try to
+
+00:00:33,050 --> 00:00:41,399
+kind of merge some of the chalk support
+
+00:00:37,980 --> 00:00:43,590
+four traits in with it and in my ideal
+
+00:00:41,399 --> 00:00:47,070
+world we could have some kind of shared
+
+00:00:43,590 --> 00:00:52,110
+library that represents types which can
+
+00:00:47,070 --> 00:00:53,910
+be used by chalk and by RLS 2.0 and that
+
+00:00:52,110 --> 00:00:56,520
+that same library then we can maybe
+
+00:00:53,910 --> 00:00:59,699
+share some code for sort of trait
+
+00:00:56,520 --> 00:01:02,219
+lowering basically the chalk eye our
+
+00:00:59,699 --> 00:01:03,629
+generation and the talks over and thus
+
+00:01:02,219 --> 00:01:04,799
+kind of pushed a little bit past the
+
+00:01:03,629 --> 00:01:06,960
+state of the art world we might have
+
+00:01:04,799 --> 00:01:10,500
+been able to do with rusty leapfrog
+
+00:01:06,960 --> 00:01:11,820
+ahead and longer term then I would say
+
+00:01:10,500 --> 00:01:15,600
+that the type checker maybe is something
+
+00:01:11,820 --> 00:01:19,100
+we can extract out into a shared library
+
+00:01:15,600 --> 00:01:24,060
+that the rusty itself could also use but
+
+00:01:19,100 --> 00:01:25,770
+so that's my my vision but the first
+
+00:01:24,060 --> 00:01:26,880
+lowly step I guess is for us to
+
+00:01:25,770 --> 00:01:37,460
+understand what the other people have
+
+00:01:26,880 --> 00:01:49,920
+done so along those lines
+
+00:01:37,460 --> 00:01:58,110
+Florian what have you done okay Casey
+
+00:01:49,920 --> 00:02:01,560
+yes yes okay so I thought we'd start
+
+00:01:58,110 --> 00:02:08,069
+with the high-level view of the queries
+
+00:02:01,560 --> 00:02:11,370
+and then we can go into the details or
+
+00:02:08,069 --> 00:02:13,819
+maybe just as a general idea where we
+
+00:02:11,370 --> 00:02:13,819
+are currently
+
+00:02:14,060 --> 00:02:19,580
+so we have basic type of parents
+
+00:02:20,060 --> 00:02:26,400
+including generators and so on
+
+00:02:23,130 --> 00:02:32,120
+of course not trade sorting and in
+
+00:02:26,400 --> 00:02:36,500
+general the goal has been to kept mostly
+
+00:02:32,120 --> 00:02:39,110
+for completion going so we don't do any
+
+00:02:36,500 --> 00:02:43,319
+Diagnostics or anything we just try to
+
+00:02:39,110 --> 00:02:54,810
+understand as much as possible about the
+
+00:02:43,319 --> 00:02:57,269
+types of so you have to submit the basic
+
+00:02:54,810 --> 00:03:10,290
+entry point for the type of parents is
+
+00:02:57,269 --> 00:03:12,030
+missing battery so for example if we
+
+00:03:10,290 --> 00:03:14,760
+want to get some completions in the
+
+00:03:12,030 --> 00:03:18,360
+functioning the completion code requires
+
+00:03:14,760 --> 00:03:19,739
+a function on the inner function and get
+
+00:03:18,360 --> 00:03:22,049
+back and then parents with eyes which
+
+00:03:19,739 --> 00:03:25,590
+basically contains some types of foreign
+
+00:03:22,049 --> 00:03:28,549
+expressions and patterns and some more
+
+00:03:25,590 --> 00:03:31,950
+tables to including information about
+
+00:03:28,549 --> 00:03:35,579
+resolutions of methods and so on this is
+
+00:03:31,950 --> 00:03:37,019
+like for some particular function sort
+
+00:03:35,579 --> 00:03:38,610
+of take some particular function do the
+
+00:03:37,019 --> 00:03:42,930
+type checking and get back the kind of
+
+00:03:38,610 --> 00:03:46,070
+final result okay yeah okay so this this
+
+00:03:42,930 --> 00:03:49,070
+function writing is an ID of some kind
+
+00:03:46,070 --> 00:03:49,070
+yeah
+
+00:03:50,880 --> 00:04:00,480
+yeah and so this uses these other
+
+00:03:57,640 --> 00:04:05,260
+queries that are around here
+
+00:04:00,480 --> 00:04:08,530
+most importantly this body curry which I
+
+00:04:05,260 --> 00:04:09,490
+think Alexia shorted either so text we
+
+00:04:08,530 --> 00:04:14,910
+is video already
+
+00:04:09,490 --> 00:04:17,530
+but basically deep its intermediate
+
+00:04:14,910 --> 00:04:20,500
+representation between the full syntax
+
+00:04:17,530 --> 00:04:30,850
+trees which contain one the whitespace
+
+00:04:20,500 --> 00:04:35,430
+and ranges and so on whereas this it's
+
+00:04:30,850 --> 00:04:39,300
+basically yeah it contains the whole
+
+00:04:35,430 --> 00:04:47,860
+expressions it's not yet named resolved
+
+00:04:39,300 --> 00:04:51,820
+but it doesn't contain white space also
+
+00:04:47,860 --> 00:04:56,110
+we do a bit of the sugaring already into
+
+00:04:51,820 --> 00:04:59,680
+step so for example while that and if
+
+00:04:56,110 --> 00:05:03,250
+let's get low to match that you said
+
+00:04:59,680 --> 00:05:06,640
+it's not yet named resolved the jet
+
+00:05:03,250 --> 00:05:09,930
+tracker does it to name resolution or
+
+00:05:06,640 --> 00:05:12,790
+does that come from some other query
+
+00:05:09,930 --> 00:05:14,919
+yeah the type check out I mean it comes
+
+00:05:12,790 --> 00:05:17,620
+from another library but their
+
+00:05:14,919 --> 00:05:24,940
+resolution happens doing to time the
+
+00:05:17,620 --> 00:05:30,160
+parents basically it what what it does
+
+00:05:24,940 --> 00:05:36,100
+is gives us this height of every other
+
+00:05:30,160 --> 00:05:39,220
+things which were fixed point are you
+
+00:05:36,100 --> 00:05:47,080
+rooting for the imports and then we can
+
+00:05:39,220 --> 00:05:51,520
+set two engines okay and apart net as
+
+00:05:47,080 --> 00:05:56,140
+the queries for lowering the types of
+
+00:05:51,520 --> 00:06:00,900
+various items no Jesus is this five four
+
+00:05:56,140 --> 00:06:00,900
+daiquiri in the type of years
+
+00:06:03,340 --> 00:06:15,200
+yeah there's some more enemies like for
+
+00:06:12,320 --> 00:06:18,230
+example collecting all the interlocks in
+
+00:06:15,200 --> 00:06:21,590
+the afraid because we need them to find
+
+00:06:18,230 --> 00:06:23,770
+message so it so tight for deaf and type
+
+00:06:21,590 --> 00:06:26,930
+for field
+
+00:06:23,770 --> 00:06:30,950
+presumably give you the kind of formal
+
+00:06:26,930 --> 00:06:37,520
+type like the type the user specified or
+
+00:06:30,950 --> 00:06:41,300
+something like that for a given like
+
+00:06:37,520 --> 00:06:45,770
+what is type for deaf example these
+
+00:06:41,300 --> 00:06:49,250
+already so these become the highest type
+
+00:06:45,770 --> 00:06:51,500
+which is the actual type structure we
+
+00:06:49,250 --> 00:06:57,950
+use in the pattern parents but this is
+
+00:06:51,500 --> 00:07:03,110
+already name is so yes basic yet let's
+
+00:06:57,950 --> 00:07:05,300
+go to this next set so this is the
+
+00:07:03,110 --> 00:07:10,480
+representation of types we use doing
+
+00:07:05,300 --> 00:07:13,780
+type inference and so this is basically
+
+00:07:10,480 --> 00:07:20,800
+the main inspiration for this is the I
+
+00:07:13,780 --> 00:07:20,800
+think called the PI kind young and Rafi
+
+00:07:21,520 --> 00:07:31,460
+so we have all the primitive tribes we
+
+00:07:24,860 --> 00:07:34,640
+have first four ATP's legendaries yeah
+
+00:07:31,460 --> 00:07:38,470
+also one thing we currently don't care
+
+00:07:34,640 --> 00:07:43,310
+all about the context of an array so
+
+00:07:38,470 --> 00:07:45,410
+because that doesn't influence condition
+
+00:07:43,310 --> 00:07:51,100
+and so on so much so we just
+
+00:07:45,410 --> 00:07:57,310
+acknowledgement yeah we have references
+
+00:07:51,100 --> 00:08:02,390
+function types function pointer types
+
+00:07:57,310 --> 00:08:06,860
+never tried to put dynamic parameters
+
+00:08:02,390 --> 00:08:11,960
+and trying to induce and we also have an
+
+00:08:06,860 --> 00:08:13,569
+unknown type which is similar to the
+
+00:08:11,960 --> 00:08:19,899
+arrow type and
+
+00:08:13,569 --> 00:08:23,679
+except we use it a lot more so one big
+
+00:08:19,899 --> 00:08:27,699
+reason of course that we never have to
+
+00:08:23,679 --> 00:08:31,929
+love situations where we can't infer the
+
+00:08:27,699 --> 00:08:34,240
+type so this is Regina these
+
+00:08:31,929 --> 00:08:39,120
+skaters there's also the situations
+
+00:08:34,240 --> 00:08:41,740
+where the code is actually incomplete
+
+00:08:39,120 --> 00:08:43,300
+so if there's something that's arrow and
+
+00:08:41,740 --> 00:08:46,899
+the function we still try to ensure
+
+00:08:43,300 --> 00:08:51,569
+types as far as possible but we might in
+
+00:08:46,899 --> 00:08:51,569
+certain unknown minutes expression it's
+
+00:08:55,920 --> 00:09:00,610
+mostly used at the agents because when
+
+00:08:58,720 --> 00:09:07,660
+type inference we mostly place unknown
+
+00:09:00,610 --> 00:09:10,480
+types of a type variables okay so this
+
+00:09:07,660 --> 00:09:13,899
+that's already neighbors all right we
+
+00:09:10,480 --> 00:09:21,250
+refer time to for the 505 ESP -
+
+00:09:13,899 --> 00:09:25,420
+definition of dog so these queries that
+
+00:09:21,250 --> 00:09:28,180
+know our definition to actual resolve
+
+00:09:25,420 --> 00:09:32,139
+names for example if you have a type
+
+00:09:28,180 --> 00:09:36,160
+alias we will resolve the time alias
+
+00:09:32,139 --> 00:09:39,779
+until immediate real time so you jump
+
+00:09:36,160 --> 00:09:39,779
+back for one second to the ADT deaf
+
+00:09:44,510 --> 00:09:51,589
+I see that you have a deaf ID there but
+
+00:09:48,680 --> 00:09:53,240
+also a name for displaying is there a
+
+00:09:51,589 --> 00:09:57,529
+reason that can't be derived from the
+
+00:09:53,240 --> 00:10:02,589
+deaf ID it could be but we would have to
+
+00:09:57,529 --> 00:10:05,360
+have the databases and translate we
+
+00:10:02,589 --> 00:10:08,420
+Josefa this claim of the implementation
+
+00:10:05,360 --> 00:10:11,750
+for tiny things and so we wouldn't be
+
+00:10:08,420 --> 00:10:12,260
+able to move to Spain in Spain okay okay
+
+00:10:11,750 --> 00:10:29,019
+I see
+
+00:10:12,260 --> 00:10:29,019
+yeah but really really okay yeah so okay
+
+00:10:31,810 --> 00:10:47,690
+so yeah we have to know in step which
+
+00:10:43,930 --> 00:10:51,079
+takes definitions and references to
+
+00:10:47,690 --> 00:10:55,399
+types and lowers them to occupy this is
+
+00:10:51,079 --> 00:10:57,079
+basically two big parts with the one is
+
+00:10:55,399 --> 00:11:01,360
+this this type for destiny which I
+
+00:10:57,079 --> 00:11:04,160
+showed the other is the function f takes
+
+00:11:01,360 --> 00:11:06,079
+reference of two types and mainly
+
+00:11:04,160 --> 00:11:12,790
+convicted type of it's by resolving
+
+00:11:06,079 --> 00:11:16,069
+events so this is this from via function
+
+00:11:12,790 --> 00:11:19,040
+like some of these X type reference
+
+00:11:16,069 --> 00:11:23,449
+which is it's not directly
+
+00:11:19,040 --> 00:11:25,760
+similar to the expression it's not
+
+00:11:23,449 --> 00:11:27,110
+Arcadia is T but it's the word form
+
+00:11:25,760 --> 00:11:33,040
+which turned into a much greater
+
+00:11:27,110 --> 00:11:40,190
+Princeton apart from that is you know
+
+00:11:33,040 --> 00:11:45,040
+whatever I use I can write as a file and
+
+00:11:40,190 --> 00:11:47,899
+if we take that and revive names and
+
+00:11:45,040 --> 00:11:50,560
+insert iron content wrong and we
+
+00:11:47,899 --> 00:11:50,560
+authority by
+
+00:11:55,350 --> 00:12:02,970
+[Music]
+
+00:11:57,110 --> 00:12:06,680
+yeah so here we also it's a diaper
+
+00:12:02,970 --> 00:12:13,500
+meters provided by user we don't handle
+
+00:12:06,680 --> 00:12:15,930
+D flat Frankie and a long time are
+
+00:12:13,500 --> 00:12:43,110
+provided but usually and so on
+
+00:12:15,930 --> 00:12:46,140
+unknown types okay so let's go yeah so
+
+00:12:43,110 --> 00:12:50,880
+basically what we do isn't that
+
+00:12:46,140 --> 00:12:53,400
+different from a width of it so we have
+
+00:12:50,880 --> 00:12:57,840
+this context which includes function
+
+00:12:53,400 --> 00:13:06,960
+we're currently checking in the database
+
+00:12:57,840 --> 00:13:11,310
+and basically we go through the function
+
+00:13:06,960 --> 00:13:13,860
+and try to build our expressions one by
+
+00:13:11,310 --> 00:13:20,880
+one and write the high speed and drop
+
+00:13:13,860 --> 00:13:25,590
+into these maps and these are the five
+
+00:13:20,880 --> 00:13:28,580
+tables I mentioned and yeah we have came
+
+00:13:25,590 --> 00:13:37,790
+for a unification of type variables
+
+00:13:28,580 --> 00:13:37,790
+which uses the unit rate and yeah
+
+00:13:40,360 --> 00:13:46,340
+okay so when we want to infer some
+
+00:13:43,100 --> 00:13:49,430
+functions we take the signature of first
+
+00:13:46,340 --> 00:13:51,920
+let's take a look at the parameters at
+
+00:13:49,430 --> 00:13:56,150
+the return pipe know that - I could
+
+00:13:51,920 --> 00:14:01,640
+write and write the types of the
+
+00:13:56,150 --> 00:14:10,190
+patterns and then he goes to the body
+
+00:14:01,640 --> 00:14:13,790
+and if I change one times then and yeah
+
+00:14:10,190 --> 00:14:16,970
+that's my relative similar to receive so
+
+00:14:13,790 --> 00:14:23,150
+think match statement without depending
+
+00:14:16,970 --> 00:14:24,770
+on the expression type varies can I ask
+
+00:14:23,150 --> 00:14:27,350
+a random side question before you going
+
+00:14:24,770 --> 00:14:29,090
+this this like Emax integration you're
+
+00:14:27,350 --> 00:14:33,920
+showing off yours this is also using the
+
+00:14:29,090 --> 00:14:37,040
+rest analyzer underneath yeah yeah
+
+00:14:33,920 --> 00:14:40,730
+that's basically makes with Insp
+
+00:14:37,040 --> 00:14:43,010
+intermittent so infer expert this is
+
+00:14:40,730 --> 00:14:51,380
+okay I see so this basically takes given
+
+00:14:43,010 --> 00:14:56,390
+expression and computes its type yeah
+
+00:14:51,380 --> 00:14:59,440
+bestia computer type if we can't infer
+
+00:14:56,390 --> 00:15:03,950
+something we insert the node type and
+
+00:14:59,440 --> 00:15:06,830
+generally we date unknown types by type
+
+00:15:03,950 --> 00:15:07,700
+variables so we can if there's something
+
+00:15:06,830 --> 00:15:11,900
+we can't in here
+
+00:15:07,700 --> 00:15:18,260
+maybe we can still in further time by
+
+00:15:11,900 --> 00:15:23,780
+some other means later so maybe this is
+
+00:15:18,260 --> 00:15:27,170
+because we want to find as many times as
+
+00:15:23,780 --> 00:15:29,660
+possible and since we're not returning
+
+00:15:27,170 --> 00:15:40,550
+any errors or Diagnostics we don't have
+
+00:15:29,660 --> 00:15:42,800
+to go for you know long for I don't know
+
+00:15:40,550 --> 00:15:44,420
+if you tell me if you have a different
+
+00:15:42,800 --> 00:15:49,400
+order in mind but I'd be curious to take
+
+00:15:44,420 --> 00:15:53,020
+for example into method dispatch yeah
+
+00:15:49,400 --> 00:15:53,020
+yeah we can look at
+
+00:15:57,500 --> 00:16:07,130
+or maybe just one thing what we also do
+
+00:16:03,240 --> 00:16:10,470
+is we passed on than expected side
+
+00:16:07,130 --> 00:16:13,490
+chronically testers really unexpected
+
+00:16:10,470 --> 00:16:14,910
+vibe so far we have you not need to
+
+00:16:13,490 --> 00:16:23,240
+distinguish between different
+
+00:16:14,910 --> 00:16:25,710
+expectation and yeah we use that tool I
+
+00:16:23,240 --> 00:16:29,130
+mean we unify that with the type
+
+00:16:25,710 --> 00:16:41,640
+actually get easier to find out
+
+00:16:29,130 --> 00:16:51,270
+something yeah okay so let's take a look
+
+00:16:41,640 --> 00:16:53,820
+at basically the way that works is we
+
+00:16:51,270 --> 00:17:04,560
+try to revive the type of the receiver
+
+00:16:53,820 --> 00:17:06,870
+and then we go to inherit methods of the
+
+00:17:04,560 --> 00:17:12,660
+of that type and try to find the moment
+
+00:17:06,870 --> 00:17:15,000
+I mentioned where we have described
+
+00:17:12,660 --> 00:17:24,589
+which collects all the interlocks in the
+
+00:17:15,000 --> 00:17:29,100
+grade so we get that and we look after
+
+00:17:24,589 --> 00:17:31,290
+five player and go slower than this at
+
+00:17:29,100 --> 00:17:35,090
+seven five and what happens in the case
+
+00:17:31,290 --> 00:17:35,090
+where the receiver type isn't known yet
+
+00:17:36,110 --> 00:17:46,190
+I mean if it's a factory that we try to
+
+00:17:40,020 --> 00:17:46,190
+solve it so basically
+
+00:17:47,470 --> 00:17:53,800
+in fact tries to resolve everything into
+
+00:17:51,160 --> 00:17:56,530
+dance so what we get back here should be
+
+00:17:53,800 --> 00:18:00,100
+resolved as faster now so if this is a
+
+00:17:56,530 --> 00:18:04,950
+library will be actually don't know come
+
+00:18:00,100 --> 00:18:07,290
+to this anything we find nothing you
+
+00:18:04,950 --> 00:18:13,140
+okay
+
+00:18:07,290 --> 00:18:16,890
+the way that will happen is that when
+
+00:18:13,140 --> 00:18:20,890
+you clean out the box here so we have to
+
+00:18:16,890 --> 00:18:24,340
+fingerprint prototypes this the index in
+
+00:18:20,890 --> 00:18:26,560
+input box by that and if it's a I
+
+00:18:24,340 --> 00:18:39,550
+believe you just want everything a
+
+00:18:26,560 --> 00:18:42,370
+fingerprint yet and then okay yeah I
+
+00:18:39,550 --> 00:18:44,560
+mean that's predicated formatted
+
+00:18:42,370 --> 00:18:46,420
+resolution currently we have a very very
+
+00:18:44,560 --> 00:18:54,190
+sensitive instrumentation of autographed
+
+00:18:46,420 --> 00:18:57,040
+which just written to us and so we don't
+
+00:18:54,190 --> 00:19:09,490
+go to the rest I try to find the
+
+00:18:57,040 --> 00:19:17,200
+mutation okay are you doing coercion and
+
+00:19:09,490 --> 00:19:21,460
+so on Co actually not really sulfides
+
+00:19:17,200 --> 00:19:23,380
+I've found I mean most of the time if we
+
+00:19:21,460 --> 00:19:26,140
+just want to know what it's about type
+
+00:19:23,380 --> 00:19:29,200
+something is we don't actually give any
+
+00:19:26,140 --> 00:19:32,650
+questions very much because as far as I
+
+00:19:29,200 --> 00:19:39,010
+understand it Curtis mostly yet with no
+
+00:19:32,650 --> 00:19:43,000
+other side so I think we've come very
+
+00:19:39,010 --> 00:19:44,800
+fast without doing any questions but one
+
+00:19:43,000 --> 00:19:46,210
+thing which is kind of like three
+
+00:19:44,800 --> 00:19:49,930
+questions of cetera
+
+00:19:46,210 --> 00:19:54,040
+yeah inferring an area and have an
+
+00:19:49,930 --> 00:19:56,770
+expected type projects fries and we will
+
+00:19:54,040 --> 00:19:58,950
+use the you know type of this type of
+
+00:19:56,770 --> 00:20:05,910
+time
+
+00:19:58,950 --> 00:20:08,220
+times in but that's okay yeah that's
+
+00:20:05,910 --> 00:20:12,650
+interesting that's probably true that if
+
+00:20:08,220 --> 00:20:12,650
+you sort of the coercion
+
+00:20:13,160 --> 00:20:23,580
+rarely inform the type of something more
+
+00:20:17,220 --> 00:20:26,750
+checking after the fact how I think I
+
+00:20:23,580 --> 00:20:29,640
+remember seeing some statistics from
+
+00:20:26,750 --> 00:20:31,560
+Alexei about like what percentage of
+
+00:20:29,640 --> 00:20:33,360
+types you're able to infer or what
+
+00:20:31,560 --> 00:20:35,690
+percentage of the code you're able to
+
+00:20:33,360 --> 00:20:39,990
+infer types for or something like that
+
+00:20:35,690 --> 00:20:42,290
+yeah do you remember that off the top of
+
+00:20:39,990 --> 00:20:42,290
+your head
+
+00:20:42,570 --> 00:20:52,500
+yeah I mean basic you guesses and my
+
+00:20:49,320 --> 00:20:54,900
+editor mark there which goes through all
+
+00:20:52,500 --> 00:20:56,520
+the functions on the workspace and tries
+
+00:20:54,900 --> 00:21:05,810
+to inform types and which some
+
+00:20:56,520 --> 00:21:05,810
+statistics or not how many times yeah so
+
+00:21:06,860 --> 00:21:11,910
+for us Allah Allah analyzer because we
+
+00:21:09,840 --> 00:21:16,590
+don't use trade set much less actually
+
+00:21:11,910 --> 00:21:18,240
+yeah we get about eighty percent fifty
+
+00:21:16,590 --> 00:21:23,600
+percent which we don't know and oil and
+
+00:21:18,240 --> 00:21:23,600
+five percent which things from onion pie
+
+00:21:24,350 --> 00:21:37,890
+for has a greater because yeah usually
+
+00:21:30,140 --> 00:21:42,920
+okay so yeah I think I mean it's still
+
+00:21:37,890 --> 00:21:49,830
+quite primitive but go get ready
+
+00:21:42,920 --> 00:22:00,450
+yeah that's really cool so I could show
+
+00:21:49,830 --> 00:22:01,950
+how we tested basically almost all tests
+
+00:22:00,450 --> 00:22:04,430
+for the type inference currently has
+
+00:22:01,950 --> 00:22:07,410
+been protests where we just have some
+
+00:22:04,430 --> 00:22:09,660
+source file and you make a sentence
+
+00:22:07,410 --> 00:22:11,020
+which contains all types of one
+
+00:22:09,660 --> 00:22:14,980
+expression Sigma
+
+00:22:11,020 --> 00:22:17,650
+we just like to see more for for a lot
+
+00:22:14,980 --> 00:22:20,110
+of different expressions of what the
+
+00:22:17,650 --> 00:22:24,480
+type is implementing change reading
+
+00:22:20,110 --> 00:22:24,480
+which we get y to the HK visible ball
+
+00:22:31,080 --> 00:22:37,480
+one one question you mentioned that you
+
+00:22:35,050 --> 00:22:39,160
+have this display imple four types in
+
+00:22:37,480 --> 00:22:41,140
+general and rest analyzers are using the
+
+00:22:39,160 --> 00:22:46,690
+display impulse for a lot of things for
+
+00:22:41,140 --> 00:22:48,520
+this kind or some other traits like in
+
+00:22:46,690 --> 00:22:53,500
+order to generate the pretty printed
+
+00:22:48,520 --> 00:23:05,290
+version isn't don't really have anything
+
+00:22:53,500 --> 00:23:06,730
+is but I think if we don't also don't
+
+00:23:05,290 --> 00:23:18,929
+you have a lot of cases when you say
+
+00:23:06,730 --> 00:23:21,940
+this page I just know it happens to be
+
+00:23:18,929 --> 00:23:25,690
+you know a pain point in rusty as well
+
+00:23:21,940 --> 00:23:27,040
+but I mean one of the things I'm
+
+00:23:25,690 --> 00:23:28,960
+thinking listening to all this is that
+
+00:23:27,040 --> 00:23:31,270
+it would be kind of interesting and
+
+00:23:28,960 --> 00:23:35,890
+valuable maybe to walk through some of
+
+00:23:31,270 --> 00:23:37,990
+what we were doing in lark when we're
+
+00:23:35,890 --> 00:23:41,650
+like Jonathan and I were playing around
+
+00:23:37,990 --> 00:23:45,730
+there because we did similar things but
+
+00:23:41,650 --> 00:23:47,380
+different in a lot of cases I don't we
+
+00:23:45,730 --> 00:23:50,500
+could might be a good thing to do for a
+
+00:23:47,380 --> 00:23:54,059
+different time um something I would want
+
+00:23:50,500 --> 00:23:54,059
+to think about going forward
+
+00:24:02,700 --> 00:24:15,359
+yeah I think it's basically for the
+
+00:24:05,309 --> 00:24:17,519
+ thing I'm trying to think what
+
+00:24:15,359 --> 00:24:19,619
+else now I feel like I have a pretty
+
+00:24:17,519 --> 00:24:23,549
+good feeling now I don't know if anybody
+
+00:24:19,619 --> 00:24:24,719
+else has any other questions are you
+
+00:24:23,549 --> 00:24:29,429
+good feeling for what you're doing right
+
+00:24:24,719 --> 00:24:33,629
+now then I guess one question I would
+
+00:24:29,429 --> 00:24:35,579
+have yeah it seems like you're using a
+
+00:24:33,629 --> 00:24:39,959
+lot of arcs and so forth to do the
+
+00:24:35,579 --> 00:24:44,879
+memory management yeah do you have any
+
+00:24:39,959 --> 00:24:47,549
+idea like has that been any kind of
+
+00:24:44,879 --> 00:24:50,820
+performance issue and do you make any
+
+00:24:47,549 --> 00:24:53,749
+effort for example to deduplicate like
+
+00:24:50,820 --> 00:24:57,089
+if you have a whole bunch of boolean I
+
+00:24:53,749 --> 00:24:59,759
+don't know that slices the boolean types
+
+00:24:57,089 --> 00:25:00,899
+or something like that okay so you know
+
+00:24:59,759 --> 00:25:02,369
+are you doing anything to kind of
+
+00:25:00,899 --> 00:25:07,499
+deduplicate or you're just allocating
+
+00:25:02,369 --> 00:25:11,969
+fresh copies of those types each time we
+
+00:25:07,499 --> 00:25:14,849
+don't do anything any time so huh
+
+00:25:11,969 --> 00:25:17,429
+I think we have the advantage has been
+
+00:25:14,849 --> 00:25:27,450
+mostly just new to in for one function
+
+00:25:17,429 --> 00:25:30,209
+at the time so yeah I'm not sure
+
+00:25:27,450 --> 00:25:35,579
+actually how much be asked to use in the
+
+00:25:30,209 --> 00:25:42,570
+types we help from like how much share
+
+00:25:35,579 --> 00:25:45,959
+yeah so that's actually one thing you
+
+00:25:42,570 --> 00:25:49,229
+didn't talk at all about is generics so
+
+00:25:45,959 --> 00:25:52,349
+do you support generics can you show an
+
+00:25:49,229 --> 00:25:58,609
+example of like some of the data
+
+00:25:52,349 --> 00:25:58,609
+structures around that yeah
+
+00:26:08,610 --> 00:26:11,670
+[Music]
+
+00:26:15,520 --> 00:26:28,820
+or in the case of and so okay all right
+
+00:26:25,490 --> 00:26:33,260
+for example I wanted to have a generic
+
+00:26:28,820 --> 00:26:35,300
+struct how can I find out how many type
+
+00:26:33,260 --> 00:26:36,410
+or a week or a lifetime parameters it
+
+00:26:35,300 --> 00:26:42,050
+has things like that
+
+00:26:36,410 --> 00:26:46,070
+oh yeah so we have set that query for
+
+00:26:42,050 --> 00:26:49,280
+day which for any item definition which
+
+00:26:46,070 --> 00:26:57,550
+I can have absolute confirmation water
+
+00:26:49,280 --> 00:27:01,870
+so yeah it's generally fan spray which
+
+00:26:57,550 --> 00:27:07,670
+this camera graphic sign language from
+
+00:27:01,870 --> 00:27:17,240
+Malaysia to connect generate and so this
+
+00:27:07,670 --> 00:27:19,850
+returns are generated armies in the case
+
+00:27:17,240 --> 00:27:32,510
+of a better it all sorted contain
+
+00:27:19,850 --> 00:27:39,980
+strange and dangerous okay the basically
+
+00:27:32,510 --> 00:27:44,230
+what that it's cold water in the face it
+
+00:27:39,980 --> 00:27:44,230
+to comment any fans for the mouth
+
+00:28:01,500 --> 00:28:08,370
+I guess the question is you still got
+
+00:28:06,809 --> 00:28:18,659
+some time should we talk about some
+
+00:28:08,370 --> 00:28:22,110
+other topics like I I mean trying to
+
+00:28:18,659 --> 00:28:25,530
+decide we could talk a little bit about
+
+00:28:22,110 --> 00:28:27,179
+what what it might look like if we had a
+
+00:28:25,530 --> 00:28:28,710
+shared library for types and like what I
+
+00:28:27,179 --> 00:28:30,960
+had in mind there we could talk a little
+
+00:28:28,710 --> 00:28:33,659
+bit about some of the stuff we did in
+
+00:28:30,960 --> 00:28:35,100
+lark that differs although I didn't
+
+00:28:33,659 --> 00:28:39,230
+really look at that code in a while so
+
+00:28:35,100 --> 00:28:42,150
+I'd probably be pretty sloppy there um
+
+00:28:39,230 --> 00:28:45,090
+might be better to not do that latter
+
+00:28:42,150 --> 00:28:52,350
+one until I'd be interested in going
+
+00:28:45,090 --> 00:28:54,830
+over it at some point B so I guess we
+
+00:28:52,350 --> 00:28:59,130
+could talk a little bit about types I I
+
+00:28:54,830 --> 00:29:02,600
+think what I was thinking so if you like
+
+00:28:59,130 --> 00:29:05,730
+your definition of types is fairly
+
+00:29:02,600 --> 00:29:07,200
+similar to russy's and one thing I've
+
+00:29:05,730 --> 00:29:11,809
+been wondering about is trying to get a
+
+00:29:07,200 --> 00:29:14,549
+much simpler definition in some sense
+
+00:29:11,809 --> 00:29:17,010
+basically because it turns out that you
+
+00:29:14,549 --> 00:29:19,080
+know most of those types that are in
+
+00:29:17,010 --> 00:29:22,799
+there like insane boolean's and whatever
+
+00:29:19,080 --> 00:29:26,850
+else all right some sense no different
+
+00:29:22,799 --> 00:29:28,350
+from like a fresh struct you know for
+
+00:29:26,850 --> 00:29:32,970
+most parts of the system they don't care
+
+00:29:28,350 --> 00:29:36,210
+they're just they're just a type and so
+
+00:29:32,970 --> 00:29:37,770
+I I think I'm hoping we could get it
+
+00:29:36,210 --> 00:29:40,740
+down so that we have basically only a
+
+00:29:37,770 --> 00:29:43,799
+few variants you know kind of one would
+
+00:29:40,740 --> 00:29:46,080
+be like some named type with some number
+
+00:29:43,799 --> 00:29:48,929
+of substitutions given to it and one
+
+00:29:46,080 --> 00:29:51,929
+would be sort of a for all kind of type
+
+00:29:48,929 --> 00:29:55,980
+and then an inner type and maybe a few
+
+00:29:51,929 --> 00:29:57,960
+more I have to go look Struck's
+
+00:29:55,980 --> 00:30:04,130
+definition maybe I could share it a
+
+00:29:57,960 --> 00:30:04,130
+little bit and show you what I mean
+
+00:30:04,640 --> 00:30:10,160
+and see stalks definition isn't quite
+
+00:30:08,450 --> 00:30:23,150
+probably what I think it should be but
+
+00:30:10,160 --> 00:30:28,150
+it's closer I see I have a check yes
+
+00:30:23,150 --> 00:30:28,150
+this will do you share that window out
+
+00:30:38,169 --> 00:31:00,400
+update is this I don't know so it all
+
+00:31:03,220 --> 00:31:08,330
+yeah so this is what chalk is using
+
+00:31:05,750 --> 00:31:17,440
+right now which is like the apply is
+
+00:31:08,330 --> 00:31:21,049
+basically need to get a fancy renovation
+
+00:31:17,440 --> 00:31:22,520
+but apply is basically some type name
+
+00:31:21,049 --> 00:31:26,419
+with some number of parameters so this
+
+00:31:22,520 --> 00:31:29,450
+could be in tool could be a struct
+
+00:31:26,419 --> 00:31:38,570
+whatever projection would be something
+
+00:31:29,450 --> 00:31:41,620
+like I have something this would be like
+
+00:31:38,570 --> 00:31:46,309
+that give you 32 or you 32 or stream a
+
+00:31:41,620 --> 00:31:48,770
+projection would be some some associated
+
+00:31:46,309 --> 00:31:50,900
+type projection unselected projection
+
+00:31:48,770 --> 00:31:51,470
+that's that's kind of an interesting
+
+00:31:50,900 --> 00:31:53,900
+point
+
+00:31:51,470 --> 00:31:56,030
+so actually what projection really
+
+00:31:53,900 --> 00:32:00,320
+represents is something where the trait
+
+00:31:56,030 --> 00:32:04,640
+is known and you haven't dealt with this
+
+00:32:00,320 --> 00:32:05,900
+kind of stuff yet but you know of course
+
+00:32:04,640 --> 00:32:08,630
+most of the time you just write
+
+00:32:05,900 --> 00:32:10,940
+something like this in rust today right
+
+00:32:08,630 --> 00:32:13,730
+and so the idea of unselected projection
+
+00:32:10,940 --> 00:32:16,060
+in rust see we have a kind of hack that
+
+00:32:13,730 --> 00:32:18,280
+uses a the basically
+
+00:32:16,060 --> 00:32:21,940
+converts if you if you tied tikal and
+
+00:32:18,280 --> 00:32:24,250
+call an item it tries to figure out you
+
+00:32:21,940 --> 00:32:27,190
+know the trait automatically via some
+
+00:32:24,250 --> 00:32:28,450
+heuristics and off sometimes it fails
+
+00:32:27,190 --> 00:32:30,880
+and that's when you have to write the
+
+00:32:28,450 --> 00:32:32,560
+full form out what what truck is trying
+
+00:32:30,880 --> 00:32:34,690
+to do instead is to have that be a first
+
+00:32:32,560 --> 00:32:37,030
+sort of a first class thing where you
+
+00:32:34,690 --> 00:32:38,710
+say I'm pretty I'm writing te : : item
+
+00:32:37,030 --> 00:32:41,890
+but I didn't say what straight it is and
+
+00:32:38,710 --> 00:32:46,680
+it'll figure out which trait it could
+
+00:32:41,890 --> 00:32:50,980
+have been essentially for all this is
+
+00:32:46,680 --> 00:32:52,720
+sort of in rust you can only have these
+
+00:32:50,980 --> 00:32:56,740
+for all binders on functions but in
+
+00:32:52,720 --> 00:32:58,330
+chocolates a little more generic so you
+
+00:32:56,740 --> 00:33:00,820
+know when you have like a function that
+
+00:32:58,330 --> 00:33:03,340
+can be called with a reference of any
+
+00:33:00,820 --> 00:33:07,210
+lifetime in chalk that would be composed
+
+00:33:03,340 --> 00:33:09,310
+of two things essentially um and then
+
+00:33:07,210 --> 00:33:10,750
+these parts are the entrance so
+
+00:33:09,310 --> 00:33:14,830
+inference bar is an inference variable
+
+00:33:10,750 --> 00:33:17,410
+and this is a this is actually a for all
+
+00:33:14,830 --> 00:33:19,870
+variable like to get the example above
+
+00:33:17,410 --> 00:33:20,950
+so this is kind of what I would hope for
+
+00:33:19,870 --> 00:33:23,200
+is that we can try to shoot for
+
+00:33:20,950 --> 00:33:27,610
+something more minimal like this that
+
+00:33:23,200 --> 00:33:29,140
+would be part 1 and part 2 would be we
+
+00:33:27,610 --> 00:33:31,030
+have to think about the best way to
+
+00:33:29,140 --> 00:33:37,270
+represent the types and whether to use
+
+00:33:31,030 --> 00:33:39,370
+arcs or rusty right now is using arenas
+
+00:33:37,270 --> 00:33:44,710
+I don't think that's a very good fit for
+
+00:33:39,370 --> 00:33:46,090
+an IDE like setting but I maybe it
+
+00:33:44,710 --> 00:33:47,800
+doesn't really matter too much but I do
+
+00:33:46,090 --> 00:33:48,280
+feel like we can probably do better than
+
+00:33:47,800 --> 00:33:51,370
+arcs
+
+00:33:48,280 --> 00:33:54,100
+it hasn't proven to be a compilation
+
+00:33:51,370 --> 00:33:55,600
+time hit for you all I guess primarily
+
+00:33:54,100 --> 00:33:57,400
+because it probably doesn't affect
+
+00:33:55,600 --> 00:33:59,170
+responsiveness too much in small
+
+00:33:57,400 --> 00:34:01,060
+functions but I think if you're trying
+
+00:33:59,170 --> 00:34:03,670
+to find all the errors in a project or
+
+00:34:01,060 --> 00:34:05,620
+something you will start to notice it on
+
+00:34:03,670 --> 00:34:07,030
+the other hand maybe it's premature
+
+00:34:05,620 --> 00:34:08,380
+optimization to worry about it I don't
+
+00:34:07,030 --> 00:34:10,420
+know but it feels like the kind of thing
+
+00:34:08,380 --> 00:34:12,580
+that we want to at least think a little
+
+00:34:10,420 --> 00:34:15,730
+bit about since it'll be a pain in the
+
+00:34:12,580 --> 00:34:18,010
+neck to change it later in lark what we
+
+00:34:15,730 --> 00:34:22,420
+did was we used into interning scheme
+
+00:34:18,010 --> 00:34:23,830
+pretty universally um but but so
+
+00:34:22,420 --> 00:34:25,750
+basically they passed on integers and
+
+00:34:23,830 --> 00:34:28,300
+had a way into given a database you
+
+00:34:25,750 --> 00:34:31,720
+could you could kind of get back the
+
+00:34:28,300 --> 00:34:38,169
+what the integer represents just kind of
+
+00:34:31,720 --> 00:34:44,770
+nice because everything's copy but um so
+
+00:34:38,169 --> 00:34:47,470
+that's one part of it but now I'm
+
+00:34:44,770 --> 00:34:49,800
+realizing well you know I think the
+
+00:34:47,470 --> 00:34:52,179
+other ideas that I have I would rather
+
+00:34:49,800 --> 00:34:53,649
+go into by walking through some of what
+
+00:34:52,179 --> 00:34:55,690
+we did with Larkin I think I'd rather
+
+00:34:53,649 --> 00:34:57,040
+schedule a follow-up session but maybe
+
+00:34:55,690 --> 00:35:01,180
+that's a good thing to close on is
+
+00:34:57,040 --> 00:35:03,130
+talking a little bit about like what the
+
+00:35:01,180 --> 00:35:07,870
+next steps you were thinking about are
+
+00:35:03,130 --> 00:35:15,040
+and what you know what we should do next
+
+00:35:07,870 --> 00:35:16,930
+um overall to start with is this slot
+
+00:35:15,040 --> 00:35:19,600
+kind of good should we try to have
+
+00:35:16,930 --> 00:35:34,710
+another meeting in the same general
+
+00:35:19,600 --> 00:35:40,210
+taggart it kind of works for me okay I
+
+00:35:34,710 --> 00:35:42,040
+mean in terms of of what the code you
+
+00:35:40,210 --> 00:35:47,590
+have now in rust analyser are there I
+
+00:35:42,040 --> 00:35:49,390
+assume there are bugs like what what is
+
+00:35:47,590 --> 00:35:51,280
+it kind of done from your point of view
+
+00:35:49,390 --> 00:35:52,690
+until you start adding traits or making
+
+00:35:51,280 --> 00:35:57,090
+other major changes or is there still
+
+00:35:52,690 --> 00:36:01,810
+stuff you're working on unit I mean
+
+00:35:57,090 --> 00:36:04,510
+there has to various details on the same
+
+00:36:01,810 --> 00:36:09,430
+like I mentioned that type of entities
+
+00:36:04,510 --> 00:36:13,600
+words we don't implement finding notes
+
+00:36:09,430 --> 00:36:17,400
+for example currently so there are still
+
+00:36:13,600 --> 00:36:21,010
+some missing parts in the parts we have
+
+00:36:17,400 --> 00:36:24,160
+but I was also already thinking about
+
+00:36:21,010 --> 00:36:28,450
+how to start and contain the train
+
+00:36:24,160 --> 00:36:31,570
+system I think it will probably a lot
+
+00:36:28,450 --> 00:36:34,660
+name things and filling in the details
+
+00:36:31,570 --> 00:36:36,400
+right now yeah the other thing that
+
+00:36:34,660 --> 00:36:37,420
+comes to mind is you don't if I
+
+00:36:36,400 --> 00:36:40,890
+understood correctly you're not
+
+00:36:37,420 --> 00:36:40,890
+presently presenting errors right
+
+00:36:41,540 --> 00:36:46,880
+yeah that's also another big thing yes
+
+00:36:45,080 --> 00:36:51,740
+it seems like integrating the trade
+
+00:36:46,880 --> 00:36:54,260
+system for completions and so on and
+
+00:36:51,740 --> 00:36:56,930
+then presenting errors presenting errors
+
+00:36:54,260 --> 00:36:59,390
+has kind of got a lot of sub parts to it
+
+00:36:56,930 --> 00:37:02,680
+right because there's none no I'm gonna
+
+00:36:59,390 --> 00:37:26,930
+do is I'm gonna make a little document
+
+00:37:02,680 --> 00:37:37,390
+one second just to take a few notes sure
+
+00:37:26,930 --> 00:37:37,390
+that's you are L in one second okay okay
+
+00:37:43,450 --> 00:37:48,650
+first of all that and secondly let me
+
+00:37:46,280 --> 00:38:01,730
+send out the link if I can figure out
+
+00:37:48,650 --> 00:38:05,720
+how okay so like okay we were discussing
+
+00:38:01,730 --> 00:38:10,250
+kind of next steps for the rust analyzer
+
+00:38:05,720 --> 00:38:14,600
+itself and it would basically be there
+
+00:38:10,250 --> 00:38:16,610
+are some gaps to fill in which we view
+
+00:38:14,600 --> 00:38:18,260
+is sort of low priority you're saying or
+
+00:38:16,610 --> 00:38:22,400
+you view and then there's the trade
+
+00:38:18,260 --> 00:38:23,840
+system integration and kind of
+
+00:38:22,400 --> 00:38:25,220
+presenting errors and what I was going
+
+00:38:23,840 --> 00:38:26,960
+to say about presenting errors is that
+
+00:38:25,220 --> 00:38:31,160
+there is certainly a certain amount of
+
+00:38:26,960 --> 00:38:34,220
+work just tracking formatting etc the
+
+00:38:31,160 --> 00:38:37,400
+ears there's also gonna be I think a lot
+
+00:38:34,220 --> 00:38:41,330
+more like mmm the completeness metric is
+
+00:38:37,400 --> 00:38:44,380
+gonna be pretty different um in other
+
+00:38:41,330 --> 00:38:44,380
+words stuff like
+
+00:38:44,470 --> 00:38:52,600
+you know coercion is etc sudden they
+
+00:38:46,990 --> 00:38:54,430
+become pretty relevant we have any way
+
+00:38:52,600 --> 00:38:57,010
+to compare you said you're inferring
+
+00:38:54,430 --> 00:38:59,880
+types for like 80 percent of the code
+
+00:38:57,010 --> 00:39:02,080
+but we don't really have a way to
+
+00:38:59,880 --> 00:39:05,410
+compare that against say the types the
+
+00:39:02,080 --> 00:39:07,990
+rusty infers yeah we thought they should
+
+00:39:05,410 --> 00:39:10,600
+know how much they're really coated i I
+
+00:39:07,990 --> 00:39:12,430
+was actually thinking about like we
+
+00:39:10,600 --> 00:39:14,340
+could have a way of asking must seem
+
+00:39:12,430 --> 00:39:23,110
+like the types are in the comparing now
+
+00:39:14,340 --> 00:39:25,000
+yeah I mean so let's see just random
+
+00:39:23,110 --> 00:39:28,630
+note one of the things that we did in
+
+00:39:25,000 --> 00:39:32,020
+mark is when we wrote unit tests one of
+
+00:39:28,630 --> 00:39:34,330
+the one of the modes was to say kind of
+
+00:39:32,020 --> 00:39:36,340
+an annotation that would say okay what
+
+00:39:34,330 --> 00:39:38,350
+what is the type of the thing that I'm
+
+00:39:36,340 --> 00:39:39,550
+pointing out here and so instead of just
+
+00:39:38,350 --> 00:39:41,020
+dumping the types for everything you
+
+00:39:39,550 --> 00:39:43,420
+could dump the types for specific things
+
+00:39:41,020 --> 00:39:44,980
+it seems like we could investigate
+
+00:39:43,420 --> 00:39:47,140
+adding that into a that doesn't
+
+00:39:44,980 --> 00:39:50,230
+actually seem too hard a kind of option
+
+00:39:47,140 --> 00:39:54,630
+to say get in this location dump me the
+
+00:39:50,230 --> 00:39:56,320
+types around it it would probably be
+
+00:39:54,630 --> 00:39:57,670
+slow as all get-out
+
+00:39:56,320 --> 00:40:01,570
+I guess what we probably want to do more
+
+00:39:57,670 --> 00:40:05,290
+is have actually we probably just want
+
+00:40:01,570 --> 00:40:07,960
+to use save analysis honestly yeah I've
+
+00:40:05,290 --> 00:40:10,810
+talked about that but I mean currently
+
+00:40:07,960 --> 00:40:16,570
+safe analysis doesn't contain like types
+
+00:40:10,810 --> 00:40:19,810
+of expressions just yeah but it probably
+
+00:40:16,570 --> 00:40:23,400
+contains like enough right I don't know
+
+00:40:19,810 --> 00:40:26,470
+release compare some stuff well anyway
+
+00:40:23,400 --> 00:40:31,810
+then are also some way to dump I feel
+
+00:40:26,470 --> 00:40:34,810
+like going forward it's gonna be pretty
+
+00:40:31,810 --> 00:40:37,480
+important to be able to do these sorts
+
+00:40:34,810 --> 00:40:39,870
+of checks you know for us to have
+
+00:40:37,480 --> 00:40:39,870
+confidence
+
+00:40:40,910 --> 00:40:47,110
+so especially because like if we kind of
+
+00:40:45,380 --> 00:40:49,340
+fill in a little of what I said before
+
+00:40:47,110 --> 00:40:52,480
+on this long-term vision of like a
+
+00:40:49,340 --> 00:40:55,490
+separate library for a type-checking um
+
+00:40:52,480 --> 00:40:57,650
+which i think is fairly far down the
+
+00:40:55,490 --> 00:40:59,480
+road but that would really certainly by
+
+00:40:57,650 --> 00:41:04,240
+then we would want some way to like
+
+00:40:59,480 --> 00:41:04,240
+compare our behavior against rusty right
+
+00:41:33,820 --> 00:41:38,390
+so into thinking about next things we
+
+00:41:36,950 --> 00:41:39,680
+might talk about in terms of the lark
+
+00:41:38,390 --> 00:41:44,200
+thing if we were going to talk about it
+
+00:41:39,680 --> 00:41:49,640
+the main reason to do so is that some
+
+00:41:44,200 --> 00:41:52,370
+some of it had to do with sort of how we
+
+00:41:49,640 --> 00:41:53,930
+represent types so we did a few things
+
+00:41:52,370 --> 00:41:55,640
+which may or may not have been great but
+
+00:41:53,930 --> 00:41:57,920
+they're kind of interesting like using
+
+00:41:55,640 --> 00:42:00,500
+different type families using the type
+
+00:41:57,920 --> 00:42:02,030
+checker to make sure that you get
+
+00:42:00,500 --> 00:42:03,950
+generics right for example and don't
+
+00:42:02,030 --> 00:42:08,840
+forget to apply a substitution and stuff
+
+00:42:03,950 --> 00:42:10,520
+like that so kind of more variations on
+
+00:42:08,840 --> 00:42:14,360
+what a type is depending on where it is
+
+00:42:10,520 --> 00:42:18,230
+in the system we also had a type checker
+
+00:42:14,360 --> 00:42:19,370
+that ignored we have different for the
+
+00:42:18,230 --> 00:42:26,560
+same type checker could be instantiated
+
+00:42:19,370 --> 00:42:29,600
+in different ways for example to ignore
+
+00:42:26,560 --> 00:42:31,520
+what we call permissions or regions
+
+00:42:29,600 --> 00:42:34,520
+which basically correspond to the
+
+00:42:31,520 --> 00:42:35,600
+lifetimes which would the idea being
+
+00:42:34,520 --> 00:42:36,860
+there that when you need to do
+
+00:42:35,600 --> 00:42:38,240
+completions or something you actually
+
+00:42:36,860 --> 00:42:39,980
+don't need to compute lifetime
+
+00:42:38,240 --> 00:42:43,130
+information but other times you do and
+
+00:42:39,980 --> 00:42:44,720
+you'd like to share code we integrated
+
+00:42:43,130 --> 00:42:47,200
+with Polonius which is another thing we
+
+00:42:44,720 --> 00:42:47,200
+could talk about
+
+00:42:48,410 --> 00:42:57,589
+so there's some interesting stuff to
+
+00:42:50,430 --> 00:43:02,700
+talk about there um there's probably
+
+00:42:57,589 --> 00:43:04,710
+planning out integration I don't
+
+00:43:02,700 --> 00:43:17,670
+know it'll be the first steps there but
+
+00:43:04,710 --> 00:43:20,160
+I think I mean certainly talk
+
+00:43:17,670 --> 00:43:24,809
+integration we could do without sharing
+
+00:43:20,160 --> 00:43:25,859
+pipes actually like we you that's how it
+
+00:43:24,809 --> 00:43:27,510
+was designed it would just be a more
+
+00:43:25,859 --> 00:43:30,089
+minimal integration like what rusty was
+
+00:43:27,510 --> 00:43:31,530
+doing so that's something we could talk
+
+00:43:30,089 --> 00:44:07,670
+about talk through the different options
+
+00:43:31,530 --> 00:44:11,190
+there I think I would rather not but
+
+00:44:07,670 --> 00:44:13,010
+like I would rather if we can plan out a
+
+00:44:11,190 --> 00:44:16,430
+more ambitious chocolate invasion plan
+
+00:44:13,010 --> 00:44:18,599
+I'm not exactly sure what that means I
+
+00:44:16,430 --> 00:44:20,040
+think it would mean basically starting
+
+00:44:18,599 --> 00:44:23,849
+out probably starting out by trying to
+
+00:44:20,040 --> 00:44:26,990
+share a representation of types and try
+
+00:44:23,849 --> 00:44:26,990
+to share some of the lower income
+
+00:44:32,660 --> 00:44:38,370
+nice thing is since they're both using
+
+00:44:34,890 --> 00:44:40,680
+salsa there's like well that matters but
+
+00:44:38,370 --> 00:44:42,450
+it would be interesting example of
+
+00:44:40,680 --> 00:44:46,460
+trying to integrate distinct projects
+
+00:44:42,450 --> 00:44:46,460
+just in crates using salsa lines lines
+
+00:44:50,390 --> 00:44:54,390
+all right
+
+00:44:51,630 --> 00:44:59,880
+well we we can figure out why don't we
+
+00:44:54,390 --> 00:45:01,670
+say we'll try to talk again next weekend
+
+00:44:59,880 --> 00:45:04,680
+in the meantime we can try to figure out
+
+00:45:01,670 --> 00:45:08,100
+some of these questions maybe talk a
+
+00:45:04,680 --> 00:45:09,630
+little async like what we actually will
+
+00:45:08,100 --> 00:45:11,850
+talk about I mean I'd be hot why don't I
+
+00:45:09,630 --> 00:45:13,290
+talk about lark next week are you all
+
+00:45:11,850 --> 00:45:14,000
+interested in that I think it sounds
+
+00:45:13,290 --> 00:45:17,010
+interesting
+
+00:45:14,000 --> 00:45:20,010
+okay I'll talk about lark because that's
+
+00:45:17,010 --> 00:45:27,120
+easy and in the meantime will will might
+
+00:45:20,010 --> 00:45:28,770
+be do some sketching around what around
+
+00:45:27,120 --> 00:45:29,940
+what it might mean to talk to integrate
+
+00:45:28,770 --> 00:45:38,580
+chalk more deeply and what that might
+
+00:45:29,940 --> 00:45:44,730
+look like about that and we'll sketch
+
+00:45:38,580 --> 00:45:45,600
+out cool well thanks for um for
+
+00:45:44,730 --> 00:45:47,910
+presenting that that was really
+
+00:45:45,600 --> 00:45:54,630
+interesting and also awesome work that's
+
+00:45:47,910 --> 00:46:01,790
+really cool any last comments by anybody
+
+00:45:54,630 --> 00:46:01,790
+
+YouTube URL: https://www.youtube.com/watch?v=Lmp3P9WNL8o
+
+

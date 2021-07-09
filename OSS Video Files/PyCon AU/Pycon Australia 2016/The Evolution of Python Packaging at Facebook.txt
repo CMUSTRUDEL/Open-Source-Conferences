@@ -1,0 +1,2205 @@
+Title: The Evolution of Python Packaging at Facebook
+Publication date: 2016-08-16
+Playlist: Pycon Australia 2016
+Description: 
+	Dan Reif
+https://2016.pycon-au.org/schedule/131/view_talk
+With tens of millions of Python invocations every day, what’s a packager to do?  The answer selected must account for the insanity of a deeply-heterogeneous production environment: different kernels, different OS distributions, even different versions of system Python.  It also needs enough context to carry with it a consistent reference point for when it was packaged relative to the work of thousands of engineers in a single, unified source control tree.  Lastly, at Facebook scale with hundreds of thousands of servers, every byte sent over the network and stored on disk counts, and every CPU cycle wasted can create a myriad of challenges associated with data center operations management.
+ 
+Sure, it’d be easy to show what a beautiful, easy packaging format we’ve developed at Facebook, and sing its praises, but that’s not what this talk is about.  Instead, we’ll get into the nitty-gritty, and talk about hard tradeoffs that happen when developing a system in the real world.  This is an in-depth look at how Facebook’s packaging has evolved, warts and speed bumps included.  Some of the design goals we addressed (and/or issues we hit!) included:
+
+* Synchronizing and pinning versioning of underlying compiled libraries across related tools
+* Running the package as a transparently-Pythonic command-line utility, à la shebang, so we could do in-place replacements of packages written in other languages (e.g. C++)
+* Optimizing package size transferred across the network
+* Optimizing package sizes on disk
+* Minimizing package launch times
+* Handling packages launched from a network-FS location that subsequently goes offline
+
+Attendees will learn about the different tools and techniques we used to solve these challenges, as well as the reasoning behind any trade offs that were made.
+Captions: 
+	00:00:00,000 --> 00:00:04,830
+okay everyone hello um again a quick
+
+00:00:02,850 --> 00:00:06,870
+reminder if you found anything lost
+
+00:00:04,830 --> 00:00:10,710
+property wires pass it to reggio if
+
+00:00:06,870 --> 00:00:11,610
+you've lost anything in particular for
+
+00:00:10,710 --> 00:00:12,929
+the women in the room there was
+
+00:00:11,610 --> 00:00:16,080
+something found in the women's toilets
+
+00:00:12,929 --> 00:00:20,400
+please check out reggio they've probably
+
+00:00:16,080 --> 00:00:23,310
+got it for you ok the next talk is by
+
+00:00:20,400 --> 00:00:25,590
+down wife and then it is a production
+
+00:00:23,310 --> 00:00:27,779
+engineer on the MySQL infrastructure
+
+00:00:25,590 --> 00:00:29,250
+team at Facebook which is automated the
+
+00:00:27,779 --> 00:00:30,960
+management of tens of thousands of my
+
+00:00:29,250 --> 00:00:33,030
+servers and the largest deployment in
+
+00:00:30,960 --> 00:00:40,170
+the world almost exclusively with Python
+
+00:00:33,030 --> 00:00:42,090
+please thank down for his talk so I
+
+00:00:40,170 --> 00:00:44,219
+thought that that particular custom is
+
+00:00:42,090 --> 00:00:45,629
+is weird but wonderful right because now
+
+00:00:44,219 --> 00:00:47,640
+we're sending a really high expectation
+
+00:00:45,629 --> 00:00:51,570
+if I don't earn that applause you can
+
+00:00:47,640 --> 00:00:53,940
+take it back at the end ok so to talk
+
+00:00:51,570 --> 00:00:55,590
+about Python packaging and Facebook its
+
+00:00:53,940 --> 00:00:58,620
+first important to talk about what
+
+00:00:55,590 --> 00:01:00,300
+python is at Facebook and the answer is
+
+00:00:58,620 --> 00:01:02,129
+that it is the primary language for
+
+00:01:00,300 --> 00:01:04,799
+production engineers the entire facebook
+
+00:01:02,129 --> 00:01:07,560
+contingent that's here is production
+
+00:01:04,799 --> 00:01:09,600
+engineers which leads to a pretty
+
+00:01:07,560 --> 00:01:12,420
+obvious question hell is a production
+
+00:01:09,600 --> 00:01:14,159
+engineer sorry I told I not supposed to
+
+00:01:12,420 --> 00:01:17,250
+curse the heck is a production engineer
+
+00:01:14,159 --> 00:01:20,790
+and the answer is a production engineer
+
+00:01:17,250 --> 00:01:22,290
+is a jack-of-all-trades right so we have
+
+00:01:20,790 --> 00:01:23,549
+a little bit of coding we have a little
+
+00:01:22,290 --> 00:01:24,869
+bit of network we have a little bit of
+
+00:01:23,549 --> 00:01:26,130
+security we have a little bit of this a
+
+00:01:24,869 --> 00:01:29,009
+little bit of that little bit everything
+
+00:01:26,130 --> 00:01:31,320
+else it is the t-shaped expertise right
+
+00:01:29,009 --> 00:01:32,790
+so we go very very wide but then there's
+
+00:01:31,320 --> 00:01:38,700
+one or two areas where we go very very
+
+00:01:32,790 --> 00:01:40,470
+deep as well so python is the Kuril put
+
+00:01:38,700 --> 00:01:42,240
+another way it is the glue that holds
+
+00:01:40,470 --> 00:01:45,509
+Facebook together it is hundreds of
+
+00:01:42,240 --> 00:01:48,030
+thousands of lines of code supported by
+
+00:01:45,509 --> 00:01:51,240
+many more hundreds of thousands of lines
+
+00:01:48,030 --> 00:01:53,640
+of code so we build our actual core
+
+00:01:51,240 --> 00:01:56,460
+services in Python but then we build the
+
+00:01:53,640 --> 00:01:58,649
+support structures for those largely in
+
+00:01:56,460 --> 00:02:01,259
+C++ so things like thrift for example
+
+00:01:58,649 --> 00:02:04,530
+are in C++ and expose bindings up into
+
+00:02:01,259 --> 00:02:06,299
+Python all right so I've convinced you
+
+00:02:04,530 --> 00:02:08,580
+that we actually use Python at Facebook
+
+00:02:06,299 --> 00:02:11,770
+the question then becomes why do we need
+
+00:02:08,580 --> 00:02:15,050
+to package it well
+
+00:02:11,770 --> 00:02:18,890
+this is the biggest reason why right we
+
+00:02:15,050 --> 00:02:22,670
+have thousands of engineers we have a
+
+00:02:18,890 --> 00:02:25,550
+number of interns that isn't zero and
+
+00:02:22,670 --> 00:02:28,970
+all of those engineers and all of those
+
+00:02:25,550 --> 00:02:30,590
+interns are constantly making changes so
+
+00:02:28,970 --> 00:02:34,040
+it's important that our packaging format
+
+00:02:30,590 --> 00:02:35,480
+if it ever worked right if the program
+
+00:02:34,040 --> 00:02:38,660
+that you just packaged ever worked it
+
+00:02:35,480 --> 00:02:40,640
+keeps working and to pin all those
+
+00:02:38,660 --> 00:02:42,530
+dependencies because all of those
+
+00:02:40,640 --> 00:02:48,080
+engineers and all of those interns cough
+
+00:02:42,530 --> 00:02:50,330
+cough subscribe to this model right and
+
+00:02:48,080 --> 00:02:52,100
+that's wonderful and that's great and
+
+00:02:50,330 --> 00:02:53,720
+I'm really glad that they do because it
+
+00:02:52,100 --> 00:02:56,420
+produces wonderful results we can move
+
+00:02:53,720 --> 00:02:58,730
+fast but it also means that when they
+
+00:02:56,420 --> 00:03:00,230
+change some of those dependencies we
+
+00:02:58,730 --> 00:03:04,340
+can't be the ones that fall over our
+
+00:03:00,230 --> 00:03:05,840
+package has to be reliable so works once
+
+00:03:04,340 --> 00:03:09,770
+pin dependencies and so on the other
+
+00:03:05,840 --> 00:03:13,280
+reason is to ease distribution right so
+
+00:03:09,770 --> 00:03:15,290
+if you have a new version that you'd
+
+00:03:13,280 --> 00:03:17,120
+like to push out it's really much more
+
+00:03:15,290 --> 00:03:21,440
+handy to be able to push out one file
+
+00:03:17,120 --> 00:03:23,360
+than 2,000 now also imagine that you're
+
+00:03:21,440 --> 00:03:26,000
+testing a new version so even if you
+
+00:03:23,360 --> 00:03:28,220
+have a very advanced way of pushing
+
+00:03:26,000 --> 00:03:29,930
+things out that's you know all segmented
+
+00:03:28,220 --> 00:03:32,420
+by version numbers and maybe it has a
+
+00:03:29,930 --> 00:03:35,150
+you know symlink structure or something
+
+00:03:32,420 --> 00:03:36,500
+else to help you if you aren't pushing
+
+00:03:35,150 --> 00:03:38,000
+forward the version number that doesn't
+
+00:03:36,500 --> 00:03:39,980
+help you at all right so when you're
+
+00:03:38,000 --> 00:03:41,450
+testing new versions it's handy to be
+
+00:03:39,980 --> 00:03:43,280
+able to package things up in one package
+
+00:03:41,450 --> 00:03:47,840
+because then it can all go out in one
+
+00:03:43,280 --> 00:03:51,830
+one side so I therefore have for us a
+
+00:03:47,840 --> 00:03:54,140
+modest proposal and anyone who's
+
+00:03:51,830 --> 00:03:58,160
+snickering right now is an arts major so
+
+00:03:54,140 --> 00:04:00,290
+a modest proposal like the original
+
+00:03:58,160 --> 00:04:02,860
+modest proposal is not at all modest it
+
+00:04:00,290 --> 00:04:05,299
+is something that can't actually be done
+
+00:04:02,860 --> 00:04:06,530
+but it's what we're going to aim for so
+
+00:04:05,299 --> 00:04:09,260
+we're going to aim for something that's
+
+00:04:06,530 --> 00:04:10,850
+fast why does it have to be fast has to
+
+00:04:09,260 --> 00:04:13,580
+be fast because we're launching this
+
+00:04:10,850 --> 00:04:15,680
+hundreds of thousands of times right
+
+00:04:13,580 --> 00:04:17,030
+when you think of the fact that Facebook
+
+00:04:15,680 --> 00:04:19,520
+has hundreds of thousands of servers
+
+00:04:17,030 --> 00:04:21,650
+even if a given program is only run once
+
+00:04:19,520 --> 00:04:23,599
+on each of those servers in its entire
+
+00:04:21,650 --> 00:04:24,420
+life it's already been run hundreds of
+
+00:04:23,599 --> 00:04:27,210
+thousands of time
+
+00:04:24,420 --> 00:04:30,710
+that means speeding it up has a real
+
+00:04:27,210 --> 00:04:32,790
+benefit it also needs to be easy to use
+
+00:04:30,710 --> 00:04:34,200
+that's because you remember all those
+
+00:04:32,790 --> 00:04:36,270
+engineers and interns I talked about
+
+00:04:34,200 --> 00:04:38,190
+earlier the reason we hire them is
+
+00:04:36,270 --> 00:04:39,630
+because they are delightfully lazy just
+
+00:04:38,190 --> 00:04:42,630
+the way we like our programmers right
+
+00:04:39,630 --> 00:04:44,730
+and because of that if we make it hard
+
+00:04:42,630 --> 00:04:45,900
+to do this packaging they're not going
+
+00:04:44,730 --> 00:04:47,280
+to do it they're going to go out and do
+
+00:04:45,900 --> 00:04:49,470
+it their own way they're going to deploy
+
+00:04:47,280 --> 00:04:51,450
+giant blobs into site packages or
+
+00:04:49,470 --> 00:04:53,640
+whatever it feels like the easiest way
+
+00:04:51,450 --> 00:04:55,650
+for them to do for the person running it
+
+00:04:53,640 --> 00:04:57,900
+they have an even lower threshold it has
+
+00:04:55,650 --> 00:04:59,940
+to be indistinguishable from just
+
+00:04:57,900 --> 00:05:03,480
+running a normal binary for them to run
+
+00:04:59,940 --> 00:05:06,900
+this packaged binary okay it also has to
+
+00:05:03,480 --> 00:05:08,850
+be flexible and that's because we don't
+
+00:05:06,900 --> 00:05:12,240
+know what's coming down the line when we
+
+00:05:08,850 --> 00:05:13,830
+first started developing pars which is
+
+00:05:12,240 --> 00:05:15,060
+what I'm about to talk about I didn't
+
+00:05:13,830 --> 00:05:17,940
+mean to use that word yet we first
+
+00:05:15,060 --> 00:05:20,850
+started developing parts we were on
+
+00:05:17,940 --> 00:05:22,080
+Python to these days were on Python 3 we
+
+00:05:20,850 --> 00:05:24,330
+had to be able to make that transition
+
+00:05:22,080 --> 00:05:25,740
+when we first started developing pars we
+
+00:05:24,330 --> 00:05:28,290
+didn't realize that people are going to
+
+00:05:25,740 --> 00:05:31,380
+want to also use that same format to
+
+00:05:28,290 --> 00:05:34,470
+package up Lua what they do so all of
+
+00:05:31,380 --> 00:05:36,750
+those things I feed into us being
+
+00:05:34,470 --> 00:05:39,330
+flexible and lastly it needs to be
+
+00:05:36,750 --> 00:05:43,110
+independent right so it needs to be
+
+00:05:39,330 --> 00:05:45,480
+entirely separate from the system as far
+
+00:05:43,110 --> 00:05:47,730
+as we can make it because after all
+
+00:05:45,480 --> 00:05:52,860
+that's how we get our concept of being
+
+00:05:47,730 --> 00:05:56,130
+free of dependencies okay so what is a
+
+00:05:52,860 --> 00:06:01,610
+par a par is a Python archive now I'm
+
+00:05:56,130 --> 00:06:04,620
+allowed to use the word it's a zip file
+
+00:06:01,610 --> 00:06:11,100
+anyone not know what a zip file is okay
+
+00:06:04,620 --> 00:06:14,310
+good so it's also shell script it's also
+
+00:06:11,100 --> 00:06:17,040
+a Python program it's actually all of
+
+00:06:14,310 --> 00:06:18,870
+these things right and they're all baked
+
+00:06:17,040 --> 00:06:23,370
+together into one so let's take a look
+
+00:06:18,870 --> 00:06:25,050
+at par version one this was from the
+
+00:06:23,370 --> 00:06:26,400
+dark ages in fact it's so old I
+
+00:06:25,050 --> 00:06:28,230
+literally don't know when we started
+
+00:06:26,400 --> 00:06:30,150
+using it at Facebook I tried looking and
+
+00:06:28,230 --> 00:06:34,200
+it crossed one of our transitions
+
+00:06:30,150 --> 00:06:37,470
+between version control systems so long
+
+00:06:34,200 --> 00:06:38,280
+long ago in the dark ages back before a
+
+00:06:37,470 --> 00:06:42,120
+disturbing number
+
+00:06:38,280 --> 00:06:45,180
+you were born par version one simple
+
+00:06:42,120 --> 00:06:47,010
+self-extracting zip file and couldn't be
+
+00:06:45,180 --> 00:06:49,919
+simpler what does it do it extract 2 /
+
+00:06:47,010 --> 00:06:53,520
+temp / something and then it calls may
+
+00:06:49,919 --> 00:06:56,490
+not be why okay so you can imagine
+
+00:06:53,520 --> 00:06:58,919
+exactly how that would work and we
+
+00:06:56,490 --> 00:07:00,120
+called this zip because that was the
+
+00:06:58,919 --> 00:07:01,950
+only thing we had at the time we also
+
+00:07:00,120 --> 00:07:03,180
+called it part but we're going to name
+
+00:07:01,950 --> 00:07:04,889
+some of these with nick name so i can
+
+00:07:03,180 --> 00:07:06,090
+refer back to them you don't have to
+
+00:07:04,889 --> 00:07:10,200
+remember version one version to version
+
+00:07:06,090 --> 00:07:11,460
+3 so this is a sip par so what does it
+
+00:07:10,200 --> 00:07:13,500
+look like well it kind of looks like
+
+00:07:11,460 --> 00:07:17,040
+this I hope you have really good eyes in
+
+00:07:13,500 --> 00:07:19,620
+the back so I'm going to break this down
+
+00:07:17,040 --> 00:07:24,180
+this this is the whole thing right this
+
+00:07:19,620 --> 00:07:26,210
+all this this is just the top piece so
+
+00:07:24,180 --> 00:07:30,660
+the very top like any self-respecting
+
+00:07:26,210 --> 00:07:32,220
+script that you can run has a shebang it
+
+00:07:30,660 --> 00:07:34,380
+then contains remember how I talked
+
+00:07:32,220 --> 00:07:37,050
+about flexibility turns out people want
+
+00:07:34,380 --> 00:07:39,270
+to run these things on max great why not
+
+00:07:37,050 --> 00:07:42,000
+so it can tase low Mac compatibility
+
+00:07:39,270 --> 00:07:43,500
+then it contains a super-secret function
+
+00:07:42,000 --> 00:07:48,150
+that I will never tell you the details
+
+00:07:43,500 --> 00:07:50,100
+of until three slides from now finish of
+
+00:07:48,150 --> 00:07:53,100
+that function we then grab the build
+
+00:07:50,100 --> 00:07:56,220
+uuid this is a a randomly generated it's
+
+00:07:53,100 --> 00:07:59,220
+a uuid for its a randomly generated uuid
+
+00:07:56,220 --> 00:08:03,690
+that's necessary because even if we are
+
+00:07:59,220 --> 00:08:05,160
+at the same exact moment in the hg
+
+00:08:03,690 --> 00:08:07,260
+source tree that we're building from
+
+00:08:05,160 --> 00:08:09,660
+it's possible that we haven't committed
+
+00:08:07,260 --> 00:08:11,340
+our changes yet thus we're actually in a
+
+00:08:09,660 --> 00:08:13,200
+different version so we simply randomly
+
+00:08:11,340 --> 00:08:15,180
+generate a new uuid every time and
+
+00:08:13,200 --> 00:08:21,690
+that's where we unpack too so it's /
+
+00:08:15,180 --> 00:08:23,370
+tempt / blah right okay we then set a
+
+00:08:21,690 --> 00:08:26,100
+couple of the linker variables good
+
+00:08:23,370 --> 00:08:27,630
+clean fun we unzip our contents into the
+
+00:08:26,100 --> 00:08:30,960
+temperature that we've selected based on
+
+00:08:27,630 --> 00:08:32,400
+our uuid we then muck around with Python
+
+00:08:30,960 --> 00:08:37,289
+path and Python home because we enjoy
+
+00:08:32,400 --> 00:08:40,740
+pain and then we exec into what we just
+
+00:08:37,289 --> 00:08:43,260
+unpacked easy enough right everything
+
+00:08:40,740 --> 00:08:44,940
+below that is the zip fought because if
+
+00:08:43,260 --> 00:08:47,700
+files have the very handy little trick
+
+00:08:44,940 --> 00:08:49,320
+of when you open a zip file ignoring
+
+00:08:47,700 --> 00:08:52,160
+everything up until it finds the magic
+
+00:08:49,320 --> 00:08:54,900
+zip file signature which starts with PK
+
+00:08:52,160 --> 00:08:57,900
+so we can put whatever we want at the
+
+00:08:54,900 --> 00:09:00,000
+front and it is a zip file just a zip
+
+00:08:57,900 --> 00:09:04,020
+file that happens to be also a shell
+
+00:09:00,000 --> 00:09:07,170
+script at the beginning now everyone at
+
+00:09:04,020 --> 00:09:10,230
+Facebook loves iterating on things so
+
+00:09:07,170 --> 00:09:13,230
+what do we do we say hey we can do
+
+00:09:10,230 --> 00:09:16,200
+better so we take that same
+
+00:09:13,230 --> 00:09:19,770
+self-extracting zip file but now instead
+
+00:09:16,200 --> 00:09:21,420
+of extracting everything we use a handy
+
+00:09:19,770 --> 00:09:25,650
+little piece of software called zip
+
+00:09:21,420 --> 00:09:29,190
+import that allows us to keep all of the
+
+00:09:25,650 --> 00:09:33,300
+Python files inside the par we only have
+
+00:09:29,190 --> 00:09:34,740
+to extract the non Python files now
+
+00:09:33,300 --> 00:09:36,330
+remember I said that we are supported by
+
+00:09:34,740 --> 00:09:39,840
+a whole bunch of thousands of lines of
+
+00:09:36,330 --> 00:09:43,020
+code of C++ those all end up compiling
+
+00:09:39,840 --> 00:09:45,980
+down into a variety of dot SOS libraries
+
+00:09:43,020 --> 00:09:48,990
+right so those we have to extract zip
+
+00:09:45,980 --> 00:09:51,270
+import for all of its amazingness is not
+
+00:09:48,990 --> 00:09:54,000
+able to overwhelm the capability of the
+
+00:09:51,270 --> 00:09:55,860
+linker to load shared objects but
+
+00:09:54,000 --> 00:09:58,110
+otherwise we can leave all the actual
+
+00:09:55,860 --> 00:10:01,080
+Python in the par so that saves us from
+
+00:09:58,110 --> 00:10:03,810
+having to write it to temp this is great
+
+00:10:01,080 --> 00:10:06,810
+right because that means that we have
+
+00:10:03,810 --> 00:10:08,550
+now we've now reduced the amount of disk
+
+00:10:06,810 --> 00:10:13,380
+churn that we have on every single part
+
+00:10:08,550 --> 00:10:17,040
+run except sorry well call this fast zip
+
+00:10:13,380 --> 00:10:19,910
+except oh damn it I screwed up that
+
+00:10:17,040 --> 00:10:24,600
+transition this is what this looks like
+
+00:10:19,910 --> 00:10:28,350
+alright so the par file is stuck on
+
+00:10:24,600 --> 00:10:30,540
+desist a path and then the OS decoder
+
+00:10:28,350 --> 00:10:37,380
+which is that tempter right that tempter
+
+00:10:30,540 --> 00:10:39,960
+with the uuid is only contains SOS so
+
+00:10:37,380 --> 00:10:44,160
+this is great except there we go that
+
+00:10:39,960 --> 00:10:47,160
+everything's broken okay so when
+
+00:10:44,160 --> 00:10:49,050
+everything is broken at Facebook it's
+
+00:10:47,160 --> 00:10:51,180
+not as subtle as when everything's
+
+00:10:49,050 --> 00:10:53,130
+broken some other places I don't know
+
+00:10:51,180 --> 00:10:55,820
+what social network this is a screenshot
+
+00:10:53,130 --> 00:10:59,580
+from it doesn't look very important but
+
+00:10:55,820 --> 00:11:01,620
+wherever it is I emphasizes the fact
+
+00:10:59,580 --> 00:11:04,470
+that when Facebook goes down people
+
+00:11:01,620 --> 00:11:05,590
+literally call 911 000 in Australia
+
+00:11:04,470 --> 00:11:09,790
+right
+
+00:11:05,590 --> 00:11:13,060
+and so the LAPD had to a word starting
+
+00:11:09,790 --> 00:11:17,610
+with t that people should stop calling
+
+00:11:13,060 --> 00:11:20,910
+them to report Facebook being down so
+
+00:11:17,610 --> 00:11:23,890
+failures have a big impact on the world
+
+00:11:20,910 --> 00:11:28,360
+who knows what this does anyone
+
+00:11:23,890 --> 00:11:30,340
+recognize it so so yeah so someone just
+
+00:11:28,360 --> 00:11:32,620
+just yell out what what sort of cron job
+
+00:11:30,340 --> 00:11:34,780
+is that how often does it run every
+
+00:11:32,620 --> 00:11:36,070
+minute okay so I said we had hundreds of
+
+00:11:34,780 --> 00:11:39,880
+thousands of servers let's just pretend
+
+00:11:36,070 --> 00:11:42,910
+for a minute that we have only a hundred
+
+00:11:39,880 --> 00:11:46,270
+thousand servers and that we have a bug
+
+00:11:42,910 --> 00:11:48,970
+that happens if something happens at the
+
+00:11:46,270 --> 00:11:51,190
+exact wrong millisecond during launch I
+
+00:11:48,970 --> 00:11:54,160
+mean what's the laws of that right the
+
+00:11:51,190 --> 00:11:57,400
+answer is that with a hundred thousand
+
+00:11:54,160 --> 00:12:02,970
+servers we're launching 1667 times the
+
+00:11:57,400 --> 00:12:06,040
+second or 1.6 times per millisecond so
+
+00:12:02,970 --> 00:12:07,480
+that means that what you might know is
+
+00:12:06,040 --> 00:12:09,640
+edge cases right so if you have an
+
+00:12:07,480 --> 00:12:12,460
+algorithm that takes from one to ten in
+
+00:12:09,640 --> 00:12:13,990
+edge cases one in edge cases 10 and what
+
+00:12:12,460 --> 00:12:15,970
+you might those corner cases so you have
+
+00:12:13,990 --> 00:12:17,830
+two algorithms that you know touch each
+
+00:12:15,970 --> 00:12:19,690
+other and you give one of them one and
+
+00:12:17,830 --> 00:12:24,010
+the other 11 and oh look at that corner
+
+00:12:19,690 --> 00:12:26,590
+it breaks those hits so often that the
+
+00:12:24,010 --> 00:12:28,150
+site is down immediately if you put out
+
+00:12:26,590 --> 00:12:30,340
+something with an edge case or a corner
+
+00:12:28,150 --> 00:12:32,140
+case in fact what you have to worry
+
+00:12:30,340 --> 00:12:34,090
+about are the vertex cases because the
+
+00:12:32,140 --> 00:12:40,390
+vertex cases just wait a few minutes and
+
+00:12:34,090 --> 00:12:43,480
+then take the site down so let's look at
+
+00:12:40,390 --> 00:12:44,710
+what we ran into we have temp watch temp
+
+00:12:43,480 --> 00:12:47,620
+watch goes through the temp directory
+
+00:12:44,710 --> 00:12:51,040
+and deletes old files thank you very
+
+00:12:47,620 --> 00:12:53,380
+nice of it we have upgrades what two
+
+00:12:51,040 --> 00:12:55,960
+upgrades do well upgrades replace the
+
+00:12:53,380 --> 00:12:58,120
+par there used to be a part something
+
+00:12:55,960 --> 00:13:02,500
+dot par and now there's a new par named
+
+00:12:58,120 --> 00:13:07,630
+something dot par and the worst possible
+
+00:13:02,500 --> 00:13:09,970
+timing so what happens the worst
+
+00:13:07,630 --> 00:13:13,839
+possible timing happens
+
+00:13:09,970 --> 00:13:16,120
+and we launched a par and as it's in the
+
+00:13:13,839 --> 00:13:19,480
+middle of launching we replace it
+
+00:13:16,120 --> 00:13:22,540
+underneath and run temp watch and all of
+
+00:13:19,480 --> 00:13:24,819
+a sudden we are referencing a dot py
+
+00:13:22,540 --> 00:13:27,399
+file that got refactored into another py
+
+00:13:24,819 --> 00:13:29,230
+file but that other py file exists only
+
+00:13:27,399 --> 00:13:31,870
+in the old version not the new version
+
+00:13:29,230 --> 00:13:35,980
+and everything breaks horribly okay
+
+00:13:31,870 --> 00:13:37,269
+great so what do we do you remember how
+
+00:13:35,980 --> 00:13:39,759
+I told you I'd never tell you the secret
+
+00:13:37,269 --> 00:13:42,550
+here's the secret that little function
+
+00:13:39,759 --> 00:13:44,170
+is read link e which is just a version
+
+00:13:42,550 --> 00:13:46,240
+of read link to that goes all the way
+
+00:13:44,170 --> 00:13:49,360
+down to metal like it just goes until it
+
+00:13:46,240 --> 00:13:52,779
+can't go anymore right and that allows
+
+00:13:49,360 --> 00:13:57,759
+us to open the par as an FD during
+
+00:13:52,779 --> 00:14:01,240
+startup so what that means is inside of
+
+00:13:57,759 --> 00:14:03,879
+Linux a file isn't deleted until all
+
+00:14:01,240 --> 00:14:06,399
+references to it are deleted right you
+
+00:14:03,879 --> 00:14:11,290
+have the n-linked count this increases
+
+00:14:06,399 --> 00:14:12,879
+the n-linked count therefore we get to
+
+00:14:11,290 --> 00:14:16,779
+keep our file around even after it's
+
+00:14:12,879 --> 00:14:22,329
+deleted or replaced this is RM professed
+
+00:14:16,779 --> 00:14:24,069
+zip so it looks I mean I don't know I'm
+
+00:14:22,329 --> 00:14:26,980
+sure all of you have eidetic memories
+
+00:14:24,069 --> 00:14:29,740
+but right here this simply used to be
+
+00:14:26,980 --> 00:14:31,750
+the power file now it's / dev / ft /
+
+00:14:29,740 --> 00:14:34,480
+whatever but functionally it's the exact
+
+00:14:31,750 --> 00:14:37,180
+same thing right so the only real
+
+00:14:34,480 --> 00:14:39,279
+downside of this is that now your trace
+
+00:14:37,180 --> 00:14:43,000
+backs look crazy your trace back to our
+
+00:14:39,279 --> 00:14:45,279
+/ dev / ft / whatever / numpy y / numpy
+
+00:14:43,000 --> 00:14:46,860
+ywi and it's not like you can go vim
+
+00:14:45,279 --> 00:14:53,100
+that because that file doesn't exist
+
+00:14:46,860 --> 00:14:55,809
+right but otherwise it's great okay so
+
+00:14:53,100 --> 00:15:00,250
+remember how we keep iterating on things
+
+00:14:55,809 --> 00:15:02,079
+well enough wasn't good enough so now
+
+00:15:00,250 --> 00:15:04,269
+what we do is we take all those files
+
+00:15:02,079 --> 00:15:06,160
+that we extract all those dot SOS and
+
+00:15:04,269 --> 00:15:09,009
+sometimes they're like little dot texts
+
+00:15:06,160 --> 00:15:10,300
+or license files or whatever else and we
+
+00:15:09,009 --> 00:15:13,360
+put them into a content addressable
+
+00:15:10,300 --> 00:15:15,370
+store a content addressable store or CAS
+
+00:15:13,360 --> 00:15:17,529
+is one of those five-dollar words that
+
+00:15:15,370 --> 00:15:19,809
+basically boils down to this you take a
+
+00:15:17,529 --> 00:15:22,630
+checksum or a hash of the content and
+
+00:15:19,809 --> 00:15:23,710
+then you store it under that instead of
+
+00:15:22,630 --> 00:15:25,810
+under the original file
+
+00:15:23,710 --> 00:15:27,910
+so if you have two thousand different
+
+00:15:25,810 --> 00:15:30,790
+files named two thousand different names
+
+00:15:27,910 --> 00:15:33,130
+but all of them have the exact same
+
+00:15:30,790 --> 00:15:35,890
+content that says you know hi mom my
+
+00:15:33,130 --> 00:15:38,910
+name is Dan you only store one copy of
+
+00:15:35,890 --> 00:15:42,730
+that and all the others simply point in
+
+00:15:38,910 --> 00:15:46,180
+so that allows us to then hard link each
+
+00:15:42,730 --> 00:15:49,870
+of the file that is being extracted back
+
+00:15:46,180 --> 00:15:51,580
+into the CAS so by doing the hard link
+
+00:15:49,870 --> 00:15:54,640
+that means even if temp watch comes in
+
+00:15:51,580 --> 00:15:56,890
+behind us and deletes a file from a
+
+00:15:54,640 --> 00:15:59,100
+unpacked directory that we haven't
+
+00:15:56,890 --> 00:16:01,450
+touched in a little while that's fine
+
+00:15:59,100 --> 00:16:04,450
+even if it deletes in fact the one from
+
+00:16:01,450 --> 00:16:05,800
+the CAS that's fine because we still
+
+00:16:04,450 --> 00:16:07,660
+have hard links to it we're incrementing
+
+00:16:05,800 --> 00:16:14,080
+that in linked account thus it never
+
+00:16:07,660 --> 00:16:15,280
+goes away so we call this facet cas so
+
+00:16:14,080 --> 00:16:16,780
+what does that look like well let's
+
+00:16:15,280 --> 00:16:19,240
+start with our improve fast sip you
+
+00:16:16,780 --> 00:16:22,950
+remember that one now watch closely this
+
+00:16:19,240 --> 00:16:28,960
+is going to shift a little bit on you we
+
+00:16:22,950 --> 00:16:30,370
+all right so at run time t1 depart still
+
+00:16:28,960 --> 00:16:32,890
+has the exact same thing right so dev
+
+00:16:30,370 --> 00:16:36,010
+FDX still goes back to that power file
+
+00:16:32,890 --> 00:16:39,100
+just like it did before but we now have
+
+00:16:36,010 --> 00:16:43,060
+a different tool tool t2 running at the
+
+00:16:39,100 --> 00:16:46,240
+same time and that tool has the same lib
+
+00:16:43,060 --> 00:16:50,130
+one well now at runtime they actually
+
+00:16:46,240 --> 00:16:55,020
+share the same lib one file ok and then
+
+00:16:50,130 --> 00:16:57,460
+tool one dot par has version a of lib to
+
+00:16:55,020 --> 00:16:58,780
+tool to top our house version B of lib
+
+00:16:57,460 --> 00:17:01,030
+to it doesn't matter that they're
+
+00:16:58,780 --> 00:17:04,120
+actually the same library because we're
+
+00:17:01,030 --> 00:17:05,800
+hashing on the content they're safe
+
+00:17:04,120 --> 00:17:13,209
+right they point to their correct
+
+00:17:05,800 --> 00:17:15,339
+version ok so fast zip casts now well
+
+00:17:13,209 --> 00:17:19,570
+enough isn't good enough so what do we
+
+00:17:15,339 --> 00:17:22,600
+do we now say wait a minute we've got
+
+00:17:19,570 --> 00:17:26,230
+all these Python files that are just
+
+00:17:22,600 --> 00:17:28,660
+shared and all these dot SOS that are
+
+00:17:26,230 --> 00:17:30,550
+built once and then just shared across a
+
+00:17:28,660 --> 00:17:32,260
+whole bunch of different pars that are
+
+00:17:30,550 --> 00:17:35,590
+getting distributed together so you
+
+00:17:32,260 --> 00:17:37,539
+might imagine if core utils were written
+
+00:17:35,590 --> 00:17:41,440
+with pars which thank God they aren't
+
+00:17:37,539 --> 00:17:43,989
+if they were you'd have RM and MV and
+
+00:17:41,440 --> 00:17:46,479
+all these other and cat right all these
+
+00:17:43,989 --> 00:17:48,609
+tools that were all built at the exact
+
+00:17:46,479 --> 00:17:50,279
+same time pushed at the exact same time
+
+00:17:48,609 --> 00:17:53,350
+they were put into a package together
+
+00:17:50,279 --> 00:17:56,619
+and all of them had to have their own
+
+00:17:53,350 --> 00:17:58,539
+copy of every single library just silly
+
+00:17:56,619 --> 00:18:00,489
+right so why not share some libraries
+
+00:17:58,539 --> 00:18:03,399
+between them so the way we do that is we
+
+00:18:00,489 --> 00:18:05,440
+add a second zip that second zip also
+
+00:18:03,399 --> 00:18:09,429
+added to stop path just like all the
+
+00:18:05,440 --> 00:18:13,210
+others right it only contains the
+
+00:18:09,429 --> 00:18:15,759
+non-conflicting files so if you have a a
+
+00:18:13,210 --> 00:18:17,919
+version a of a file in a version B of a
+
+00:18:15,759 --> 00:18:19,749
+file then each power get their own
+
+00:18:17,919 --> 00:18:21,669
+individual copy of version a and version
+
+00:18:19,749 --> 00:18:23,889
+be depending on which one it needs but
+
+00:18:21,669 --> 00:18:27,070
+if they all have version a then we can
+
+00:18:23,889 --> 00:18:33,009
+put version a in the espar right so this
+
+00:18:27,070 --> 00:18:35,649
+this additional sparse par the biggest
+
+00:18:33,009 --> 00:18:37,629
+trade-off is that it means that building
+
+00:18:35,649 --> 00:18:39,669
+a par is no longer something you can do
+
+00:18:37,629 --> 00:18:42,970
+in a vacuum you now have to understand
+
+00:18:39,669 --> 00:18:45,039
+which pars go together and your
+
+00:18:42,970 --> 00:18:47,320
+distribution now has to also be done in
+
+00:18:45,039 --> 00:18:50,379
+that same way you have to be able to
+
+00:18:47,320 --> 00:18:52,450
+distribute pars together because if you
+
+00:18:50,379 --> 00:18:56,499
+can't distribute the espar along with
+
+00:18:52,450 --> 00:19:00,970
+the par the power is useless okay so we
+
+00:18:56,499 --> 00:19:05,169
+call this sparse and this one also I
+
+00:19:00,970 --> 00:19:07,059
+have a nice little slideshow right so in
+
+00:19:05,169 --> 00:19:09,279
+this one these are at rest remember
+
+00:19:07,059 --> 00:19:13,539
+before we were looking at things at
+
+00:19:09,279 --> 00:19:15,729
+runtime so this is at rest we take this
+
+00:19:13,539 --> 00:19:19,659
+duplicated pie see in this duplicated
+
+00:19:15,729 --> 00:19:23,950
+dot s 0 out of each of 201 and tool to
+
+00:19:19,659 --> 00:19:27,099
+and we move it into the s par ok so with
+
+00:19:23,950 --> 00:19:30,220
+two tools and let's say that you know
+
+00:19:27,099 --> 00:19:32,919
+this represents half of the size of each
+
+00:19:30,220 --> 00:19:37,299
+of these with two tools we've gone from
+
+00:19:32,919 --> 00:19:39,999
+one two three four copies to one two
+
+00:19:37,299 --> 00:19:43,419
+three at rest so we've saved ourselves a
+
+00:19:39,999 --> 00:19:46,330
+quarter of our appt wait but if we had
+
+00:19:43,419 --> 00:19:48,849
+instead of two tools we had 50 tools all
+
+00:19:46,330 --> 00:19:52,679
+of a sudden we've shaved the vast
+
+00:19:48,849 --> 00:19:52,679
+majority of our appellate
+
+00:19:52,880 --> 00:19:57,450
+it's worth comparing this though going
+
+00:19:55,500 --> 00:19:59,670
+back a minute to the fast zip kaffe
+
+00:19:57,450 --> 00:20:02,100
+fassett cast does something kind of
+
+00:19:59,670 --> 00:20:04,860
+similar but it does it at runtime right
+
+00:20:02,100 --> 00:20:06,960
+so we get kind of the advantages of both
+
+00:20:04,860 --> 00:20:08,670
+worlds here because with sparse we're
+
+00:20:06,960 --> 00:20:10,110
+doing that at rest we're getting all
+
+00:20:08,670 --> 00:20:11,580
+those benefits in terms of transferring
+
+00:20:10,110 --> 00:20:14,700
+things over the network writing them to
+
+00:20:11,580 --> 00:20:16,980
+disk everything else whereas with sparse
+
+00:20:14,700 --> 00:20:18,120
+we're getting sorry that's what sparse
+
+00:20:16,980 --> 00:20:19,440
+we're getting all this benefit with
+
+00:20:18,120 --> 00:20:21,210
+facet tasks we're getting them at
+
+00:20:19,440 --> 00:20:26,100
+runtime we're avoiding having to extract
+
+00:20:21,210 --> 00:20:28,710
+things that already matched okay so this
+
+00:20:26,100 --> 00:20:31,080
+is about when I showed up by the way is
+
+00:20:28,710 --> 00:20:33,120
+that I took a look at this and said wait
+
+00:20:31,080 --> 00:20:35,850
+a minute what we're doing is we're
+
+00:20:33,120 --> 00:20:39,390
+extracting all these libraries but these
+
+00:20:35,850 --> 00:20:42,570
+libraries often look a little bit like
+
+00:20:39,390 --> 00:20:43,740
+this so this is fast zip Cass what was
+
+00:20:42,570 --> 00:20:45,900
+actually happening the reason we had a
+
+00:20:43,740 --> 00:20:49,050
+version to a in a version a and a
+
+00:20:45,900 --> 00:20:52,650
+version B of lib too is that version a
+
+00:20:49,050 --> 00:20:55,470
+had let's say some functions that gave
+
+00:20:52,650 --> 00:21:00,870
+us addition and subtraction version B
+
+00:20:55,470 --> 00:21:05,010
+had addition subtraction and division we
+
+00:21:00,870 --> 00:21:07,770
+don't actually need version a right
+
+00:21:05,010 --> 00:21:09,450
+because everything that tool one dot par
+
+00:21:07,770 --> 00:21:11,370
+needs to do when he when he calls into
+
+00:21:09,450 --> 00:21:14,850
+this library he says hey teach me how to
+
+00:21:11,370 --> 00:21:16,100
+add something together the other version
+
+00:21:14,850 --> 00:21:18,330
+could have given them that answer
+
+00:21:16,100 --> 00:21:19,500
+likewise teach me how to subtract
+
+00:21:18,330 --> 00:21:22,710
+something the other version could have
+
+00:21:19,500 --> 00:21:28,500
+given them that answer so we simply do
+
+00:21:22,710 --> 00:21:33,410
+this right we no longer store version to
+
+00:21:28,500 --> 00:21:33,410
+a at all we simply store a version to be
+
+00:21:33,680 --> 00:21:39,630
+so four hrs Oh check its list of
+
+00:21:37,980 --> 00:21:41,280
+exported symbols in constructive poly
+
+00:21:39,630 --> 00:21:46,580
+tree saving only the roots of each of
+
+00:21:41,280 --> 00:21:49,410
+those trees poly tree being of course a
+
+00:21:46,580 --> 00:21:54,420
+directed acyclic graph that has one or
+
+00:21:49,410 --> 00:21:57,720
+more roots okay I like pictures this is
+
+00:21:54,420 --> 00:21:59,610
+a poly tree so never mind all those CSE
+
+00:21:57,720 --> 00:22:01,020
+words I totally dropped out of cs it's
+
+00:21:59,610 --> 00:22:04,380
+okay you can too don't tell your mother
+
+00:22:01,020 --> 00:22:04,809
+I said that um this is what it is is
+
+00:22:04,380 --> 00:22:08,710
+that
+
+00:22:04,809 --> 00:22:11,169
+we need to only keep a B and H to be
+
+00:22:08,710 --> 00:22:14,379
+able to descend to any point in that
+
+00:22:11,169 --> 00:22:16,720
+graph right we can't not keep H because
+
+00:22:14,379 --> 00:22:19,629
+we then can't actually arrive at H by
+
+00:22:16,720 --> 00:22:22,749
+going only down arrows we go ad GI but
+
+00:22:19,629 --> 00:22:25,029
+we can't get back up to H so if each of
+
+00:22:22,749 --> 00:22:27,279
+these are super set subset relationships
+
+00:22:25,029 --> 00:22:30,039
+that means that a is a superset of
+
+00:22:27,279 --> 00:22:32,049
+everything below it except H B is a
+
+00:22:30,039 --> 00:22:36,340
+superset of everything below it except a
+
+00:22:32,049 --> 00:22:42,429
+C and H etc so we can just keep a B and
+
+00:22:36,340 --> 00:22:43,779
+H the downside is we can't share the
+
+00:22:42,429 --> 00:22:46,210
+libraries even libraries that have the
+
+00:22:43,779 --> 00:22:47,559
+exact same set of exported symbols so
+
+00:22:46,210 --> 00:22:50,440
+the exact same set of functions that
+
+00:22:47,559 --> 00:22:52,320
+they implement between different s parts
+
+00:22:50,440 --> 00:23:03,490
+that were built at different times and
+
+00:22:52,320 --> 00:23:05,080
+why is that anyone exactly yes so
+
+00:23:03,490 --> 00:23:07,539
+imagine we had a function that was named
+
+00:23:05,080 --> 00:23:09,879
+give me the best number ever and it
+
+00:23:07,539 --> 00:23:13,179
+currently returns to and next week it
+
+00:23:09,879 --> 00:23:15,249
+returns three the name of that function
+
+00:23:13,179 --> 00:23:17,529
+is the exported symbol so that doesn't
+
+00:23:15,249 --> 00:23:19,389
+change but the implementation underneath
+
+00:23:17,529 --> 00:23:20,830
+did so we need to be able to pin that
+
+00:23:19,389 --> 00:23:22,720
+remember these need to stay independent
+
+00:23:20,830 --> 00:23:25,119
+these need to not be able to be broken
+
+00:23:22,720 --> 00:23:29,289
+by some intern doing something silly so
+
+00:23:25,119 --> 00:23:32,529
+that means that s pars sorry super
+
+00:23:29,289 --> 00:23:34,629
+sparse which is the name of this the the
+
+00:23:32,529 --> 00:23:40,899
+espar computation can't be shared
+
+00:23:34,629 --> 00:23:44,230
+between different s pars alright then
+
+00:23:40,899 --> 00:23:45,970
+remember the flexibility thing part two
+
+00:23:44,230 --> 00:23:50,230
+point four point one is very simply that
+
+00:23:45,970 --> 00:23:51,580
+pep 3147 broke things for us in a broke
+
+00:23:50,230 --> 00:23:53,649
+things for us because the zip import
+
+00:23:51,580 --> 00:23:55,450
+module doesn't understand the new PI
+
+00:23:53,649 --> 00:23:58,450
+cache directory which is a great thing
+
+00:23:55,450 --> 00:24:01,110
+that should totally have happened except
+
+00:23:58,450 --> 00:24:04,869
+that it broke zip import for us so we
+
+00:24:01,110 --> 00:24:06,399
+simply repack it because python 3 still
+
+00:24:04,869 --> 00:24:08,590
+knows how to read the old python two
+
+00:24:06,399 --> 00:24:10,119
+locations of dot P ycs instead of them
+
+00:24:08,590 --> 00:24:13,299
+being under PI cash that are alongside
+
+00:24:10,119 --> 00:24:16,299
+the P wise so as part of building a par
+
+00:24:13,299 --> 00:24:18,279
+we simply move it no problem right but
+
+00:24:16,299 --> 00:24:19,809
+this feat this feeds into the flexible
+
+00:24:18,279 --> 00:24:22,989
+bility argument of how we design a
+
+00:24:19,809 --> 00:24:25,690
+packaging system and then there's Python
+
+00:24:22,989 --> 00:24:30,729
+version 2.5 this one is from about last
+
+00:24:25,690 --> 00:24:35,799
+week I technically pushed it just before
+
+00:24:30,729 --> 00:24:37,239
+flying here so for standalone pars that
+
+00:24:35,799 --> 00:24:39,669
+is pars that are not part of the nest
+
+00:24:37,239 --> 00:24:41,139
+par we would unzip them into the content
+
+00:24:39,669 --> 00:24:43,629
+addressable store but in order to do
+
+00:24:41,139 --> 00:24:45,549
+that we would hatch their contents to
+
+00:24:43,629 --> 00:24:48,519
+figure out where they went in the CAS it
+
+00:24:45,549 --> 00:24:51,789
+turns out that running a whole bunch of
+
+00:24:48,519 --> 00:24:53,859
+Shah sums on a whole bunch of data that
+
+00:24:51,789 --> 00:24:57,039
+you know isn't going to change after you
+
+00:24:53,859 --> 00:24:59,169
+generated it is kind of silly so we were
+
+00:24:57,039 --> 00:25:01,359
+able to increase our decrease launch
+
+00:24:59,169 --> 00:25:03,909
+time by about twenty-five percent by
+
+00:25:01,359 --> 00:25:08,440
+stopping doing that so this is called
+
+00:25:03,909 --> 00:25:10,779
+pre hash and then there is the version
+
+00:25:08,440 --> 00:25:16,210
+from outer space this is probe move
+
+00:25:10,779 --> 00:25:18,249
+future so czar is a complete rethink of
+
+00:25:16,210 --> 00:25:20,139
+the way that pars work so instead of it
+
+00:25:18,249 --> 00:25:22,599
+being an executable shell script with a
+
+00:25:20,139 --> 00:25:25,690
+zip file instead it is an executable
+
+00:25:22,599 --> 00:25:29,559
+shell script that then mounts itself as
+
+00:25:25,690 --> 00:25:31,330
+a squash FS with an offset what's great
+
+00:25:29,559 --> 00:25:33,249
+about that is that it means we can get
+
+00:25:31,330 --> 00:25:34,960
+rid of zip import zip import is kind of
+
+00:25:33,249 --> 00:25:37,330
+old and crusty at this point like I said
+
+00:25:34,960 --> 00:25:40,719
+it doesn't understand pep 3147 amongst
+
+00:25:37,330 --> 00:25:42,489
+other downsides also one of the
+
+00:25:40,719 --> 00:25:44,529
+consistent problems that we have is
+
+00:25:42,489 --> 00:25:47,409
+third party source going ah I need to
+
+00:25:44,529 --> 00:25:50,229
+read myself no problem I'll just grab my
+
+00:25:47,409 --> 00:25:52,779
+own entry out of sis top path and start
+
+00:25:50,229 --> 00:25:55,599
+walking up and down the tree until I get
+
+00:25:52,779 --> 00:25:58,239
+to my file that totally doesn't work if
+
+00:25:55,599 --> 00:26:02,279
+you are sitting inside some proc FD
+
+00:25:58,239 --> 00:26:05,739
+whatever right but it would work here
+
+00:26:02,279 --> 00:26:08,229
+the downside is fuse ain't free so this
+
+00:26:05,739 --> 00:26:10,450
+is implemented with with fuse and
+
+00:26:08,229 --> 00:26:12,219
+there's no built-in sparse option right
+
+00:26:10,450 --> 00:26:15,849
+it becomes much harder because sis top
+
+00:26:12,219 --> 00:26:21,669
+path doesn't work that way so again this
+
+00:26:15,849 --> 00:26:23,889
+is called czar so great news this is
+
+00:26:21,669 --> 00:26:27,820
+what it looks like when your package has
+
+00:26:23,889 --> 00:26:31,950
+arrived but overall the the message that
+
+00:26:27,820 --> 00:26:34,110
+I want to give is that at a lot of these
+
+00:26:31,950 --> 00:26:35,399
+I often hear from the very very biggest
+
+00:26:34,110 --> 00:26:37,830
+players and they're like so we were
+
+00:26:35,399 --> 00:26:40,500
+sitting around a conference room and we
+
+00:26:37,830 --> 00:26:43,740
+called up scientists at NASA and the
+
+00:26:40,500 --> 00:26:46,320
+world's best you know XY and Z and then
+
+00:26:43,740 --> 00:26:47,789
+we got in our academic partners and
+
+00:26:46,320 --> 00:26:51,539
+together we were able to create the
+
+00:26:47,789 --> 00:26:55,559
+ideal X and here's what it is as fake by
+
+00:26:51,539 --> 00:26:57,779
+God himself right that's not how
+
+00:26:55,559 --> 00:26:59,970
+development works and I think we all
+
+00:26:57,779 --> 00:27:02,250
+know that and every time we go into a
+
+00:26:59,970 --> 00:27:05,010
+room and we give those people credence
+
+00:27:02,250 --> 00:27:07,769
+we lose our own sense of ourselves as
+
+00:27:05,010 --> 00:27:09,960
+developers my hope is when you looked at
+
+00:27:07,769 --> 00:27:12,059
+this you saw some of the things that hey
+
+00:27:09,960 --> 00:27:14,850
+wait a minute I could push that one
+
+00:27:12,059 --> 00:27:15,809
+percent right or you saw what if you
+
+00:27:14,850 --> 00:27:17,669
+know you started thinking of timing
+
+00:27:15,809 --> 00:27:19,380
+attacks against this right you're like
+
+00:27:17,669 --> 00:27:21,870
+old on I can come up with a vertex case
+
+00:27:19,380 --> 00:27:23,909
+for this that's the sort of thing that
+
+00:27:21,870 --> 00:27:26,100
+real developers do and that's what gets
+
+00:27:23,909 --> 00:27:28,200
+me really excited and that's what we're
+
+00:27:26,100 --> 00:27:30,929
+doing here so that sort of thing appeals
+
+00:27:28,200 --> 00:27:33,480
+to you come talk to me afterwards get a
+
+00:27:30,929 --> 00:27:34,860
+card talk to us about about Facebook
+
+00:27:33,480 --> 00:27:36,299
+even if you don't come to facebook
+
+00:27:34,860 --> 00:27:38,070
+you're the kind of people who I want to
+
+00:27:36,299 --> 00:27:41,389
+be talking with so thank you so much for
+
+00:27:38,070 --> 00:27:41,389
+showing up to my talk that's all I got
+
+00:27:47,090 --> 00:27:51,779
+thank you Dan we've got a couple of
+
+00:27:49,019 --> 00:28:01,590
+minutes for questions so doesn't want to
+
+00:27:51,779 --> 00:28:02,610
+go to get us started okay only pick the
+
+00:28:01,590 --> 00:28:05,720
+ones who look like they have easy
+
+00:28:02,610 --> 00:28:07,799
+questions please that looks pretty cool
+
+00:28:05,720 --> 00:28:10,169
+also looks like it was a lot of effort
+
+00:28:07,799 --> 00:28:12,059
+over a long period of time were you
+
+00:28:10,169 --> 00:28:13,799
+resourced specifically or people
+
+00:28:12,059 --> 00:28:15,929
+resource pacifically to do that or was
+
+00:28:13,799 --> 00:28:19,230
+it just something that people took on
+
+00:28:15,929 --> 00:28:22,289
+for themselves that's a great question I
+
+00:28:19,230 --> 00:28:24,149
+am delighted to report that this was not
+
+00:28:22,289 --> 00:28:28,019
+at all in my job description to put it
+
+00:28:24,149 --> 00:28:29,460
+mildly and and yet I just basically woke
+
+00:28:28,019 --> 00:28:32,100
+up one day and decided i was going to do
+
+00:28:29,460 --> 00:28:34,440
+it the way that things at Facebook work
+
+00:28:32,100 --> 00:28:36,419
+is that the only person at Facebook who
+
+00:28:34,440 --> 00:28:39,720
+can't tell you what to do is your
+
+00:28:36,419 --> 00:28:42,600
+manager everyone else says hey I'm
+
+00:28:39,720 --> 00:28:44,429
+having this problem and then you have to
+
+00:28:42,600 --> 00:28:45,389
+come up with a solution for them so when
+
+00:28:44,429 --> 00:28:46,950
+my team members were
+
+00:28:45,389 --> 00:28:48,719
+hey we're having problems pushing out
+
+00:28:46,950 --> 00:28:51,149
+our package because our package is
+
+00:28:48,719 --> 00:28:54,389
+getting too large right and literally we
+
+00:28:51,149 --> 00:28:55,700
+push out one of our packages via our
+
+00:28:54,389 --> 00:28:58,309
+sink and whole nine yards right
+
+00:28:55,700 --> 00:29:00,690
+bittorrent that sort of thing there's a
+
+00:28:58,309 --> 00:29:02,129
+there's an upper limit on the size of
+
+00:29:00,690 --> 00:29:03,989
+the package that we can push out that
+
+00:29:02,129 --> 00:29:05,999
+way and we were bumping up against it so
+
+00:29:03,989 --> 00:29:07,769
+we kept deleting tools from our package
+
+00:29:05,999 --> 00:29:09,719
+and we made this bigger and bigger
+
+00:29:07,769 --> 00:29:13,109
+omnibus tool that contained all of our
+
+00:29:09,719 --> 00:29:14,219
+other tools I said that's silly tell you
+
+00:29:13,109 --> 00:29:16,049
+what I'm going to take a couple weeks
+
+00:29:14,219 --> 00:29:18,599
+and just do this a couple weeks turned
+
+00:29:16,049 --> 00:29:20,489
+into a month that's unimportant but what
+
+00:29:18,599 --> 00:29:22,709
+ended up happening was super sparse and
+
+00:29:20,489 --> 00:29:24,629
+then from there kept iterating so all of
+
+00:29:22,709 --> 00:29:25,709
+the like the mac support for example
+
+00:29:24,629 --> 00:29:27,299
+that was just someone who wanted to run
+
+00:29:25,709 --> 00:29:30,059
+pars on their mac so they're like I'm
+
+00:29:27,299 --> 00:29:33,919
+blocked by this here's a patch I'm like
+
+00:29:30,059 --> 00:29:41,549
+seems reasonable approve and it went in
+
+00:29:33,919 --> 00:29:43,469
+ok any other questions over there so
+
+00:29:41,549 --> 00:29:45,959
+you've got a couple hundred thousand
+
+00:29:43,469 --> 00:29:48,919
+Python files there if you are using
+
+00:29:45,959 --> 00:29:51,299
+field descriptors and you you IDs to
+
+00:29:48,919 --> 00:29:57,299
+package them how do you know which one
+
+00:29:51,299 --> 00:29:59,639
+has broken so I I think I think there
+
+00:29:57,299 --> 00:30:00,839
+might be AI actually leave the mic with
+
+00:29:59,639 --> 00:30:05,070
+her for there for a second i might need
+
+00:30:00,839 --> 00:30:08,820
+clarification so we we use those uu IDs
+
+00:30:05,070 --> 00:30:12,809
+to identify the package not the file
+
+00:30:08,820 --> 00:30:17,159
+within the package so the uuid is a is a
+
+00:30:12,809 --> 00:30:18,659
+tuple in a sense of the the package
+
+00:30:17,159 --> 00:30:22,320
+being built like the name of the tool
+
+00:30:18,659 --> 00:30:24,869
+comma who built it comma where they
+
+00:30:22,320 --> 00:30:26,369
+built it comma when they built it I so
+
+00:30:24,869 --> 00:30:29,759
+it's a it's a it's a moment in time
+
+00:30:26,369 --> 00:30:31,799
+snapshot of their source tree does that
+
+00:30:29,759 --> 00:30:33,419
+address your question yeah I thought
+
+00:30:31,799 --> 00:30:37,279
+you're talking more about int values for
+
+00:30:33,419 --> 00:30:37,279
+uuid cool okay
+
+00:30:41,350 --> 00:30:45,800
+so you say you packaged up all the
+
+00:30:43,670 --> 00:30:49,040
+penalties how far down do you go we
+
+00:30:45,800 --> 00:30:52,850
+talking like the Bison 220 or like even
+
+00:30:49,040 --> 00:30:56,990
+lipsy 6 excellent question I lived in
+
+00:30:52,850 --> 00:31:01,100
+fear of this question so so so
+
+00:30:56,990 --> 00:31:03,800
+everything I've told you is a lie here's
+
+00:31:01,100 --> 00:31:07,580
+here's what actually happens is we
+
+00:31:03,800 --> 00:31:10,850
+define a few fixed points and we then
+
+00:31:07,580 --> 00:31:15,050
+build against those so we define a like
+
+00:31:10,850 --> 00:31:17,300
+version of libs G lipsy a version of GCC
+
+00:31:15,050 --> 00:31:18,950
+that it was compiled with and a version
+
+00:31:17,300 --> 00:31:22,580
+of Python and then that's defined as a
+
+00:31:18,950 --> 00:31:25,160
+platform and that platform might move
+
+00:31:22,580 --> 00:31:27,530
+forward but probably won't it is you
+
+00:31:25,160 --> 00:31:31,160
+know pinned at a moment in time ABI wise
+
+00:31:27,530 --> 00:31:34,190
+and everything references back to which
+
+00:31:31,160 --> 00:31:35,960
+platform it wants to run on so we don't
+
+00:31:34,190 --> 00:31:38,210
+actually python packaged up the Python
+
+00:31:35,960 --> 00:31:40,730
+interpreter right we can just say we
+
+00:31:38,210 --> 00:31:43,850
+want Python 35 we want Python 27 we want
+
+00:31:40,730 --> 00:31:46,250
+Python you know 0.1 whatever in that
+
+00:31:43,850 --> 00:31:48,050
+that is in a sense eight a symlink what
+
+00:31:46,250 --> 00:31:51,560
+we do packaged up is the bits that we
+
+00:31:48,050 --> 00:31:55,520
+ourselves move so both the things that
+
+00:31:51,560 --> 00:31:57,080
+Facebook has written all the Python the
+
+00:31:55,520 --> 00:31:58,940
+facebook is written all the C++ that
+
+00:31:57,080 --> 00:32:01,130
+Facebook is written and all the Python
+
+00:31:58,940 --> 00:32:03,290
+and C++ that third parties have written
+
+00:32:01,130 --> 00:32:04,670
+that we use that's what is contained
+
+00:32:03,290 --> 00:32:08,660
+within the par everything else is
+
+00:32:04,670 --> 00:32:14,000
+contained within the platform ok I think
+
+00:32:08,660 --> 00:32:15,290
+one more and those one here we go so has
+
+00:32:14,000 --> 00:32:17,900
+the onset of something like Dhaka
+
+00:32:15,290 --> 00:32:21,850
+changed your perspective on packaging
+
+00:32:17,900 --> 00:32:23,900
+pythons and the dependencies so
+
+00:32:21,850 --> 00:32:28,100
+containerization is used pretty
+
+00:32:23,900 --> 00:32:30,190
+extensively within Facebook but in a
+
+00:32:28,100 --> 00:32:32,870
+sense it's made this work more important
+
+00:32:30,190 --> 00:32:34,400
+because when you're rapidly spinning up
+
+00:32:32,870 --> 00:32:35,450
+and spinning down containers and when
+
+00:32:34,400 --> 00:32:36,740
+you have a whole bunch of containers
+
+00:32:35,450 --> 00:32:38,780
+that are running alongside each other
+
+00:32:36,740 --> 00:32:42,740
+the ability to have a self-contained
+
+00:32:38,780 --> 00:32:46,220
+thing to run becomes very very important
+
+00:32:42,740 --> 00:32:47,360
+so all of our infrastructure for stand
+
+00:32:46,220 --> 00:32:49,490
+up sit down fight fight fight on
+
+00:32:47,360 --> 00:32:52,010
+containers is actually built around the
+
+00:32:49,490 --> 00:32:53,750
+concept of distributing a relatively
+
+00:32:52,010 --> 00:32:55,880
+small set of files
+
+00:32:53,750 --> 00:32:58,220
+and then running those files and so this
+
+00:32:55,880 --> 00:33:01,640
+has become integral to all of that
+
+00:32:58,220 --> 00:33:04,510
+working okay leave them please thank Dan
+
+00:33:01,640 --> 00:33:04,510
+
+YouTube URL: https://www.youtube.com/watch?v=56C-0o0zwZ4
+
+

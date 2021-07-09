@@ -1,0 +1,1635 @@
+Title: Christian Heimes - File descriptors, Unix sockets and other POSIX wizardry - PyCon 2016
+Publication date: 2016-05-30
+Playlist: PyCon 2016
+Description: 
+	Speaker: Christian Heimes
+
+Have you ever wondered how the OS manages open files and network connections, what this 'file descriptor' thing actually is all about, or what's so special about Unix sockets? In my talk I will give you a quick tour into the I/O layer and process model of Unix-like operating systems. You will learn how to securely identify and efficiently share resources between processes.
+
+Slides can be found at: https://speakerdeck.com/pycon2016 and https://github.com/PyCon/2016-slides
+Captions: 
+	00:00:57,180 --> 00:01:01,980
+(presenter) It's confusing, oh, here we go.
+
+00:01:08,020 --> 00:01:10,540
+(presenter) Welcome, everyone, to our first talks
+
+00:01:10,549 --> 00:01:12,820
+of PyCon 2016.
+
+00:01:12,820 --> 00:01:16,180
+In our first session, we'll be having Christian Heimes
+
+00:01:16,180 --> 00:01:21,520
+who is a longtime core developer of CPython and an employee of Red Hat.
+
+00:01:21,520 --> 00:01:23,620
+He will be telling us about file descriptors,
+
+00:01:23,620 --> 00:01:26,100
+Unix sockets and other POSIX magic.
+
+00:01:26,100 --> 00:01:28,580
+So, please join me in giving him a warm welcome.
+
+00:01:28,580 --> 00:01:34,540
+[applause]
+
+00:01:35,340 --> 00:01:37,340
+Yeah, good morning everybody.
+
+00:01:37,340 --> 00:01:40,420
+Welcome to PyCon and welcome to my talk.
+
+00:01:40,420 --> 00:01:43,040
+This is actually the first time I'm talking in English
+
+00:01:43,049 --> 00:01:45,049
+in front of a public audience,
+
+00:01:45,049 --> 00:01:48,269
+so, excuse me if my English is not that perfect, but yeah.
+
+00:01:48,269 --> 00:01:50,800
+So, let's go on.
+
+00:01:50,800 --> 00:01:53,460
+I'm working for over a year for Red Hat
+
+00:01:53,460 --> 00:01:59,560
+as senior software engineer in Security and Identity Management Department.
+
+00:01:59,560 --> 00:02:04,180
+We are developing software to make computers more secure,
+
+00:02:04,180 --> 00:02:07,800
+and one of the things I'm currently doing research on
+
+00:02:07,800 --> 00:02:09,880
+is called Custodia.
+
+00:02:09,880 --> 00:02:13,720
+It's a way to get secrets, like passwords and keys,
+
+00:02:13,720 --> 00:02:17,360
+into containers to make that more secure.
+
+00:02:17,360 --> 00:02:21,680
+And this actually is lots of the things I'm going to explain
+
+00:02:21,690 --> 00:02:23,950
+in the next 25 minutes.
+
+00:02:25,500 --> 00:02:27,540
+Because I just have 25 minutes,
+
+00:02:27,540 --> 00:02:30,900
+unfortunately I can't give you ready-to-use recipes.
+
+00:02:30,910 --> 00:02:33,480
+I'm going to introduce you to a couple of concepts,
+
+00:02:33,480 --> 00:02:36,400
+a couple of tools you can use in your application.
+
+00:02:36,400 --> 00:02:40,740
+Most of the stuff I'm going to explain is focused on Linux
+
+00:02:40,740 --> 00:02:45,000
+and works only on Unix-like operating systems -- so, POSIX.
+
+00:02:45,000 --> 00:02:47,820
+And all the examples, of course, are in Python 3.
+
+00:02:47,820 --> 00:02:50,700
+Yeah, nobody uses Python 2 anymore, hopefully.
+
+00:02:50,700 --> 00:02:52,740
+[audience chuckles]
+
+00:02:52,740 --> 00:02:58,040
+So, agenda for today: I'm going to explain file descriptors
+
+00:02:58,050 --> 00:03:01,020
+and later on, a bit into the operating system
+
+00:03:01,020 --> 00:03:04,120
+and the Linux code.
+
+00:03:04,120 --> 00:03:09,600
+And next up are how file descriptors and processes interact with each other,
+
+00:03:09,600 --> 00:03:11,600
+a bit about networking,
+
+00:03:11,600 --> 00:03:15,240
+and finally Unix sockets, containers, sandboxing.
+
+00:03:15,240 --> 00:03:18,340
+And depending on how fast I'm able to talk today,
+
+00:03:18,340 --> 00:03:20,600
+I have a little bonus track.
+
+00:03:21,360 --> 00:03:23,480
+So, simplifications ahead.
+
+00:03:23,480 --> 00:03:26,800
+Sorry, I have to lie in a couple of places,
+
+00:03:26,800 --> 00:03:29,470
+just because I don't have the time to get in all the details,
+
+00:03:29,470 --> 00:03:32,520
+so I'm going to skip over a couple of parts.
+
+00:03:32,520 --> 00:03:34,540
+If you want to know more,
+
+00:03:34,540 --> 00:03:38,200
+I'm going to have an Open Space later on today at 4 o'clock.
+
+00:03:39,960 --> 00:03:41,900
+File descriptors.
+
+00:03:41,900 --> 00:03:45,940
+Maybe you've heard the term in Unix, "everything's a file,"
+
+00:03:45,950 --> 00:03:50,400
+like the default system, the prog file system.
+
+00:03:50,400 --> 00:03:52,400
+You can use it just to interact with your hardware
+
+00:03:52,400 --> 00:03:57,200
+or to get information of processes, networking, settings, etc., etc.
+
+00:03:58,120 --> 00:04:02,020
+And everything you do with that -- every time you do input/output,
+
+00:04:02,020 --> 00:04:06,300
+read some stuff, write some stuff, even interact with resources,
+
+00:04:06,300 --> 00:04:08,580
+you use a file descriptor.
+
+00:04:10,340 --> 00:04:12,680
+File descriptors are used for all sorts of things
+
+00:04:12,680 --> 00:04:16,780
+like reading/writing files, obviously -- even directories.
+
+00:04:16,790 --> 00:04:21,480
+We can interact with hardware, and we do inter-process communications,
+
+00:04:21,480 --> 00:04:26,140
+like, we talk between processes, networking, I/O multiplexing,
+
+00:04:26,140 --> 00:04:30,740
+but the heart of async I/O, file system monitoring,
+
+00:04:30,740 --> 00:04:33,060
+and lots of stuff more.
+
+00:04:33,060 --> 00:04:36,720
+File descriptor is internally a bit like a ticket.
+
+00:04:36,720 --> 00:04:38,740
+So you go to the kernel,
+
+00:04:38,750 --> 00:04:42,010
+you ask the kernel for access to a resource,
+
+00:04:42,010 --> 00:04:43,870
+get back a ticket,
+
+00:04:43,870 --> 00:04:45,640
+and every time you want to do something
+
+00:04:45,640 --> 00:04:47,620
+with a file descriptor with this resource,
+
+00:04:47,629 --> 00:04:50,130
+you show the kernel again the file descriptor,
+
+00:04:50,130 --> 00:04:55,850
+the number (like a ticket), and the kernel does something.
+
+00:04:55,850 --> 00:04:59,290
+There are a couple of standard numbers, 0, 1, and 2
+
+00:04:59,290 --> 00:05:03,210
+for standard in, standard out, and standard error output.
+
+00:05:03,210 --> 00:05:07,650
+There's also number one are used for error indication.
+
+00:05:07,650 --> 00:05:09,630
+Don't care about it in Python.
+
+00:05:09,630 --> 00:05:12,880
+Yeah, Python is an exception for you, so if you see a developer,
+
+00:05:12,880 --> 00:05:16,520
+you have to take care of -1 -- in Python, no.
+
+00:05:17,560 --> 00:05:20,640
+A very simple example, probably have seen that.
+
+00:05:20,640 --> 00:05:24,760
+"With" statement, open a file, read from the file, print it.
+
+00:05:24,760 --> 00:05:29,640
+This example uses already two file descriptors
+
+00:05:29,640 --> 00:05:31,600
+once there's a process running.
+
+00:05:31,600 --> 00:05:35,460
+So, it reads from a file, the "open" creates a file descriptor,
+
+00:05:35,460 --> 00:05:38,340
+and the "print" writes to another file descriptor.
+
+00:05:38,340 --> 00:05:41,620
+You send it out to the shell.
+
+00:05:42,940 --> 00:05:45,460
+That's a very simple example for a file descriptor.
+
+00:05:45,460 --> 00:05:48,139
+You can do even more with file descriptors.
+
+00:05:48,139 --> 00:05:53,019
+You can use file descriptors to actually reference a file that's already open.
+
+00:05:53,020 --> 00:05:55,040
+That's rather useful in certain cases.
+
+00:05:55,040 --> 00:05:57,400
+There's also security implications.
+
+00:05:57,400 --> 00:05:59,480
+That's usually more secure.
+
+00:05:59,480 --> 00:06:01,400
+If you already have a file open,
+
+00:06:01,400 --> 00:06:03,420
+you can get the status information of a file,
+
+00:06:03,420 --> 00:06:06,740
+you can change the file permission settings.
+
+00:06:07,860 --> 00:06:10,600
+A couple of years ago,
+
+00:06:10,600 --> 00:06:13,819
+Python were able to use the dir file descriptors.
+
+00:06:13,819 --> 00:06:19,219
+You can use the file descriptor to a directory like a location indicator.
+
+00:06:20,540 --> 00:06:22,980
+They use it more in Python --
+
+00:06:22,980 --> 00:06:27,999
+in Python, um, I think 3.4 introduced that feature.
+
+00:06:29,680 --> 00:06:33,820
+Then, you can even control your hardware with file descriptor.
+
+00:06:33,820 --> 00:06:38,080
+And that's my only demo for today, and I hope it works.
+
+00:06:42,760 --> 00:06:44,260
+[clicking sound]
+
+00:06:44,260 --> 00:06:46,840
+Did you hear that?
+
+00:06:46,840 --> 00:06:50,760
+For those who are hearing impaired, we have closed captions.
+
+00:06:50,760 --> 00:06:54,879
+Um, oh, wrong one.
+
+00:06:55,680 --> 00:06:57,860
+I'll hide that.
+
+00:06:58,540 --> 00:07:00,520
+That's what happens.
+
+00:07:00,520 --> 00:07:02,560
+[laughter]
+
+00:07:03,500 --> 00:07:05,540
+A prerecording.
+
+00:07:05,540 --> 00:07:07,660
+Actually, I use a file descriptor
+
+00:07:07,660 --> 00:07:11,040
+to open some hardware device, dev/cdrom
+
+00:07:11,040 --> 00:07:16,100
+and to give it a command to eject the bay -- and back in.
+
+00:07:18,500 --> 00:07:20,560
+It works only on Linux bay, too.
+
+00:07:20,560 --> 00:07:22,560
+Every operating system
+
+00:07:22,560 --> 00:07:25,160
+has their own line of magic codes for that.
+
+00:07:25,160 --> 00:07:27,640
+Operating System 101.
+
+00:07:27,640 --> 00:07:31,320
+Before I can teach you some of the other tricks,
+
+00:07:31,320 --> 00:07:35,320
+I have to explain how an operating system actually works internally.
+
+00:07:35,320 --> 00:07:38,280
+We used to have the Dark Ages back then.
+
+00:07:38,280 --> 00:07:41,920
+We had no kind of isolation between processes.
+
+00:07:41,920 --> 00:07:46,580
+Everybody could just read and write from hardware, from software.
+
+00:07:46,580 --> 00:07:52,220
+If one program crashes, it could just tear down the whole system.
+
+00:07:52,220 --> 00:07:56,760
+If you used DOS like me in the old ages or even older computers,
+
+00:07:56,760 --> 00:07:59,740
+a crash of a program usually means you have to restart the computer.
+
+00:08:00,469 --> 00:08:02,709
+In modern operating systems,
+
+00:08:02,709 --> 00:08:05,860
+we have the layout between the hardware and software
+
+00:08:05,860 --> 00:08:07,860
+called the kernel.
+
+00:08:07,860 --> 00:08:11,180
+The kernel does a lot of things.
+
+00:08:11,189 --> 00:08:14,580
+I'm not going to explain all the hardware drivers,
+
+00:08:14,580 --> 00:08:18,760
+the way the kernel makes it much easier to talk to hardware.
+
+00:08:18,760 --> 00:08:22,139
+Rather than -- the kernel is also a very important step
+
+00:08:22,139 --> 00:08:24,199
+to isolate processes.
+
+00:08:24,200 --> 00:08:27,500
+So, a process can't directly interact with another process
+
+00:08:27,509 --> 00:08:30,740
+except of using the kernel in one way or another
+
+00:08:30,740 --> 00:08:33,260
+at least to set up a communication channel.
+
+00:08:33,260 --> 00:08:37,600
+The kernel also does lots of checks regarding security.
+
+00:08:37,600 --> 00:08:39,660
+So, you have file permissions,
+
+00:08:39,660 --> 00:08:41,780
+you have users and groups in your system.
+
+00:08:41,780 --> 00:08:44,120
+For networking, you have, maybe, firewalls,
+
+00:08:44,120 --> 00:08:47,620
+and you have physical memory in your computer,
+
+00:08:47,630 --> 00:08:49,730
+and you have visual memory in the processes,
+
+00:08:49,730 --> 00:08:54,280
+and how the kernel maps these virtual memory to physical memory
+
+00:08:54,290 --> 00:08:58,110
+is something I wanted to explain, but unfortunately, not the time today.
+
+00:08:58,110 --> 00:09:00,450
+Twenty five minutes is very short.
+
+00:09:02,360 --> 00:09:06,420
+So, to sum that up, every time you do something,
+
+00:09:06,420 --> 00:09:09,700
+you have to talk to the kernel if you read or write.
+
+00:09:10,780 --> 00:09:13,880
+The way you talk to the kernel is called a syscall.
+
+00:09:13,880 --> 00:09:18,900
+A system call -- that's the way you switch the context
+
+00:09:18,910 --> 00:09:23,050
+from a user-space program to a kernel-space program.
+
+00:09:23,050 --> 00:09:26,380
+Maybe you've heard the term "context switch."
+
+00:09:26,380 --> 00:09:28,440
+Context switches are rather slow.
+
+00:09:28,440 --> 00:09:30,440
+Take a couple of --
+
+00:09:30,440 --> 00:09:32,780
+up to a couple hundred of use cycles in a modern system,
+
+00:09:32,780 --> 00:09:38,180
+and when you use a lot of them, like currently almost 400.
+
+00:09:38,180 --> 00:09:42,180
+And we go back to the simple example where you just opened the file,
+
+00:09:42,180 --> 00:09:45,300
+read from the file, and printed it out.
+
+00:09:47,140 --> 00:09:49,400
+They're commonly called systrace or s-trace,
+
+00:09:49,400 --> 00:09:55,500
+where you can see which kind of system calls the program does.
+
+00:09:55,510 --> 00:10:00,520
+So in this example the "with" statement opens the file
+
+00:10:00,520 --> 00:10:02,540
+and you get file descriptor number 3.
+
+00:10:02,540 --> 00:10:05,700
+The kernel usually takes the next open file descriptor.
+
+00:10:05,700 --> 00:10:08,460
+And then Python does some stuff
+
+00:10:08,460 --> 00:10:10,950
+like check if it's actually a real file
+
+00:10:10,950 --> 00:10:15,430
+to prevent you from opening directories, in a way.
+
+00:10:15,430 --> 00:10:19,740
+It seeks to the first position of the file in case something is --
+
+00:10:19,740 --> 00:10:21,560
+yeah, I don't know why really.
+
+00:10:21,560 --> 00:10:23,360
+Benjamin might know.
+
+00:10:23,360 --> 00:10:25,120
+He wrote that.
+
+00:10:25,120 --> 00:10:26,920
+[chuckles]
+
+00:10:26,920 --> 00:10:32,960
+And then, we use again number 3 to read and read a couple of screens.
+
+00:10:32,970 --> 00:10:34,530
+The number 19 at the end
+
+00:10:34,530 --> 00:10:39,860
+means it actually read 19 characters on the screen.
+
+00:10:39,860 --> 00:10:41,620
+It tries again.
+
+00:10:41,620 --> 00:10:43,400
+OK, the file's empty.
+
+00:10:43,400 --> 00:10:46,340
+And then Python uses another file descriptor, number 1 --
+
+00:10:46,340 --> 00:10:53,040
+that's the center out -- to actually write the string to the shell.
+
+00:10:53,040 --> 00:10:56,040
+And finally, every time we have a file descriptor,
+
+00:10:56,040 --> 00:10:58,000
+we should close the file descriptor,
+
+00:10:58,000 --> 00:11:00,740
+because file descriptors are actually very scarce resources,
+
+00:11:00,740 --> 00:11:02,740
+so you don't want to waste them.
+
+00:11:02,740 --> 00:11:07,240
+If you have a long-running program and run out of file descriptors,
+
+00:11:07,240 --> 00:11:09,340
+yeah, you can't do anything anymore.
+
+00:11:10,780 --> 00:11:15,180
+And the kernel internally maintains a couple of tables, informations.
+
+00:11:15,190 --> 00:11:17,780
+We have the global open file table.
+
+00:11:17,780 --> 00:11:19,710
+That's one gigantic table in the kernel
+
+00:11:19,710 --> 00:11:22,430
+that has all open resources.
+
+00:11:23,340 --> 00:11:26,600
+Every process has a file descriptor itself --
+
+00:11:26,600 --> 00:11:28,460
+refers to the table itself.
+
+00:11:28,460 --> 00:11:30,240
+The file descriptor table in the process
+
+00:11:30,240 --> 00:11:32,040
+is actually very small.
+
+00:11:32,040 --> 00:11:34,400
+It just maps some of the numbers into the kernel.
+
+00:11:36,600 --> 00:11:38,660
+So, a couple of examples.
+
+00:11:38,660 --> 00:11:40,660
+You open a file, you get a file descriptor
+
+00:11:40,660 --> 00:11:43,020
+that points to an entry in the global table
+
+00:11:43,020 --> 00:11:46,300
+and eventually ends up in a file.
+
+00:11:46,310 --> 00:11:48,570
+You can open the same file again
+
+00:11:48,570 --> 00:11:50,860
+and get an independent file descriptor.
+
+00:11:50,860 --> 00:11:53,620
+But you can also duplicate the file descriptor
+
+00:11:53,630 --> 00:11:56,810
+and maybe get the file descriptor that points to the same entry.
+
+00:11:58,920 --> 00:12:01,920
+And there's another operation that's useful.
+
+00:12:01,920 --> 00:12:03,920
+We're going to look at that later.
+
+00:12:03,920 --> 00:12:09,400
+We can override a file descriptor and rename it.
+
+00:12:09,400 --> 00:12:11,940
+Finally, there's a way to get a file descriptor
+
+00:12:11,940 --> 00:12:14,220
+to know the process,
+
+00:12:14,220 --> 00:12:19,060
+and so that suddenly another process uses the same global entry.
+
+00:12:20,540 --> 00:12:26,680
+In this table -- the file descriptor table itself
+
+00:12:26,690 --> 00:12:28,630
+just contains this mapping.
+
+00:12:28,630 --> 00:12:30,610
+Another flag, Close-exec or cloexec,
+
+00:12:30,610 --> 00:12:33,680
+I'm going to explain in a couple of minutes.
+
+00:12:33,690 --> 00:12:38,850
+The open file table actually contains everything that's stateful,
+
+00:12:38,850 --> 00:12:40,870
+like the position of the file,
+
+00:12:40,870 --> 00:12:44,420
+the mode, if you open the file, read or write or both,
+
+00:12:44,420 --> 00:12:46,460
+or who's the owner, file locking,
+
+00:12:46,460 --> 00:12:49,840
+credentials, reference, counting, etc., etc.
+
+00:12:49,840 --> 00:12:53,760
+So, the entry in the open file table, the global table,
+
+00:12:53,760 --> 00:12:56,140
+is a bit like this old device.
+
+00:12:56,140 --> 00:12:58,160
+Say we have a global counter,
+
+00:12:58,160 --> 00:13:03,400
+and even if you have multiple programs reading from the same resource,
+
+00:13:03,400 --> 00:13:05,620
+you can't go independent.
+
+00:13:05,620 --> 00:13:09,180
+Next up, how Unix creates processes.
+
+00:13:09,180 --> 00:13:13,500
+That's a bit strange for people who are not used to that.
+
+00:13:13,500 --> 00:13:19,120
+So, there are actually two steps in creating a new process.
+
+00:13:19,120 --> 00:13:21,180
+For one, we have fork.
+
+00:13:21,180 --> 00:13:23,500
+Fork just creates a clone of the current process
+
+00:13:23,510 --> 00:13:28,770
+and basically an almost perfect copy except for threading.
+
+00:13:28,770 --> 00:13:31,100
+And this child process you create
+
+00:13:31,110 --> 00:13:34,820
+inherits this file descriptor table from the parent process,
+
+00:13:34,820 --> 00:13:39,460
+so it actually points to the same global entry.
+
+00:13:39,460 --> 00:13:44,800
+And the second step you do -- oh no, sorry, the first thing -- small example.
+
+00:13:44,800 --> 00:13:51,060
+If you run fork and then the first process,
+
+00:13:51,060 --> 00:13:56,060
+you might have, like, that's currently the parent process.
+
+00:13:56,060 --> 00:14:00,680
+It just happened to be the first of the parentals from the parent process
+
+00:14:00,680 --> 00:14:06,000
+that reads a bit from the example txt, Python,
+
+00:14:06,000 --> 00:14:10,140
+and almost at the same moment, the child process reads
+
+00:14:10,140 --> 00:14:14,010
+from the same file descriptor and the global table,
+
+00:14:14,010 --> 00:14:16,470
+just to get to the end.
+
+00:14:17,260 --> 00:14:19,500
+The second step we have --
+
+00:14:19,510 --> 00:14:22,550
+just forking the process, getting a copy, is not very useful
+
+00:14:22,550 --> 00:14:24,610
+if you want to run a different program.
+
+00:14:24,610 --> 00:14:27,440
+The second step is replacing the current code
+
+00:14:27,440 --> 00:14:30,340
+with different code, and that's called exec.
+
+00:14:31,980 --> 00:14:34,640
+Even in exec, you get all the file descriptors
+
+00:14:34,640 --> 00:14:36,640
+from the original process,
+
+00:14:36,640 --> 00:14:38,680
+which can be a security issue.
+
+00:14:38,680 --> 00:14:40,660
+That's where cloexec comes in.
+
+00:14:40,660 --> 00:14:44,180
+So all file descriptors marked as cloexec are ultimately closed.
+
+00:14:44,180 --> 00:14:46,560
+And thanks to Victor Stinner and Python,
+
+00:14:46,560 --> 00:14:49,840
+you don't have to care about that, too.
+
+00:14:49,840 --> 00:14:51,860
+So, quick summary.
+
+00:14:51,860 --> 00:14:54,040
+Every time you do something, if you go to the kernel,
+
+00:14:54,040 --> 00:14:57,800
+we have this different kind of tables,
+
+00:14:57,800 --> 00:15:00,760
+and a new process is created with fork and exec.
+
+00:15:02,090 --> 00:15:04,940
+Now you might wonder why this is useful.
+
+00:15:04,940 --> 00:15:07,800
+The child process actually gets the same file descriptor
+
+00:15:07,800 --> 00:15:10,060
+as the parent process.
+
+00:15:10,060 --> 00:15:12,540
+There is something like subprocess.PIPE,
+
+00:15:12,540 --> 00:15:15,840
+or, like, piping on a shell comes in.
+
+00:15:15,840 --> 00:15:18,780
+Pipe is actually real like a water pipe.
+
+00:15:21,060 --> 00:15:24,400
+You have one end where the data flows in
+
+00:15:24,410 --> 00:15:26,940
+and the other end where the data flows out.
+
+00:15:26,940 --> 00:15:29,920
+It's a universal pipe.
+
+00:15:29,920 --> 00:15:36,520
+And the way this piping works is, you have a common like os.pipe --
+
+00:15:36,520 --> 00:15:38,540
+Python's standard library is pretty awesome --
+
+00:15:38,540 --> 00:15:40,540
+where you get two ends.
+
+00:15:40,540 --> 00:15:45,380
+And when a subprocess creates a new process,
+
+00:15:45,380 --> 00:15:49,560
+it first forks itself and then checks,
+
+00:15:49,560 --> 00:15:51,360
+"Oh it's a parent process.
+
+00:15:51,360 --> 00:15:53,360
+"We are not interested to use the writeend."
+
+00:15:53,360 --> 00:15:55,740
+We just close it and degroup with that.
+
+00:15:56,460 --> 00:15:59,960
+And the child process, we close the readend
+
+00:15:59,960 --> 00:16:03,580
+because the child isn't supposed to mess with both ends.
+
+00:16:03,580 --> 00:16:05,580
+And then we use Step 2.
+
+00:16:05,580 --> 00:16:08,100
+That's when you rename the file descriptor to #1.
+
+00:16:08,100 --> 00:16:12,060
+And lastly, we run a program like ls.
+
+00:16:13,180 --> 00:16:15,760
+And then the parent process itself
+
+00:16:15,760 --> 00:16:17,800
+can read again from the file descriptor
+
+00:16:17,800 --> 00:16:21,240
+and that's how piping works in subprocess.
+
+00:16:22,120 --> 00:16:24,160
+But, of course, just talking between processes
+
+00:16:24,160 --> 00:16:26,100
+is not very interesting.
+
+00:16:26,100 --> 00:16:29,340
+You want to talk, in this global world, to other computers.
+
+00:16:29,340 --> 00:16:31,720
+Now we have networks sockets.
+
+00:16:31,720 --> 00:16:35,840
+Network sockets are a bit like a parcel delivery system.
+
+00:16:35,840 --> 00:16:39,880
+A sorting center, we send packages through a couple of steps --
+
+00:16:39,890 --> 00:16:42,300
+that's where routing and addressing comes in.
+
+00:16:42,300 --> 00:16:46,420
+So, in order to send a package from you to somebody else,
+
+00:16:46,420 --> 00:16:48,420
+you need to know the address.
+
+00:16:48,420 --> 00:16:50,360
+And the other person you sent the package to,
+
+00:16:50,360 --> 00:16:54,350
+of course, needs to know to whom to send back an answer,
+
+00:16:54,350 --> 00:16:56,830
+so, a bit like a letter.
+
+00:16:56,830 --> 00:17:03,020
+And these addressing/routing -- just IPv4 and IPv6,
+
+00:17:03,030 --> 00:17:06,850
+so, the basic internet protocols most of you have probably heard of.
+
+00:17:06,850 --> 00:17:11,079
+There's also a second thing called flow control.
+
+00:17:11,079 --> 00:17:14,339
+It's like -- do you want to send out just packages
+
+00:17:14,339 --> 00:17:16,730
+or do you want to send out packages
+
+00:17:16,730 --> 00:17:19,169
+and get a receipt that the package
+
+00:17:19,169 --> 00:17:22,949
+was actually received by the other peer?
+
+00:17:22,949 --> 00:17:25,109
+That's TCP and UDP.
+
+00:17:25,780 --> 00:17:28,540
+So, quick example.
+
+00:17:28,549 --> 00:17:31,710
+That's how our server, our Unix server, looks like
+
+00:17:31,710 --> 00:17:33,740
+for a socket server,
+
+00:17:33,740 --> 00:17:35,740
+so you bind to a port like an address,
+
+00:17:35,749 --> 00:17:38,480
+like a street address or an apartment number,
+
+00:17:38,480 --> 00:17:40,600
+and you listen to wait for incoming packages
+
+00:17:40,600 --> 00:17:42,799
+and then you finally accept packages
+
+00:17:42,799 --> 00:17:49,019
+and both the server and the con (the connection)
+
+00:17:49,020 --> 00:17:51,260
+file descriptors internally.
+
+00:17:51,260 --> 00:17:55,460
+And the client itself also creates a new socket
+
+00:17:55,470 --> 00:17:58,970
+and connects to the peer to send them.
+
+00:17:58,970 --> 00:18:02,640
+And what probably not everybody knows:
+
+00:18:02,640 --> 00:18:07,180
+IPv4 and IPv6 are incompatible,
+
+00:18:07,180 --> 00:18:10,360
+so you have to use a different kind of addressing
+
+00:18:10,360 --> 00:18:14,880
+and different, yeah, kind of address names.
+
+00:18:17,080 --> 00:18:20,600
+Now, to the promised Unix sockets.
+
+00:18:20,600 --> 00:18:28,220
+Unix sockets are a bit like a mix of pipes and network circuits,
+
+00:18:28,220 --> 00:18:31,040
+so actually they aren't like network circuits, but limiters,
+
+00:18:31,040 --> 00:18:33,940
+so they only work on the current computer.
+
+00:18:33,940 --> 00:18:38,940
+It's a bit like an old-style plumatic delivery system
+
+00:18:38,940 --> 00:18:42,080
+where you have pipes running through your building.
+
+00:18:42,080 --> 00:18:46,360
+Like the building in this example is like the operating system --
+
+00:18:46,370 --> 00:18:49,670
+and to connect different parts, like processes.
+
+00:18:49,670 --> 00:18:51,840
+Because it's all in house --
+
+00:18:51,850 --> 00:18:57,249
+so inside one kernel, we have additional features
+
+00:18:57,249 --> 00:19:00,029
+and additional security settings.
+
+00:19:00,029 --> 00:19:04,279
+And the kernel guarantees that these pipes are protected
+
+00:19:04,279 --> 00:19:07,179
+and nobody can mess with them.
+
+00:19:08,720 --> 00:19:13,160
+And to send a message, we have this line of a fancy capsule
+
+00:19:13,160 --> 00:19:15,140
+where you put your data in,
+
+00:19:15,140 --> 00:19:18,160
+but you can also put some information outside.
+
+00:19:18,160 --> 00:19:20,120
+You can glue a tac on it,
+
+00:19:20,129 --> 00:19:24,369
+and that's called ancillary data for Unix sockets.
+
+00:19:27,240 --> 00:19:32,380
+So, Unix sockets, like, a way to create Unix sockets
+
+00:19:32,389 --> 00:19:37,480
+is you just exchange the way you do the addressing.
+
+00:19:37,480 --> 00:19:44,280
+So, instead of talking to IPv6 or IPv4 you use AF Unix, Address Family Unix,
+
+00:19:44,280 --> 00:19:50,600
+and then you can use a path to a file (like location),
+
+00:19:50,600 --> 00:19:54,580
+and the client can then connect to that file.
+
+00:19:54,580 --> 00:19:58,139
+Because these are regular files in the file system,
+
+00:19:58,139 --> 00:20:01,659
+you can use all sorts of permission settings,
+
+00:20:01,660 --> 00:20:06,720
+like the way you have user groups and read and write bits.
+
+00:20:07,920 --> 00:20:13,320
+You can use that feature for authentication and for protecting.
+
+00:20:13,320 --> 00:20:15,470
+There are also ways to create a socket pair.
+
+00:20:15,470 --> 00:20:20,050
+It's a bit like a pipe with a/b directional ends.
+
+00:20:20,050 --> 00:20:24,980
+Unix has also something called abstract namespace.
+
+00:20:24,980 --> 00:20:27,240
+I'm not going to cover that here.
+
+00:20:28,080 --> 00:20:31,940
+So, a couple of things we can actually do with Unix sockets
+
+00:20:31,940 --> 00:20:34,140
+that don't work with normal sockets.
+
+00:20:35,120 --> 00:20:37,260
+We can get the peer credentials.
+
+00:20:37,260 --> 00:20:41,120
+So, the kernel tells us who is on the other side of the pipe.
+
+00:20:42,320 --> 00:20:44,160
+That's a bit of an example.
+
+00:20:44,160 --> 00:20:45,980
+That's currently not in the standard library.
+
+00:20:45,980 --> 00:20:47,960
+I'm planning to add that for Python 3.6.
+
+00:20:47,960 --> 00:20:52,039
+You can get the PID, the program ID, the process ID,
+
+00:20:52,039 --> 00:20:55,419
+the user ID, and the group ID of another process.
+
+00:20:55,420 --> 00:20:58,460
+Because that's guaranteed by the kernel,
+
+00:20:58,460 --> 00:21:00,620
+nobody can mess with that.
+
+00:21:01,380 --> 00:21:03,380
+You can also get --
+
+00:21:03,380 --> 00:21:05,360
+if you are running a system that has Linux,
+
+00:21:05,360 --> 00:21:07,360
+you can get the Linux context.
+
+00:21:07,360 --> 00:21:11,180
+Again, I'm going to add that feature to the standard library too.
+
+00:21:16,380 --> 00:21:19,120
+And we can use both these features
+
+00:21:19,129 --> 00:21:21,489
+to do something very fancy with containers.
+
+00:21:21,489 --> 00:21:26,860
+That's one of the main things I am using for the Custodial protocol
+
+00:21:26,860 --> 00:21:30,780
+is we can use Unix sockets even between containers,
+
+00:21:30,780 --> 00:21:33,560
+because we actually run the kernel space
+
+00:21:33,570 --> 00:21:36,360
+a lot like virtual machines.
+
+00:21:36,360 --> 00:21:42,980
+SELinux might make it a bit harder for very good reasons.
+
+00:21:42,980 --> 00:21:47,460
+Ben Walsh has a couple of blog posts about SELinux on Unix containers.
+
+00:21:49,420 --> 00:21:52,960
+Another thing: so when you run a container,
+
+00:21:52,960 --> 00:21:54,920
+you have different name spaces
+
+00:21:54,920 --> 00:21:56,940
+so the container doesn't see other processes.
+
+00:21:56,950 --> 00:21:59,200
+But with the Unix sockets,
+
+00:21:59,200 --> 00:22:03,289
+actually the kernel translates the PID to the correct --
+
+00:22:03,289 --> 00:22:05,669
+(audience member) What about [inaudible]?
+
+00:22:05,669 --> 00:22:08,060
+Later, okay.
+
+00:22:08,060 --> 00:22:13,600
+And you also get these multi-category security separation label,
+
+00:22:13,600 --> 00:22:16,780
+so every container is guaranteed to have a UNIX label.
+
+00:22:16,780 --> 00:22:19,360
+Every currently [inaudible] container has a Unix label
+
+00:22:19,360 --> 00:22:24,220
+for [inaudible] systems that use secure visualization.
+
+00:22:24,220 --> 00:22:26,740
+So was that useful?
+
+00:22:26,740 --> 00:22:30,680
+We can actually get the Docker ID from a PIDs.
+
+00:22:30,680 --> 00:22:33,680
+So, we have, like, the C group's file with the control groups.
+
+00:22:33,680 --> 00:22:35,640
+If you look on the control groups file,
+
+00:22:35,640 --> 00:22:37,660
+it looks a bit like that.
+
+00:22:37,660 --> 00:22:39,680
+Shorten the ID a bit.
+
+00:22:39,680 --> 00:22:44,480
+And being able to hash, that's actually your Docker ID.
+
+00:22:45,120 --> 00:22:48,880
+And when you look closer,
+
+00:22:48,880 --> 00:22:54,040
+you can check if the SELinux label matches,
+
+00:22:54,040 --> 00:22:57,260
+and if you're running, like, Kubernetes or OpenShift,
+
+00:22:57,260 --> 00:23:00,480
+you can even get to the information of the container, pod,
+
+00:23:00,480 --> 00:23:02,640
+name space, and, yeah.
+
+00:23:03,200 --> 00:23:06,880
+And because that -- um, the kernel
+
+00:23:06,880 --> 00:23:09,519
+prevents any process from messing with that,
+
+00:23:09,519 --> 00:23:13,659
+unless either the kernel or the document container is --
+
+00:23:13,660 --> 00:23:15,680
+if both the kernel and the document container
+
+00:23:15,680 --> 00:23:18,920
+are not compromised, it's secure.
+
+00:23:20,410 --> 00:23:24,970
+You can also send file descriptors over Unix sockets.
+
+00:23:24,970 --> 00:23:32,360
+That's using the surrogate data, just glued on also the capsules.
+
+00:23:32,360 --> 00:23:36,220
+So, these features, for example, are used in multi-processing
+
+00:23:36,220 --> 00:23:38,560
+and the standard library documentation.
+
+00:23:38,560 --> 00:23:41,520
+The socket model has an example of how to do that.
+
+00:23:41,520 --> 00:23:45,020
+It looks rather ugly; it depends on operating systems.
+
+00:23:45,020 --> 00:23:48,620
+I'm also planning to add that, actually, to the standard library socket model.
+
+00:23:49,820 --> 00:23:54,399
+Why is it useful to send a file descriptor between --
+
+00:23:54,399 --> 00:23:56,579
+from one person to another?
+
+00:23:57,360 --> 00:24:00,060
+That's very useful for example for sandboxing.
+
+00:24:00,070 --> 00:24:02,630
+There is a feature called seccomp,
+
+00:24:02,630 --> 00:24:05,899
+and it can be used by lots of programs
+
+00:24:05,899 --> 00:24:08,999
+where you put your process in a sandbox,
+
+00:24:09,000 --> 00:24:12,420
+and the sandbox actually prevents the process
+
+00:24:12,420 --> 00:24:17,220
+from doing any kind of forbidden syscall.
+
+00:24:17,220 --> 00:24:19,899
+So, you say, "This person's not allowed to create new process."
+
+00:24:19,899 --> 00:24:23,779
+"This person's not allowed to open any files,
+
+00:24:23,780 --> 00:24:27,820
+"mess with other files, or create network connections.
+
+00:24:28,740 --> 00:24:33,920
+But if you have an H connection or a browser,
+
+00:24:33,920 --> 00:24:37,420
+of course, you want to talk to another rec server.
+
+00:24:37,420 --> 00:24:39,679
+There comes in the so-called broker.
+
+00:24:39,679 --> 00:24:43,230
+So you have another process that's very, very simple
+
+00:24:43,230 --> 00:24:47,220
+and can be audited and checked for issues
+
+00:24:47,220 --> 00:24:49,600
+much, much better than the flash
+
+00:24:49,600 --> 00:24:53,190
+or a very complex browser renderer or VU renderer.
+
+00:24:53,190 --> 00:24:57,790
+So, the sandbox asks the broker, "Please open that file for me,"
+
+00:24:57,790 --> 00:25:01,860
+and the broker then opens the file and sends back the file descriptor.
+
+00:25:01,860 --> 00:25:06,820
+Or, in case the process is compromised and does something evil,
+
+00:25:06,820 --> 00:25:10,960
+the broker is able to just kill the malicious instance
+
+00:25:10,960 --> 00:25:13,260
+and yeah, you're safe.
+
+00:25:14,700 --> 00:25:19,580
+I have a couple of topics I would really, really like to cover here,
+
+00:25:19,580 --> 00:25:24,140
+but I'm a bit out of time, like 30 seconds left
+
+00:25:24,140 --> 00:25:26,300
+before all the questions and answers start.
+
+00:25:26,300 --> 00:25:28,300
+Memory mapped I/O.
+
+00:25:28,300 --> 00:25:32,260
+You can actually do more than just reading from a file;
+
+00:25:32,260 --> 00:25:34,620
+you can map a file into memory.
+
+00:25:34,620 --> 00:25:39,940
+It's very efficient if you have, like, multiple processes open in the same file
+
+00:25:39,940 --> 00:25:42,100
+or your renderer reads and writes.
+
+00:25:42,100 --> 00:25:45,320
+The kernel actually copies data from the file into the memory
+
+00:25:45,330 --> 00:25:47,590
+and removes that eventually.
+
+00:25:49,320 --> 00:25:51,480
+NumPy has [inaudible] for that.
+
+00:25:51,480 --> 00:25:54,600
+There is something very new called memory fd,
+
+00:25:54,600 --> 00:25:59,200
+where you can actually create a file-like thingy in memory
+
+00:25:59,200 --> 00:26:01,220
+that you can seal,
+
+00:26:01,220 --> 00:26:03,760
+so you can basically write data, seal the box,
+
+00:26:03,769 --> 00:26:06,029
+and nobody can change the data anymore
+
+00:26:06,029 --> 00:26:10,109
+and then give this file descriptor to another process.
+
+00:26:10,109 --> 00:26:13,149
+It's a better way to do temporary files
+
+00:26:14,420 --> 00:26:18,520
+and you can do much more efficient I/O with zero copying.
+
+00:26:18,520 --> 00:26:20,820
+So, every time you copy data from the kernel
+
+00:26:20,820 --> 00:26:24,000
+into the user space and back in the kernel space,
+
+00:26:24,000 --> 00:26:26,360
+you have a context switch that is very slow.
+
+00:26:26,360 --> 00:26:28,880
+You have to copy data multiple times.
+
+00:26:28,880 --> 00:26:32,400
+There are better ways to do that -- like sendfile.
+
+00:26:32,400 --> 00:26:34,420
+Python uses that already.
+
+00:26:34,420 --> 00:26:38,560
+Copy file range -- that's going to be added to Python 3.6.
+
+00:26:38,560 --> 00:26:45,560
+Splicing, a very new thing where you have actually an SSL/TLS socket
+
+00:26:45,570 --> 00:26:49,220
+that is very useful for high performance file service.
+
+00:26:49,220 --> 00:26:55,809
+They do most of the expensive TLS inside the kernel itself.
+
+00:26:55,809 --> 00:26:58,969
+And finally, event-driven I/O.
+
+00:26:58,969 --> 00:27:02,360
+The features that are used for async I/O
+
+00:27:02,360 --> 00:27:06,420
+where you have, like, hundreds of connections
+
+00:27:06,420 --> 00:27:08,420
+or thousands of connections,
+
+00:27:08,420 --> 00:27:12,980
+and you use these kind of commands to wait,
+
+00:27:12,980 --> 00:27:16,480
+and every time the pipe is ready for reading or writing,
+
+00:27:16,480 --> 00:27:19,980
+the socket connection is ready for reading and writing.
+
+00:27:19,980 --> 00:27:22,000
+The process gets informed of that.
+
+00:27:22,000 --> 00:27:24,200
+So async I/O uses that.
+
+00:27:25,480 --> 00:27:29,279
+If you want to know more about file descriptors
+
+00:27:29,279 --> 00:27:33,459
+or want to talk about the Custodial protocol
+
+00:27:33,460 --> 00:27:36,800
+and proof of concepts I am currently researching,
+
+00:27:36,800 --> 00:27:39,660
+please come to my Open Table at 4 o'clock today.
+
+00:27:39,660 --> 00:27:44,320
+It's in Room C 120 downstairs.
+
+00:27:45,640 --> 00:27:47,620
+Thank you very much.
+
+00:27:47,620 --> 00:27:51,460
+[applause]
+
+00:27:51,460 --> 00:27:53,520
+Almost in time.
+
+00:27:53,520 --> 00:27:56,080
+Three minutes left for questions.
+
+00:27:57,880 --> 00:27:59,460
+(audience member) I have a question.
+
+00:27:59,460 --> 00:28:01,240
+What about chroot?
+
+00:28:01,240 --> 00:28:03,520
+(Christian Heimes) Change root?
+
+00:28:03,520 --> 00:28:05,800
+(Christian Heimes) Can you please go to the microphone?
+
+00:28:07,200 --> 00:28:09,200
+It is over there.
+
+00:28:09,200 --> 00:28:11,020
+(audience member) All right, oh sorry.
+
+00:28:11,020 --> 00:28:12,800
+This might be a bit germane to your topic at hand,
+
+00:28:12,800 --> 00:28:15,300
+but, sorry, if I start up Red Hat,
+
+00:28:15,309 --> 00:28:17,850
+I open Python 3, and I open a file
+
+00:28:17,850 --> 00:28:20,250
+with a non-Unicode character in the string --
+
+00:28:20,250 --> 00:28:22,090
+(Christian Heimes) Can you speak up a bit?
+
+00:28:22,090 --> 00:28:23,870
+It's hard to understand you.
+
+00:28:23,870 --> 00:28:27,180
+(audience member) So, I have a blank Red Hat Linux running,
+
+00:28:27,180 --> 00:28:29,920
+I start Python 3, I open the file
+
+00:28:29,929 --> 00:28:32,509
+and in the file name, there's a non-Unicode character.
+
+00:28:33,260 --> 00:28:35,720
+What happens, what do I have to care about?
+
+00:28:35,720 --> 00:28:37,520
+Would it always work?
+
+00:28:37,520 --> 00:28:39,340
+(Christian Heimes) Okay, that's actually not covered by --
+
+00:28:39,340 --> 00:28:41,320
+that's already handled by Python internally.
+
+00:28:41,320 --> 00:28:44,460
+That's not related to file descriptors.
+
+00:28:44,460 --> 00:28:48,980
+Python tries to use something called surrogated pairs
+
+00:28:48,980 --> 00:28:55,759
+to kind of translate bytes that match UTF-8 into something.
+
+00:28:57,680 --> 00:29:01,040
+I'm not an expert on that part of encoding.
+
+00:29:03,360 --> 00:29:06,760
+But that's actually not handled by anything in the kernel or syscall.
+
+00:29:06,760 --> 00:29:08,720
+That's handled in Python,
+
+00:29:08,720 --> 00:29:11,800
+because in Unix, files are actually bytes
+
+00:29:11,809 --> 00:29:14,689
+but Python tries to do that as text.
+
+00:29:17,000 --> 00:29:18,680
+There's nobody?
+
+00:29:18,680 --> 00:29:20,300
+Okay, so, on the other side again.
+
+00:29:20,300 --> 00:29:22,160
+(audience member) Hello, sorry for shouting earlier.
+
+00:29:22,160 --> 00:29:23,900
+Thank you for the talk.
+
+00:29:23,900 --> 00:29:29,860
+My question is -- you said you can pass Unix sockets between containers,
+
+00:29:29,860 --> 00:29:33,240
+between containerized processes,
+
+00:29:33,240 --> 00:29:35,840
+but often containerized processes have a chroot, right?
+
+00:29:35,840 --> 00:29:37,820
+They have a different view of what the file system is,
+
+00:29:37,820 --> 00:29:39,800
+so I wonder how that could work.
+
+00:29:39,800 --> 00:29:41,880
+(Christian Heimes) Yeah that works.
+
+00:29:41,880 --> 00:29:45,180
+You can create a file-based Unix socket,
+
+00:29:45,180 --> 00:29:48,620
+say, if your Unix socket is like a file in the file system.
+
+00:29:48,620 --> 00:29:54,520
+Then you can mount-bind that directory into another container.
+
+00:29:54,520 --> 00:29:59,880
+It even works when you mount-bound the container read-only.
+
+00:29:59,880 --> 00:30:01,840
+And that prevents the process
+
+00:30:01,840 --> 00:30:04,540
+from replacing or removing the file descriptors.
+
+00:30:04,540 --> 00:30:08,040
+The copy of the file descriptor actually is a bit like a device file,
+
+00:30:08,049 --> 00:30:10,669
+so stuff you have in the def directory.
+
+00:30:10,669 --> 00:30:15,850
+You can open that file and connect with the file descriptor.
+
+00:30:15,850 --> 00:30:17,820
+What's currently not working is
+
+00:30:17,820 --> 00:30:22,460
+if you have one container that creates a file descriptor
+
+00:30:22,460 --> 00:30:24,840
+and another container that wants to open the file descriptors,
+
+00:30:24,840 --> 00:30:30,859
+because the MCS labeling prevents you from exchanging information
+
+00:30:30,859 --> 00:30:33,119
+between unrelated containers.
+
+00:30:33,120 --> 00:30:38,499
+You either have to use some settings to put them in the same context
+
+00:30:38,499 --> 00:30:44,579
+or that's something that's going to be handled by kernel DBS.
+
+00:30:44,580 --> 00:30:50,420
+Kernel DBS are Unix sockets on steroids with additional features.
+
+00:30:50,420 --> 00:30:56,080
+We also can do, like, this cross container communication
+
+00:30:56,080 --> 00:30:58,200
+in a different way.
+
+00:31:01,720 --> 00:31:03,700
+(audience member) OK, so is the short answer
+
+00:31:03,700 --> 00:31:06,640
+that I have to bind-mount a common directory to both containers?
+
+00:31:06,640 --> 00:31:09,440
+(Christian Heimes) Yes, and if you --
+
+00:31:09,440 --> 00:31:11,740
+basically it's easier to lose the broker approach.
+
+00:31:11,740 --> 00:31:15,539
+You have, like, a super-privileged container that's running
+
+00:31:15,539 --> 00:31:18,990
+in the host PID namespace and create the file descriptor,
+
+00:31:18,990 --> 00:31:21,770
+and all the other containers then connect to that.
+
+00:31:21,770 --> 00:31:25,499
+So, the container example I wrote for Custodia
+
+00:31:25,499 --> 00:31:29,839
+actually is a privileged container where they host namespacing.
+
+00:31:29,840 --> 00:31:36,120
+It doesn't currently work with the SELinux for security reasons --
+
+00:31:36,129 --> 00:31:38,189
+for good security reasons.
+
+00:31:38,189 --> 00:31:39,989
+(audience member) OK, thank you.
+
+00:31:39,989 --> 00:31:41,789
+(presenter) Thank you.
+
+00:31:41,789 --> 00:31:43,729
+That's all the time we have for questions,
+
+00:31:43,729 --> 00:31:46,120
+but remember Christian's Open Space at 4 p.m.
+
+00:31:46,120 --> 00:31:47,960
+(Christian Heimes) Thank you.
+
+00:31:47,960 --> 00:31:49,780
+
+YouTube URL: https://www.youtube.com/watch?v=Ftg8fjY_YWU
+
+

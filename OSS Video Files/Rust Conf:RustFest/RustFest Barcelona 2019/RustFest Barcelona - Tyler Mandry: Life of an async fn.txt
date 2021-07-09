@@ -1,0 +1,1214 @@
+Title: RustFest Barcelona - Tyler Mandry: Life of an async fn
+Publication date: 2019-11-28
+Playlist: RustFest Barcelona 2019
+Description: 
+	async/await is one of the headline features to ship in Rust this year. But how does it actually work, and what does that mean for performance?
+
+We’ll walk through what happens to async/await code inside the compiler. We’ll see some of the performance implications that result from this, and how to avoid common pitfalls. You’ll walk away with a deeper understanding of how your async/await code behaves at runtime and what the compiler is doing under the hood.
+
+Finally, we’ll explore some of the cutting-edge use cases for async/await and coroutines beyond web servers.
+
+https://barcelona.rustfest.eu/sessions/life-of-an-async-fn
+Captions: 
+	00:00:06,359 --> 00:00:11,000
+TYLER: Well, in case you haven't been paying any attention, async/await is now stable in
+
+00:00:11,000 --> 00:00:14,200
+Rust.
+
+00:00:14,200 --> 00:00:22,050
+[Applause] This is a huge milestone for the language and I think systems development in
+
+00:00:22,050 --> 00:00:24,500
+general, so very exciting.
+
+00:00:24,500 --> 00:00:28,800
+Again, my name is Tyler, or tmandry.
+
+00:00:28,800 --> 00:00:34,240
+I work on Fuchsia, which is an experimental operating system at Google.
+
+00:00:34,240 --> 00:00:39,210
+We use Rust for a number of things in the operating system.
+
+00:00:39,210 --> 00:00:44,780
+I work on the toolchain team supporting Rust, which means that sometimes I get to spend
+
+00:00:44,780 --> 00:00:51,850
+time fiddling around in the compiler and I'm also a Rust release team member and compiler
+
+00:00:51,850 --> 00:00:55,080
+team contributor.
+
+00:00:55,080 --> 00:01:01,540
+So I just want to briefly give kind of a primer on futures before I dive into some of the
+
+00:01:01,540 --> 00:01:02,540
+async stuff.
+
+00:01:02,540 --> 00:01:10,990
+Florian covered some of this, so just to recap, a future is any computation that progresses
+
+00:01:10,990 --> 00:01:20,530
+asynchronously, so that could be like a request to some external database server, it could
+
+00:01:20,530 --> 00:01:26,320
+be like reading and writing on disk, or doing some expensive data processing on another
+
+00:01:26,320 --> 00:01:27,770
+thread, something like that.
+
+00:01:27,770 --> 00:01:30,080
+All of these things can be represented with a future.
+
+00:01:30,080 --> 00:01:38,340
+It eventually produces a result which is called its output and we represent futures in Rust
+
+00:01:38,340 --> 00:01:41,890
+with the future trait, so you can see there is an associated type called output which
+
+00:01:41,890 --> 00:01:48,850
+is the output of your computation, and then there's this method called poll which has
+
+00:01:48,850 --> 00:01:55,250
+kind of the scary signature but the job of the poll method is to make progress on the
+
+00:01:55,250 --> 00:01:58,470
+future, as much progress as possible.
+
+00:01:58,470 --> 00:02:07,480
+Poll returns an enum called poll and the result of the poll is either pending which means
+
+00:02:07,480 --> 00:02:12,670
+that I made as much progress as I can and now I'm waiting for some external event, or
+
+00:02:12,670 --> 00:02:19,420
+ready, which means that I'm completely done and here is the result of my computation.
+
+00:02:19,420 --> 00:02:26,030
+An important thing to remember is that in Rust we have a lazy futures model, so futures
+
+00:02:26,030 --> 00:02:32,870
+don't do anything until they are told and it's the job of the executor to do that.
+
+00:02:32,870 --> 00:02:41,069
+Okay, so I want to talk about async functions in this talk and I will start with a really
+
+00:02:41,069 --> 00:02:46,069
+simple example of an async function, so here is an async function named handle request.
+
+00:02:46,069 --> 00:02:49,459
+We are going to take some arguments.
+
+00:02:49,459 --> 00:02:54,640
+The first thing we are going to do is to issue a request to an external database server,
+
+00:02:54,640 --> 00:02:58,910
+to get a row from our database corresponding to the ID we were handed.
+
+00:02:58,910 --> 00:03:03,860
+We are going to await the result of that, so basically suspend execution of this function
+
+00:03:03,860 --> 00:03:06,110
+until we get the row back.
+
+00:03:06,110 --> 00:03:14,989
+Once we get it back we are going to encode it into JSON and then finally we are going
+
+00:03:14,989 --> 00:03:21,300
+to write the encoded JSON out onto a TCP stream.
+
+00:03:21,300 --> 00:03:28,880
+Now, if you are coding this synchronously your function would block your thread at two
+
+00:03:28,880 --> 00:03:30,819
+potential points.
+
+00:03:30,819 --> 00:03:34,330
+One is basically when you are awaiting the database server and the other is when you
+
+00:03:34,330 --> 00:03:39,970
+are writing out to a TCP stream because TCP sockets many times have a buffer that can
+
+00:03:39,970 --> 00:03:46,459
+fill up so you will block your entire thread and at minimum you will pay a contact switch
+
+00:03:46,459 --> 00:03:49,730
+or your thread could be locked for a really long time.
+
+00:03:49,730 --> 00:03:59,069
+The way this connects to future, as was mentioned earlier, is we re-write the signature in the
+
+00:03:59,069 --> 00:04:00,489
+compiler of your async function.
+
+00:04:00,489 --> 00:04:06,519
+It could just be a normal function that returns impl future and that means that we are returning
+
+00:04:06,519 --> 00:04:09,880
+some type, we are not going to tell you what type it is, that happens to implement the
+
+00:04:09,880 --> 00:04:11,870
+future crate.
+
+00:04:11,870 --> 00:04:16,269
+In this case our async function did not have a recurrent type so the output is just the
+
+00:04:16,269 --> 00:04:25,020
+empty [inaudible] and then inside of the function body, we just wrap it with an async block.
+
+00:04:25,020 --> 00:04:32,419
+So let's talk about what the compiler actually does when you compile this async function.
+
+00:04:32,419 --> 00:04:39,110
+To do that I want to walk through how you would implement this by hand in the pre-async/await
+
+00:04:39,110 --> 00:04:40,110
+world.
+
+00:04:40,110 --> 00:04:45,869
+So the way you would do that is you want to create a data structure that represents the
+
+00:04:45,869 --> 00:04:50,990
+state of your request, and so we are going to do that, we are going to call it request
+
+00:04:50,990 --> 00:04:58,069
+handler and start with what we call the argument star function into that struct and then we
+
+00:04:58,069 --> 00:05:04,949
+are going to implement future on a request handler, again our async function doesn't
+
+00:05:04,949 --> 00:05:11,629
+return anything so the output associated type is just tuple and then we are going to implement
+
+00:05:11,629 --> 00:05:18,309
+the poll method, so the way you implement this by hand is by writing a state machine
+
+00:05:18,309 --> 00:05:19,389
+which is what we are going to do.
+
+00:05:19,389 --> 00:05:25,379
+We are going to add a state field to our struct which keeps track of what state our request
+
+00:05:25,379 --> 00:05:30,090
+is in and then, inside the poll method, every time I get polled we are going to match on
+
+00:05:30,090 --> 00:05:35,050
+that state and basically behave accordingly.
+
+00:05:35,050 --> 00:05:39,509
+So the very first state that we can be in is we've never been polled before, this corresponds
+
+00:05:39,509 --> 00:05:45,939
+to the very top of the async function; the next one is that we are getting the row so
+
+00:05:45,939 --> 00:05:52,139
+awaiting the result of the database; the third is that we are writing to our TCP stream.
+
+00:05:52,139 --> 00:05:58,080
+Notice I didn't create a state for encoding the JSON because that's a synchronous operation.
+
+00:05:58,080 --> 00:06:00,900
+There's no await.
+
+00:06:00,900 --> 00:06:10,379
+Then finally we are completely done and ready to return our result.
+
+00:06:10,379 --> 00:06:13,610
+Let's go back.
+
+00:06:13,610 --> 00:06:18,349
+In the case where we've never been polled before we are going to just basically execute
+
+00:06:18,349 --> 00:06:24,550
+the very first line in our function, so we are going to call get row and it's going to
+
+00:06:24,550 --> 00:06:31,710
+return a future which we are going to store in a field and then we will update to getting
+
+00:06:31,710 --> 00:06:32,789
+row.
+
+00:06:32,789 --> 00:06:35,809
+Get row returns a future.
+
+00:06:35,809 --> 00:06:44,309
+We are going to store that in a field called row fut and we have to initialise all the
+
+00:06:44,309 --> 00:06:51,330
+fields, need to be able to say: I don't have it yet, none, and then when we do have it,
+
+00:06:51,330 --> 00:06:57,029
+initialise it, some, with the value of the future.
+
+00:06:57,029 --> 00:07:00,689
+Then once we are polled we are polled when we are in the getting row state.
+
+00:07:00,689 --> 00:07:08,209
+We are awaiting, so we need to propagate this to pull down the future that we are awaiting,
+
+00:07:08,209 --> 00:07:11,039
+so we will do that.
+
+00:07:11,039 --> 00:07:13,310
+We know there's a future inside of row_fut.
+
+00:07:13,310 --> 00:07:27,569
+If that returns pending that means we can't make any more progress so we simply put that
+
+00:07:27,569 --> 00:07:30,080
+back up the stack.
+
+00:07:30,080 --> 00:07:35,919
+If we get poll ready, that means the row is ready and we can make progress so the very
+
+00:07:35,919 --> 00:07:42,349
+first thing we can do is deallocate the row_fut, we don't need that anymore and then we are
+
+00:07:42,349 --> 00:07:49,490
+going to do the next thing in the function which is to encode our row into JSON.
+
+00:07:49,490 --> 00:07:53,659
+Then we do the next thing which is to create the write all.
+
+00:07:53,659 --> 00:07:56,149
+So we call write all.
+
+00:07:56,149 --> 00:08:02,389
+Again, we are going to store the value in our state machine and then we are going to
+
+00:08:02,389 --> 00:08:07,569
+update our state to be writing.
+
+00:08:07,569 --> 00:08:14,979
+All right, so the next state is writing.
+
+00:08:14,979 --> 00:08:20,909
+This sounds really simple, basically the same thing that we saw before, where we are now
+
+00:08:20,909 --> 00:08:25,270
+await the write_fut so we will propagate the poll down to the write_fut.
+
+00:08:25,270 --> 00:08:27,409
+Again if it's pending, we will return poll pending.
+
+00:08:27,409 --> 00:08:37,880
+If it's ready there's no output so we immediately update our state to be ready and that's it.
+
+00:08:37,880 --> 00:08:39,569
+The ready state is really simple.
+
+00:08:39,569 --> 00:08:44,850
+You simply [inaudible].
+
+00:08:44,850 --> 00:08:49,959
+So there's one last thing that we need to do which is add a loop round the inside of
+
+00:08:49,959 --> 00:08:55,180
+our body and that means that every time poll gets called, we make as much progress as we
+
+00:08:55,180 --> 00:09:02,279
+possibly can until we either hit a poll pending on subfuture or we are completely done, so
+
+00:09:02,279 --> 00:09:06,540
+basically we will constantly loop until we hit one of these three return statements in
+
+00:09:06,540 --> 00:09:08,639
+the body.
+
+00:09:08,639 --> 00:09:13,970
+You notice there's quite a bit more code on the right side than the left.
+
+00:09:13,970 --> 00:09:16,480
+It's not as readable.
+
+00:09:16,480 --> 00:09:21,089
+That's one major benefit of async/await, of course.
+
+00:09:21,089 --> 00:09:25,740
+And in fact we actually cheated and actually made the code a little bit more readable than
+
+00:09:25,740 --> 00:09:32,930
+it would have to be in real life because we are actually borrowing one of our struct members
+
+00:09:32,930 --> 00:09:38,959
+with [inaudible] encoded inside of the value of the write so when we call write all we
+
+00:09:38,959 --> 00:09:45,199
+are handing it a reference to basically put it to buffer and you can't actually write
+
+00:09:45,199 --> 00:09:46,240
+this in normal Rust.
+
+00:09:46,240 --> 00:09:51,450
+You would have to introduce a layer of indirection with a smart pointer or something and it ends
+
+00:09:51,450 --> 00:09:55,319
+up being really not fun.
+
+00:09:55,319 --> 00:09:58,620
+This is an issue that comes up a lot in async.
+
+00:09:58,620 --> 00:10:04,279
+Thankfully, with async/await all that is taken care of for you and it's more efficient.
+
+00:10:04,279 --> 00:10:11,649
+Just says: I know that you are [inaudible] yourself and thanks to some extractions we
+
+00:10:11,649 --> 00:10:16,570
+can guarantee that.
+
+00:10:16,570 --> 00:10:21,830
+Another problem with our implementation that you might notice is we are actually wasting
+
+00:10:21,830 --> 00:10:24,709
+some space here.
+
+00:10:24,709 --> 00:10:31,450
+Any time we are in the middle of getting the row we don't have any need for the write_fut,
+
+00:10:31,450 --> 00:10:36,990
+encoder bytes, and then in the next stage when we are writing to the TCP stream we don't
+
+00:10:36,990 --> 00:10:43,639
+need the row_fut anymore so it would be really nice if we could not allocate all of that
+
+00:10:43,639 --> 00:10:47,230
+space and just re-use the bytes.
+
+00:10:47,230 --> 00:10:52,060
+If we look at the way that it's laid out in memory right now, we've got offset zero of
+
+00:10:52,060 --> 00:10:58,880
+our structs and you have all of the fields, so this is the way it is now.
+
+00:10:58,880 --> 00:11:03,889
+What we would really like to be able to do is basically again re-use those same bytes,
+
+00:11:03,889 --> 00:11:15,959
+row_futs in the next stage when we are awaiting the write_fut.
+
+00:11:15,959 --> 00:11:23,730
+So as recently as a few months ago it didn't do this and this problem compounds really
+
+00:11:23,730 --> 00:11:25,740
+quickly.
+
+00:11:25,740 --> 00:11:32,680
+If we assume for simplicity's sake that the size of our future is basically dominated
+
+00:11:32,680 --> 00:11:39,690
+by the size of all the subfutures, then we are roughly twice as big as we need, not re-using
+
+00:11:39,690 --> 00:11:41,250
+though bytes.
+
+00:11:41,250 --> 00:11:47,269
+And that's a problem but it actually gets worse because row_fut and write_fut, those
+
+00:11:47,269 --> 00:11:52,050
+are written as async functions and those each have their own problems where they are awaiting
+
+00:11:52,050 --> 00:11:55,850
+different subfutures and so really those are twice as big as they need to be.
+
+00:11:55,850 --> 00:11:59,420
+So really the future we are writing isn't twice as big as it needs to be, it's really
+
+00:11:59,420 --> 00:12:05,249
+four times as big as it needs to be and then if that gets awaited by some other future
+
+00:12:05,249 --> 00:12:08,720
+maybe that's eight times a big as it needs to be.
+
+00:12:08,720 --> 00:12:10,290
+This really did happen in practice.
+
+00:12:10,290 --> 00:12:17,740
+So in Fuchsia we would have futures that took up half a megabyte on the stack, which is
+
+00:12:17,740 --> 00:12:23,899
+really big and we had a lot of futures that actually blew the stack.
+
+00:12:23,899 --> 00:12:25,610
+You can [inaudible] in Rust.
+
+00:12:25,610 --> 00:12:32,379
+It's not undefined behaviour, but you can.
+
+00:12:32,379 --> 00:12:37,899
+What the compiler wants to do is it wants to ask the question: okay, which of these
+
+00:12:37,899 --> 00:12:41,249
+fields can I overlap?
+
+00:12:41,249 --> 00:12:47,519
+The way it does that is it looks at your programme - I will zoom in here so you can read some
+
+00:12:47,519 --> 00:12:54,709
+things - so this is a graphical representation of what's called mirror or the mid-level IR
+
+00:12:54,709 --> 00:12:58,230
+inside the Rust compiler.
+
+00:12:58,230 --> 00:13:03,720
+We represent the entire program as this control flow graph, we are inside of every block.
+
+00:13:03,720 --> 00:13:08,300
+These are called basic blocks, so on the left side in the middle you will see basically
+
+00:13:08,300 --> 00:13:12,490
+block number 14 and inside of that block there's a bunch of statements.
+
+00:13:12,490 --> 00:13:17,459
+These are very simple statements where you can only do things like: I need to allocate
+
+00:13:17,459 --> 00:13:24,819
+storage on the stack for a local variable, or I need to access one member of this variable,
+
+00:13:24,819 --> 00:13:27,720
+reference something or assign something.
+
+00:13:27,720 --> 00:13:29,939
+There's no control flow inside of the basic blocks.
+
+00:13:29,939 --> 00:13:34,480
+All the control flow happens between the basic blocks along these edges here.
+
+00:13:34,480 --> 00:13:43,450
+So at the end of block 14 we drop something and drop is an operation which can panic,
+
+00:13:43,450 --> 00:13:45,160
+so there are two options.
+
+00:13:45,160 --> 00:13:49,630
+Either we return and go down the happy path, which is normally what you think about, down
+
+00:13:49,630 --> 00:13:59,509
+to basic block 23, or we panic and we unwind and go into basic block 7 to do all the clean-up.
+
+00:13:59,509 --> 00:14:04,490
+So what we are going to do is crawl this entire info graph and work out which variables are
+
+00:14:04,490 --> 00:14:06,790
+storage live at the same time.
+
+00:14:06,790 --> 00:14:10,079
+Storage live is how we represent that we actually need storage for a variable.
+
+00:14:10,079 --> 00:14:14,089
+We are not actually going to do that because we don't have three hours for this talk so
+
+00:14:14,089 --> 00:14:18,529
+we are just going to squint at the source and see if we can figure anything out.
+
+00:14:18,529 --> 00:14:19,649
+You can do this at home.
+
+00:14:19,649 --> 00:14:22,339
+That works pretty well.
+
+00:14:22,339 --> 00:14:28,589
+So the first question we are going to ask is: can I overlap row_fut with encoded?
+
+00:14:28,589 --> 00:14:36,600
+The rule of thumb here is, if the last time you ever use a future is - sorry, if the last
+
+00:14:36,600 --> 00:14:41,339
+time you ever use field A happens before the first time you ever use field B then you can
+
+00:14:41,339 --> 00:14:43,910
+definitely overlap.
+
+00:14:43,910 --> 00:14:48,350
+So in this case, you will notice the last time we used row_fut is we set it equal to
+
+00:14:48,350 --> 00:14:54,730
+none and then the following line is the first time we ever use encoded and you can kind
+
+00:14:54,730 --> 00:14:59,589
+of reason about this by looking at the source and saying: okay, definitely these are never
+
+00:14:59,589 --> 00:15:00,680
+needed at the same time.
+
+00:15:00,680 --> 00:15:03,149
+So yes, we can overlap these in memory.
+
+00:15:03,149 --> 00:15:08,540
+When I say overlap, I mean just re-use the bytes, right?
+
+00:15:08,540 --> 00:15:12,009
+Okay, so what about row_fut with write_fut?
+
+00:15:12,009 --> 00:15:17,809
+Again, in this case row_fut, the last time we ever use it is setting it equal to none
+
+00:15:17,809 --> 00:15:24,759
+and then later on we use write_fut, so we can definitely overlap these two.
+
+00:15:24,759 --> 00:15:28,760
+Then the last two fields that we care about are write_fut and encoded.
+
+00:15:28,760 --> 00:15:35,300
+So in this case we assign to encoded and then we assign to write_fut and we are actually
+
+00:15:35,300 --> 00:15:41,170
+handing out a reference to the encoded bytes, which means that we definitely need these.
+
+00:15:41,170 --> 00:15:48,540
+Write_fut contains a reference to encoded so we can't overlap these in memory.
+
+00:15:48,540 --> 00:15:57,370
+So this allows us to overlap these bytes.
+
+00:15:57,370 --> 00:16:06,480
+What this ends up looking like is not so much a struct but more like an enum where you have
+
+00:16:06,480 --> 00:16:12,649
+one variant per every state your future could be in and inside of each enum variant you
+
+00:16:12,649 --> 00:16:19,619
+have all the fields that you need for that particular state, so in general in this table
+
+00:16:19,619 --> 00:16:26,019
+we have all of the enum variants so we could be in unpolled state, suspend 0, 1, 2 etc
+
+00:16:26,019 --> 00:16:28,760
+and then all of our local fields on the left here.
+
+00:16:28,760 --> 00:16:34,170
+The only difference between a regular Rust enum and this is that you can have one field
+
+00:16:34,170 --> 00:16:40,220
+and multiple variants, so in this example we need local a starting in the suspend zero
+
+00:16:40,220 --> 00:16:47,470
+variant but also in the suspend 1 variant so you can have one local that persists across
+
+00:16:47,470 --> 00:16:48,910
+multiple await points.
+
+00:16:48,910 --> 00:16:54,870
+That comes up quite a lot.
+
+00:16:54,870 --> 00:17:06,809
+So I want to talk about - this is all very cool, but what are the performance applications?
+
+00:17:06,809 --> 00:17:12,620
+So let's look at some patterns that you might not realise have subtle performance issues.
+
+00:17:12,620 --> 00:17:20,589
+So in this example we have a function called do-stuff, we take a context which is just
+
+00:17:20,589 --> 00:17:30,179
+a smart pointer to some context somewhere and what we are going to do is we are going
+
+00:17:30,179 --> 00:17:33,679
+to log some development fill with some contexts.
+
+00:17:33,679 --> 00:17:37,899
+There is a subtle performance issue with this code.
+
+00:17:37,899 --> 00:17:41,230
+Can anyone spot it?
+
+00:17:41,230 --> 00:17:45,500
+Nod if you think you see it.
+
+00:17:45,500 --> 00:17:46,860
+Not seeing any nodding, okay.
+
+00:17:46,860 --> 00:17:54,549
+So what can happen is, at the end of every scope is when we drop our local variables,
+
+00:17:54,549 --> 00:17:55,809
+right?
+
+00:17:55,809 --> 00:18:01,500
+So the compiler is going to insert an implicit drop at the very end of our function but we
+
+00:18:01,500 --> 00:18:05,220
+don't actually need context until the end of the function; we just log in at the very
+
+00:18:05,220 --> 00:18:07,470
+beginning.
+
+00:18:07,470 --> 00:18:16,120
+So we are actually hanging on to this context, all the way through awaiting that future and
+
+00:18:16,120 --> 00:18:20,510
+then finishing the task, which is kind of inefficient.
+
+00:18:20,510 --> 00:18:25,560
+If we have the only reference to context then we will be heaving that memory around and
+
+00:18:25,560 --> 00:18:27,370
+we don't need to be.
+
+00:18:27,370 --> 00:18:37,059
+What we are going to do is, one way to mitigate this is to move that context into basically
+
+00:18:37,059 --> 00:18:41,580
+an interscope in the function and the effect of this is that we are actually moving the
+
+00:18:41,580 --> 00:18:45,960
+drop to the end of that interscope before the await.
+
+00:18:45,960 --> 00:18:48,090
+This is quite a bit better.
+
+00:18:48,090 --> 00:18:51,710
+Not hanging on to context or awaiting some other future.
+
+00:18:51,710 --> 00:18:53,600
+That future could take a year to complete.
+
+00:18:53,600 --> 00:18:55,960
+We have no idea.
+
+00:18:55,960 --> 00:18:56,960
+But it's still not perfect.
+
+00:18:56,960 --> 00:19:03,990
+The reason is: remember, futures do nothing until they are polled and in the case of an
+
+00:19:03,990 --> 00:19:08,380
+async function that includes all of the lines at the top of the function, so none of these
+
+00:19:08,380 --> 00:19:12,880
+lines are run until the first time the poll is called, which means we are still hanging
+
+00:19:12,880 --> 00:19:16,960
+on to contexts or in that unresumed state.
+
+00:19:16,960 --> 00:19:24,700
+So the "perfect" way of dealing with this is actually to desugar our async function
+
+00:19:24,700 --> 00:19:29,940
+into a regular function which returns impl future like we saw earlier - compiler does
+
+00:19:29,940 --> 00:19:34,750
+this for you but you can do it yourself and at the very top of that function we will do
+
+00:19:34,750 --> 00:19:41,720
+our log and then we will write an async block which drops this into an async context where
+
+00:19:41,720 --> 00:19:50,809
+we can await anything we want and actually evaluate your future return.
+
+00:19:50,809 --> 00:19:54,690
+Because we don't reference context inside of that async block at all, we never have
+
+00:19:54,690 --> 00:19:59,750
+to save it inside of our state machine, so we aren't allocating any bytes to save the
+
+00:19:59,750 --> 00:20:06,899
+smart pointer and also never hanging on to that reference inside of the future.
+
+00:20:06,899 --> 00:20:09,710
+So once due step is called, we immediately log.
+
+00:20:09,710 --> 00:20:18,390
+Then we return a future that can make progress later.
+
+00:20:18,390 --> 00:20:24,140
+Another pattern to look out for is when you are awaiting expressions that have really
+
+00:20:24,140 --> 00:20:28,769
+big, complicated temporaries.
+
+00:20:28,769 --> 00:20:34,669
+So in this example I have a struct Big which has an array in it that is just kilobyte and
+
+00:20:34,669 --> 00:20:36,870
+link, a pretty big type.
+
+00:20:36,870 --> 00:20:42,399
+We are going to implement drop for Big and do something silly like print a message when
+
+00:20:42,399 --> 00:20:44,100
+it is called.
+
+00:20:44,100 --> 00:20:47,929
+Then I have a function through from usize to usize.
+
+00:20:47,929 --> 00:20:51,320
+It doesn't really matter what it does.
+
+00:20:51,320 --> 00:20:59,510
+Inside of my async function bar, we are going to construct a Big simply to get the length
+
+00:20:59,510 --> 00:21:03,789
+of the array out and then call foo with that link.
+
+00:21:03,789 --> 00:21:08,610
+So this is semantically equivalent to calling foo with 1024.
+
+00:21:08,610 --> 00:21:16,419
+Let's say we don't want to repeat ourselves and we forgot the thing in Rust so we are
+
+00:21:16,419 --> 00:21:19,130
+going to construct it on the stack and get the link up.
+
+00:21:19,130 --> 00:21:25,090
+Normally the compiler could optimise this away and it would be fine.
+
+00:21:25,090 --> 00:21:28,880
+But what happens when we try to print the size of the state machine that is returned?
+
+00:21:28,880 --> 00:21:34,400
+We are going to get something really big back.
+
+00:21:34,400 --> 00:21:36,710
+Our state machine is over a kilobyte in size.
+
+00:21:36,710 --> 00:21:42,179
+That's because it is embedding a copy of Big inside of the state machine.
+
+00:21:42,179 --> 00:21:48,830
+The reason for this is that Rust has well-defined semantics for when the structs are run and
+
+00:21:48,830 --> 00:21:54,809
+any time you create a temporary inside of a statement, the destructor for that temporary
+
+00:21:54,809 --> 00:21:57,370
+is called at the very end of the statement.
+
+00:21:57,370 --> 00:22:02,669
+Basically, you have a temporary expression inside of a larger statement, fast forward
+
+00:22:02,669 --> 00:22:08,450
+to the next semicolon you see and that's when the destructor will be run for that temporary,
+
+00:22:08,450 --> 00:22:19,100
+which in this case is not good because that after our await, right?
+
+00:22:19,100 --> 00:22:25,570
+So this is something to look out for and it's pretty easy to mitigate.
+
+00:22:25,570 --> 00:22:31,990
+So in this case we could simply get the link inside of one statement, there's a semicolon
+
+00:22:31,990 --> 00:22:40,149
+in between that statement and the next await and that would be fine.
+
+00:22:40,149 --> 00:22:42,169
+We can also write it like this.
+
+00:22:42,169 --> 00:22:47,710
+Actually, constructing the entire foo future inside of one statement and then awaiting
+
+00:22:47,710 --> 00:22:48,710
+on the next line.
+
+00:22:48,710 --> 00:22:49,710
+It doesn't really matter.
+
+00:22:49,710 --> 00:22:53,710
+In either case, when we print the size of our state machine it's going to be much, much
+
+00:22:53,710 --> 00:22:54,710
+smaller.
+
+00:22:54,710 --> 00:22:57,330
+We are not embedding a copy of Big.
+
+00:22:57,330 --> 00:23:06,730
+You might say, okay, that seems like a problem but if the temporary doesn't have a constructor,
+
+00:23:06,730 --> 00:23:11,330
+in other words it doesn't implement drop, we should be able to optimise that away.
+
+00:23:11,330 --> 00:23:15,419
+We don't need to hang on to this copy of Big in between because we never need to call the
+
+00:23:15,419 --> 00:23:21,179
+constructor on it and you would be right except unfortunately we don't do that optimisation
+
+00:23:21,179 --> 00:23:22,649
+today.
+
+00:23:22,649 --> 00:23:26,290
+So that's kind of a future thing that we would want to do in the future.
+
+00:23:26,290 --> 00:23:32,200
+So for now just always look out for big complicated temporaries.
+
+00:23:32,200 --> 00:23:38,149
+This only comes up occasionally in practice but it's something to be aware of.
+
+00:23:38,149 --> 00:23:39,960
+So should I use async/await?
+
+00:23:39,960 --> 00:23:42,450
+Yes, definitely use it.
+
+00:23:42,450 --> 00:23:49,889
+It's now stable but it's a "Minimum Viable Product", and that means we are taking advantage
+
+00:23:49,889 --> 00:23:54,789
+of the Rust release process where we release a new compiler every six weeks to iterate
+
+00:23:54,789 --> 00:23:57,770
+on the language compiler and implementation.
+
+00:23:57,770 --> 00:24:05,389
+All of your code - all of the state machines that get produced should be as good or better
+
+00:24:05,389 --> 00:24:14,139
+than hand-rolled in most cases with a few notable exceptions, and that's going to improve.
+
+00:24:14,139 --> 00:24:19,470
+I got to talk to some of the people writing the C++ coroutines proposal for 2020 which
+
+00:24:19,470 --> 00:24:27,529
+is a really interesting talk and that's some of their version, C++'s version of async/await
+
+00:24:27,529 --> 00:24:31,760
+so there are a couple of differences between theirs and ours.
+
+00:24:31,760 --> 00:24:38,080
+One major difference between Rust and the current proposal for C++ is that any time
+
+00:24:38,080 --> 00:24:43,549
+we allocate anything on the heap in Rust, that allocation is always made explicit so
+
+00:24:43,549 --> 00:24:48,590
+if you await another future, it always gets rolled up, all of the state for that future
+
+00:24:48,590 --> 00:24:53,649
+gets rolled up into your state machine, your data structure, and we don't allocate it on
+
+00:24:53,649 --> 00:24:58,100
+the heap unless you create a box and put the future in there.
+
+00:24:58,100 --> 00:25:05,779
+The C++ proposal, there's actually an implicit heap allocation every time you await a future
+
+00:25:05,779 --> 00:25:11,720
+and in many cases the compiler can optimise that away, but there are no guarantees.
+
+00:25:11,720 --> 00:25:19,070
+There's a possibility to flip over a new - an optimisation and have an optimisation fail
+
+00:25:19,070 --> 00:25:25,490
+and now you have a new heap allocation in your programme, in the C++ programme.
+
+00:25:25,490 --> 00:25:31,909
+Rust has fewer language-level extension points so one consequence of releasing a new standard
+
+00:25:31,909 --> 00:25:36,809
+only once every three years is that you can shove everything in at once.
+
+00:25:36,809 --> 00:25:44,929
+This works for C++, but in the case of Rust we kind of have a minimal service area.
+
+00:25:44,929 --> 00:25:47,450
+The benefit of that is that you have to do less work, keeping code performant, and the
+
+00:25:47,450 --> 00:25:56,710
+rest of the stuff you don't need.
+
+00:25:56,710 --> 00:26:01,260
+We have less legacy.
+
+00:26:01,260 --> 00:26:05,010
+Async/await is not just for web servers.
+
+00:26:05,010 --> 00:26:09,590
+There are a lot of things you could use it for and I think there are really a lot of
+
+00:26:09,590 --> 00:26:11,789
+interesting applications out there.
+
+00:26:11,789 --> 00:26:15,179
+One is high-performance compute.
+
+00:26:15,179 --> 00:26:20,020
+Another is actually filesystems, so any time you are writing to or reading from disk, that's
+
+00:26:20,020 --> 00:26:22,039
+a whole lot slower than your CPUs.
+
+00:26:22,039 --> 00:26:25,250
+I think there are some interesting applications there.
+
+00:26:25,250 --> 00:26:27,639
+Device drivers might be an interesting thing.
+
+00:26:27,639 --> 00:26:33,639
+I'm working on operating systems so that's what I'm thinking about.
+
+00:26:33,639 --> 00:26:40,890
+Build systems: any time you are writing a build system, you are basically starting a
+
+00:26:40,890 --> 00:26:44,000
+compile step and then that can take a very long time so there might be some interesting
+
+00:26:44,000 --> 00:26:51,080
+applications there for expressing build systems and bug rules and UI is another way, so you
+
+00:26:51,080 --> 00:26:56,799
+can imagine showing a pop-up user and then awaiting their response.
+
+00:26:56,799 --> 00:26:57,799
+Things like that.
+
+00:26:57,799 --> 00:27:06,580
+It's really just a paradigm in a way of writing code that allows you to express what you want
+
+00:27:06,580 --> 00:27:10,559
+in a really high level way.
+
+00:27:10,559 --> 00:27:14,920
+If any of this interested you in terms of the compiler or just getting involved in the
+
+00:27:14,920 --> 00:27:18,750
+Rust project in general I highly encourage you to contribute.
+
+00:27:18,750 --> 00:27:22,070
+There are lots of ways you can contribute.
+
+00:27:22,070 --> 00:27:27,870
+Probably the simplest way is, if you hit an issue, whether it's a compiler bug or confusing
+
+00:27:27,870 --> 00:27:31,549
+error message, it's a great idea to file an issue for that.
+
+00:27:31,549 --> 00:27:37,070
+There are people who do nothing except look for confusing messages in the compiler and
+
+00:27:37,070 --> 00:27:39,659
+fix them, and they are awesome.
+
+00:27:39,659 --> 00:27:41,679
+So definitely report things.
+
+00:27:41,679 --> 00:27:46,250
+If you feel like picking up an issue to tackle there's a lot of easy or mentor tags in the
+
+00:27:46,250 --> 00:27:51,570
+Rust repo, so you can look for that, and take advantage of the community.
+
+00:27:51,570 --> 00:27:56,390
+I mean, one of the things I love about Rust is that it has a really strong community and
+
+00:27:56,390 --> 00:27:59,799
+people that are always happy to support you.
+
+00:27:59,799 --> 00:28:04,510
+So there's a few different places that you can go to kind of post, ask questions, there's
+
+00:28:04,510 --> 00:28:11,720
+me, you can find me on Twitter, GitHub, Gmail, and there are also working groups that you
+
+00:28:11,720 --> 00:28:15,409
+can join if you want more of an ongoing contribution.
+
+00:28:15,409 --> 00:28:21,200
+Here is a shortlist of some working groups in the compiler team but there's a lot of
+
+00:28:21,200 --> 00:28:24,230
+other working groups and other teams.
+
+00:28:24,230 --> 00:28:28,600
+You can find a list online.
+
+00:28:28,600 --> 00:28:31,780
+And that's everything.
+
+00:28:31,780 --> 00:28:49,769
+So do we have time for questions?
+
+00:28:49,769 --> 00:28:54,580
+[Applause] >> You mentioned that Fuchsia's use of the
+
+00:28:54,580 --> 00:29:01,580
+generators prior to those optimisations being implemented was about, what, half a megabyte
+
+00:29:01,580 --> 00:29:03,179
+on the stack or more?
+
+00:29:03,179 --> 00:29:07,139
+After the optimisations, can you share how much it shrank by?
+
+00:29:07,139 --> 00:29:09,380
+TYLER: Yes, that's a good question.
+
+00:29:09,380 --> 00:29:12,539
+I do not remember that particular one.
+
+00:29:12,539 --> 00:29:20,740
+I think we shrunk it by over 80%.
+
+00:29:20,740 --> 00:29:25,600
+Some of them - so some of the futures that we had shrunk by - didn't shrink at all, but
+
+00:29:25,600 --> 00:29:32,500
+some shrunk by 80 or 90% in size so it just depended how deep the stack of futures that
+
+00:29:32,500 --> 00:29:40,029
+were being awaited was.
+
+00:29:40,029 --> 00:29:46,870
+>> The desugaring of the loop showed that it always - there's a loop and a match, so
+
+00:29:46,870 --> 00:29:54,840
+that even if you go from one basic block to the next it would jump to the top of the loop
+
+00:29:54,840 --> 00:29:56,049
+and rematch again.
+
+00:29:56,049 --> 00:29:57,049
+TYLER: Yes.
+
+00:29:57,049 --> 00:30:02,899
+>> Is that how it actually compiles or does it optimise it so that if you don't suspend
+
+00:30:02,899 --> 00:30:09,180
+the execution, it just falls through to the next basic block without jumping up to the
+
+00:30:09,180 --> 00:30:11,009
+top and then matching it there?
+
+00:30:11,009 --> 00:30:12,419
+Jumping back down.
+
+00:30:12,419 --> 00:30:18,951
+TYLER: So, right, yes, so it does actually have a loop in there, so any time you have
+
+00:30:18,951 --> 00:30:25,490
+an await, that is actually where the loop is introduced.
+
+00:30:25,490 --> 00:30:35,059
+So any time you await some subfuture, we basically poll that future in a loop, so what I'm doing
+
+00:30:35,059 --> 00:30:41,370
+is semantically equivalent but I'm putting the loop inside of the poll function.
+
+00:30:41,370 --> 00:30:46,520
+Around the body of our entire poll function, essentially the same thing, I'm just not embedding
+
+00:30:46,520 --> 00:30:55,380
+a loop at every single await point because then it wouldn't hit on the slide.
+
+00:30:55,380 --> 00:31:01,290
+>> So async/await has been stabilising for four years, right, or something like that?
+
+00:31:01,290 --> 00:31:02,760
+TYLER: It has been a while.
+
+00:31:02,760 --> 00:31:10,299
+>> Now it's stable, so are you seeing something that might show us that that was a mistake?
+
+00:31:10,299 --> 00:31:12,160
+We should have waited a little bit more?
+
+00:31:12,160 --> 00:31:13,570
+No pun intended.
+
+00:31:13,570 --> 00:31:15,110
+TYLER: Ooh.
+
+00:31:15,110 --> 00:31:16,649
+Uh oh.
+
+00:31:16,649 --> 00:31:19,899
+So did we make any mistakes?
+
+00:31:19,899 --> 00:31:24,080
+I think time will tell.
+
+00:31:24,080 --> 00:31:29,590
+I'm really happy that we picked the time, even though a lot of people understand build
+
+00:31:29,590 --> 00:31:32,389
+were upset by this.
+
+00:31:32,389 --> 00:31:40,179
+Yes, I don't think that there's any red flags or things missing.
+
+00:31:40,179 --> 00:31:45,420
+Some of the performance things that are covered, like the fact that we hang on to a temporary
+
+00:31:45,420 --> 00:31:50,929
+until the end of a statement, even if there's an await, that was a change that was introduced
+
+00:31:50,929 --> 00:31:54,130
+a couple of months before stabilisation.
+
+00:31:54,130 --> 00:31:58,830
+So I think that makes sense for the consistency of the language, that's how the language works
+
+00:31:58,830 --> 00:32:05,559
+outside of an async context, but it's possible we could have defined the language differently
+
+00:32:05,559 --> 00:32:11,200
+and just silently changed the semantics so that you don't hold on to temporary as across
+
+00:32:11,200 --> 00:32:12,530
+an await.
+
+00:32:12,530 --> 00:32:14,530
+Time will tell.
+
+00:32:14,530 --> 00:32:20,389
+>> Hi, thank you for the talk, it was really interesting.
+
+00:32:20,389 --> 00:32:21,399
+TYLER: Thank you.
+
+00:32:21,399 --> 00:32:23,600
+>> I'm curious about the state machine.
+
+00:32:23,600 --> 00:32:29,870
+Can you ask the compiler to omit not Rust stores but the mirror for what the state machine
+
+00:32:29,870 --> 00:32:30,870
+generates?
+
+00:32:30,870 --> 00:32:33,910
+TYLER: Yes, you can.
+
+00:32:33,910 --> 00:32:39,100
+It's a nightly only flag, so you have to download the nightly compiler and it's not super user
+
+00:32:39,100 --> 00:32:40,100
+friendly.
+
+00:32:40,100 --> 00:32:41,790
+What am I doing?
+
+00:32:41,790 --> 00:32:45,029
+I am going to show you.
+
+00:32:45,029 --> 00:32:49,730
+So yes, this diagram that I showed in the slides is actually generated by that.
+
+00:32:49,730 --> 00:32:55,720
+It actually emits a dot graph file and you can render it.
+
+00:32:55,720 --> 00:33:00,610
+So there's a couple of different modes but there's z emit mirror and then z - I can't
+
+00:33:00,610 --> 00:33:06,289
+remember the flag, but message me and I will send you the flag.
+
+00:33:06,289 --> 00:33:10,659
+There's a really nice documentation called the rustc guide so people working on the compiler.
+
+00:33:10,659 --> 00:33:14,590
+You can go and find it there, even if you just want to see your state machine.
+
+00:33:14,590 --> 00:33:16,169
+>> Thank you.
+
+00:33:16,169 --> 00:33:18,380
+Give a big hand to Tyler.
+
+00:33:18,380 --> 00:33:18,440
+
+YouTube URL: https://www.youtube.com/watch?v=ZHP9sUqB3Qs
+
+

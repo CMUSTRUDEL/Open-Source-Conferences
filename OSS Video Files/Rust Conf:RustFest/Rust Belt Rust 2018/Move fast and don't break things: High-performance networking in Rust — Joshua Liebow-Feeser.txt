@@ -1,0 +1,3029 @@
+Title: Move fast and don't break things: High-performance networking in Rust — Joshua Liebow-Feeser
+Publication date: 2018-11-28
+Playlist: Rust Belt Rust 2018
+Description: 
+	What makes Rust different is not that you can write high-performance, bare-metal code. What makes Rust different is that when you write that code, it is clean and easy to use, and you are confident in its correctness.
+
+In this talk, we discuss a new, high-performance networking stack being written in pure Rust. We discuss how Rust has allowed us to squeeze every last drop of performance out of the stack without sacrificing usability, productivity, or the confidence that our code is bug-free. We focus specifically on packet parsing and serialization, which we accomplish with zero copying, zero heap allocation, and very little unsafe code.
+
+---
+
+Josh is a security engineer at Google working on Fuchsia, where he gets to program in Rust all day long. He also programs in Rust as a hobby, which makes him very well-rounded.
+Captions: 
+	00:00:07,580 --> 00:00:12,440
+thank you for that all right
+
+00:00:10,550 --> 00:00:14,120
+sake of not running over time a little
+
+00:00:12,440 --> 00:00:15,000
+bit about me first I work at security at
+
+00:00:14,120 --> 00:00:16,320
+Google
+
+00:00:15,000 --> 00:00:17,970
+I get to work on open source rust which
+
+00:00:16,320 --> 00:00:19,680
+is really cool if that sounds like
+
+00:00:17,970 --> 00:00:22,410
+something you would like to do rust or
+
+00:00:19,680 --> 00:00:23,670
+security or both come talk to me and I
+
+00:00:22,410 --> 00:00:24,930
+just started the secure code working
+
+00:00:23,670 --> 00:00:27,630
+group for rust if you're interested in
+
+00:00:24,930 --> 00:00:29,130
+that also come check us out the thing
+
+00:00:27,630 --> 00:00:31,730
+we're going to be talking about so the
+
+00:00:29,130 --> 00:00:33,809
+thing is a experimental networking stack
+
+00:00:31,730 --> 00:00:35,489
+handles the link layer through the
+
+00:00:33,809 --> 00:00:38,250
+transport layers like you know you throw
+
+00:00:35,489 --> 00:00:41,430
+net through TCP and UDP it is written in
+
+00:00:38,250 --> 00:00:43,830
+pure rust obviously design goals are for
+
+00:00:41,430 --> 00:00:46,379
+low resource environment so like low CPU
+
+00:00:43,830 --> 00:00:48,420
+utilization low binary footprint and
+
+00:00:46,379 --> 00:00:50,670
+finally it is structured as a platform
+
+00:00:48,420 --> 00:00:52,620
+agnostic core and then some platform
+
+00:00:50,670 --> 00:00:54,000
+specific bindings so if you are
+
+00:00:52,620 --> 00:00:55,879
+interested in using this thing for your
+
+00:00:54,000 --> 00:00:59,100
+kernel or your project or whatever
+
+00:00:55,879 --> 00:01:00,690
+please let me know it you know it's it's
+
+00:00:59,100 --> 00:01:01,770
+obviously very early api's are changing
+
+00:01:00,690 --> 00:01:04,500
+but if it's just you know sort of
+
+00:01:01,770 --> 00:01:06,030
+experimental it could be cool a quick
+
+00:01:04,500 --> 00:01:10,259
+note on the subtitle that was advertised
+
+00:01:06,030 --> 00:01:13,860
+high performance this networking stack
+
+00:01:10,259 --> 00:01:20,040
+can currently respond to pings that is
+
+00:01:13,860 --> 00:01:21,299
+all it can do yes thank you yeah and so
+
+00:01:20,040 --> 00:01:22,650
+yeah so when I say high performance I'm
+
+00:01:21,299 --> 00:01:25,110
+not referring to like actual benchmarks
+
+00:01:22,650 --> 00:01:26,460
+I'm referring more to design to the fact
+
+00:01:25,110 --> 00:01:27,750
+that we can prove statically that a
+
+00:01:26,460 --> 00:01:30,810
+bunch of things are happening at compile
+
+00:01:27,750 --> 00:01:32,189
+time rather than runtime I I suspect
+
+00:01:30,810 --> 00:01:34,110
+that this will lead to actual good
+
+00:01:32,189 --> 00:01:36,360
+performance later but I don't know so
+
+00:01:34,110 --> 00:01:38,220
+we'll find out so brief outline for the
+
+00:01:36,360 --> 00:01:40,409
+talk first we're going to talk about
+
+00:01:38,220 --> 00:01:41,790
+design goals for the stack and the stuff
+
+00:01:40,409 --> 00:01:43,290
+we're gonna be talking about give a
+
+00:01:41,790 --> 00:01:44,280
+little bit of background on packets and
+
+00:01:43,290 --> 00:01:46,020
+how they're laid out just to get
+
+00:01:44,280 --> 00:01:48,119
+everyone on the same page first we're
+
+00:01:46,020 --> 00:01:49,350
+going to talk about parsing packets then
+
+00:01:48,119 --> 00:01:50,939
+we're gonna talk about serializing
+
+00:01:49,350 --> 00:01:52,560
+packets then we're going to talk about
+
+00:01:50,939 --> 00:01:55,380
+forwarding which is basically parsing
+
+00:01:52,560 --> 00:01:58,020
+and then serializing packets right yeah
+
+00:01:55,380 --> 00:01:59,130
+it's very fancy and then finally we're
+
+00:01:58,020 --> 00:02:02,159
+going to talk about some nitty-gritty
+
+00:01:59,130 --> 00:02:05,220
+details of how we do zero copy in a safe
+
+00:02:02,159 --> 00:02:09,090
+way so the goal for that for this design
+
+00:02:05,220 --> 00:02:10,679
+so first of all zero copying when I say
+
+00:02:09,090 --> 00:02:12,690
+zero copying I don't literally mean no
+
+00:02:10,679 --> 00:02:14,100
+memory reads or writes obviously but if
+
+00:02:12,690 --> 00:02:15,510
+we have a big buffer and there is a
+
+00:02:14,100 --> 00:02:16,799
+packet living in the buffer and we want
+
+00:02:15,510 --> 00:02:18,900
+to we want to operate on it so we want
+
+00:02:16,799 --> 00:02:20,549
+to parse it or modify it or serialize a
+
+00:02:18,900 --> 00:02:22,110
+new packet into the buffer we're not
+
+00:02:20,549 --> 00:02:23,430
+gonna like pull it out into some scratch
+
+00:02:22,110 --> 00:02:24,420
+space and operate on it and then move it
+
+00:02:23,430 --> 00:02:26,819
+back we're just gonna do everything
+
+00:02:24,420 --> 00:02:28,379
+directly in place as I said we expect
+
+00:02:26,819 --> 00:02:28,660
+this to make it high-performance well
+
+00:02:28,379 --> 00:02:31,600
+find
+
+00:02:28,660 --> 00:02:32,920
+out the second thing is euro heap
+
+00:02:31,600 --> 00:02:35,260
+allocation so everything is on the stack
+
+00:02:32,920 --> 00:02:37,390
+and then finally a zero unsafe right so
+
+00:02:35,260 --> 00:02:38,860
+no use of the unsafe keyword this may
+
+00:02:37,390 --> 00:02:41,350
+sound like really cool and too good to
+
+00:02:38,860 --> 00:02:46,030
+be true that's because it is there's
+
+00:02:41,350 --> 00:02:47,890
+actually a little bit of unsafe but in
+
+00:02:46,030 --> 00:02:49,840
+standard rust fashion that unsafe is
+
+00:02:47,890 --> 00:02:51,490
+sort of self-contained in little you
+
+00:02:49,840 --> 00:02:53,980
+know nice little small packages and it
+
+00:02:51,490 --> 00:02:56,230
+can be nicely composed another thing I
+
+00:02:53,980 --> 00:02:57,400
+want to clarify here this is not a look
+
+00:02:56,230 --> 00:02:59,110
+at the cool things you can do in Russ
+
+00:02:57,400 --> 00:03:00,430
+talk this is a look at the cool things
+
+00:02:59,110 --> 00:03:01,780
+you could do safely in Russ talk
+
+00:03:00,430 --> 00:03:04,720
+everything that we're gonna describe
+
+00:03:01,780 --> 00:03:06,700
+here today can be done and is done in C
+
+00:03:04,720 --> 00:03:09,100
+and C++ the only difference there is
+
+00:03:06,700 --> 00:03:10,600
+it's very unsafe and you the programmer
+
+00:03:09,100 --> 00:03:12,730
+have to verify a lot of properties
+
+00:03:10,600 --> 00:03:14,230
+yourself so the distinction here is not
+
+00:03:12,730 --> 00:03:16,600
+like we can do this thing but rather we
+
+00:03:14,230 --> 00:03:18,070
+can do this thing differently quick note
+
+00:03:16,600 --> 00:03:19,720
+on terminology when I say the word
+
+00:03:18,070 --> 00:03:20,740
+packet I am aware for the peasants in
+
+00:03:19,720 --> 00:03:23,470
+the audience that there are things like
+
+00:03:20,740 --> 00:03:24,640
+Ethernet frames and TCP segments if you
+
+00:03:23,470 --> 00:03:25,690
+read the code base you will find these
+
+00:03:24,640 --> 00:03:27,280
+things but for the sake of simplicity
+
+00:03:25,690 --> 00:03:29,430
+everything is a packet I'm terribly
+
+00:03:27,280 --> 00:03:29,430
+sorry
+
+00:03:29,490 --> 00:03:33,190
+so all right so a little bit of
+
+00:03:31,690 --> 00:03:35,290
+background on how network packets are
+
+00:03:33,190 --> 00:03:37,240
+laid out so packets are just a big
+
+00:03:35,290 --> 00:03:38,459
+sequence of bytes the all these diagrams
+
+00:03:37,240 --> 00:03:41,590
+that you're gonna see today are
+
+00:03:38,459 --> 00:03:44,530
+beginning byte on the left and byte on
+
+00:03:41,590 --> 00:03:45,400
+the right packets are recursive so the
+
+00:03:44,530 --> 00:03:47,320
+analogy that we're gonna be using
+
+00:03:45,400 --> 00:03:48,670
+throughout the entire talk I hope you
+
+00:03:47,320 --> 00:03:51,459
+like onions we're gonna be talking a lot
+
+00:03:48,670 --> 00:03:52,810
+about onions so basically you've got a
+
+00:03:51,459 --> 00:03:54,220
+packet which contains a packet which
+
+00:03:52,810 --> 00:03:56,070
+contains another packet which contains
+
+00:03:54,220 --> 00:03:58,090
+another packet and so on and so forth
+
+00:03:56,070 --> 00:03:59,920
+the packet that we're gonna be talking
+
+00:03:58,090 --> 00:04:01,300
+about are just a header and a body I'm
+
+00:03:59,920 --> 00:04:02,940
+sorry for those of you who really like
+
+00:04:01,300 --> 00:04:06,340
+packet formats no packets with footers
+
+00:04:02,940 --> 00:04:07,630
+so there's a there's a format header
+
+00:04:06,340 --> 00:04:09,850
+there's a hair at the beginning whose
+
+00:04:07,630 --> 00:04:11,530
+format is fixed as in if you go and read
+
+00:04:09,850 --> 00:04:13,209
+the Ethernet spec for example you will
+
+00:04:11,530 --> 00:04:14,560
+see there is this field and then this
+
+00:04:13,209 --> 00:04:16,299
+field and blah blah blah so the header
+
+00:04:14,560 --> 00:04:18,100
+has a well-known format that we can
+
+00:04:16,299 --> 00:04:19,660
+parse and then the body is completely
+
+00:04:18,100 --> 00:04:20,919
+unstructured and variable length we have
+
+00:04:19,660 --> 00:04:23,410
+no idea what's in there it's completely
+
+00:04:20,919 --> 00:04:24,910
+opaque now once we know what is in there
+
+00:04:23,410 --> 00:04:26,710
+that might be a different format which
+
+00:04:24,910 --> 00:04:28,030
+we can go parse so for example we might
+
+00:04:26,710 --> 00:04:29,530
+discover that oh look there's an IP
+
+00:04:28,030 --> 00:04:31,000
+packet in there and then we can go pull
+
+00:04:29,530 --> 00:04:32,169
+out the IP spec and we can read it and
+
+00:04:31,000 --> 00:04:33,610
+say oh this is how you parse an IP
+
+00:04:32,169 --> 00:04:35,740
+packet but from the perspective of
+
+00:04:33,610 --> 00:04:37,780
+Ethernet it's completely opaque so let's
+
+00:04:35,740 --> 00:04:39,310
+say that we have this IP packet here we
+
+00:04:37,780 --> 00:04:41,140
+might say well we're gonna parse this
+
+00:04:39,310 --> 00:04:42,520
+again again an IP packet just in the
+
+00:04:41,140 --> 00:04:43,840
+same way there's a format header
+
+00:04:42,520 --> 00:04:45,340
+the beginning we know we know what that
+
+00:04:43,840 --> 00:04:47,139
+format is and then there's an
+
+00:04:45,340 --> 00:04:48,910
+unstructured body maybe this contains a
+
+00:04:47,139 --> 00:04:50,280
+UDP packet and you know so on and so
+
+00:04:48,910 --> 00:04:52,659
+forth we can we can keep going like this
+
+00:04:50,280 --> 00:04:54,550
+an important thing to keep in mind here
+
+00:04:52,659 --> 00:04:56,199
+is that when we're parsing we don't
+
+00:04:54,550 --> 00:04:58,060
+actually know ahead of time what all of
+
+00:04:56,199 --> 00:04:59,409
+these types are going to be so we might
+
+00:04:58,060 --> 00:05:00,729
+get an Ethernet packet and we don't know
+
+00:04:59,409 --> 00:05:02,530
+what's inside of it it might be an ARP
+
+00:05:00,729 --> 00:05:03,819
+packet it might be an IP packet we
+
+00:05:02,530 --> 00:05:05,919
+actually have to look at the header the
+
+00:05:03,819 --> 00:05:07,419
+header tells us what's inside so we
+
+00:05:05,919 --> 00:05:08,650
+actually don't know until runtime what
+
+00:05:07,419 --> 00:05:10,750
+the next thing that we're gonna parse is
+
+00:05:08,650 --> 00:05:13,620
+so this can this is unfortunately it has
+
+00:05:10,750 --> 00:05:15,520
+to be less static than you might like so
+
+00:05:13,620 --> 00:05:17,229
+let's talk very briefly about what our
+
+00:05:15,520 --> 00:05:19,120
+end goal is or if you recall there four
+
+00:05:17,229 --> 00:05:20,680
+parts parsing serialization and then
+
+00:05:19,120 --> 00:05:22,240
+forwarding is our is our third part
+
+00:05:20,680 --> 00:05:23,229
+we're gonna build up to forwarding at
+
+00:05:22,240 --> 00:05:24,460
+the end and I want to describe very
+
+00:05:23,229 --> 00:05:26,020
+briefly what that's going to look like
+
+00:05:24,460 --> 00:05:29,169
+just to keep in mind what we're building
+
+00:05:26,020 --> 00:05:30,909
+towards so in forwarding we were going
+
+00:05:29,169 --> 00:05:32,620
+to allocate a buffer on the stack we're
+
+00:05:30,909 --> 00:05:34,479
+gonna receive an Ethernet packet into it
+
+00:05:32,620 --> 00:05:36,580
+we're gonna parse the Ethernet packet
+
+00:05:34,479 --> 00:05:38,139
+gonna parse the IP packet inside of you
+
+00:05:36,580 --> 00:05:39,280
+from that packet then we're gonna decide
+
+00:05:38,139 --> 00:05:40,659
+to forward the packet so we're actually
+
+00:05:39,280 --> 00:05:43,240
+just gonna resend it to somebody else
+
+00:05:40,659 --> 00:05:44,800
+and first we're going to update the
+
+00:05:43,240 --> 00:05:46,419
+header we have to do some updates when
+
+00:05:44,800 --> 00:05:48,400
+we forward packets and then we're gonna
+
+00:05:46,419 --> 00:05:49,780
+serialize it inside of a new Ethernet
+
+00:05:48,400 --> 00:05:51,610
+packet and all of that is going to
+
+00:05:49,780 --> 00:05:52,870
+happen in place on the stack no copying
+
+00:05:51,610 --> 00:05:54,460
+so that's the goal that we're building
+
+00:05:52,870 --> 00:05:58,360
+up to but first we have to get through
+
+00:05:54,460 --> 00:06:00,639
+some other things namely parsing so the
+
+00:05:58,360 --> 00:06:02,199
+goal of this section is a lot simpler we
+
+00:06:00,639 --> 00:06:03,669
+were going to allocate a buffer on the
+
+00:06:02,199 --> 00:06:05,500
+stack and we're going to receive an
+
+00:06:03,669 --> 00:06:07,000
+Ethernet frame into that buffer we're
+
+00:06:05,500 --> 00:06:08,380
+gonna parse the packet we're going to
+
+00:06:07,000 --> 00:06:10,870
+parse the packet we're gonna parse the
+
+00:06:08,380 --> 00:06:12,669
+pack anyway this is the fit you get the
+
+00:06:10,870 --> 00:06:13,779
+idea a very simple example we just
+
+00:06:12,669 --> 00:06:15,310
+receive it and parse parts parts more
+
+00:06:13,779 --> 00:06:18,759
+sparse that's the whole example for this
+
+00:06:15,310 --> 00:06:20,469
+section so all right the buffer trait
+
+00:06:18,759 --> 00:06:22,840
+the buffer trait is a really important
+
+00:06:20,469 --> 00:06:24,430
+trait in the net stack it is sort of
+
+00:06:22,840 --> 00:06:26,289
+like the core trait for parsing and
+
+00:06:24,430 --> 00:06:28,029
+serialization the reason that it's a
+
+00:06:26,289 --> 00:06:29,139
+trait and rat and not a concrete type is
+
+00:06:28,029 --> 00:06:30,099
+that we have a bunch of implementations
+
+00:06:29,139 --> 00:06:32,080
+of it but the detail there aren't
+
+00:06:30,099 --> 00:06:33,400
+important a really important thing to
+
+00:06:32,080 --> 00:06:35,469
+keep in mind with buffers is that they
+
+00:06:33,400 --> 00:06:37,599
+are referencing and by that I mean that
+
+00:06:35,469 --> 00:06:39,460
+when you say you have ownership of a
+
+00:06:37,599 --> 00:06:41,380
+buffer object that's just a tiny little
+
+00:06:39,460 --> 00:06:42,759
+struct thing with some pointers right
+
+00:06:41,380 --> 00:06:43,960
+maybe it's an own point maybe you know
+
+00:06:42,759 --> 00:06:45,550
+maybe it's owned maybe it's a reference
+
+00:06:43,960 --> 00:06:47,710
+to something but the point is that thing
+
+00:06:45,550 --> 00:06:49,120
+is tiny the buffer bytes themselves live
+
+00:06:47,710 --> 00:06:50,589
+somewhere else so we're going to talk
+
+00:06:49,120 --> 00:06:51,909
+about like moving these things around a
+
+00:06:50,589 --> 00:06:53,110
+lot keep in mind that that's a very
+
+00:06:51,909 --> 00:06:54,910
+cheap operation because this is
+
+00:06:53,110 --> 00:06:56,830
+basically just a point
+
+00:06:54,910 --> 00:06:58,030
+so these things are basically just a
+
+00:06:56,830 --> 00:06:59,680
+sequence of bytes just like a packet
+
+00:06:58,030 --> 00:07:01,600
+would be you might ask the question
+
+00:06:59,680 --> 00:07:03,460
+reasonably why is this not just a slice
+
+00:07:01,600 --> 00:07:05,290
+well the answer is that we need to keep
+
+00:07:03,460 --> 00:07:07,150
+track of how much we've parsed so far or
+
+00:07:05,290 --> 00:07:10,150
+how much we have serialized so for
+
+00:07:07,150 --> 00:07:13,090
+example or sorry so so the way that we
+
+00:07:10,150 --> 00:07:15,190
+do this is we split the the buffer into
+
+00:07:13,090 --> 00:07:16,480
+a prefix and a body the prefix is
+
+00:07:15,190 --> 00:07:19,060
+basically everything that I have not
+
+00:07:16,480 --> 00:07:20,470
+parsed or serialized so far I'm sorry
+
+00:07:19,060 --> 00:07:22,600
+everything that I have parsed or not
+
+00:07:20,470 --> 00:07:24,610
+serialized and then the the body is
+
+00:07:22,600 --> 00:07:25,840
+everything else so I so it's essentially
+
+00:07:24,610 --> 00:07:27,160
+just a pointer into the buffer right
+
+00:07:25,840 --> 00:07:29,530
+it's you know here's the whole buffer
+
+00:07:27,160 --> 00:07:31,330
+and here's where I am so far right so
+
+00:07:29,530 --> 00:07:32,590
+you can consume bytes from the body and
+
+00:07:31,330 --> 00:07:34,420
+they get added to the prefix so I can
+
+00:07:32,590 --> 00:07:35,560
+shift this way you can consume bite from
+
+00:07:34,420 --> 00:07:38,020
+the prefix they get out of the body
+
+00:07:35,560 --> 00:07:39,250
+shift that way and the invariant that
+
+00:07:38,020 --> 00:07:40,300
+we're trying to maintain here and this
+
+00:07:39,250 --> 00:07:42,130
+is gonna be really important through the
+
+00:07:40,300 --> 00:07:44,860
+through the whole thing is that the body
+
+00:07:42,130 --> 00:07:46,870
+always contains when you are parsing the
+
+00:07:44,860 --> 00:07:48,550
+stuff that you haven't parsed yet so if
+
+00:07:46,870 --> 00:07:49,930
+I have an e thread packet and I jump the
+
+00:07:48,550 --> 00:07:51,580
+Ethernet frame or the Ethernet header
+
+00:07:49,930 --> 00:07:53,470
+off the beginning then I have the body
+
+00:07:51,580 --> 00:07:55,180
+left and then when I pick up where I
+
+00:07:53,470 --> 00:07:57,160
+left off I call the parse method again
+
+00:07:55,180 --> 00:07:59,080
+I'm naturally parsing the next most
+
+00:07:57,160 --> 00:08:00,640
+encapsulated thing and then when I'm
+
+00:07:59,080 --> 00:08:02,350
+serializing the exact inverse happens
+
+00:08:00,640 --> 00:08:04,480
+the current thing in the body is
+
+00:08:02,350 --> 00:08:06,670
+everything that I have serialized so far
+
+00:08:04,480 --> 00:08:07,900
+and when I ask please serialize your
+
+00:08:06,670 --> 00:08:10,180
+header it starts where we left off and
+
+00:08:07,900 --> 00:08:12,460
+goes this way and expands the body to
+
+00:08:10,180 --> 00:08:13,900
+include the now larger packet so what is
+
+00:08:12,460 --> 00:08:15,370
+in the body is really important where
+
+00:08:13,900 --> 00:08:16,270
+that body is versus the prefix that's
+
+00:08:15,370 --> 00:08:17,890
+going to be the sort of the core of
+
+00:08:16,270 --> 00:08:21,610
+everything here so let's walk through an
+
+00:08:17,890 --> 00:08:23,080
+example the so this is a diagram here on
+
+00:08:21,610 --> 00:08:24,730
+the bottom we have the actual physical
+
+00:08:23,080 --> 00:08:26,980
+structure of the packet or at sorry of
+
+00:08:24,730 --> 00:08:29,890
+the buffer excuse me so it starts off as
+
+00:08:26,980 --> 00:08:31,660
+being all body on the top we have the
+
+00:08:29,890 --> 00:08:32,830
+logical view so logically the contents
+
+00:08:31,660 --> 00:08:34,690
+of these bytes are an Ethernet header
+
+00:08:32,830 --> 00:08:35,140
+and an Ethernet body but we don't know
+
+00:08:34,690 --> 00:08:38,590
+that yet
+
+00:08:35,140 --> 00:08:40,599
+and so when we parse it it's gonna look
+
+00:08:38,590 --> 00:08:42,789
+a little something like this so what we
+
+00:08:40,599 --> 00:08:45,490
+have here is the result of parsing is an
+
+00:08:42,789 --> 00:08:47,620
+Ethernet packet object Ethernet packet
+
+00:08:45,490 --> 00:08:49,360
+object is a tiny little struct that just
+
+00:08:47,620 --> 00:08:51,370
+has some references into the buffer okay
+
+00:08:49,360 --> 00:08:52,690
+again this is a zero copy theme here the
+
+00:08:51,370 --> 00:08:54,880
+Ethernet packet object is just
+
+00:08:52,690 --> 00:08:56,140
+references so it has one reference into
+
+00:08:54,880 --> 00:08:57,970
+the header and then one reference into
+
+00:08:56,140 --> 00:08:59,980
+the body an important thing to keep in
+
+00:08:57,970 --> 00:09:01,330
+mind here is that the header well so the
+
+00:08:59,980 --> 00:09:02,710
+body is just bytes we don't know what it
+
+00:09:01,330 --> 00:09:04,750
+is so that's just a that's just byte
+
+00:09:02,710 --> 00:09:06,400
+slice right the header on the other hand
+
+00:09:04,750 --> 00:09:07,720
+is actually structured so we'll get into
+
+00:09:06,400 --> 00:09:08,710
+at the end of the talk how we actually
+
+00:09:07,720 --> 00:09:11,290
+achieve that without
+
+00:09:08,710 --> 00:09:13,270
+safe but this you should basically think
+
+00:09:11,290 --> 00:09:15,190
+of this as a struct reference okay so we
+
+00:09:13,270 --> 00:09:16,660
+have a struct it represents what the
+
+00:09:15,190 --> 00:09:18,100
+header actually looks like right we've
+
+00:09:16,660 --> 00:09:19,510
+got this field and in that field and so
+
+00:09:18,100 --> 00:09:20,830
+on and so forth and this is just a
+
+00:09:19,510 --> 00:09:22,750
+reference in that struct so we can just
+
+00:09:20,830 --> 00:09:25,170
+access it like plain vanilla rest write
+
+00:09:22,750 --> 00:09:28,120
+struct dot field blah blah blah blah
+
+00:09:25,170 --> 00:09:30,340
+last thing to note is because these are
+
+00:09:28,120 --> 00:09:32,470
+references the ethernet packet object
+
+00:09:30,340 --> 00:09:34,210
+borrows the buffer so if we want to
+
+00:09:32,470 --> 00:09:36,160
+actually move the buffer around which we
+
+00:09:34,210 --> 00:09:37,750
+will want to do we have to drop the
+
+00:09:36,160 --> 00:09:39,070
+packet first and so a pattern that
+
+00:09:37,750 --> 00:09:41,740
+you're gonna see over and over again is
+
+00:09:39,070 --> 00:09:43,510
+first we parse then we operate on that
+
+00:09:41,740 --> 00:09:45,520
+actual object and then before we do
+
+00:09:43,510 --> 00:09:46,990
+anything else we drop it and then we
+
+00:09:45,520 --> 00:09:50,920
+pick up where we left off but now we've
+
+00:09:46,990 --> 00:09:52,540
+forgotten about that thing right okay so
+
+00:09:50,920 --> 00:09:54,820
+as we said before we've got this and
+
+00:09:52,540 --> 00:09:57,700
+then we're gonna drop it it goes away
+
+00:09:54,820 --> 00:09:59,650
+and so what we're left with is that the
+
+00:09:57,700 --> 00:10:01,270
+body of the buffer now corresponds to
+
+00:09:59,650 --> 00:10:02,290
+the body of the ethernet packet so as I
+
+00:10:01,270 --> 00:10:04,090
+mentioned before we can just pick up
+
+00:10:02,290 --> 00:10:06,370
+where we left off and parse the next
+
+00:10:04,090 --> 00:10:08,260
+packet so the exact same thing happens
+
+00:10:06,370 --> 00:10:10,000
+this time with the IP packet we have a
+
+00:10:08,260 --> 00:10:11,620
+header it references into the buffer and
+
+00:10:10,000 --> 00:10:12,790
+it is a structured reference to the
+
+00:10:11,620 --> 00:10:14,260
+actual you know it's a struct that we
+
+00:10:12,790 --> 00:10:16,120
+can access the fields and then an
+
+00:10:14,260 --> 00:10:18,100
+unstructured reference to the body it
+
+00:10:16,120 --> 00:10:19,420
+borrows or it borrows the but the buffer
+
+00:10:18,100 --> 00:10:21,820
+and so when we're done with it we have
+
+00:10:19,420 --> 00:10:23,200
+to drop it let's look at a little
+
+00:10:21,820 --> 00:10:25,180
+example of what this might look like in
+
+00:10:23,200 --> 00:10:26,950
+code um this is obviously a little
+
+00:10:25,180 --> 00:10:28,450
+pseudocode ish because they're you know
+
+00:10:26,950 --> 00:10:30,520
+more like I would want to do more things
+
+00:10:28,450 --> 00:10:32,590
+if I receive in Ethernet packet but this
+
+00:10:30,520 --> 00:10:34,600
+really is the core of it you the buffer
+
+00:10:32,590 --> 00:10:36,820
+has a parse method and you literally say
+
+00:10:34,600 --> 00:10:39,640
+here is a type of a packet please parse
+
+00:10:36,820 --> 00:10:41,170
+it for me done and so you get a packet
+
+00:10:39,640 --> 00:10:42,580
+object back here and then you you know
+
+00:10:41,170 --> 00:10:44,770
+you might operate on it and then you
+
+00:10:42,580 --> 00:10:46,480
+drop it and then you pass that buffer
+
+00:10:44,770 --> 00:10:47,890
+again as I said you pass the buffer by
+
+00:10:46,480 --> 00:10:49,930
+value you're actually passing ownership
+
+00:10:47,890 --> 00:10:51,550
+this will become important later so you
+
+00:10:49,930 --> 00:10:54,460
+pass the the buffer by ownership to the
+
+00:10:51,550 --> 00:10:56,500
+next layer of the stack the body is left
+
+00:10:54,460 --> 00:10:57,700
+as it was before so the next layer the
+
+00:10:56,500 --> 00:11:00,760
+stack just picks up right where we left
+
+00:10:57,700 --> 00:11:02,560
+off so let's actually look at what this
+
+00:11:00,760 --> 00:11:04,810
+might look like in memory on the stack
+
+00:11:02,560 --> 00:11:07,660
+so we get a sense of how all the memory
+
+00:11:04,810 --> 00:11:10,870
+is laid out so let's say that we receive
+
+00:11:07,660 --> 00:11:12,190
+a we have a buffer that is allocated on
+
+00:11:10,870 --> 00:11:15,940
+the stack so it sits in a stack frame
+
+00:11:12,190 --> 00:11:17,620
+there first we pass the buffer in to
+
+00:11:15,940 --> 00:11:19,060
+receive Ethernet packet so this little
+
+00:11:17,620 --> 00:11:20,650
+black arrow here just means that you
+
+00:11:19,060 --> 00:11:22,000
+know the actual object is here but the
+
+00:11:20,650 --> 00:11:22,460
+actual bytes of the buffer are still in
+
+00:11:22,000 --> 00:11:25,130
+the original
+
+00:11:22,460 --> 00:11:27,560
+back frame first we parse the ethernet
+
+00:11:25,130 --> 00:11:29,420
+packet just like we mentioned before so
+
+00:11:27,560 --> 00:11:30,860
+the Ethernet packet struct itself which
+
+00:11:29,420 --> 00:11:32,390
+is this tiny little thing it lives in
+
+00:11:30,860 --> 00:11:34,190
+this top stack frame here but the
+
+00:11:32,390 --> 00:11:35,420
+references are all into the contents
+
+00:11:34,190 --> 00:11:39,200
+which live in the original stack frame
+
+00:11:35,420 --> 00:11:41,030
+right no copying so we drop it and then
+
+00:11:39,200 --> 00:11:43,340
+we send the but the buffer again into
+
+00:11:41,030 --> 00:11:45,560
+the receive IP packet function this time
+
+00:11:43,340 --> 00:11:48,020
+and again we parse this time and IP
+
+00:11:45,560 --> 00:11:49,550
+packet again the reference is that it's
+
+00:11:48,020 --> 00:11:51,860
+tiny little struct libs and that's a
+
+00:11:49,550 --> 00:11:53,570
+creme and the references point into the
+
+00:11:51,860 --> 00:11:56,360
+bottom stack frame so that's parsing
+
+00:11:53,570 --> 00:11:59,750
+it's very straightforward let's get into
+
+00:11:56,360 --> 00:12:02,840
+serialization so the goal here is that
+
+00:11:59,750 --> 00:12:05,240
+we are going to receive a request to
+
+00:12:02,840 --> 00:12:07,010
+send an IP or UDP packet so there is an
+
+00:12:05,240 --> 00:12:08,240
+application that says I you know it's
+
+00:12:07,010 --> 00:12:10,430
+like a DNS client or something
+
+00:12:08,240 --> 00:12:11,780
+it says here are the contents of a UDP
+
+00:12:10,430 --> 00:12:14,150
+packet that I would like you to send out
+
+00:12:11,780 --> 00:12:15,710
+onto the network first we're going to
+
+00:12:14,150 --> 00:12:17,840
+compute some header information for the
+
+00:12:15,710 --> 00:12:19,640
+UDP packet then we're going to compute
+
+00:12:17,840 --> 00:12:21,620
+some routing information for IP where
+
+00:12:19,640 --> 00:12:23,150
+are we sending this thing and then some
+
+00:12:21,620 --> 00:12:25,700
+information about what the IP header
+
+00:12:23,150 --> 00:12:28,910
+will need to have then some Ethernet
+
+00:12:25,700 --> 00:12:30,440
+routing and the header information and
+
+00:12:28,910 --> 00:12:32,810
+then finally after we've done all of
+
+00:12:30,440 --> 00:12:35,540
+this only then do we actually compute
+
+00:12:32,810 --> 00:12:38,120
+the length and allocate the buffer so
+
+00:12:35,540 --> 00:12:39,200
+all the computation before we haven't
+
+00:12:38,120 --> 00:12:40,730
+actually been doing anything we've not
+
+00:12:39,200 --> 00:12:44,030
+been serializing we've not been doing
+
+00:12:40,730 --> 00:12:45,890
+any kind of allocation only at the
+
+00:12:44,030 --> 00:12:47,210
+bottom do we actually say ok now that we
+
+00:12:45,890 --> 00:12:48,920
+know how big the packet needs to be now
+
+00:12:47,210 --> 00:12:50,210
+we can allocate the buffer I know that I
+
+00:12:48,920 --> 00:12:51,440
+said stack allocation at the beginning
+
+00:12:50,210 --> 00:12:53,210
+we're gonna keep allocate in this
+
+00:12:51,440 --> 00:12:55,670
+example just to keep things simple we'll
+
+00:12:53,210 --> 00:12:57,920
+actually stack allocate in the end and
+
+00:12:55,670 --> 00:12:59,720
+then finally once we have a buffer then
+
+00:12:57,920 --> 00:13:03,530
+we can just serialize in one big pass
+
+00:12:59,720 --> 00:13:06,770
+UDP UDP bot or UDP header IP header
+
+00:13:03,530 --> 00:13:09,380
+Ethernet header and then we're done so a
+
+00:13:06,770 --> 00:13:10,820
+little note on why this is hard some of
+
+00:13:09,380 --> 00:13:12,860
+you in the audience may be thinking ok
+
+00:13:10,820 --> 00:13:14,540
+well if you know how big the packet is
+
+00:13:12,860 --> 00:13:15,590
+why don't you just like allocated ahead
+
+00:13:14,540 --> 00:13:17,750
+of time why do you have to do all of
+
+00:13:15,590 --> 00:13:20,060
+this sort of weird stuff and the answer
+
+00:13:17,750 --> 00:13:23,060
+is that you need to send the request to
+
+00:13:20,060 --> 00:13:25,970
+the next layer before you serialize so
+
+00:13:23,060 --> 00:13:27,620
+for example if I have a UDP body and I
+
+00:13:25,970 --> 00:13:29,210
+want to say well I need to know what
+
+00:13:27,620 --> 00:13:31,010
+buffer I'm going to serialize it into I
+
+00:13:29,210 --> 00:13:32,240
+have to know obviously how big all of
+
+00:13:31,010 --> 00:13:34,940
+the headers are going to be so I know
+
+00:13:32,240 --> 00:13:36,320
+how big the buffer needs to be but the
+
+00:13:34,940 --> 00:13:38,060
+IP layer needs to know
+
+00:13:36,320 --> 00:13:40,130
+where it's sending the thing in order to
+
+00:13:38,060 --> 00:13:41,720
+know which link layer protocol is being
+
+00:13:40,130 --> 00:13:43,580
+used am i sending it over an Ethernet
+
+00:13:41,720 --> 00:13:45,470
+network that has a header of this size
+
+00:13:43,580 --> 00:13:47,360
+am i sending it over a Wi-Fi network
+
+00:13:45,470 --> 00:13:48,620
+that has a larger header right so you
+
+00:13:47,360 --> 00:13:50,480
+need to actually compute all the routing
+
+00:13:48,620 --> 00:13:51,980
+information before you know how big the
+
+00:13:50,480 --> 00:13:53,390
+buffer needs to be and so there's this
+
+00:13:51,980 --> 00:13:55,250
+chicken and egg problem where in order
+
+00:13:53,390 --> 00:13:56,870
+to call the function that says please
+
+00:13:55,250 --> 00:13:59,240
+send this thing for me
+
+00:13:56,870 --> 00:14:01,370
+it cannot be serialized already but of
+
+00:13:59,240 --> 00:14:02,660
+course you can't get control flow back
+
+00:14:01,370 --> 00:14:04,190
+because the thing needs to be sent by
+
+00:14:02,660 --> 00:14:05,810
+the time you send you call the function
+
+00:14:04,190 --> 00:14:07,420
+and so that's why this is difficult and
+
+00:14:05,810 --> 00:14:10,070
+we'll see how we solve this problem
+
+00:14:07,420 --> 00:14:12,800
+so the first trait that we're gonna
+
+00:14:10,070 --> 00:14:14,840
+introduce to deal with parsing is the
+
+00:14:12,800 --> 00:14:16,520
+packet builder trait remember before
+
+00:14:14,840 --> 00:14:18,200
+that I said that all packets are onions
+
+00:14:16,520 --> 00:14:21,200
+right and they are just you know sort of
+
+00:14:18,200 --> 00:14:23,210
+a series of layers the packet builder is
+
+00:14:21,200 --> 00:14:24,800
+like a single layer of the onion nothing
+
+00:14:23,210 --> 00:14:27,320
+inside of it nothing outside of it just
+
+00:14:24,800 --> 00:14:29,180
+one sort of shell right and it assumes
+
+00:14:27,320 --> 00:14:30,800
+that we already have a buffer allocated
+
+00:14:29,180 --> 00:14:32,150
+that already has enough prefix space to
+
+00:14:30,800 --> 00:14:35,030
+serialize everything will solve that
+
+00:14:32,150 --> 00:14:37,040
+problem later and what it does is it
+
+00:14:35,030 --> 00:14:39,650
+serializes itself into the buffer so you
+
+00:14:37,040 --> 00:14:41,960
+give it a buffer like this so here's a
+
+00:14:39,650 --> 00:14:43,850
+buffer that has a body and you say dear
+
+00:14:41,960 --> 00:14:44,810
+packet builder so in this case an
+
+00:14:43,850 --> 00:14:47,000
+Ethernet packet builder
+
+00:14:44,810 --> 00:14:48,650
+please serialize yourself right here
+
+00:14:47,000 --> 00:14:49,760
+right we already gave you the body we
+
+00:14:48,650 --> 00:14:51,500
+gave you enough space just write
+
+00:14:49,760 --> 00:14:52,880
+yourself in right and so this contains
+
+00:14:51,500 --> 00:14:54,260
+all the metadata needed to figure out
+
+00:14:52,880 --> 00:14:56,480
+what that header needs to look like
+
+00:14:54,260 --> 00:14:58,700
+source address destination address so on
+
+00:14:56,480 --> 00:15:01,100
+and so forth so that handles just a
+
+00:14:58,700 --> 00:15:03,560
+layer of the onion let's talk about the
+
+00:15:01,100 --> 00:15:05,360
+whole onion itself so the serializer
+
+00:15:03,560 --> 00:15:08,360
+trait on the other hand represents the
+
+00:15:05,360 --> 00:15:09,980
+entire onion so it represents the you
+
+00:15:08,360 --> 00:15:12,800
+know a single layer and everything below
+
+00:15:09,980 --> 00:15:14,540
+it and it's recursive so if you take a
+
+00:15:12,800 --> 00:15:17,150
+serializer which represents the whole
+
+00:15:14,540 --> 00:15:18,680
+onion and you add a packet builder which
+
+00:15:17,150 --> 00:15:21,950
+represents the next layer of the onion
+
+00:15:18,680 --> 00:15:23,060
+you get a bigger onion and this is how
+
+00:15:21,950 --> 00:15:25,400
+we're going to construct all of our
+
+00:15:23,060 --> 00:15:27,080
+serializers another important thing to
+
+00:15:25,400 --> 00:15:28,850
+note here a serializer does not actually
+
+00:15:27,080 --> 00:15:30,590
+represent a packet directly you can sort
+
+00:15:28,850 --> 00:15:31,760
+of think of it like a packet future it
+
+00:15:30,590 --> 00:15:34,130
+describes all of the information
+
+00:15:31,760 --> 00:15:36,410
+necessary to figure out how to allocate
+
+00:15:34,130 --> 00:15:39,890
+and serialize a packet in the future
+
+00:15:36,410 --> 00:15:42,410
+later let's walk through a very simple
+
+00:15:39,890 --> 00:15:44,060
+example so this is a sort of silly straw
+
+00:15:42,410 --> 00:15:46,130
+man example of a function that might
+
+00:15:44,060 --> 00:15:48,050
+construct a serializer it takes to
+
+00:15:46,130 --> 00:15:49,880
+serialize err in and then wraps it in IP
+
+00:15:48,050 --> 00:15:50,540
+and wraps that in Ethernet and then
+
+00:15:49,880 --> 00:15:53,240
+return
+
+00:15:50,540 --> 00:15:56,689
+so we start off with a serializer called
+
+00:15:53,240 --> 00:15:58,550
+CERN we encapsulate it in a new IP
+
+00:15:56,689 --> 00:16:00,379
+packet builder remember that builder is
+
+00:15:58,550 --> 00:16:02,600
+then the IP layer of the onion and we
+
+00:16:00,379 --> 00:16:05,420
+get a new larger onion back right a new
+
+00:16:02,600 --> 00:16:07,399
+larger serializer then we encapsulate it
+
+00:16:05,420 --> 00:16:08,779
+again by adding yet another field which
+
+00:16:07,399 --> 00:16:10,819
+is this Ethernet packet builder the
+
+00:16:08,779 --> 00:16:13,100
+struck just keeps growing we get the
+
+00:16:10,819 --> 00:16:15,259
+Ethernet packet onion and even bigger
+
+00:16:13,100 --> 00:16:16,610
+onion and we can now return it okay so
+
+00:16:15,259 --> 00:16:17,929
+we know how to construct these things
+
+00:16:16,610 --> 00:16:20,329
+but how do we actually use them how do
+
+00:16:17,929 --> 00:16:23,629
+we actually use them to create a buffer
+
+00:16:20,329 --> 00:16:25,040
+and sterilize into it so the way that we
+
+00:16:23,629 --> 00:16:26,809
+do this is with this serializer trade
+
+00:16:25,040 --> 00:16:28,730
+again and there is a method on the
+
+00:16:26,809 --> 00:16:32,540
+serializer trait called serialize I'm
+
+00:16:28,730 --> 00:16:33,619
+good at naming the serialize err is
+
+00:16:32,540 --> 00:16:35,600
+we're supposed serialize method is
+
+00:16:33,619 --> 00:16:37,129
+responsible for producing a buffer so
+
+00:16:35,600 --> 00:16:39,170
+when you call it it doesn't take an
+
+00:16:37,129 --> 00:16:41,660
+existing buffer it actually creates and
+
+00:16:39,170 --> 00:16:43,249
+gives you back the buffer and it you
+
+00:16:41,660 --> 00:16:44,720
+know it might use you know a pool of
+
+00:16:43,249 --> 00:16:47,269
+buffers or it might use something that's
+
+00:16:44,720 --> 00:16:48,679
+already allocated implementation is you
+
+00:16:47,269 --> 00:16:50,449
+know up to the implementation of the
+
+00:16:48,679 --> 00:16:54,199
+trade but it gives you back the buffer
+
+00:16:50,449 --> 00:16:56,179
+and it takes the number of prefix bytes
+
+00:16:54,199 --> 00:16:57,769
+that you need so far remember that all
+
+00:16:56,179 --> 00:16:59,660
+of this is sort of recursive so if I say
+
+00:16:57,769 --> 00:17:01,850
+I want to serialize an Ethernet packet
+
+00:16:59,660 --> 00:17:03,709
+it says ok well how many prefix bytes do
+
+00:17:01,850 --> 00:17:05,270
+you need for all of the packets outside
+
+00:17:03,709 --> 00:17:07,819
+of me because I don't know that right
+
+00:17:05,270 --> 00:17:09,620
+and so what you do is you start at the
+
+00:17:07,819 --> 00:17:12,500
+outside of the onion and you work your
+
+00:17:09,620 --> 00:17:13,970
+way inwards building up the prefix
+
+00:17:12,500 --> 00:17:16,069
+length so you start at the very outer
+
+00:17:13,970 --> 00:17:17,510
+layer and you say well I need 0 bytes so
+
+00:17:16,069 --> 00:17:18,980
+far and then you go to the next layer
+
+00:17:17,510 --> 00:17:20,929
+and you say ok well this is an 18 byte
+
+00:17:18,980 --> 00:17:22,520
+header so now I need 18 bytes and then
+
+00:17:20,929 --> 00:17:23,750
+this next header and so on and so forth
+
+00:17:22,520 --> 00:17:25,760
+and you just build up the number of
+
+00:17:23,750 --> 00:17:27,829
+prefix bytes that you need until you get
+
+00:17:25,760 --> 00:17:29,870
+to the inner core and once you get to
+
+00:17:27,829 --> 00:17:31,820
+the core now you know in total how many
+
+00:17:29,870 --> 00:17:33,980
+prefix bytes you need and it's the cores
+
+00:17:31,820 --> 00:17:36,020
+responsibility to satisfy that request
+
+00:17:33,980 --> 00:17:37,880
+so it has to give you a buffer whose
+
+00:17:36,020 --> 00:17:39,789
+body contains all of the stuff that the
+
+00:17:37,880 --> 00:17:42,740
+innermost packet needs to contain and
+
+00:17:39,789 --> 00:17:44,630
+that has enough prefix length to handle
+
+00:17:42,740 --> 00:17:46,010
+all of the headers that came before it
+
+00:17:44,630 --> 00:17:48,830
+that you're going to need to serialize
+
+00:17:46,010 --> 00:17:51,710
+in the future and so once you're in that
+
+00:17:48,830 --> 00:17:53,000
+innermost onion and you have satisfied
+
+00:17:51,710 --> 00:17:54,919
+the request you have a big buffer it has
+
+00:17:53,000 --> 00:17:56,899
+the body and so on then you can return
+
+00:17:54,919 --> 00:17:59,240
+it and now you start walking your way
+
+00:17:56,899 --> 00:18:00,950
+out so remember we went in calculating
+
+00:17:59,240 --> 00:18:02,960
+the prefix length and then you walk out
+
+00:18:00,950 --> 00:18:04,160
+and actually serialize stuff so you go
+
+00:18:02,960 --> 00:18:05,750
+to the first layer serialize
+
+00:18:04,160 --> 00:18:07,250
+first header right and then you expand
+
+00:18:05,750 --> 00:18:11,030
+the body so now the body can you know
+
+00:18:07,250 --> 00:18:12,290
+encapsulate the entire next packet then
+
+00:18:11,030 --> 00:18:14,150
+you return it again in the next player
+
+00:18:12,290 --> 00:18:16,130
+serializes its header and so on and so
+
+00:18:14,150 --> 00:18:18,620
+forth and by doing this you make sure
+
+00:18:16,130 --> 00:18:20,180
+that you can just serialize in one shot
+
+00:18:18,620 --> 00:18:22,780
+right you allocate once you serialize
+
+00:18:20,180 --> 00:18:22,780
+once and you're done
+
+00:18:22,790 --> 00:18:26,870
+let's look at an example of what this
+
+00:18:24,500 --> 00:18:28,880
+looks like so this diagram is wildly not
+
+00:18:26,870 --> 00:18:30,830
+to scale imagine that you know this
+
+00:18:28,880 --> 00:18:33,430
+stock struct here is really tiny that
+
+00:18:30,830 --> 00:18:35,630
+body is really big but diagrams are hard
+
+00:18:33,430 --> 00:18:37,160
+so again this packet this this
+
+00:18:35,630 --> 00:18:39,200
+serializer here represents the entire
+
+00:18:37,160 --> 00:18:41,150
+UDP packet right so it has all of the
+
+00:18:39,200 --> 00:18:44,750
+body bytes that the application asked us
+
+00:18:41,150 --> 00:18:46,370
+to send and it has that packet builder
+
+00:18:44,750 --> 00:18:47,660
+for the UDP layer right that shell of
+
+00:18:46,370 --> 00:18:49,100
+the onion that just represents all the
+
+00:18:47,660 --> 00:18:51,470
+stuff that needs to go in the UDP header
+
+00:18:49,100 --> 00:18:53,390
+and so when we want to send this we're
+
+00:18:51,470 --> 00:18:54,890
+gonna call this into the send IP packet
+
+00:18:53,390 --> 00:18:56,390
+function we're gonna pass it by value
+
+00:18:54,890 --> 00:18:57,770
+right this time you little struct moves
+
+00:18:56,390 --> 00:18:59,600
+from this struct rate sorry from this
+
+00:18:57,770 --> 00:19:02,780
+stack frame to this stack frame but the
+
+00:18:59,600 --> 00:19:04,370
+body itself again doesn't move we're
+
+00:19:02,780 --> 00:19:05,450
+gonna shrink this just for brevity
+
+00:19:04,370 --> 00:19:07,010
+because we're gonna need to make these
+
+00:19:05,450 --> 00:19:10,370
+slides pretty big so that thing is the
+
+00:19:07,010 --> 00:19:12,500
+same thing as that thing the IP packet
+
+00:19:10,370 --> 00:19:14,210
+sorry the send IP packet function then
+
+00:19:12,500 --> 00:19:15,440
+is going to calculate its own routing
+
+00:19:14,210 --> 00:19:16,760
+information right it needs to figure out
+
+00:19:15,440 --> 00:19:19,700
+where this stuff is going so on and so
+
+00:19:16,760 --> 00:19:21,800
+forth and on that basis it's going to
+
+00:19:19,700 --> 00:19:24,170
+construct an IP packet builder for the
+
+00:19:21,800 --> 00:19:26,840
+IP layer of the onion and boom construct
+
+00:19:24,170 --> 00:19:28,220
+a bigger serializer write the IP packet
+
+00:19:26,840 --> 00:19:28,610
+builder represents the IP layer of the
+
+00:19:28,220 --> 00:19:30,830
+onion
+
+00:19:28,610 --> 00:19:32,690
+this entire serializer represents the
+
+00:19:30,830 --> 00:19:36,320
+entire IP packet and everything inside
+
+00:19:32,690 --> 00:19:37,820
+of it again send it to the next layer so
+
+00:19:36,320 --> 00:19:41,630
+send it to the send Ethernet packet
+
+00:19:37,820 --> 00:19:43,460
+function compress for brevity take this
+
+00:19:41,630 --> 00:19:45,290
+serializer and encapsulate it with
+
+00:19:43,460 --> 00:19:47,560
+ethernet right so add another layer the
+
+00:19:45,290 --> 00:19:49,460
+onion now we have the Ethernet onion
+
+00:19:47,560 --> 00:19:50,900
+alright so now we've actually
+
+00:19:49,460 --> 00:19:52,250
+constructed this entire thing and we're
+
+00:19:50,900 --> 00:19:55,670
+ready to serialize it let's see how that
+
+00:19:52,250 --> 00:19:57,080
+works this is a diagram that if we had a
+
+00:19:55,670 --> 00:19:59,060
+giant wide screen would have been
+
+00:19:57,080 --> 00:20:00,800
+totally horizontal but we don't so each
+
+00:19:59,060 --> 00:20:02,510
+of these dot dot dots represents the
+
+00:20:00,800 --> 00:20:04,460
+entire next line right just imagine that
+
+00:20:02,510 --> 00:20:06,770
+this is one big long thing it's one one
+
+00:20:04,460 --> 00:20:10,190
+you know small but conceptually big
+
+00:20:06,770 --> 00:20:12,350
+struct so the first thing that we're
+
+00:20:10,190 --> 00:20:14,180
+gonna do is call serialize zero right
+
+00:20:12,350 --> 00:20:15,620
+the outermost layer is the outermost
+
+00:20:14,180 --> 00:20:17,130
+layer so we don't need any prefix bytes
+
+00:20:15,620 --> 00:20:18,180
+ahead of it
+
+00:20:17,130 --> 00:20:21,630
+and we're going to figure out how many
+
+00:20:18,180 --> 00:20:23,460
+extra prefix bytes we need for this
+
+00:20:21,630 --> 00:20:24,810
+layer when we call serialize into the
+
+00:20:23,460 --> 00:20:26,130
+next layer we have to figure out how
+
+00:20:24,810 --> 00:20:28,590
+many bytes the Ethernet header is going
+
+00:20:26,130 --> 00:20:31,200
+to take up so we ask it we say dear
+
+00:20:28,590 --> 00:20:34,200
+Ethernet packet builder how many bytes
+
+00:20:31,200 --> 00:20:34,860
+will you need and it says 18 so we go
+
+00:20:34,200 --> 00:20:37,590
+okay great
+
+00:20:34,860 --> 00:20:40,560
+we needed 0 now we need 18 so we need 18
+
+00:20:37,590 --> 00:20:43,050
+in total and again the next the next
+
+00:20:40,560 --> 00:20:44,520
+innermost packet or sorry the next inter
+
+00:20:43,050 --> 00:20:46,620
+most serializer this one for the IP
+
+00:20:44,520 --> 00:20:49,740
+layer goes ok well I'm supposed to give
+
+00:20:46,620 --> 00:20:52,830
+this person 18 my layer itself the IP
+
+00:20:49,740 --> 00:20:55,500
+layer right the IP header is 20 bytes
+
+00:20:52,830 --> 00:20:58,410
+long so I need an extra 20 bytes so now
+
+00:20:55,500 --> 00:21:00,210
+I need 38 bytes in total the UDP layer
+
+00:20:58,410 --> 00:21:02,460
+adds another 8 bytes so now in total
+
+00:21:00,210 --> 00:21:03,870
+it's 46 but now we're in the middle
+
+00:21:02,460 --> 00:21:06,180
+right we've actually gotten into the
+
+00:21:03,870 --> 00:21:07,650
+inner serializer and there are no more
+
+00:21:06,180 --> 00:21:08,190
+serializers to do we can't recurse
+
+00:21:07,650 --> 00:21:09,480
+anymore
+
+00:21:08,190 --> 00:21:11,280
+so we actually have to allocate the
+
+00:21:09,480 --> 00:21:12,780
+thing so first we have to figure out how
+
+00:21:11,280 --> 00:21:14,880
+long the body is so let's say it's a
+
+00:21:12,780 --> 00:21:16,980
+thousand bytes and now we know that we
+
+00:21:14,880 --> 00:21:18,870
+need a thousand 46 bytes so we allocate
+
+00:21:16,980 --> 00:21:19,950
+them again we'll stack allocate later
+
+00:21:18,870 --> 00:21:22,500
+for the time being we're doing it on the
+
+00:21:19,950 --> 00:21:24,480
+heap we say please give us a buffer
+
+00:21:22,500 --> 00:21:26,850
+which is a thousand 46 bytes long and
+
+00:21:24,480 --> 00:21:28,410
+that buffer starts off entirely as
+
+00:21:26,850 --> 00:21:29,730
+prefixed because there's nothing we
+
+00:21:28,410 --> 00:21:31,410
+haven't serialized anything yet
+
+00:21:29,730 --> 00:21:34,050
+so the body is completely empty there's
+
+00:21:31,410 --> 00:21:35,790
+there's nothing there so first we
+
+00:21:34,050 --> 00:21:37,620
+serialize the body that we were asked to
+
+00:21:35,790 --> 00:21:39,000
+into the buffer so now the body of the
+
+00:21:37,620 --> 00:21:42,260
+buffer is the same thing as the body of
+
+00:21:39,000 --> 00:21:45,000
+the UDP packet and now we can start
+
+00:21:42,260 --> 00:21:47,910
+rewinding back out right unwinding out
+
+00:21:45,000 --> 00:21:50,100
+the stack so first we go to the UDP
+
+00:21:47,910 --> 00:21:51,960
+packet builder and we say hey you know
+
+00:21:50,100 --> 00:21:53,940
+how to serialize a header can you
+
+00:21:51,960 --> 00:21:56,430
+serialize yourself into this buffer
+
+00:21:53,940 --> 00:21:58,740
+please and it does and it expands the
+
+00:21:56,430 --> 00:22:01,110
+body so that now the body contains both
+
+00:21:58,740 --> 00:22:03,360
+the UDP packet body and the UDP packet
+
+00:22:01,110 --> 00:22:05,250
+header it's an entire UDP packet and now
+
+00:22:03,360 --> 00:22:06,930
+we're done this call to serialize has
+
+00:22:05,250 --> 00:22:08,940
+satisfied its constraint right it was
+
+00:22:06,930 --> 00:22:11,700
+asked to give a buffer which contains
+
+00:22:08,940 --> 00:22:13,110
+the entire UDP packet and 38 bytes of
+
+00:22:11,700 --> 00:22:15,390
+prefix well we have that so we can
+
+00:22:13,110 --> 00:22:17,070
+return it now this next call to
+
+00:22:15,390 --> 00:22:19,680
+serialize does the exact same thing it
+
+00:22:17,070 --> 00:22:22,080
+goes ok great I have a packet whose body
+
+00:22:19,680 --> 00:22:23,430
+is what it needs to be already there is
+
+00:22:22,080 --> 00:22:27,270
+enough prefix space so I will now
+
+00:22:23,430 --> 00:22:29,400
+serialize the IP layer in place and
+
+00:22:27,270 --> 00:22:30,930
+again now the body contains the entire
+
+00:22:29,400 --> 00:22:33,030
+IP packet and
+
+00:22:30,930 --> 00:22:36,030
+has 18 bytes of prefix space so we can
+
+00:22:33,030 --> 00:22:39,090
+return that finally we can serialize the
+
+00:22:36,030 --> 00:22:43,790
+ethernet layer and now the body contains
+
+00:22:39,090 --> 00:22:43,790
+the entire Ethernet packet thank you
+
+00:22:46,580 --> 00:22:51,780
+yeah and so we're entirely done and we
+
+00:22:49,200 --> 00:22:53,850
+can return this thing and now we have we
+
+00:22:51,780 --> 00:22:56,520
+have a buffer so we talked about parsing
+
+00:22:53,850 --> 00:23:00,120
+we talked about serialization let's put
+
+00:22:56,520 --> 00:23:01,980
+it together and forward so the goal this
+
+00:23:00,120 --> 00:23:03,300
+time is first of all no heap allocation
+
+00:23:01,980 --> 00:23:05,160
+we're actually gonna allocate on the
+
+00:23:03,300 --> 00:23:07,680
+stack we're gonna receive an Ethernet
+
+00:23:05,160 --> 00:23:09,690
+packet we're gonna parse it we're gonna
+
+00:23:07,680 --> 00:23:10,830
+parse the IP packet inside of it we're
+
+00:23:09,690 --> 00:23:12,510
+going to decide that we want to forward
+
+00:23:10,830 --> 00:23:15,060
+the packet so we're gonna resize it and
+
+00:23:12,510 --> 00:23:16,470
+send it to somebody else so first we
+
+00:23:15,060 --> 00:23:17,790
+have to update the header there are some
+
+00:23:16,470 --> 00:23:20,070
+modifications that we have to make to
+
+00:23:17,790 --> 00:23:22,710
+the header then we have to serialize it
+
+00:23:20,070 --> 00:23:24,930
+in a new Ethernet packet all right so
+
+00:23:22,710 --> 00:23:26,460
+let's get into it so parsing is super
+
+00:23:24,930 --> 00:23:27,720
+easy right we saw in the parsing section
+
+00:23:26,460 --> 00:23:29,610
+how this works there's gonna be super
+
+00:23:27,720 --> 00:23:31,500
+straightforward again we have the buffer
+
+00:23:29,610 --> 00:23:34,230
+the actual bytes of it live on the stack
+
+00:23:31,500 --> 00:23:37,920
+we send it into the receive Ethernet
+
+00:23:34,230 --> 00:23:39,480
+packet function we parse creating one of
+
+00:23:37,920 --> 00:23:42,150
+these Ethernet packet objects which
+
+00:23:39,480 --> 00:23:43,680
+consumes those bytes from the prefix we
+
+00:23:42,150 --> 00:23:45,690
+drop the thing so we can continue
+
+00:23:43,680 --> 00:23:47,570
+operating on it and we send the buffer
+
+00:23:45,690 --> 00:23:50,850
+into the receive IP packet function
+
+00:23:47,570 --> 00:23:54,480
+again we parse this time getting an IP
+
+00:23:50,850 --> 00:23:56,310
+packet struct and so now we have to
+
+00:23:54,480 --> 00:23:57,480
+modify this stuff in place so this is
+
+00:23:56,310 --> 00:23:59,460
+where it gets interesting because the
+
+00:23:57,480 --> 00:24:01,350
+modifications that we need to do operate
+
+00:23:59,460 --> 00:24:03,690
+on the sort of like logical structure of
+
+00:24:01,350 --> 00:24:04,950
+the IP header so it's really important
+
+00:24:03,690 --> 00:24:06,330
+that this header is structured and gives
+
+00:24:04,950 --> 00:24:07,320
+us access to like struct fields and
+
+00:24:06,330 --> 00:24:09,090
+stuff like that for us to be able to
+
+00:24:07,320 --> 00:24:10,950
+update it and so the updates that we're
+
+00:24:09,090 --> 00:24:13,980
+going to do are actually methods on the
+
+00:24:10,950 --> 00:24:16,140
+IP packet object so here's some code
+
+00:24:13,980 --> 00:24:17,700
+it's very simple we just say packet
+
+00:24:16,140 --> 00:24:19,470
+please decrement your TTL which is like
+
+00:24:17,700 --> 00:24:21,240
+a counter of how many hops the packet
+
+00:24:19,470 --> 00:24:23,010
+has gone through and that just vanilla
+
+00:24:21,240 --> 00:24:25,380
+Roscoe right it's struct that field
+
+00:24:23,010 --> 00:24:28,020
+minus minus or minus equals 1 sorry
+
+00:24:25,380 --> 00:24:30,420
+and yes so it's just you know it's just
+
+00:24:28,020 --> 00:24:32,990
+just normal normal Russ code so now we
+
+00:24:30,420 --> 00:24:34,950
+have this thing now we drop this thing
+
+00:24:32,990 --> 00:24:36,750
+it's a little bit of a problem here
+
+00:24:34,950 --> 00:24:42,390
+does anyone spot the problem if we want
+
+00:24:36,750 --> 00:24:44,760
+to serialize the IP packet what is the
+
+00:24:42,390 --> 00:24:49,570
+contents of the body
+
+00:24:44,760 --> 00:24:51,700
+sorry well so the body hasn't been
+
+00:24:49,570 --> 00:24:53,620
+modified but importantly the body is the
+
+00:24:51,700 --> 00:24:55,090
+body of the IP packet we don't want to
+
+00:24:53,620 --> 00:24:56,649
+we don't want to forward the body of the
+
+00:24:55,090 --> 00:24:58,870
+IP packet we want to forward the whole
+
+00:24:56,649 --> 00:25:00,600
+IP packet including the header but we
+
+00:24:58,870 --> 00:25:02,769
+just parsed the header and threw it away
+
+00:25:00,600 --> 00:25:04,000
+so there's this cute little hack that we
+
+00:25:02,769 --> 00:25:08,950
+do it's very straightforward
+
+00:25:04,000 --> 00:25:11,850
+it's called undo parse we say how many
+
+00:25:08,950 --> 00:25:14,440
+header bytes did you just parse oops
+
+00:25:11,850 --> 00:25:15,970
+please undo it and so we do it just
+
+00:25:14,440 --> 00:25:17,159
+takes the pointer and goes oh you just
+
+00:25:15,970 --> 00:25:20,350
+parse 20 bytes okay whoops
+
+00:25:17,159 --> 00:25:23,409
+Bumba 20 bytes so we go from that to
+
+00:25:20,350 --> 00:25:25,870
+that and now we have an IP packet that
+
+00:25:23,409 --> 00:25:29,289
+we can forward and so let's do that
+
+00:25:25,870 --> 00:25:30,220
+right so we decrement the TTL we figure
+
+00:25:29,289 --> 00:25:31,990
+out how many header bytes we need to
+
+00:25:30,220 --> 00:25:36,100
+undo and we undo them and then we
+
+00:25:31,990 --> 00:25:37,720
+serialized very straightforward now you
+
+00:25:36,100 --> 00:25:39,549
+might be wondering I thought that send
+
+00:25:37,720 --> 00:25:40,179
+ethernet packet was supposed to take a
+
+00:25:39,549 --> 00:25:43,750
+serializer
+
+00:25:40,179 --> 00:25:46,120
+well it is here's the core idea that I
+
+00:25:43,750 --> 00:25:49,210
+want to get across buffers are
+
+00:25:46,120 --> 00:25:51,519
+serializers the serializer trait simply
+
+00:25:49,210 --> 00:25:54,850
+says can you give me a buffer that has
+
+00:25:51,519 --> 00:25:56,559
+these properties if the buffer already
+
+00:25:54,850 --> 00:25:59,830
+has those properties then it says yes
+
+00:25:56,559 --> 00:26:01,899
+Here I am it just returns itself by
+
+00:25:59,830 --> 00:26:02,889
+value right the serialized method you
+
+00:26:01,899 --> 00:26:04,990
+might have noticed if you were looking
+
+00:26:02,889 --> 00:26:06,940
+closely takes the serializer by value
+
+00:26:04,990 --> 00:26:09,220
+takes it by ownership so you basically
+
+00:26:06,940 --> 00:26:10,840
+take this buffer you say by buffer give
+
+00:26:09,220 --> 00:26:13,330
+me a buffer and it says I'm already here
+
+00:26:10,840 --> 00:26:16,539
+Here I am back and that's what we're
+
+00:26:13,330 --> 00:26:20,110
+gonna do so first we take the buffer we
+
+00:26:16,539 --> 00:26:23,710
+send it in to receive IP packet that
+
+00:26:20,110 --> 00:26:25,240
+receive IP packet function sorry sorry
+
+00:26:23,710 --> 00:26:27,340
+excuse me we're in receive IP packet
+
+00:26:25,240 --> 00:26:30,039
+currently we send it in to send Ethernet
+
+00:26:27,340 --> 00:26:31,750
+packet send Ethernet packet then says
+
+00:26:30,039 --> 00:26:34,029
+okay great here's a serializer I need to
+
+00:26:31,750 --> 00:26:36,360
+now encapsulate it inside of Ethernet so
+
+00:26:34,029 --> 00:26:38,830
+we do write construct the serializer
+
+00:26:36,360 --> 00:26:41,889
+I'm gonna squash these stack frames just
+
+00:26:38,830 --> 00:26:43,720
+for brevity so then the sending thir net
+
+00:26:41,889 --> 00:26:46,000
+packet function says okay great I've got
+
+00:26:43,720 --> 00:26:48,399
+my serializer and I need to serialize so
+
+00:26:46,000 --> 00:26:51,130
+we call serialize of 0 we want to
+
+00:26:48,399 --> 00:26:54,159
+serialize this thing it says ok Ethernet
+
+00:26:51,130 --> 00:26:57,250
+header asks for 18 bytes in the prefix
+
+00:26:54,159 --> 00:26:57,960
+so we'll ask for serialize 18 of our
+
+00:26:57,250 --> 00:27:00,120
+serializer
+
+00:26:57,960 --> 00:27:01,559
+now the buffer is the serializer so the
+
+00:27:00,120 --> 00:27:04,200
+buffer looks at itself and goes well I
+
+00:27:01,559 --> 00:27:07,140
+already have 18 bytes so we're done
+
+00:27:04,200 --> 00:27:09,330
+and it returns itself by value and the
+
+00:27:07,140 --> 00:27:12,539
+the call to serialize zero goes okay
+
+00:27:09,330 --> 00:27:14,700
+great I have a buffer that has 18 bytes
+
+00:27:12,539 --> 00:27:18,750
+of prefix space I can just serialize
+
+00:27:14,700 --> 00:27:22,470
+this header directly in place then we
+
+00:27:18,750 --> 00:27:24,659
+have finally a buffer which is still on
+
+00:27:22,470 --> 00:27:26,880
+the stack we haven't ever copied it it
+
+00:27:24,659 --> 00:27:28,409
+contains all of the bytes of the
+
+00:27:26,880 --> 00:27:29,549
+Ethernet packet and we can just send
+
+00:27:28,409 --> 00:27:32,460
+this thing right so we've gone from
+
+00:27:29,549 --> 00:27:34,710
+having a formula from receiving the
+
+00:27:32,460 --> 00:27:36,750
+packet on the on the stack to send the
+
+00:27:34,710 --> 00:27:38,130
+stack parse it all the way we've decided
+
+00:27:36,750 --> 00:27:39,720
+that we want to risa realize we've gone
+
+00:27:38,130 --> 00:27:41,760
+hey we already have this buffer space
+
+00:27:39,720 --> 00:27:43,260
+why don't we just reuse it and we reuse
+
+00:27:41,760 --> 00:27:45,690
+it and finally we can turn around go
+
+00:27:43,260 --> 00:27:46,950
+okay great let's just forward it out so
+
+00:27:45,690 --> 00:27:49,649
+this is what forwarding looks like and
+
+00:27:46,950 --> 00:27:51,480
+this is sort of like you know this is
+
+00:27:49,649 --> 00:27:52,950
+this is it this is as simple as it gets
+
+00:27:51,480 --> 00:27:54,210
+um there's obviously in practice a
+
+00:27:52,950 --> 00:27:55,470
+little bit more complicated logic cuz we
+
+00:27:54,210 --> 00:27:57,779
+have a footers and other stuff like that
+
+00:27:55,470 --> 00:27:59,909
+but this is fundamentally at the core of
+
+00:27:57,779 --> 00:28:01,470
+the algorithm and in none of this stuff
+
+00:27:59,909 --> 00:28:02,640
+is there any unsafe code we'll talk
+
+00:28:01,470 --> 00:28:10,500
+about on safe in a second but none of
+
+00:28:02,640 --> 00:28:11,700
+this has any unsafe code alright so that
+
+00:28:10,500 --> 00:28:14,580
+was all about how we do parsing
+
+00:28:11,700 --> 00:28:16,710
+serialization I mentioned at the very
+
+00:28:14,580 --> 00:28:18,360
+beginning that our header references are
+
+00:28:16,710 --> 00:28:19,679
+actually struct references which you
+
+00:28:18,360 --> 00:28:23,130
+might have said how the hell do you do
+
+00:28:19,679 --> 00:28:26,039
+that and the answer is unsafe right so
+
+00:28:23,130 --> 00:28:27,480
+this diagram actually looks like this
+
+00:28:26,039 --> 00:28:28,169
+diagram right it's just like that's a
+
+00:28:27,480 --> 00:28:30,029
+header reference
+
+00:28:28,169 --> 00:28:32,010
+so the way that we do this is with an
+
+00:28:30,029 --> 00:28:35,159
+unsafe marker trait called from bytes
+
+00:28:32,010 --> 00:28:37,860
+and from bytes if they type implements
+
+00:28:35,159 --> 00:28:44,159
+from bytes it promises to satisfy the
+
+00:28:37,860 --> 00:28:47,700
+following properties first it's any size
+
+00:28:44,159 --> 00:28:50,419
+of T bytes any sequence of bytes size of
+
+00:28:47,700 --> 00:28:52,429
+T long is a valid instance of this type
+
+00:28:50,419 --> 00:28:54,480
+what that means is that I can take
+
+00:28:52,429 --> 00:28:57,120
+random bytes that I got off the network
+
+00:28:54,480 --> 00:28:59,820
+and just go this is a thing now right
+
+00:28:57,120 --> 00:29:01,529
+now you're just treated as a thing this
+
+00:28:59,820 --> 00:29:04,620
+is not true of all types right if I take
+
+00:29:01,529 --> 00:29:06,570
+a random sequence of eight bytes and I
+
+00:29:04,620 --> 00:29:08,429
+say this is a reference now that is not
+
+00:29:06,570 --> 00:29:09,990
+guaranteed to be a valid reference right
+
+00:29:08,429 --> 00:29:11,440
+it might just point you know randomly
+
+00:29:09,990 --> 00:29:12,909
+into memory somewhere
+
+00:29:11,440 --> 00:29:14,379
+so it's important that this only
+
+00:29:12,909 --> 00:29:15,549
+actually applies to a subset of type so
+
+00:29:14,379 --> 00:29:18,850
+we have to be very careful about which
+
+00:29:15,549 --> 00:29:20,740
+types we apply this to for composite
+
+00:29:18,850 --> 00:29:23,019
+types like structs and arrays and unions
+
+00:29:20,740 --> 00:29:25,509
+all the fields where the elements have
+
+00:29:23,019 --> 00:29:27,850
+to be just you know recursively from
+
+00:29:25,509 --> 00:29:30,639
+bytes it just composes nicely and then
+
+00:29:27,850 --> 00:29:32,769
+if you really want for enums they must
+
+00:29:30,639 --> 00:29:34,750
+be C like and have a power of two number
+
+00:29:32,769 --> 00:29:37,929
+of variants exercise to the reader why
+
+00:29:34,750 --> 00:29:41,320
+that's true all right finally we have a
+
+00:29:37,929 --> 00:29:42,940
+custom derived for this thing so if we
+
+00:29:41,320 --> 00:29:44,559
+just slap derive from bytes on something
+
+00:29:42,940 --> 00:29:46,389
+we've got you know a custom derived that
+
+00:29:44,559 --> 00:29:48,669
+will analyze your type and go that's not
+
+00:29:46,389 --> 00:29:49,960
+from bytes what are you talking about or
+
+00:29:48,669 --> 00:29:53,519
+yeah that's fine we'll go ahead and
+
+00:29:49,960 --> 00:29:56,620
+animate the info so that's one thing
+
+00:29:53,519 --> 00:30:00,690
+next thing is the unaligned train so the
+
+00:29:56,620 --> 00:30:00,690
+unlined trait says that something is
+
+00:30:00,929 --> 00:30:05,110
+this is this is this is fantastic yeah
+
+00:30:03,850 --> 00:30:06,399
+so the gun line trait says that
+
+00:30:05,110 --> 00:30:10,240
+something is on line again I'm fantastic
+
+00:30:06,399 --> 00:30:11,379
+naming and so you can slap a drive on
+
+00:30:10,240 --> 00:30:13,299
+something and say great this thing is on
+
+00:30:11,379 --> 00:30:14,980
+line cool it's important to note that
+
+00:30:13,299 --> 00:30:18,039
+this has some little wonky implications
+
+00:30:14,980 --> 00:30:19,750
+such as like this ether type field
+
+00:30:18,039 --> 00:30:21,730
+really should be au 16 but it can't
+
+00:30:19,750 --> 00:30:23,230
+because u 16s are not on the line they
+
+00:30:21,730 --> 00:30:24,879
+have an alignment of two so it's a
+
+00:30:23,230 --> 00:30:26,889
+little bit of like you have to use some
+
+00:30:24,879 --> 00:30:28,450
+some you know like byte order type stuff
+
+00:30:26,889 --> 00:30:30,789
+it's super simple but it's kind of
+
+00:30:28,450 --> 00:30:31,929
+annoying anyway so it has to be on the
+
+00:30:30,789 --> 00:30:33,639
+line because we don't know where in the
+
+00:30:31,929 --> 00:30:36,009
+buffer we might be you know parsing
+
+00:30:33,639 --> 00:30:37,330
+something from so once we have those two
+
+00:30:36,009 --> 00:30:38,980
+things we can build this awesome
+
+00:30:37,330 --> 00:30:40,600
+function now this function doesn't
+
+00:30:38,980 --> 00:30:41,769
+literally exist in the code base but
+
+00:30:40,600 --> 00:30:43,450
+there's something very analogous to it
+
+00:30:41,769 --> 00:30:46,419
+and basically what it does it's called
+
+00:30:43,450 --> 00:30:48,220
+ref from bytes you say here is a
+
+00:30:46,419 --> 00:30:49,990
+sequence of bytes of the appropriate
+
+00:30:48,220 --> 00:30:51,940
+length if it is not of the appropriate
+
+00:30:49,990 --> 00:30:54,159
+length then we return none but if it is
+
+00:30:51,940 --> 00:30:55,629
+of the appropriate length then it just
+
+00:30:54,159 --> 00:30:57,100
+gives us back a reference to T because
+
+00:30:55,629 --> 00:30:58,600
+the type system already took care of
+
+00:30:57,100 --> 00:31:00,100
+making sure that all this stuff was safe
+
+00:30:58,600 --> 00:31:01,659
+so we don't have to do any work at
+
+00:31:00,100 --> 00:31:03,519
+runtime right like ideally this function
+
+00:31:01,659 --> 00:31:05,799
+compiles to nothing this function
+
+00:31:03,519 --> 00:31:07,000
+shouldn't actually have a run right
+
+00:31:05,799 --> 00:31:09,159
+but it's a place for us to write the
+
+00:31:07,000 --> 00:31:10,750
+unsafe keyword and what it does is it
+
+00:31:09,159 --> 00:31:12,159
+just says here's bytes here's a T cool
+
+00:31:10,750 --> 00:31:14,769
+right everything's safe the compiler
+
+00:31:12,159 --> 00:31:16,929
+verified it for us what this allows us
+
+00:31:14,769 --> 00:31:19,059
+to do is build this really cool function
+
+00:31:16,929 --> 00:31:20,080
+and which uses one of my favorite
+
+00:31:19,059 --> 00:31:22,389
+favorite favorite methods from the
+
+00:31:20,080 --> 00:31:24,909
+entire library or from the entire code
+
+00:31:22,389 --> 00:31:25,450
+base so this is actually the parsing
+
+00:31:24,909 --> 00:31:28,899
+function that we
+
+00:31:25,450 --> 00:31:30,250
+really have in the ethernet stack it's
+
+00:31:28,899 --> 00:31:32,649
+stripped down there so I remove some
+
+00:31:30,250 --> 00:31:36,159
+error handling but we had this function
+
+00:31:32,649 --> 00:31:37,659
+this method called take objects it is a
+
+00:31:36,159 --> 00:31:40,899
+method on buffer and it says the
+
+00:31:37,659 --> 00:31:42,610
+following consume size of T bytes from
+
+00:31:40,899 --> 00:31:45,820
+the buffer write add them from the body
+
+00:31:42,610 --> 00:31:48,370
+to the prefix reinterpret them as though
+
+00:31:45,820 --> 00:31:50,230
+it was a reference to T and return that
+
+00:31:48,370 --> 00:31:52,450
+reference and so parsing then just
+
+00:31:50,230 --> 00:31:54,899
+becomes okay you have a header it is a
+
+00:31:52,450 --> 00:31:57,909
+struct right your the header struct cool
+
+00:31:54,899 --> 00:31:59,490
+take it done
+
+00:31:57,909 --> 00:32:02,260
+that's all parsing so this is literally
+
+00:31:59,490 --> 00:32:04,029
+what the Ethernet parsing function looks
+
+00:32:02,260 --> 00:32:05,860
+like similarly for all the other parsers
+
+00:32:04,029 --> 00:32:08,409
+it's basically just take a struct take a
+
+00:32:05,860 --> 00:32:10,120
+struct take a struct done and from here
+
+00:32:08,409 --> 00:32:11,380
+on out by the way right this is a
+
+00:32:10,120 --> 00:32:13,330
+structured reference so now we can just
+
+00:32:11,380 --> 00:32:16,600
+access it we can say you know header or
+
+00:32:13,330 --> 00:32:19,090
+smack or you know whatever so that's all
+
+00:32:16,600 --> 00:32:20,470
+I've got so the conclusions from all of
+
+00:32:19,090 --> 00:32:22,539
+this again as I said at the beginning in
+
+00:32:20,470 --> 00:32:24,519
+CN C++ you can absolutely do this stuff
+
+00:32:22,539 --> 00:32:26,889
+it is done if you if you look at most
+
+00:32:24,519 --> 00:32:28,389
+high-performance networking stacks most
+
+00:32:26,889 --> 00:32:29,919
+of which are written in C and C++ they
+
+00:32:28,389 --> 00:32:32,440
+do all of this stuff but they just do it
+
+00:32:29,919 --> 00:32:34,600
+unsafely right all the guarantees that I
+
+00:32:32,440 --> 00:32:37,480
+described that are given by lifetimes
+
+00:32:34,600 --> 00:32:40,990
+and references immutable ability
+
+00:32:37,480 --> 00:32:42,610
+immutability versus mutability that you
+
+00:32:40,990 --> 00:32:44,409
+know the from bytes unlined stuff all
+
+00:32:42,610 --> 00:32:49,360
+that is just reasoned in the head of a
+
+00:32:44,409 --> 00:32:50,380
+programmer and sometimes it is so unsafe
+
+00:32:49,360 --> 00:32:51,659
+that it can't be done some of you
+
+00:32:50,380 --> 00:32:55,240
+probably know what I'm referring to here
+
+00:32:51,659 --> 00:32:57,220
+famously parallel CSS layout computation
+
+00:32:55,240 --> 00:32:59,889
+in chrome was attempted a number of
+
+00:32:57,220 --> 00:33:01,570
+times and was never done because they
+
+00:32:59,889 --> 00:33:04,120
+just couldn't iron out all of the bugs
+
+00:33:01,570 --> 00:33:06,519
+in parallel C++ code it was just too
+
+00:33:04,120 --> 00:33:10,169
+hard Chris it exists in Firefox why
+
+00:33:06,519 --> 00:33:10,169
+because it's written in rust and
+
+00:33:13,730 --> 00:33:17,850
+so the takeaway that I want to leave you
+
+00:33:15,809 --> 00:33:20,549
+with is that safety brings speed and
+
+00:33:17,850 --> 00:33:22,140
+developer friendliness right when I'm
+
+00:33:20,549 --> 00:33:23,789
+working on this codebase I can move
+
+00:33:22,140 --> 00:33:24,990
+quickly all of the other developers that
+
+00:33:23,789 --> 00:33:26,730
+I work with they can move quickly
+
+00:33:24,990 --> 00:33:29,159
+because we're not afraid that we're
+
+00:33:26,730 --> 00:33:31,799
+going to accidentally invalidate some
+
+00:33:29,159 --> 00:33:32,789
+subtle invariant on a list of invariants
+
+00:33:31,799 --> 00:33:34,650
+that isn't actually written down
+
+00:33:32,789 --> 00:33:36,179
+anywhere and it's developer friendly
+
+00:33:34,650 --> 00:33:37,919
+right because when we get new people to
+
+00:33:36,179 --> 00:33:40,620
+the codebase in fact I think a majority
+
+00:33:37,919 --> 00:33:42,090
+of the developers that we have on this
+
+00:33:40,620 --> 00:33:44,490
+codebase this is their first rust
+
+00:33:42,090 --> 00:33:45,720
+project and what that means is that they
+
+00:33:44,490 --> 00:33:47,460
+can come to this project and they can
+
+00:33:45,720 --> 00:33:49,559
+say okay I like this you know little
+
+00:33:47,460 --> 00:33:51,539
+from bite stuff is terrifying but the
+
+00:33:49,559 --> 00:33:52,770
+rest of the codebase is fine right it's
+
+00:33:51,539 --> 00:33:54,360
+all safe there's no unsafe I don't have
+
+00:33:52,770 --> 00:33:55,860
+to worry about keeping all of these
+
+00:33:54,360 --> 00:33:58,230
+invariants in mind I can just hack on
+
+00:33:55,860 --> 00:34:01,320
+the thing and they do so that's all I've
+
+00:33:58,230 --> 00:34:03,029
+got here are some code links this last
+
+00:34:01,320 --> 00:34:04,289
+one here doesn't actually exist yet but
+
+00:34:03,029 --> 00:34:07,020
+it will hopefully by the time this stuff
+
+00:34:04,289 --> 00:34:08,190
+is up there's my email if you want to
+
+00:34:07,020 --> 00:34:09,239
+email me about anything
+
+00:34:08,190 --> 00:34:16,669
+thank you very much preciate
+
+00:34:09,239 --> 00:34:16,669
+
+YouTube URL: https://www.youtube.com/watch?v=UfMOOxOGCmA
+
+
