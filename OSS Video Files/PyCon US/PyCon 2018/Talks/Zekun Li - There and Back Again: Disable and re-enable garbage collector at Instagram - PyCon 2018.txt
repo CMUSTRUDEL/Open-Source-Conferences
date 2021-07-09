@@ -1,0 +1,1399 @@
+Title: Zekun Li - There and Back Again: Disable and re-enable garbage collector at Instagram - PyCon 2018
+Publication date: 2018-08-06
+Playlist: Talks
+Description: 
+	Speaker: Zekun Li
+
+Python's cyclic garbage collector wonderfully hides the complexity of memory management from the programmer. But we pay the price in performance. Ever wondered how that works? In this talk, you'll learn how garbage collection is designed in Python, what the tradeoffs are and how Instagram battled copy-on-write memory issues by disabling the garbage collector entirely.
+
+You'll also learn why that isn't such a great idea after all and how we ended up extending the garbage collector API which allowed us to (mostly) re-enable garbage collection. We'll discuss our upstream contributions to the garbage collector that landed in Python 3.6 and 3.7.
+
+This is an in-depth talk about memory management but no prior experience with CPython internals is necessary to follow it.
+
+Slides can be found at: https://speakerdeck.com/pycon2018 and https://github.com/PyCon/2018-slides
+Captions: 
+	00:00:00,030 --> 00:00:06,390
+good afternoon PyCon let's welcome Zach
+
+00:00:03,510 --> 00:00:08,069
+only there and back again dissing able
+
+00:00:06,390 --> 00:00:22,140
+and reenable garbage collector at
+
+00:00:08,069 --> 00:00:24,210
+Instagram from Instagram today I'm going
+
+00:00:22,140 --> 00:00:27,060
+to talk about a story of garbage
+
+00:00:24,210 --> 00:00:33,180
+collection at Instagram the Aryan back
+
+00:00:27,060 --> 00:00:35,340
+again so agenda first I'll provide some
+
+00:00:33,180 --> 00:00:39,000
+brief background knowledge in case you
+
+00:00:35,340 --> 00:00:41,640
+are not familiar ways then it's many to
+
+00:00:39,000 --> 00:00:43,890
+parts why and how Instagram disable
+
+00:00:41,640 --> 00:00:47,850
+garbage traction to get a big efficiency
+
+00:00:43,890 --> 00:00:51,420
+win and why and how ring a boy it's
+
+00:00:47,850 --> 00:00:55,590
+mostly to get another big win that's
+
+00:00:51,420 --> 00:00:58,379
+what we call it zero and back again so
+
+00:00:55,590 --> 00:01:00,870
+background a brief introduction of how
+
+00:00:58,379 --> 00:01:04,379
+memory management works in Python and
+
+00:01:00,870 --> 00:01:09,330
+what is copy and writes in Linux and our
+
+00:01:04,379 --> 00:01:12,210
+text stats so personal use reference
+
+00:01:09,330 --> 00:01:15,869
+counts plus a cyclic garbage collection
+
+00:01:12,210 --> 00:01:18,000
+to avoid confusing GC or garbage
+
+00:01:15,869 --> 00:01:21,659
+collection in this talk only refers to
+
+00:01:18,000 --> 00:01:24,119
+the cyclic garbage collector reference
+
+00:01:21,659 --> 00:01:26,939
+count is a broadly used technique in the
+
+00:01:24,119 --> 00:01:29,820
+memory management there is a counter for
+
+00:01:26,939 --> 00:01:32,700
+every object recording how many times
+
+00:01:29,820 --> 00:01:34,710
+other objects refers to it and when the
+
+00:01:32,700 --> 00:01:37,890
+number goes to 0 with the allocates
+
+00:01:34,710 --> 00:01:41,280
+object it works well if the reference
+
+00:01:37,890 --> 00:01:43,680
+graph is a DAC directed acyclic graph
+
+00:01:41,280 --> 00:01:47,670
+but in practice it usually has cycles
+
+00:01:43,680 --> 00:01:50,549
+where we need a garbage character so
+
+00:01:47,670 --> 00:01:53,909
+let's see a very simple example if you
+
+00:01:50,549 --> 00:01:57,689
+have a module and you create two lists
+
+00:01:53,909 --> 00:02:02,219
+for an bar so they will have exact one
+
+00:01:57,689 --> 00:02:04,950
+reference then if you delete them the
+
+00:02:02,219 --> 00:02:09,619
+reference will become and they will
+
+00:02:04,950 --> 00:02:12,959
+disappear like the allocate properly but
+
+00:02:09,619 --> 00:02:13,860
+if we have cyclic reference let's see
+
+00:02:12,959 --> 00:02:17,160
+like we append
+
+00:02:13,860 --> 00:02:20,310
+released to each other then if you
+
+00:02:17,160 --> 00:02:23,340
+delete it after that not immediately
+
+00:02:20,310 --> 00:02:25,980
+freeze the objects those two object will
+
+00:02:23,340 --> 00:02:28,770
+still exist in the memory unless the
+
+00:02:25,980 --> 00:02:30,840
+garbage character starts to work the
+
+00:02:28,770 --> 00:02:33,210
+garbage collector will try to find out
+
+00:02:30,840 --> 00:02:35,760
+all the unreachable object from the root
+
+00:02:33,210 --> 00:02:39,300
+objects by a graph traversal and the
+
+00:02:35,760 --> 00:02:41,580
+allocation and what is root objects it's
+
+00:02:39,300 --> 00:02:44,970
+some like fundamental objects of the
+
+00:02:41,580 --> 00:02:46,620
+runtime like the interpreter states in
+
+00:02:44,970 --> 00:02:48,900
+this case the garbage character will
+
+00:02:46,620 --> 00:02:54,720
+find out that foo and bar is unreachable
+
+00:02:48,900 --> 00:02:57,510
+and deallocating next is about
+
+00:02:54,720 --> 00:02:59,510
+copy-on-write in the linux system it's
+
+00:02:57,510 --> 00:03:02,400
+an optimization trick to avoid
+
+00:02:59,510 --> 00:03:06,270
+unnecessary memory copy let's see if
+
+00:03:02,400 --> 00:03:08,550
+process one owns a memory page and it
+
+00:03:06,270 --> 00:03:13,260
+has the string hello in this memory page
+
+00:03:08,550 --> 00:03:15,630
+and it folks a child process to the
+
+00:03:13,260 --> 00:03:18,480
+kernel won't immediately copy the all
+
+00:03:15,630 --> 00:03:20,489
+the memory for process two instead the
+
+00:03:18,480 --> 00:03:22,890
+process two will point to the same
+
+00:03:20,489 --> 00:03:25,470
+physical memory as processed one and
+
+00:03:22,890 --> 00:03:29,790
+those memory will become shirt and read
+
+00:03:25,470 --> 00:03:32,370
+only any process tries to modify it will
+
+00:03:29,790 --> 00:03:35,400
+get a page fault and make a private copy
+
+00:03:32,370 --> 00:03:38,280
+and modify from there if process to
+
+00:03:35,400 --> 00:03:43,650
+chance a string from hello to world then
+
+00:03:38,280 --> 00:03:47,190
+it's need to copy its own and lastly I
+
+00:03:43,650 --> 00:03:50,430
+briefly cover our web stacks of course
+
+00:03:47,190 --> 00:03:53,040
+we use Python and probably not
+
+00:03:50,430 --> 00:03:56,880
+surprising we use Django as our web
+
+00:03:53,040 --> 00:04:00,330
+framework and we use USD as our web
+
+00:03:56,880 --> 00:04:03,510
+server because of the famous or infamous
+
+00:04:00,330 --> 00:04:03,930
+feature of Python the global interpreter
+
+00:04:03,510 --> 00:04:06,060
+lock
+
+00:04:03,930 --> 00:04:09,630
+we're running multi processing model
+
+00:04:06,060 --> 00:04:12,150
+based on fork and rely on initialization
+
+00:04:09,630 --> 00:04:17,010
+on the master process to leverage the
+
+00:04:12,150 --> 00:04:18,989
+copy-on-write feature so that's all the
+
+00:04:17,010 --> 00:04:21,600
+background knowledge I want to share and
+
+00:04:18,989 --> 00:04:24,990
+now let's start the story of garbage
+
+00:04:21,600 --> 00:04:27,080
+collection the first episode is disabled
+
+00:04:24,990 --> 00:04:30,050
+it
+
+00:04:27,080 --> 00:04:32,720
+anyone heard that way disabled garbage
+
+00:04:30,050 --> 00:04:36,280
+collection would wonder why let's see
+
+00:04:32,720 --> 00:04:40,069
+what motivated us to do it at that time
+
+00:04:36,280 --> 00:04:42,319
+it starts from an observation of the
+
+00:04:40,069 --> 00:04:45,289
+shared memory we just introduced a
+
+00:04:42,319 --> 00:04:48,650
+copy-on-write semantics it brings us the
+
+00:04:45,289 --> 00:04:50,449
+benefit of a large shared memory but we
+
+00:04:48,650 --> 00:04:54,800
+found out that the size of the shared
+
+00:04:50,449 --> 00:04:59,240
+memory jobs sharply after fork it
+
+00:04:54,800 --> 00:05:01,729
+shrinks from 500 megabytes to around 350
+
+00:04:59,240 --> 00:05:05,780
+when processing the first request and
+
+00:05:01,729 --> 00:05:09,169
+that means we copy 150 megabytes for the
+
+00:05:05,780 --> 00:05:11,840
+process and that is a lot remember we're
+
+00:05:09,169 --> 00:05:15,169
+running multi processing that basically
+
+00:05:11,840 --> 00:05:17,560
+means like every process that needs to
+
+00:05:15,169 --> 00:05:21,590
+serve request needs to copy those memory
+
+00:05:17,560 --> 00:05:24,909
+and if you if we have 64 process when
+
+00:05:21,590 --> 00:05:28,520
+you to copy around 10 gigabytes memory
+
+00:05:24,909 --> 00:05:29,949
+and that's our first observation and our
+
+00:05:28,520 --> 00:05:33,349
+filling
+
+00:05:29,949 --> 00:05:38,750
+we started investigates where is the
+
+00:05:33,349 --> 00:05:41,569
+shared memory and why jobs a lot so we
+
+00:05:38,750 --> 00:05:44,719
+always do profiling first we'll use perf
+
+00:05:41,569 --> 00:05:46,969
+for the page for events here's the
+
+00:05:44,719 --> 00:05:51,199
+profiling data we get during the first
+
+00:05:46,969 --> 00:05:53,919
+request you can see around 20% page
+
+00:05:51,199 --> 00:05:56,349
+fault is caused by the function collect
+
+00:05:53,919 --> 00:05:59,960
+which is from garbage collection and
+
+00:05:56,349 --> 00:06:02,389
+that makes us a little confused at the
+
+00:05:59,960 --> 00:06:05,300
+first time like why garbage collection
+
+00:06:02,389 --> 00:06:07,789
+will cause so many page faults it's
+
+00:06:05,300 --> 00:06:10,130
+supposed to do the graph traversal aunty
+
+00:06:07,789 --> 00:06:14,740
+allocates unreachable objects which
+
+00:06:10,130 --> 00:06:18,050
+sounds not related to the copy on right
+
+00:06:14,740 --> 00:06:20,930
+then we start to dig into the codes to
+
+00:06:18,050 --> 00:06:24,289
+see why garbage collection we found out
+
+00:06:20,930 --> 00:06:26,840
+this code snippet related to garbage
+
+00:06:24,289 --> 00:06:29,900
+collection reading the commenting the
+
+00:06:26,840 --> 00:06:32,479
+first line is probably enough the GC
+
+00:06:29,900 --> 00:06:36,169
+information is stored right before the
+
+00:06:32,479 --> 00:06:38,389
+object structure what does it mean from
+
+00:06:36,169 --> 00:06:40,550
+the perspective of the memory layout
+
+00:06:38,389 --> 00:06:43,430
+this structs
+
+00:06:40,550 --> 00:06:46,430
+will appear in front of every container
+
+00:06:43,430 --> 00:06:49,190
+object if we change the value of it on
+
+00:06:46,430 --> 00:06:52,009
+the shared memory page it needs to copy
+
+00:06:49,190 --> 00:06:53,930
+the memory and the problem is the
+
+00:06:52,009 --> 00:06:55,879
+garbage collection algorithm needs to
+
+00:06:53,930 --> 00:06:57,949
+modify the instructor of every tract
+
+00:06:55,879 --> 00:07:01,970
+objects in order to detect the
+
+00:06:57,949 --> 00:07:05,659
+unreachable so to visualize this process
+
+00:07:01,970 --> 00:07:09,759
+if we have a memory page and we have a
+
+00:07:05,659 --> 00:07:13,220
+single object like this and it has a red
+
+00:07:09,759 --> 00:07:16,009
+like hat in front of it and remember
+
+00:07:13,220 --> 00:07:17,690
+this page is shared across process when
+
+00:07:16,009 --> 00:07:21,139
+we do the correction the head will
+
+00:07:17,690 --> 00:07:24,229
+change and it will result in a private
+
+00:07:21,139 --> 00:07:26,780
+copy and all the process that do the
+
+00:07:24,229 --> 00:07:27,440
+garbage cracking will result in its own
+
+00:07:26,780 --> 00:07:29,960
+copy
+
+00:07:27,440 --> 00:07:32,120
+so we suspect because garbage collection
+
+00:07:29,960 --> 00:07:34,610
+needs to scan all the objects to do its
+
+00:07:32,120 --> 00:07:37,280
+job it would make a lot of memory copy
+
+00:07:34,610 --> 00:07:39,830
+like this one and that is the reason we
+
+00:07:37,280 --> 00:07:44,690
+see it's at the top of our page for
+
+00:07:39,830 --> 00:07:47,360
+profiling so to support our Serie we
+
+00:07:44,690 --> 00:07:49,699
+want to just disable it like we always
+
+00:07:47,360 --> 00:07:52,190
+do simple things first if we wonder
+
+00:07:49,699 --> 00:07:54,699
+whether we can disable it without
+
+00:07:52,190 --> 00:07:57,590
+totally breaking the memory management
+
+00:07:54,699 --> 00:08:00,529
+the answer is yes we still have
+
+00:07:57,590 --> 00:08:02,810
+reference counts like working like a
+
+00:08:00,529 --> 00:08:04,819
+garbage collection is only used to solve
+
+00:08:02,810 --> 00:08:07,130
+the cyclic reference problem which can
+
+00:08:04,819 --> 00:08:09,199
+be solved by the reference counts if you
+
+00:08:07,130 --> 00:08:11,389
+carefully write your program it's
+
+00:08:09,199 --> 00:08:16,099
+possible to avoid the cyclic reference
+
+00:08:11,389 --> 00:08:19,069
+like using quick reference properly and
+
+00:08:16,099 --> 00:08:22,159
+it's time to start our experiment but
+
+00:08:19,069 --> 00:08:24,139
+how to disable GC you may wonder why
+
+00:08:22,159 --> 00:08:27,229
+it's worth mention if you know there is
+
+00:08:24,139 --> 00:08:31,180
+a public API which is a disable and it
+
+00:08:27,229 --> 00:08:34,479
+should be straightforward ways also to
+
+00:08:31,180 --> 00:08:37,640
+here are the approaches which write
+
+00:08:34,479 --> 00:08:40,610
+first of course we try the public API to
+
+00:08:37,640 --> 00:08:44,180
+see disabled which turns out to have no
+
+00:08:40,610 --> 00:08:46,610
+effect at all and profiling indicates
+
+00:08:44,180 --> 00:08:48,829
+that you see is still working and it
+
+00:08:46,610 --> 00:08:50,750
+took us a while to figure out why and
+
+00:08:48,829 --> 00:08:53,029
+it's pretty funny it's just some syrup
+
+00:08:50,750 --> 00:08:54,050
+at the library will call GC enable
+
+00:08:53,029 --> 00:08:58,610
+explicitly
+
+00:08:54,050 --> 00:09:01,790
+after we disable it and we tried the
+
+00:08:58,610 --> 00:09:05,210
+second approach we set this ratio to
+
+00:09:01,790 --> 00:09:07,880
+zero it's also a public API and from the
+
+00:09:05,210 --> 00:09:12,260
+documentation settings ratio to zero is
+
+00:09:07,880 --> 00:09:14,780
+equivalent to disable the GC everything
+
+00:09:12,260 --> 00:09:17,120
+looks good this time we are excited to
+
+00:09:14,780 --> 00:09:20,240
+see the shared memory size done job a
+
+00:09:17,120 --> 00:09:23,660
+lot after first request I'll save a lot
+
+00:09:20,240 --> 00:09:26,090
+of memory and we spend this memory and a
+
+00:09:23,660 --> 00:09:29,480
+few more process to increase our stupid
+
+00:09:26,090 --> 00:09:33,230
+and we start to deploy the changes and
+
+00:09:29,480 --> 00:09:37,480
+then a cultures went down after we
+
+00:09:33,230 --> 00:09:41,870
+deploy this change due to out of memory
+
+00:09:37,480 --> 00:09:44,390
+the reason is we figure out Python will
+
+00:09:41,870 --> 00:09:47,000
+do a final garbage collection when exit
+
+00:09:44,390 --> 00:09:48,980
+process in the finalized function and
+
+00:09:47,000 --> 00:09:51,860
+the earth no matter what ratio do you
+
+00:09:48,980 --> 00:09:55,040
+set as we know that GC will cost
+
+00:09:51,860 --> 00:09:58,250
+copy-on-write and when we push new code
+
+00:09:55,040 --> 00:10:00,530
+we kill all the old process and which
+
+00:09:58,250 --> 00:10:04,400
+suddenly copies a tons of memory and
+
+00:10:00,530 --> 00:10:07,370
+just took down the server the hack which
+
+00:10:04,400 --> 00:10:10,460
+came out to solve this is to suicide
+
+00:10:07,370 --> 00:10:13,250
+immediately if the process is going to
+
+00:10:10,460 --> 00:10:17,030
+be gone then let it be and don't bother
+
+00:10:13,250 --> 00:10:19,550
+for all the cleanups but after we post
+
+00:10:17,030 --> 00:10:23,810
+our work a finalized function problem is
+
+00:10:19,550 --> 00:10:25,640
+fixed in 3.6 so you don't need to worry
+
+00:10:23,810 --> 00:10:28,160
+about that the finalized function will
+
+00:10:25,640 --> 00:10:31,700
+respect the GC settings now if your you
+
+00:10:28,160 --> 00:10:35,470
+are using 3.6 or higher version and 3
+
+00:10:31,700 --> 00:10:38,210
+set this ratio to zero and you are done
+
+00:10:35,470 --> 00:10:43,010
+LSA it's not very straightforward to
+
+00:10:38,210 --> 00:10:46,970
+disable GC but we are getting there and
+
+00:10:43,010 --> 00:10:49,310
+this is result we cut this is the time
+
+00:10:46,970 --> 00:10:52,250
+we deploy the change and when we start a
+
+00:10:49,310 --> 00:10:56,480
+server although it's only two lines of
+
+00:10:52,250 --> 00:10:58,160
+codes it makes a big difference the
+
+00:10:56,480 --> 00:11:03,050
+Purple Line is the memory utilization
+
+00:10:58,160 --> 00:11:05,960
+which jobs 15% the orange is a shared
+
+00:11:03,050 --> 00:11:07,270
+memory size increased 100 megabytes
+
+00:11:05,960 --> 00:11:10,390
+which means like
+
+00:11:07,270 --> 00:11:11,770
+each process saves 100 megabytes that's
+
+00:11:10,390 --> 00:11:16,360
+the reason why the memory utilization
+
+00:11:11,770 --> 00:11:19,810
+jobs 15% and the blue line is
+
+00:11:16,360 --> 00:11:21,010
+instruction per cycle is indication of
+
+00:11:19,810 --> 00:11:25,360
+the CPU throughputs
+
+00:11:21,010 --> 00:11:28,390
+also increased 10% and that means we
+
+00:11:25,360 --> 00:11:33,100
+expand our capacity by nearly 10% by
+
+00:11:28,390 --> 00:11:34,840
+this two lines of code that's all we
+
+00:11:33,100 --> 00:11:37,630
+have for the first episode
+
+00:11:34,840 --> 00:11:40,740
+wait disable it and we success we gets a
+
+00:11:37,630 --> 00:11:45,670
+big win but we still have the next one
+
+00:11:40,740 --> 00:11:47,860
+we enable the garbage collection or it
+
+00:11:45,670 --> 00:11:50,820
+got such a big win from disabling it's
+
+00:11:47,860 --> 00:11:54,760
+why we are bothering to enable it again
+
+00:11:50,820 --> 00:11:57,700
+so why disable GC is bad the job of
+
+00:11:54,760 --> 00:12:00,670
+garbage collection is to flee free the
+
+00:11:57,700 --> 00:12:02,650
+cyclic reference objects so without it
+
+00:12:00,670 --> 00:12:06,100
+this object would leak and the memory
+
+00:12:02,650 --> 00:12:08,050
+will grow why it's not a problem before
+
+00:12:06,100 --> 00:12:11,230
+as I said if you write your code
+
+00:12:08,050 --> 00:12:14,770
+carefully you can avoid cyclic reference
+
+00:12:11,230 --> 00:12:16,930
+in theory but in practice it's not that
+
+00:12:14,770 --> 00:12:19,240
+easy especially when the engineering
+
+00:12:16,930 --> 00:12:23,380
+teams grows very fast and the code base
+
+00:12:19,240 --> 00:12:28,690
+grows fast too so what's our situation
+
+00:12:23,380 --> 00:12:31,750
+after we disable it one year this is a
+
+00:12:28,690 --> 00:12:34,630
+graph plots memory growth of a single
+
+00:12:31,750 --> 00:12:38,350
+process the x-axis is the number of
+
+00:12:34,630 --> 00:12:41,770
+requests it serves the y-axis is the
+
+00:12:38,350 --> 00:12:45,010
+memory usage you can see it only takes
+
+00:12:41,770 --> 00:12:47,020
+3,000 requests to leak around 600
+
+00:12:45,010 --> 00:12:49,990
+megabytes of memory for a single process
+
+00:12:47,020 --> 00:12:51,820
+and more importantly leak trend is
+
+00:12:49,990 --> 00:12:56,230
+pretty linear after the first few
+
+00:12:51,820 --> 00:12:59,410
+requests and we're running multi
+
+00:12:56,230 --> 00:13:02,200
+processors for one server which means we
+
+00:12:59,410 --> 00:13:03,940
+cannot afford such big leak then we need
+
+00:13:02,200 --> 00:13:06,850
+to frequently queue the process and
+
+00:13:03,940 --> 00:13:09,730
+restart it and the frequent queue and
+
+00:13:06,850 --> 00:13:12,550
+restart has its own overheads which such
+
+00:13:09,730 --> 00:13:15,700
+wash out the big win we get from disable
+
+00:13:12,550 --> 00:13:18,730
+it and the leak is never going to stop
+
+00:13:15,700 --> 00:13:21,630
+but become worse unless you get garbage
+
+00:13:18,730 --> 00:13:21,630
+collection working again
+
+00:13:21,890 --> 00:13:27,030
+so this is the time we start using
+
+00:13:24,500 --> 00:13:29,460
+seriously can we make garbage clacking
+
+00:13:27,030 --> 00:13:32,090
+copy-on-write friendly instead instead
+
+00:13:29,460 --> 00:13:35,490
+of simply disable it
+
+00:13:32,090 --> 00:13:37,950
+since our theory is that making change
+
+00:13:35,490 --> 00:13:38,760
+to the hat the GC hat would cost
+
+00:13:37,950 --> 00:13:41,400
+copy-on-write
+
+00:13:38,760 --> 00:13:45,660
+the first thing we think about is to
+
+00:13:41,400 --> 00:13:48,540
+redesign it let's take a look again the
+
+00:13:45,660 --> 00:13:52,080
+problem is that the Hat struct in front
+
+00:13:48,540 --> 00:13:54,450
+of each container object and the value
+
+00:13:52,080 --> 00:13:58,050
+changed during clutchin which caught
+
+00:13:54,450 --> 00:14:01,050
+costs copy-on-write if we add a layer of
+
+00:13:58,050 --> 00:14:01,920
+indirection to it and keep this shocks
+
+00:14:01,050 --> 00:14:07,230
+on chance
+
+00:14:01,920 --> 00:14:08,970
+the problem should be solved but what
+
+00:14:07,230 --> 00:14:11,880
+what do I mean by adding a layer of
+
+00:14:08,970 --> 00:14:14,550
+indirection we just move this struct to
+
+00:14:11,880 --> 00:14:17,940
+a compact memory area and to the pointer
+
+00:14:14,550 --> 00:14:20,100
+instead then during the collection the
+
+00:14:17,940 --> 00:14:22,530
+pointer will remain the same while the
+
+00:14:20,100 --> 00:14:26,160
+actual value change happen in the
+
+00:14:22,530 --> 00:14:30,360
+dedicated memory area let's visualize
+
+00:14:26,160 --> 00:14:33,300
+this idea we move the hat to a different
+
+00:14:30,360 --> 00:14:36,780
+memory area and we'll leave the object
+
+00:14:33,300 --> 00:14:40,740
+alone then we use pointer to link them
+
+00:14:36,780 --> 00:14:43,350
+together after this collection will
+
+00:14:40,740 --> 00:14:45,450
+still cost copy-on-write but only on the
+
+00:14:43,350 --> 00:14:49,410
+pages containing the hats which are
+
+00:14:45,450 --> 00:14:51,210
+dense and small now we tried a very
+
+00:14:49,410 --> 00:14:54,660
+simple script to prove it's actually
+
+00:14:51,210 --> 00:14:57,720
+working this is just generating a lot of
+
+00:14:54,660 --> 00:14:59,370
+lists and strings and we fork and do a
+
+00:14:57,720 --> 00:15:03,300
+garbage collection and check the memory
+
+00:14:59,370 --> 00:15:06,990
+usage with less than 3.6 it actually
+
+00:15:03,300 --> 00:15:09,690
+cost 60 60 megabytes memory copying the
+
+00:15:06,990 --> 00:15:13,710
+child process while by applying our
+
+00:15:09,690 --> 00:15:18,380
+change only less than one megabyte so
+
+00:15:13,710 --> 00:15:21,900
+it's time to show the results sadly no
+
+00:15:18,380 --> 00:15:24,020
+let's look again at our implementation
+
+00:15:21,900 --> 00:15:27,050
+and see what's new in our changes and
+
+00:15:24,020 --> 00:15:31,530
+that's two additional pointers and
+
+00:15:27,050 --> 00:15:34,529
+pointers take space if we have 1 million
+
+00:15:31,530 --> 00:15:36,480
+objects and you have a lis process
+
+00:15:34,529 --> 00:15:38,970
+as resulting nearly 1 gigabytes of
+
+00:15:36,480 --> 00:15:41,399
+memory overhead which will hurt our snow
+
+00:15:38,970 --> 00:15:43,199
+boots also the extra layer of
+
+00:15:41,399 --> 00:15:47,220
+indirection will slow down the garbage
+
+00:15:43,199 --> 00:15:50,129
+collection so after some brainstorming
+
+00:15:47,220 --> 00:15:52,559
+we have a better idea of hiding scenes
+
+00:15:50,129 --> 00:15:55,319
+away from garbage character we call it
+
+00:15:52,559 --> 00:15:57,600
+freeze if we tell the garbage collector
+
+00:15:55,319 --> 00:16:01,019
+just don't try to crack my objects
+
+00:15:57,600 --> 00:16:03,990
+allocated before fork which is on the
+
+00:16:01,019 --> 00:16:07,019
+memory shared memory area let us stop
+
+00:16:03,990 --> 00:16:10,350
+touching this object and still do its
+
+00:16:07,019 --> 00:16:17,040
+job for those objects allocated after
+
+00:16:10,350 --> 00:16:19,649
+that but how can we do that here is a
+
+00:16:17,040 --> 00:16:22,350
+real code we use it's only five lines
+
+00:16:19,649 --> 00:16:25,649
+function let me explain what this fine
+
+00:16:22,350 --> 00:16:27,959
+lines do capture character maintains
+
+00:16:25,649 --> 00:16:31,139
+three generations which essentially is
+
+00:16:27,959 --> 00:16:34,589
+just three double linked lists as Jane
+
+00:16:31,139 --> 00:16:37,889
+had I and which is Traverse others
+
+00:16:34,589 --> 00:16:40,259
+linked list and merge all objects into
+
+00:16:37,889 --> 00:16:42,389
+our new lists the permanent generation
+
+00:16:40,259 --> 00:16:45,059
+which is invisible to the garbage
+
+00:16:42,389 --> 00:16:46,680
+character so we just cheat the garbage
+
+00:16:45,059 --> 00:16:50,100
+character and that's it
+
+00:16:46,680 --> 00:16:52,019
+after this from the perspective of the
+
+00:16:50,100 --> 00:16:55,290
+garbage collector there's just nothing
+
+00:16:52,019 --> 00:16:57,569
+collectable now well new object will
+
+00:16:55,290 --> 00:17:01,009
+still go into the list and collection
+
+00:16:57,569 --> 00:17:04,049
+will detect unreachable from there and
+
+00:17:01,009 --> 00:17:06,530
+in Python land the only thing you need
+
+00:17:04,049 --> 00:17:10,079
+is just call this API GC freeze
+
+00:17:06,530 --> 00:17:12,329
+we also option this patch to pass on 3.7
+
+00:17:10,079 --> 00:17:16,250
+so it's well it will be pretty easy to
+
+00:17:12,329 --> 00:17:16,250
+apply to your application in the future
+
+00:17:16,490 --> 00:17:22,919
+well we are experimenting the new API
+
+00:17:19,740 --> 00:17:26,030
+with you a full collection before freeze
+
+00:17:22,919 --> 00:17:28,770
+objects then way of the observe announce
+
+00:17:26,030 --> 00:17:31,740
+trivial amount of shared memory job
+
+00:17:28,770 --> 00:17:35,190
+compared to no GC that makes us
+
+00:17:31,740 --> 00:17:37,590
+disappointed and confused but while we
+
+00:17:35,190 --> 00:17:40,020
+investigate we figure out an even more
+
+00:17:37,590 --> 00:17:42,659
+interesting observation doing a full
+
+00:17:40,020 --> 00:17:45,090
+collection before fork and disable got
+
+00:17:42,659 --> 00:17:47,990
+garbage crackling afterwards will still
+
+00:17:45,090 --> 00:17:50,320
+decrease the shared memory since
+
+00:17:47,990 --> 00:17:53,809
+it can't cost copy-on-write before fork
+
+00:17:50,320 --> 00:17:59,120
+it sounds pretty weird and contradictory
+
+00:17:53,809 --> 00:18:02,600
+to our theory here's our explanation as
+
+00:17:59,120 --> 00:18:05,720
+the memory pool memory buoy is also
+
+00:18:02,600 --> 00:18:08,720
+broadly used techniques of the memory
+
+00:18:05,720 --> 00:18:11,390
+management which when you free object it
+
+00:18:08,720 --> 00:18:14,000
+won't return it to the operating system
+
+00:18:11,390 --> 00:18:18,620
+immediately instead it will try to reuse
+
+00:18:14,000 --> 00:18:21,050
+it for the next allocation garbage
+
+00:18:18,620 --> 00:18:23,090
+collection is not a direct cost since it
+
+00:18:21,050 --> 00:18:25,640
+happens before fork there's no shared
+
+00:18:23,090 --> 00:18:26,780
+memory at all but it it could be an
+
+00:18:25,640 --> 00:18:31,460
+indirect cost
+
+00:18:26,780 --> 00:18:34,190
+let me visualize the process once we do
+
+00:18:31,460 --> 00:18:39,590
+a collection it will free some
+
+00:18:34,190 --> 00:18:43,940
+unreachable objects and return it to the
+
+00:18:39,590 --> 00:18:45,890
+memory pool then after we fork the child
+
+00:18:43,940 --> 00:18:48,650
+process tries to allocate some new
+
+00:18:45,890 --> 00:18:51,350
+objects the memory pool will give it
+
+00:18:48,650 --> 00:18:54,230
+from this page which is in the shared
+
+00:18:51,350 --> 00:18:59,090
+area now and that caused the caption
+
+00:18:54,230 --> 00:19:02,150
+rights again so our final solution is to
+
+00:18:59,090 --> 00:19:04,460
+freeze objects before fork while we keep
+
+00:19:02,150 --> 00:19:07,760
+garbage cracks and disable ads and
+
+00:19:04,460 --> 00:19:11,330
+master process then we enable GC after
+
+00:19:07,760 --> 00:19:13,429
+we fork this works nicely for us the
+
+00:19:11,330 --> 00:19:15,559
+shared memory stays the same while we
+
+00:19:13,429 --> 00:19:20,450
+have garbage collection enables for all
+
+00:19:15,559 --> 00:19:25,070
+the child process now after we apply our
+
+00:19:20,450 --> 00:19:27,290
+chance here is a result this plot shows
+
+00:19:25,070 --> 00:19:32,600
+the memory gross comparison between the
+
+00:19:27,290 --> 00:19:35,510
+GC disabled and enabled the x-axis is
+
+00:19:32,600 --> 00:19:39,050
+still the number of requests reserved
+
+00:19:35,510 --> 00:19:41,450
+the y-axis is the memory usage and you
+
+00:19:39,050 --> 00:19:43,910
+can see there is kind of invisible upper
+
+00:19:41,450 --> 00:19:46,010
+bound line which is our memory limits
+
+00:19:43,910 --> 00:19:50,750
+for each process to prevent the server
+
+00:19:46,010 --> 00:19:52,730
+goes out of memory with GC enabled we
+
+00:19:50,750 --> 00:19:55,309
+can see we bent the memory gross by a
+
+00:19:52,730 --> 00:19:58,160
+lot which makes the process lives longer
+
+00:19:55,309 --> 00:20:01,360
+and serves more requests it immediately
+
+00:19:58,160 --> 00:20:03,970
+gives us represent efficiency win
+
+00:20:01,360 --> 00:20:06,610
+but more importantly having GC enabled
+
+00:20:03,970 --> 00:20:09,040
+can limit the leaks and make our code
+
+00:20:06,610 --> 00:20:11,140
+base more scalable you don't need to
+
+00:20:09,040 --> 00:20:15,420
+worry about the cyclic reference during
+
+00:20:11,140 --> 00:20:18,850
+product iterations and you can move fast
+
+00:20:15,420 --> 00:20:21,460
+to wrap up with disable garbage
+
+00:20:18,850 --> 00:20:24,100
+collection to save memory and improve
+
+00:20:21,460 --> 00:20:28,360
+CPU throughput by avoiding unnecessary
+
+00:20:24,100 --> 00:20:31,030
+copy-on-write and will enable it to
+
+00:20:28,360 --> 00:20:34,690
+prevent memory leak by adding a new API
+
+00:20:31,030 --> 00:20:36,580
+freeze also we don't do to see before
+
+00:20:34,690 --> 00:20:39,630
+fork to avoid the copy-on-write
+
+00:20:36,580 --> 00:20:42,790
+by the reallocation of the memory pool
+
+00:20:39,630 --> 00:20:47,130
+and you can also read the story from our
+
+00:20:42,790 --> 00:20:47,130
+block that's all I have thank you
+
+00:20:51,620 --> 00:20:56,460
+Thank You Z we now have about seven
+
+00:20:55,230 --> 00:20:58,650
+minutes for questions
+
+00:20:56,460 --> 00:21:01,170
+please remember to phrase all questions
+
+00:20:58,650 --> 00:21:07,550
+in the form of a question and limit your
+
+00:21:01,170 --> 00:21:07,550
+questions to just one there's two mics
+
+00:21:18,440 --> 00:21:23,180
+it's a really cool talk we definitely
+
+00:21:21,360 --> 00:21:25,770
+followed the original post and and
+
+00:21:23,180 --> 00:21:29,790
+updated fries as well so I'm curious
+
+00:21:25,770 --> 00:21:36,840
+what would you do if you're still on
+
+00:21:29,790 --> 00:21:41,550
+Python 2 7 you can make the fries API
+
+00:21:36,840 --> 00:21:44,190
+yourself the CAPTCHA character is not
+
+00:21:41,550 --> 00:21:48,740
+changed for Python 3 I think so you can
+
+00:21:44,190 --> 00:21:48,740
+make the API yourself and it will work
+
+00:21:56,500 --> 00:22:02,080
+I noticed at the end that the memory
+
+00:22:00,130 --> 00:22:05,080
+usage was still going up even if a bit
+
+00:22:02,080 --> 00:22:08,080
+more slowly can you comment on that yes
+
+00:22:05,080 --> 00:22:10,180
+and we suspect it's due to our code base
+
+00:22:08,080 --> 00:22:12,490
+have some like global dictionary which
+
+00:22:10,180 --> 00:22:14,800
+deuce the cache and never evicted and
+
+00:22:12,490 --> 00:22:18,090
+that's a code quality problem now it's a
+
+00:22:14,800 --> 00:22:18,090
+garbage collection power
+
+00:22:20,010 --> 00:22:26,910
+what was your experience pushing the
+
+00:22:23,350 --> 00:22:31,420
+changes you made to the three Severn
+
+00:22:26,910 --> 00:22:37,750
+repo that's pretty nice it's when smooth
+
+00:22:31,420 --> 00:22:39,430
+and yeah do you have any recommended
+
+00:22:37,750 --> 00:22:41,560
+tools for investigating memory leaks
+
+00:22:39,430 --> 00:22:43,570
+like how confident are you that the
+
+00:22:41,560 --> 00:22:44,710
+current memory leak is because of
+
+00:22:43,570 --> 00:22:47,950
+application code and not the garbage
+
+00:22:44,710 --> 00:22:49,870
+collection I think there is a beauty
+
+00:22:47,950 --> 00:22:52,360
+graph which is open source library that
+
+00:22:49,870 --> 00:22:54,510
+you can tell like which object is still
+
+00:22:52,360 --> 00:23:00,460
+alive and like what is a reference graph
+
+00:22:54,510 --> 00:23:01,840
+yeah it's the tool that you used for the
+
+00:23:00,460 --> 00:23:05,010
+analysis in the beginning what was that
+
+00:23:01,840 --> 00:23:08,790
+a screenshot of oh that's just perfect
+
+00:23:05,010 --> 00:23:08,790
+for the page for the event
+
+00:23:19,880 --> 00:23:27,030
+any more questions we have a few more
+
+00:23:22,860 --> 00:23:32,280
+minutes all right with not let's all
+
+00:23:27,030 --> 00:23:35,400
+give our speaker a big round of oh sorry
+
+00:23:32,280 --> 00:23:38,160
+less special I'm sorry okay well um are
+
+00:23:35,400 --> 00:23:40,170
+you mentioned you whiskey you mention
+
+00:23:38,160 --> 00:23:43,400
+you are disabling in before fork and
+
+00:23:40,170 --> 00:23:45,690
+you're really after pork yes how do you
+
+00:23:43,400 --> 00:23:49,830
+how do you detect a before and after
+
+00:23:45,690 --> 00:23:53,370
+fork events so we do the warm-up in the
+
+00:23:49,830 --> 00:23:55,140
+USG and there is you is she like API
+
+00:23:53,370 --> 00:23:57,510
+that allows you to execute Python
+
+00:23:55,140 --> 00:23:59,910
+function before fork and there is API
+
+00:23:57,510 --> 00:24:03,050
+that post fork which is decorator we
+
+00:23:59,910 --> 00:24:03,050
+can't get you can use that
+
+00:24:04,830 --> 00:24:13,180
+
+YouTube URL: https://www.youtube.com/watch?v=WVnACT48CkE
+
+

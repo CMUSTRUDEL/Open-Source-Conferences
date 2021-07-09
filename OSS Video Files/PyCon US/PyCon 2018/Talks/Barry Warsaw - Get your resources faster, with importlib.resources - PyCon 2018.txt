@@ -1,0 +1,1899 @@
+Title: Barry Warsaw - Get your resources faster, with importlib.resources - PyCon 2018
+Publication date: 2018-08-06
+Playlist: Talks
+Description: 
+	Speaker: Barry Warsaw
+
+Resources are files that live within Python packages.  Think test data files, certificates, templates, translation catalogs, and other static files you want to access from Python code.  Sometimes you put these static files in a package directory within your source tree, and then locate them by importing the package and using its `__file__` attribute.  But this doesn't work for zip files!
+
+You could use `pkg_resources`, an API that comes with `setuptools` and hides the differences between files on the file system and files in a zip file.  This is great because you don't have to use `__file__`, but it's not so great because `pkg_resources` is a big library and can have potentially severe performance problems, even at import time.
+
+Welcome to `importlib.resources`, a new module and API in Python 3.7 that is also available as a standalone library for older versions of Python.  `importlib.resources` is build on top of Python's existing import system, so it is very efficient.  It also defines an abstract base class which loaders can implement to provide their own resource access.  Python's built-in zipimporter uses this to provide efficient access to resources within a zip file.  Third party import hooks can do the same, so resources can come from anything that is importable by Python.
+
+This talk will step through the motivations behind `importlib.resources`, the library's usage, its interfaces, and the hooks made available to third party packages.  It will also talk about the minor differences between the standalone version and the version in Python 3.7's standard library.  Hopefully audience members will come away with compelling reasons to port their code to this much more efficient library.
+
+Slides can be found at: https://speakerdeck.com/pycon2018 and https://github.com/PyCon/2018-slides
+Captions: 
+	00:00:05,299 --> 00:00:07,529
+all right we're gonna go ahead and get
+
+00:00:07,170 --> 00:00:09,450
+started
+
+00:00:07,529 --> 00:00:22,289
+this is Barry Warsaw let's give him a
+
+00:00:09,450 --> 00:00:22,650
+round of applause microphone hey check
+
+00:00:22,289 --> 00:00:29,939
+one two
+
+00:00:22,650 --> 00:00:32,460
+is it working okay great awesome oh okay
+
+00:00:29,939 --> 00:00:35,940
+so yeah Barry Warsaw I work at LinkedIn
+
+00:00:32,460 --> 00:00:39,140
+on the Python foundation team talk about
+
+00:00:35,940 --> 00:00:41,489
+how we use Python at LinkedIn
+
+00:00:39,140 --> 00:00:45,420
+so I'm going to talk today about this
+
+00:00:41,489 --> 00:00:46,770
+new library that's in Python 37 this is
+
+00:00:45,420 --> 00:00:48,420
+kind of my catchphrase it's not
+
+00:00:46,770 --> 00:00:50,460
+completely accurate but I couldn't come
+
+00:00:48,420 --> 00:00:54,989
+up with anything better so it's what you
+
+00:00:50,460 --> 00:00:57,149
+get so here's the problem right you have
+
+00:00:54,989 --> 00:00:59,879
+you have your code and you have some
+
+00:00:57,149 --> 00:01:01,739
+static files in the code and you want to
+
+00:00:59,879 --> 00:01:04,350
+be able to read them in at runtime
+
+00:01:01,739 --> 00:01:08,880
+question is how hard can it really be to
+
+00:01:04,350 --> 00:01:11,520
+do that right yeah that's easy so just a
+
+00:01:08,880 --> 00:01:13,950
+couple of examples I'm sure you can come
+
+00:01:11,520 --> 00:01:16,380
+up with your own you might have
+
+00:01:13,950 --> 00:01:18,270
+templates a big wall of text that has
+
+00:01:16,380 --> 00:01:19,680
+some placeholders and at runtime you'd
+
+00:01:18,270 --> 00:01:21,750
+like to be able to read that template
+
+00:01:19,680 --> 00:01:25,759
+fill in those placeholders and use that
+
+00:01:21,750 --> 00:01:30,840
+to generate an email or other files
+
+00:01:25,759 --> 00:01:32,159
+sample data for tests either a data that
+
+00:01:30,840 --> 00:01:34,740
+you're reading in and using in your
+
+00:01:32,159 --> 00:01:37,710
+tests or comparing against the results
+
+00:01:34,740 --> 00:01:41,130
+of your tests you may have for example
+
+00:01:37,710 --> 00:01:44,399
+some certificates to do to connect to a
+
+00:01:41,130 --> 00:01:46,619
+self-signed you self-signed certificates
+
+00:01:44,399 --> 00:01:48,619
+to connect to an HTTP server or
+
+00:01:46,619 --> 00:01:51,630
+something like that
+
+00:01:48,619 --> 00:01:53,549
+internationalization there's these get
+
+00:01:51,630 --> 00:01:56,070
+text translation catalogs where you are
+
+00:01:53,549 --> 00:01:58,290
+translating from the English source to
+
+00:01:56,070 --> 00:02:00,420
+Italian or Spanish or whatever it might
+
+00:01:58,290 --> 00:02:02,340
+be so these are all types of static
+
+00:02:00,420 --> 00:02:04,259
+files that you want to ship with your
+
+00:02:02,340 --> 00:02:08,550
+library or your application and be able
+
+00:02:04,259 --> 00:02:10,770
+to read those at runtime so here's a for
+
+00:02:08,550 --> 00:02:12,330
+example what a file system the very
+
+00:02:10,770 --> 00:02:13,319
+simple file system layout might look
+
+00:02:12,330 --> 00:02:15,090
+like
+
+00:02:13,319 --> 00:02:17,849
+you've got your package called the
+
+00:02:15,090 --> 00:02:19,560
+package and it's a package because it's
+
+00:02:17,849 --> 00:02:21,390
+got a done during it top I file it there
+
+00:02:19,560 --> 00:02:24,540
+and it might have a couple of other
+
+00:02:21,390 --> 00:02:27,599
+source code files in there and another
+
+00:02:24,540 --> 00:02:29,670
+directory and inside that directory
+
+00:02:27,599 --> 00:02:33,150
+there's some sample data that you want
+
+00:02:29,670 --> 00:02:36,329
+to read at runtime so if we look at sort
+
+00:02:33,150 --> 00:02:40,950
+of a naive approach to this and you see
+
+00:02:36,329 --> 00:02:44,010
+this in a lot of code the you import the
+
+00:02:40,950 --> 00:02:47,190
+package and then you use the packages
+
+00:02:44,010 --> 00:02:49,230
+dunder file attribute which actually
+
+00:02:47,190 --> 00:02:52,049
+points to the dunder and it dub hi file
+
+00:02:49,230 --> 00:02:53,400
+right so you want to get to the parent
+
+00:02:52,049 --> 00:02:55,049
+so you can get to the directory and then
+
+00:02:53,400 --> 00:02:58,709
+you want to traverse down to wherever
+
+00:02:55,049 --> 00:03:01,340
+the sample data is you open it in binary
+
+00:02:58,709 --> 00:03:04,190
+mode you read the bytes out of it and
+
+00:03:01,340 --> 00:03:06,930
+you've got your your sample data so
+
+00:03:04,190 --> 00:03:11,239
+we're done right so I think I've got
+
+00:03:06,930 --> 00:03:11,239
+like probably 20 minutes for questions
+
+00:03:11,420 --> 00:03:17,099
+well we're not obviously not quite done
+
+00:03:14,780 --> 00:03:19,199
+because things get complicated when you
+
+00:03:17,099 --> 00:03:21,030
+take that those files and you stick them
+
+00:03:19,199 --> 00:03:25,230
+in a zip file or another type of an
+
+00:03:21,030 --> 00:03:28,709
+archive and why is that a problem
+
+00:03:25,230 --> 00:03:31,470
+well it's a problem because of this
+
+00:03:28,709 --> 00:03:33,540
+little red bit of code dunder file
+
+00:03:31,470 --> 00:03:37,799
+doesn't actually point to a real file
+
+00:03:33,540 --> 00:03:42,650
+system path in this case so when you use
+
+00:03:37,799 --> 00:03:42,650
+this naive approach you get an exception
+
+00:03:44,090 --> 00:03:51,329
+so now along comes a well known maybe
+
+00:03:49,349 --> 00:03:54,840
+infamous package called package
+
+00:03:51,329 --> 00:03:57,480
+resources and package resources has this
+
+00:03:54,840 --> 00:04:02,489
+thing called the basic resource access
+
+00:03:57,480 --> 00:04:05,250
+API and we can use this instead of
+
+00:04:02,489 --> 00:04:08,609
+accessing the dunder file directly to
+
+00:04:05,250 --> 00:04:10,290
+read the sample data so we import this
+
+00:04:08,609 --> 00:04:12,629
+function it has this function called
+
+00:04:10,290 --> 00:04:14,370
+resource string it's a little weird
+
+00:04:12,629 --> 00:04:17,310
+because I'm Python 3 actually returns
+
+00:04:14,370 --> 00:04:20,099
+bytes so ok so we'll tell the truth
+
+00:04:17,310 --> 00:04:22,019
+we'll import it as resource bytes we
+
+00:04:20,099 --> 00:04:23,820
+pass in the name of the package that has
+
+00:04:22,019 --> 00:04:26,280
+that our sample data and then sort of a
+
+00:04:23,820 --> 00:04:27,030
+path from that directory down to the
+
+00:04:26,280 --> 00:04:29,340
+sample
+
+00:04:27,030 --> 00:04:32,550
+we call the function and it returns us
+
+00:04:29,340 --> 00:04:35,100
+the bytes so the cool thing is that
+
+00:04:32,550 --> 00:04:39,150
+works for both the filesystem pads and
+
+00:04:35,100 --> 00:04:42,570
+for zip file paths so now we're done we
+
+00:04:39,150 --> 00:04:46,860
+have 19 minutes for 4 questions of
+
+00:04:42,570 --> 00:04:48,060
+course there's still a problem so what
+
+00:04:46,860 --> 00:04:49,530
+are some of the problems with package
+
+00:04:48,060 --> 00:04:53,220
+resource now package resource has been
+
+00:04:49,530 --> 00:04:55,530
+around for a long time comes sort of in
+
+00:04:53,220 --> 00:04:58,890
+setup tools and you see it in tons of
+
+00:04:55,530 --> 00:05:00,810
+things the biggest problem with package
+
+00:04:58,890 --> 00:05:03,840
+resources is that it has import time
+
+00:05:00,810 --> 00:05:06,780
+side-effects so even if you're never
+
+00:05:03,840 --> 00:05:09,210
+going to access your sample data you're
+
+00:05:06,780 --> 00:05:11,370
+paying the cost of it because as soon as
+
+00:05:09,210 --> 00:05:13,860
+you import package resources you pay
+
+00:05:11,370 --> 00:05:15,660
+this penalty package resources one of
+
+00:05:13,860 --> 00:05:17,460
+the things that does is it crawls over
+
+00:05:15,660 --> 00:05:19,560
+every entry in your sis
+
+00:05:17,460 --> 00:05:21,870
+it builds up these working sets and does
+
+00:05:19,560 --> 00:05:23,670
+all this sort of runtime work right so
+
+00:05:21,870 --> 00:05:26,130
+even if you don't need it you're paying
+
+00:05:23,670 --> 00:05:27,870
+for that and if you have a lot of things
+
+00:05:26,130 --> 00:05:30,120
+on your sis path it can be very very
+
+00:05:27,870 --> 00:05:34,500
+slow as we had at LinkedIn have
+
+00:05:30,120 --> 00:05:39,360
+discovered package resources is kind of
+
+00:05:34,500 --> 00:05:40,770
+this weird amalgam of functionality it
+
+00:05:39,360 --> 00:05:43,650
+does a lot of things so it has the
+
+00:05:40,770 --> 00:05:47,390
+resource access API it also kind of
+
+00:05:43,650 --> 00:05:50,040
+supports namespace packages Pripet 420
+
+00:05:47,390 --> 00:05:51,690
+it handles entry points and just like
+
+00:05:50,040 --> 00:05:55,560
+all this weird stuff that is kind of
+
+00:05:51,690 --> 00:05:57,570
+thrown in there which combined with the
+
+00:05:55,560 --> 00:05:59,070
+backwards compatibility guarantees and
+
+00:05:57,570 --> 00:06:01,110
+sort of the complication of package
+
+00:05:59,070 --> 00:06:04,380
+resources makes it very difficult to fix
+
+00:06:01,110 --> 00:06:08,220
+some of these runtime import time side
+
+00:06:04,380 --> 00:06:10,350
+effects as I mentioned it has some funky
+
+00:06:08,220 --> 00:06:14,240
+api's right resource string is really
+
+00:06:10,350 --> 00:06:16,950
+resource bytes it also has this API to
+
+00:06:14,240 --> 00:06:19,380
+guarantee that it will return you a path
+
+00:06:16,950 --> 00:06:22,080
+on the physical file system so if it's
+
+00:06:19,380 --> 00:06:24,210
+in a zip file it'll take that data the
+
+00:06:22,080 --> 00:06:26,280
+the contents of that file stick it in a
+
+00:06:24,210 --> 00:06:28,920
+temporary file and return you the path
+
+00:06:26,280 --> 00:06:30,960
+to the temporary file but the problem is
+
+00:06:28,920 --> 00:06:32,310
+packaged resources predates context
+
+00:06:30,960 --> 00:06:35,220
+managers and with statements so you
+
+00:06:32,310 --> 00:06:37,180
+really have no idea when when or even if
+
+00:06:35,220 --> 00:06:41,500
+that temporary file is ever going to get
+
+00:06:37,180 --> 00:06:44,410
+so it's got some weird api's it's kind
+
+00:06:41,500 --> 00:06:46,690
+of everywhere so you sort of have to pay
+
+00:06:44,410 --> 00:06:48,670
+the penalty even if you're just you know
+
+00:06:46,690 --> 00:06:52,590
+hat you have some dependency that is
+
+00:06:48,670 --> 00:06:54,970
+using package resources we'd like to
+
+00:06:52,590 --> 00:06:57,640
+kill off package resources because of
+
+00:06:54,970 --> 00:06:59,500
+this and it still supports Python 2
+
+00:06:57,640 --> 00:07:06,010
+which i think is the number one bug with
+
+00:06:59,500 --> 00:07:07,960
+you all agree right yeah awesome cool so
+
+00:07:06,010 --> 00:07:10,540
+if you get nothing else out of this talk
+
+00:07:07,960 --> 00:07:12,370
+I hope you at least start to realize
+
+00:07:10,540 --> 00:07:14,440
+that you'd like to replace your uses of
+
+00:07:12,370 --> 00:07:19,300
+the dunder file directly or package
+
+00:07:14,440 --> 00:07:21,970
+resources with our new thing and we can
+
+00:07:19,300 --> 00:07:24,700
+do better so we can do better because we
+
+00:07:21,970 --> 00:07:28,840
+have pythons awesome optimized import
+
+00:07:24,700 --> 00:07:31,090
+system to help us and so we've built
+
+00:07:28,840 --> 00:07:33,100
+this new library on top of pythons
+
+00:07:31,090 --> 00:07:36,670
+import system and it's highly optimized
+
+00:07:33,100 --> 00:07:38,080
+for finding modules and packages and so
+
+00:07:36,670 --> 00:07:42,130
+we're gonna we're gonna build on top of
+
+00:07:38,080 --> 00:07:45,100
+that so import lib resources this is how
+
+00:07:42,130 --> 00:07:48,070
+the same call would look in import lib
+
+00:07:45,100 --> 00:07:50,470
+resources so there's a function called
+
+00:07:48,070 --> 00:07:53,380
+read binary it does exactly that you
+
+00:07:50,470 --> 00:07:55,380
+give it the name of the package that has
+
+00:07:53,380 --> 00:07:58,900
+your sample data and the name of the
+
+00:07:55,380 --> 00:08:02,740
+resource inside that package and read
+
+00:07:58,900 --> 00:08:04,030
+binary returns you the bytes the kind of
+
+00:08:02,740 --> 00:08:07,060
+the other way you can do it is you can
+
+00:08:04,030 --> 00:08:08,830
+actually import the package and you can
+
+00:08:07,060 --> 00:08:10,420
+pass that as the first argument and
+
+00:08:08,830 --> 00:08:13,750
+you'll see this is a very common pattern
+
+00:08:10,420 --> 00:08:15,460
+we either accept the module object or
+
+00:08:13,750 --> 00:08:18,360
+the package object as the first argument
+
+00:08:15,460 --> 00:08:21,040
+or the string naming the package and
+
+00:08:18,360 --> 00:08:23,080
+obviously because we're using pythons
+
+00:08:21,040 --> 00:08:25,390
+import system if it hasn't been imported
+
+00:08:23,080 --> 00:08:28,870
+yet import lib resources will import the
+
+00:08:25,390 --> 00:08:30,430
+package now if you've kind of been
+
+00:08:28,870 --> 00:08:35,050
+paying attention you'll notice there's
+
+00:08:30,430 --> 00:08:38,650
+an important difference here in the
+
+00:08:35,050 --> 00:08:40,930
+original example if you notice the data
+
+00:08:38,650 --> 00:08:42,520
+directory is not a Python package
+
+00:08:40,930 --> 00:08:44,980
+because it doesn't have a dunder init
+
+00:08:42,520 --> 00:08:47,920
+dot pi file in it and that's one
+
+00:08:44,980 --> 00:08:49,350
+explicit difference between package
+
+00:08:47,920 --> 00:08:52,800
+resources and
+
+00:08:49,350 --> 00:08:54,810
+import lib resources we require that the
+
+00:08:52,800 --> 00:08:58,170
+resources live inside a Python package
+
+00:08:54,810 --> 00:09:00,330
+so it's a pretty easy fix you just stick
+
+00:08:58,170 --> 00:09:05,970
+a empty dunder init dump I file in there
+
+00:09:00,330 --> 00:09:08,070
+and it should all work so I'm gonna take
+
+00:09:05,970 --> 00:09:10,590
+a quick detour and talk about exactly
+
+00:09:08,070 --> 00:09:14,850
+what a resources and what a package is
+
+00:09:10,590 --> 00:09:17,400
+in our terminology here so a package is
+
+00:09:14,850 --> 00:09:21,000
+any importa Balma jewel with a dunder
+
+00:09:17,400 --> 00:09:22,470
+path attribute so how many people know
+
+00:09:21,000 --> 00:09:23,940
+what the difference between a module and
+
+00:09:22,470 --> 00:09:29,150
+a package is in Python
+
+00:09:23,940 --> 00:09:31,290
+well of course red dozen packages
+
+00:09:29,150 --> 00:09:32,460
+packages have a dunder path attribute
+
+00:09:31,290 --> 00:09:34,980
+that's really the only difference
+
+00:09:32,460 --> 00:09:39,360
+between a module and a package as far as
+
+00:09:34,980 --> 00:09:41,700
+the object goes so one way to think of
+
+00:09:39,360 --> 00:09:43,260
+it although you shouldn't get caught up
+
+00:09:41,700 --> 00:09:45,240
+in this this is sort of a mental model
+
+00:09:43,260 --> 00:09:47,070
+of it a package is essentially a
+
+00:09:45,240 --> 00:09:49,470
+directory containing a dunder init dot
+
+00:09:47,070 --> 00:09:50,790
+PI file now of course it doesn't have to
+
+00:09:49,470 --> 00:09:52,170
+be a physical directory on the
+
+00:09:50,790 --> 00:09:54,840
+filesystem that's kind of the whole
+
+00:09:52,170 --> 00:09:57,540
+point of this but your mental model can
+
+00:09:54,840 --> 00:09:59,820
+sort of think about it like that so
+
+00:09:57,540 --> 00:10:01,320
+what's a resource that's just any
+
+00:09:59,820 --> 00:10:06,090
+readable object contained inside a
+
+00:10:01,320 --> 00:10:07,680
+package such as a file right but again
+
+00:10:06,090 --> 00:10:09,540
+it doesn't have to be a physical file
+
+00:10:07,680 --> 00:10:11,970
+you can think of it this way as files
+
+00:10:09,540 --> 00:10:13,950
+inside of directories but they can live
+
+00:10:11,970 --> 00:10:16,860
+sort of anywhere that pythons import
+
+00:10:13,950 --> 00:10:19,140
+system can reach an important
+
+00:10:16,860 --> 00:10:22,260
+distinction here is that sub directories
+
+00:10:19,140 --> 00:10:25,260
+and subpages are not resources that's a
+
+00:10:22,260 --> 00:10:28,080
+deliberate choice also name space
+
+00:10:25,260 --> 00:10:30,840
+package is sort of the pet 420 namespace
+
+00:10:28,080 --> 00:10:32,790
+packages cannot contain resources they
+
+00:10:30,840 --> 00:10:34,680
+don't actually have a physical location
+
+00:10:32,790 --> 00:10:39,480
+anywhere so there's no place to put
+
+00:10:34,680 --> 00:10:42,630
+things so that's the terminology so if
+
+00:10:39,480 --> 00:10:45,180
+we look at our example again we can see
+
+00:10:42,630 --> 00:10:47,160
+that the package in this case has three
+
+00:10:45,180 --> 00:10:52,200
+resources it has three dunder init
+
+00:10:47,160 --> 00:10:55,350
+delphi files and the sub package the
+
+00:10:52,200 --> 00:10:58,110
+package data has two resources a dunder
+
+00:10:55,350 --> 00:11:01,670
+knit da pie and the sample data right so
+
+00:10:58,110 --> 00:11:01,670
+it all makes sense it's all pretty clear
+
+00:11:02,230 --> 00:11:07,090
+so now that we sort of understand how
+
+00:11:04,480 --> 00:11:09,670
+this all works and we've seen a little
+
+00:11:07,090 --> 00:11:12,370
+example of it we're gonna now look at
+
+00:11:09,670 --> 00:11:14,530
+the API that you have available to you
+
+00:11:12,370 --> 00:11:20,100
+we love type annotations because it's
+
+00:11:14,530 --> 00:11:23,350
+Python 3 so the API defines two types
+
+00:11:20,100 --> 00:11:25,060
+obviously package and resource so you
+
+00:11:23,350 --> 00:11:27,700
+can see here where the union of the
+
+00:11:25,060 --> 00:11:29,770
+stirrer or the module type gives you
+
+00:11:27,700 --> 00:11:32,110
+that API where the first argument can
+
+00:11:29,770 --> 00:11:34,930
+either be the the name of the package or
+
+00:11:32,110 --> 00:11:38,140
+can be the actual module object that
+
+00:11:34,930 --> 00:11:40,810
+you've imported and similarly with a
+
+00:11:38,140 --> 00:11:43,690
+resource anyplace that accepts a
+
+00:11:40,810 --> 00:11:48,060
+resource type accepts a string or sort
+
+00:11:43,690 --> 00:11:48,060
+of this new Python 3os path like thing
+
+00:11:48,720 --> 00:11:54,820
+ok so now we want to we're gonna dive in
+
+00:11:53,080 --> 00:11:57,910
+a little bit into the API and look at
+
+00:11:54,820 --> 00:11:59,800
+look at the look at the details of that
+
+00:11:57,910 --> 00:12:01,150
+so one of the first things you want to
+
+00:11:59,800 --> 00:12:02,530
+do is just get the contents of a
+
+00:12:01,150 --> 00:12:03,910
+resource you've got your sample data
+
+00:12:02,530 --> 00:12:06,430
+file over there and you want to just
+
+00:12:03,910 --> 00:12:08,860
+read everything out of it
+
+00:12:06,430 --> 00:12:11,740
+the first way you've already seen is
+
+00:12:08,860 --> 00:12:13,840
+read binary it takes a package and a
+
+00:12:11,740 --> 00:12:15,070
+resource and it returns you the bytes so
+
+00:12:13,840 --> 00:12:18,300
+it reads everything out of it and
+
+00:12:15,070 --> 00:12:20,380
+returns you in the entire contents
+
+00:12:18,300 --> 00:12:22,740
+important distinction here and this was
+
+00:12:20,380 --> 00:12:26,260
+also a deliberate API choice is that
+
+00:12:22,740 --> 00:12:29,770
+that is only four bytes and there's a
+
+00:12:26,260 --> 00:12:32,050
+separate API for text again package and
+
+00:12:29,770 --> 00:12:35,050
+resource of the first two arguments but
+
+00:12:32,050 --> 00:12:38,410
+you see sort of the the expected
+
+00:12:35,050 --> 00:12:41,310
+encoding obviously utf-8 by default and
+
+00:12:38,410 --> 00:12:45,490
+what what you should do with errors and
+
+00:12:41,310 --> 00:12:47,290
+that returns a stir so in our API we
+
+00:12:45,490 --> 00:12:49,390
+have a distinction between binary and
+
+00:12:47,290 --> 00:12:52,240
+text because we didn't want to do
+
+00:12:49,390 --> 00:12:53,950
+anything weird like oh if the encoding
+
+00:12:52,240 --> 00:12:55,870
+is none we're gonna return the bytes
+
+00:12:53,950 --> 00:13:01,420
+like that that we want to be explicit
+
+00:12:55,870 --> 00:13:02,500
+about this so the second kind of thing
+
+00:13:01,420 --> 00:13:04,480
+that you might want to do is say I don't
+
+00:13:02,500 --> 00:13:07,330
+want to read all the contents of it I
+
+00:13:04,480 --> 00:13:09,460
+want to get sort of a file handle that
+
+00:13:07,330 --> 00:13:12,010
+file handle like thing that I can stream
+
+00:13:09,460 --> 00:13:15,040
+the bytes out of or the text out of and
+
+00:13:12,010 --> 00:13:17,050
+that's the second set of API
+
+00:13:15,040 --> 00:13:20,740
+looks a lot like it's gonna look a lot
+
+00:13:17,050 --> 00:13:23,790
+like the built-in open open binary this
+
+00:13:20,740 --> 00:13:27,130
+is sort of the type annotation way of
+
+00:13:23,790 --> 00:13:28,750
+describing what gets returned but you
+
+00:13:27,130 --> 00:13:32,050
+pass in a package and a resource and it
+
+00:13:28,750 --> 00:13:34,810
+returns you a object that you can use in
+
+00:13:32,050 --> 00:13:37,630
+a with statement right so just like
+
+00:13:34,810 --> 00:13:40,450
+built-in open you use with open binary
+
+00:13:37,630 --> 00:13:41,740
+you read as many bytes out of it as you
+
+00:13:40,450 --> 00:13:43,720
+want and then as soon as the width
+
+00:13:41,740 --> 00:13:47,130
+statement or the context manager exits
+
+00:13:43,720 --> 00:13:50,200
+it closes that that file handler
+
+00:13:47,130 --> 00:13:54,880
+obviously what's next Open Text same
+
+00:13:50,200 --> 00:13:59,440
+kind of thing this returns text all
+
+00:13:54,880 --> 00:14:01,120
+makes sense right now as I mentioned
+
+00:13:59,440 --> 00:14:06,130
+package resources provides this really
+
+00:14:01,120 --> 00:14:08,320
+useful API for guaranteeing that it's
+
+00:14:06,130 --> 00:14:10,840
+going to return you the path to a
+
+00:14:08,320 --> 00:14:13,120
+concrete to a file on the concrete
+
+00:14:10,840 --> 00:14:14,710
+filesystem so if you're in a zip file
+
+00:14:13,120 --> 00:14:17,860
+let's say your resources in a zip file
+
+00:14:14,710 --> 00:14:20,650
+and you really need the a filesystem
+
+00:14:17,860 --> 00:14:22,780
+path you're going to use this API and
+
+00:14:20,650 --> 00:14:26,110
+you may you may find this for for
+
+00:14:22,780 --> 00:14:30,190
+example getting a dot Esso file where DL
+
+00:14:26,110 --> 00:14:31,630
+open will only import from a physical
+
+00:14:30,190 --> 00:14:34,000
+file system path it can't it can't
+
+00:14:31,630 --> 00:14:35,290
+import from a zip file or there may be
+
+00:14:34,000 --> 00:14:37,750
+some certificates and things like that
+
+00:14:35,290 --> 00:14:40,420
+that often other api's that require a
+
+00:14:37,750 --> 00:14:42,460
+physical file system path and so this is
+
+00:14:40,420 --> 00:14:44,020
+what it looks like you pass in the
+
+00:14:42,460 --> 00:14:46,000
+package and the resource and it returns
+
+00:14:44,020 --> 00:14:49,110
+you this weird iterator over a path
+
+00:14:46,000 --> 00:14:52,240
+thing that's really just sort of the
+
+00:14:49,110 --> 00:14:55,240
+type annotation for saying you can pass
+
+00:14:52,240 --> 00:14:56,890
+whatever path returns to a context MANET
+
+00:14:55,240 --> 00:14:58,690
+or it is a context manager so you can
+
+00:14:56,890 --> 00:15:01,570
+pass it to a with statement and that's
+
+00:14:58,690 --> 00:15:03,310
+how it would look so unlike packaged
+
+00:15:01,570 --> 00:15:05,440
+resources you know how to have a
+
+00:15:03,310 --> 00:15:07,350
+guarantee for when that temporary file
+
+00:15:05,440 --> 00:15:10,050
+if it needs to create a temporary file
+
+00:15:07,350 --> 00:15:12,250
+how when that temporary file will get
+
+00:15:10,050 --> 00:15:17,380
+deleted as soon as the with statement
+
+00:15:12,250 --> 00:15:22,090
+exits right this makes sense yes so
+
+00:15:17,380 --> 00:15:25,090
+modern api's give you all these
+
+00:15:22,090 --> 00:15:29,000
+guarantees that you really want
+
+00:15:25,090 --> 00:15:30,380
+now you want to sort of say hey I've got
+
+00:15:29,000 --> 00:15:32,660
+this package over here and I'd like to
+
+00:15:30,380 --> 00:15:37,330
+see what's inside of it kind of think of
+
+00:15:32,660 --> 00:15:39,800
+it like as an OS lister of the package
+
+00:15:37,330 --> 00:15:41,570
+the API for that is contents and all you
+
+00:15:39,800 --> 00:15:44,300
+obviously all you have to pass in is the
+
+00:15:41,570 --> 00:15:46,580
+package and it returns you a list of
+
+00:15:44,300 --> 00:15:48,410
+strings now you'll notice that it
+
+00:15:46,580 --> 00:15:52,480
+doesn't return a list of resources and
+
+00:15:48,410 --> 00:15:55,010
+that's again a deliberate choice because
+
+00:15:52,480 --> 00:15:57,230
+here's how here's an example in the
+
+00:15:55,010 --> 00:15:59,089
+interactive interpreter where you're
+
+00:15:57,230 --> 00:16:01,670
+getting all the contents of the package
+
+00:15:59,089 --> 00:16:03,980
+data and you'll notice because it got
+
+00:16:01,670 --> 00:16:09,350
+imported there's a dunder pie cache
+
+00:16:03,980 --> 00:16:12,500
+directory right that's why you get a
+
+00:16:09,350 --> 00:16:15,200
+list of strings because the items that
+
+00:16:12,500 --> 00:16:17,570
+contents returns are not guaranteed to
+
+00:16:15,200 --> 00:16:19,160
+be resources it's just sort of like an
+
+00:16:17,570 --> 00:16:21,560
+OS Lister you get everything that's in
+
+00:16:19,160 --> 00:16:23,930
+there so now you're asking the question
+
+00:16:21,560 --> 00:16:25,730
+well if all I want are the resources
+
+00:16:23,930 --> 00:16:29,420
+like I have I'm using this in my plug-in
+
+00:16:25,730 --> 00:16:30,620
+system how do I know which ones are
+
+00:16:29,420 --> 00:16:32,900
+resources and which ones are not
+
+00:16:30,620 --> 00:16:35,990
+resources you have an answer for that
+
+00:16:32,900 --> 00:16:40,580
+and that is this function call is
+
+00:16:35,990 --> 00:16:42,230
+resource so you can use this you can use
+
+00:16:40,580 --> 00:16:43,700
+is resource along with contents to
+
+00:16:42,230 --> 00:16:47,230
+iterate over all the resources in a
+
+00:16:43,700 --> 00:16:51,050
+package so in this case if you passed in
+
+00:16:47,230 --> 00:16:52,820
+dunder PI cache to this call you'd get
+
+00:16:51,050 --> 00:16:55,210
+false and everything else would return
+
+00:16:52,820 --> 00:16:55,210
+true
+
+00:16:57,370 --> 00:17:04,970
+unlike packaged resources we actually
+
+00:17:01,280 --> 00:17:07,040
+provide an API for loaders and how many
+
+00:17:04,970 --> 00:17:11,179
+people know what loaders are in pythons
+
+00:17:07,040 --> 00:17:13,459
+import system okay so the way Python
+
+00:17:11,179 --> 00:17:16,250
+kind of especially the Python 3 for
+
+00:17:13,459 --> 00:17:19,459
+example the way it actually ends up
+
+00:17:16,250 --> 00:17:21,260
+importing a module or a package is that
+
+00:17:19,459 --> 00:17:23,240
+there are things called finders and
+
+00:17:21,260 --> 00:17:24,829
+there are things called loaders so when
+
+00:17:23,240 --> 00:17:27,110
+you say something like import the
+
+00:17:24,829 --> 00:17:29,090
+package data the first thing that
+
+00:17:27,110 --> 00:17:32,060
+happens is pythons import system you
+
+00:17:29,090 --> 00:17:35,210
+tries to find a finder that knows where
+
+00:17:32,060 --> 00:17:37,040
+that package lives ok and it can live on
+
+00:17:35,210 --> 00:17:37,559
+the file system in a zip file it could
+
+00:17:37,040 --> 00:17:40,379
+live on the
+
+00:17:37,559 --> 00:17:44,070
+a network you can live in a database as
+
+00:17:40,379 --> 00:17:48,629
+long as you have a finder that can find
+
+00:17:44,070 --> 00:17:50,730
+the package or the module pythons import
+
+00:17:48,629 --> 00:17:53,159
+system could usually load it but the
+
+00:17:50,730 --> 00:17:55,379
+thing that actually loads the thing that
+
+00:17:53,159 --> 00:17:57,539
+loads the package of the module is a
+
+00:17:55,379 --> 00:18:00,509
+loader and so what we've done is we've
+
+00:17:57,539 --> 00:18:02,009
+said we can let any load or even custom
+
+00:18:00,509 --> 00:18:04,499
+loaders play along with this whole
+
+00:18:02,009 --> 00:18:06,240
+higher-level API so now we're not
+
+00:18:04,499 --> 00:18:08,730
+limited to just zip files and file
+
+00:18:06,240 --> 00:18:11,669
+system pack pads any loader can
+
+00:18:08,730 --> 00:18:13,649
+optionally import this thing this
+
+00:18:11,669 --> 00:18:17,129
+function called get resource reader if
+
+00:18:13,649 --> 00:18:19,619
+it exists it gets passed the package
+
+00:18:17,129 --> 00:18:22,830
+name and it returns an implementation of
+
+00:18:19,619 --> 00:18:25,350
+an ABC so in ABC is a abstract base
+
+00:18:22,830 --> 00:18:27,210
+class so you don't have to derive from
+
+00:18:25,350 --> 00:18:30,360
+this you just have to implement the
+
+00:18:27,210 --> 00:18:33,119
+functions in this ABC and now your
+
+00:18:30,360 --> 00:18:34,799
+custom loader that loads from a sequel
+
+00:18:33,119 --> 00:18:38,070
+Lite database or whatever happens to be
+
+00:18:34,799 --> 00:18:44,309
+can play along just fine and the
+
+00:18:38,070 --> 00:18:46,559
+higher-level API works as expected I'm
+
+00:18:44,309 --> 00:18:48,119
+not going to go into a lot of detail
+
+00:18:46,559 --> 00:18:50,850
+because most people don't have to
+
+00:18:48,119 --> 00:18:54,690
+actually implement loaders this is all
+
+00:18:50,850 --> 00:18:56,340
+documented in the in the Python
+
+00:18:54,690 --> 00:18:58,710
+documentation the Python 3:7
+
+00:18:56,340 --> 00:19:02,460
+documentation so if you are implementing
+
+00:18:58,710 --> 00:19:04,110
+a loader and you want to play along just
+
+00:19:02,460 --> 00:19:06,149
+check out the the documentation but I'll
+
+00:19:04,110 --> 00:19:08,070
+give you a quick flavor for what this
+
+00:19:06,149 --> 00:19:09,720
+looks like this is the low-level API
+
+00:19:08,070 --> 00:19:12,149
+right so import Lib resources is the
+
+00:19:09,720 --> 00:19:14,399
+high level API that consumers are going
+
+00:19:12,149 --> 00:19:16,919
+to use and anybody who implements a
+
+00:19:14,399 --> 00:19:20,399
+loader would implement this lower level
+
+00:19:16,919 --> 00:19:22,860
+API so it's things like open the
+
+00:19:20,399 --> 00:19:26,820
+resource get something you can read
+
+00:19:22,860 --> 00:19:28,169
+stuff out of resource path I'll talk
+
+00:19:26,820 --> 00:19:30,299
+about that in a little bit more detail
+
+00:19:28,169 --> 00:19:34,049
+in a moment that returns the string
+
+00:19:30,299 --> 00:19:36,330
+which points to the the file is resource
+
+00:19:34,049 --> 00:19:38,220
+obviously that that Maps almost directly
+
+00:19:36,330 --> 00:19:41,759
+to is resource and the higher-level API
+
+00:19:38,220 --> 00:19:44,369
+and contents also maps to the higher
+
+00:19:41,759 --> 00:19:47,720
+level API pretty directly the kind of
+
+00:19:44,369 --> 00:19:47,720
+the weird one is resource path
+
+00:19:47,870 --> 00:19:53,179
+so with all these api's the low-level
+
+00:19:50,659 --> 00:19:54,770
+API is they are expected to raise a file
+
+00:19:53,179 --> 00:19:56,720
+not found error when the resource
+
+00:19:54,770 --> 00:19:59,360
+doesn't exist so for example if you say
+
+00:19:56,720 --> 00:20:01,340
+open resource foo and foo is not a
+
+00:19:59,360 --> 00:20:03,770
+resource in the pack in that the loader
+
+00:20:01,340 --> 00:20:07,330
+knows about it's expected to raise a
+
+00:20:03,770 --> 00:20:11,539
+file not found error and similarly
+
+00:20:07,330 --> 00:20:14,809
+resource path requires a concrete
+
+00:20:11,539 --> 00:20:16,400
+filesystem path so if so if you think
+
+00:20:14,809 --> 00:20:20,330
+about the implementation right when you
+
+00:20:16,400 --> 00:20:23,870
+say I want the path to a resource in a
+
+00:20:20,330 --> 00:20:26,510
+package that's in a zip file what will
+
+00:20:23,870 --> 00:20:28,370
+happen is that import Lib resources will
+
+00:20:26,510 --> 00:20:30,350
+call resource path on the loader and
+
+00:20:28,370 --> 00:20:32,270
+that'll raise a file not found error
+
+00:20:30,350 --> 00:20:34,640
+because it's not in a physical file
+
+00:20:32,270 --> 00:20:37,429
+system location it's in the zip file and
+
+00:20:34,640 --> 00:20:39,140
+then importantly resources will say ok I
+
+00:20:37,429 --> 00:20:41,240
+know what that means I have to create a
+
+00:20:39,140 --> 00:20:42,620
+temporary file and I have to read the
+
+00:20:41,240 --> 00:20:43,909
+resource all the bytes out of it and I
+
+00:20:42,620 --> 00:20:45,980
+have to stick those bytes in the
+
+00:20:43,909 --> 00:20:48,080
+temporary file and now I have to return
+
+00:20:45,980 --> 00:20:50,659
+you the path to the temporary file it
+
+00:20:48,080 --> 00:20:54,799
+does that by because the low-level API
+
+00:20:50,659 --> 00:20:57,200
+raises the file not found error and
+
+00:20:54,799 --> 00:21:01,490
+again just like with the high level API
+
+00:20:57,200 --> 00:21:04,429
+contents can return non resources so
+
+00:21:01,490 --> 00:21:08,870
+just a quick word about kind of why we
+
+00:21:04,429 --> 00:21:11,149
+did this so we've got at LinkedIn we use
+
+00:21:08,870 --> 00:21:14,480
+a ton of Python everywhere because we
+
+00:21:11,149 --> 00:21:18,559
+love Python but we use it a lot in our
+
+00:21:14,480 --> 00:21:20,270
+command-line tools right so just the the
+
+00:21:18,559 --> 00:21:22,399
+nice little tools that that people write
+
+00:21:20,270 --> 00:21:26,330
+to do a particular task from the command
+
+00:21:22,399 --> 00:21:30,440
+line and we notice that in many cases
+
+00:21:26,330 --> 00:21:32,299
+you say food - - help it takes multiple
+
+00:21:30,440 --> 00:21:35,809
+seconds like way faster than it should
+
+00:21:32,299 --> 00:21:38,929
+take and so if you're not familiar with
+
+00:21:35,809 --> 00:21:43,220
+Python 37 it has a very nice way of
+
+00:21:38,929 --> 00:21:46,100
+getting a listing of the that input the
+
+00:21:43,220 --> 00:21:49,279
+time to import the cost to import all
+
+00:21:46,100 --> 00:21:51,559
+your packages and your modules and so we
+
+00:21:49,279 --> 00:21:55,130
+did some analysis and package resource
+
+00:21:51,559 --> 00:21:57,470
+was very high up there we also use PEX
+
+00:21:55,130 --> 00:22:00,260
+which is a zip file a single file
+
+00:21:57,470 --> 00:22:01,250
+executable format if PEX has been around
+
+00:22:00,260 --> 00:22:03,660
+for a long time
+
+00:22:01,250 --> 00:22:05,820
+but because it's been around for a long
+
+00:22:03,660 --> 00:22:08,550
+time it uses package resources and it
+
+00:22:05,820 --> 00:22:11,310
+also doesn't kind of set up sis path in
+
+00:22:08,550 --> 00:22:14,850
+it in the most optimal way so Lauren
+
+00:22:11,310 --> 00:22:16,710
+Cavallo one of our awesome devs at
+
+00:22:14,850 --> 00:22:19,470
+LinkedIn wrote this thing called Shiv
+
+00:22:16,710 --> 00:22:23,250
+which is a modern replacement for pecs
+
+00:22:19,470 --> 00:22:24,770
+and it uses import Lib resources and it
+
+00:22:23,250 --> 00:22:28,110
+was just recently open source so I
+
+00:22:24,770 --> 00:22:31,020
+highly recommend if this if you're using
+
+00:22:28,110 --> 00:22:33,930
+pecs now to give Shiv a look shiva only
+
+00:22:31,020 --> 00:22:36,780
+works with Python 36 so yay for modern
+
+00:22:33,930 --> 00:22:39,060
+stuff it's all open source please play
+
+00:22:36,780 --> 00:22:41,190
+with it so between the two right between
+
+00:22:39,060 --> 00:22:43,830
+Shiv and the use of import Lib resources
+
+00:22:41,190 --> 00:22:46,590
+we've seen 25 to 50 percent improvement
+
+00:22:43,830 --> 00:22:52,200
+in just like the responsiveness of - -
+
+00:22:46,590 --> 00:22:54,930
+help so that's really awesome most
+
+00:22:52,200 --> 00:22:57,720
+importantly we've taken the entire API
+
+00:22:54,930 --> 00:22:59,550
+and we've back ported it for implement
+
+00:22:57,720 --> 00:23:02,220
+Lib dot resources which is only
+
+00:22:59,550 --> 00:23:04,740
+available in Python 37 we've back ported
+
+00:23:02,220 --> 00:23:07,200
+it to two seven and three four two three
+
+00:23:04,740 --> 00:23:11,280
+six it does work in three seven but it's
+
+00:23:07,200 --> 00:23:14,220
+a very thin shim layer over the the
+
+00:23:11,280 --> 00:23:16,710
+standard library but what this means is
+
+00:23:14,220 --> 00:23:19,260
+that you don't have to wait for three
+
+00:23:16,710 --> 00:23:21,900
+seven to start getting great performance
+
+00:23:19,260 --> 00:23:23,550
+because you can get rid of packaged
+
+00:23:21,900 --> 00:23:26,850
+resources you don't have to use that
+
+00:23:23,550 --> 00:23:29,250
+anymore for most for many use cases and
+
+00:23:26,850 --> 00:23:32,100
+you can just adopt import Lib resources
+
+00:23:29,250 --> 00:23:35,430
+all pure Python I don't think there are
+
+00:23:32,100 --> 00:23:36,920
+even any dependencies at runtime and it
+
+00:23:35,430 --> 00:23:39,120
+will just work so you can start
+
+00:23:36,920 --> 00:23:41,160
+converting your code over to using the
+
+00:23:39,120 --> 00:23:43,560
+more efficient now one thing to keep in
+
+00:23:41,160 --> 00:23:45,420
+mind is that 4 to 7 because pythons
+
+00:23:43,560 --> 00:23:48,150
+import system doesn't have these finders
+
+00:23:45,420 --> 00:23:50,910
+and loaders and in Python 2 that ap that
+
+00:23:48,150 --> 00:23:57,300
+lower level API doesn't work but for
+
+00:23:50,910 --> 00:23:59,970
+Python 3 it does so not no discussion
+
+00:23:57,300 --> 00:24:02,640
+about pythons import system would be
+
+00:23:59,970 --> 00:24:06,320
+complete without giving massive props to
+
+00:24:02,640 --> 00:24:06,320
+Brett cannon right yay
+
+00:24:11,279 --> 00:24:16,720
+so for those of you who don't know this
+
+00:24:13,809 --> 00:24:19,480
+Brett essentially rewrote pythons import
+
+00:24:16,720 --> 00:24:22,389
+system in pure Python which none of this
+
+00:24:19,480 --> 00:24:25,299
+would be possible without that and it's
+
+00:24:22,389 --> 00:24:27,730
+really a you know a great improvement in
+
+00:24:25,299 --> 00:24:30,970
+Python 3 one of the many many many great
+
+00:24:27,730 --> 00:24:33,940
+improvements in Python 3 in addition to
+
+00:24:30,970 --> 00:24:35,799
+that you know LinkedIn is owned by
+
+00:24:33,940 --> 00:24:37,830
+Microsoft so we work together we have
+
+00:24:35,799 --> 00:24:43,539
+sort of weekly meetings with our
+
+00:24:37,830 --> 00:24:45,549
+Microsoft Python partners and Brett and
+
+00:24:43,539 --> 00:24:47,740
+I work together on import live resources
+
+00:24:45,549 --> 00:24:49,779
+so really you know I'm up here getting
+
+00:24:47,740 --> 00:24:52,899
+all the credit but you know we have to
+
+00:24:49,779 --> 00:24:54,789
+definitely give it up for bread for for
+
+00:24:52,899 --> 00:24:56,559
+co-writing this and and working out the
+
+00:24:54,789 --> 00:24:58,929
+API and everything and I expect this
+
+00:24:56,559 --> 00:25:04,059
+will be one of many great collaborations
+
+00:24:58,929 --> 00:25:05,440
+between our corporate entities well
+
+00:25:04,059 --> 00:25:07,389
+that's kind of it I don't know how much
+
+00:25:05,440 --> 00:25:09,190
+time there is left but I'm I'm happy to
+
+00:25:07,389 --> 00:25:09,730
+take questions is how to get in touch
+
+00:25:09,190 --> 00:25:11,860
+with me
+
+00:25:09,730 --> 00:25:13,240
+that's the read the docs link and you
+
+00:25:11,860 --> 00:25:16,750
+can get to everything from the read the
+
+00:25:13,240 --> 00:25:18,340
+docs link including the Python 3:7
+
+00:25:16,750 --> 00:25:21,850
+documentation which has most of the
+
+00:25:18,340 --> 00:25:24,120
+details and and I'll read the docs you
+
+00:25:21,850 --> 00:25:27,399
+can get there from there to everything
+
+00:25:24,120 --> 00:25:31,289
+yeah so that's it and I'm happy to take
+
+00:25:27,399 --> 00:25:31,289
+questions I can't really see anybody but
+
+00:25:36,520 --> 00:25:44,720
+does import liberal resources supports
+
+00:25:40,660 --> 00:25:48,890
+locations in FHS compliant places so
+
+00:25:44,720 --> 00:25:53,060
+outside of the package space no they
+
+00:25:48,890 --> 00:25:55,760
+have to be in I mean it it works by
+
+00:25:53,060 --> 00:25:57,710
+importing the package so wherever the
+
+00:25:55,760 --> 00:25:59,840
+package is if it's on sis path and
+
+00:25:57,710 --> 00:26:02,540
+Python can import it it can get
+
+00:25:59,840 --> 00:26:04,550
+resources out of there so it kind of
+
+00:26:02,540 --> 00:26:07,070
+doesn't really matter you know where
+
+00:26:04,550 --> 00:26:08,660
+they are you can set Python your Python
+
+00:26:07,070 --> 00:26:11,900
+path environment variable and point to
+
+00:26:08,660 --> 00:26:14,630
+some crazy location and as long as the
+
+00:26:11,900 --> 00:26:16,550
+Python can import it it can get the
+
+00:26:14,630 --> 00:26:20,000
+resources out of there and it's not plan
+
+00:26:16,550 --> 00:26:23,750
+to add that I'm sorry is it planned to
+
+00:26:20,000 --> 00:26:28,030
+add that support no no it works off as
+
+00:26:23,750 --> 00:26:28,030
+this path whatever is on this path yeah
+
+00:26:31,270 --> 00:26:36,440
+so I was thinking about a resource path
+
+00:26:33,800 --> 00:26:38,510
+for a minute and I'm wondering how to
+
+00:26:36,440 --> 00:26:40,430
+deal with the pickles you could get in
+
+00:26:38,510 --> 00:26:42,630
+with that on say if you're running on a
+
+00:26:40,430 --> 00:26:45,040
+read-only file system or if you're
+
+00:26:42,630 --> 00:26:47,270
+[Music]
+
+00:26:45,040 --> 00:26:49,880
+running in a situation where you need to
+
+00:26:47,270 --> 00:26:52,820
+make sure someone doesn't say try and
+
+00:26:49,880 --> 00:26:55,400
+race and put a file or something else
+
+00:26:52,820 --> 00:26:56,930
+where it would want to be unpacking when
+
+00:26:55,400 --> 00:27:00,020
+those resources that needs a concrete
+
+00:26:56,930 --> 00:27:03,350
+path yes so it just uses pythons temp
+
+00:27:00,020 --> 00:27:05,270
+file library so you know that that
+
+00:27:03,350 --> 00:27:07,700
+supports setting the temp and the
+
+00:27:05,270 --> 00:27:09,770
+various environment variables if you
+
+00:27:07,700 --> 00:27:12,470
+need to point it to a particular place
+
+00:27:09,770 --> 00:27:16,100
+if you really have no place with which
+
+00:27:12,470 --> 00:27:18,800
+to unpack a temp temp file you meet then
+
+00:27:16,100 --> 00:27:22,570
+well yeah probably won't work you'll
+
+00:27:18,800 --> 00:27:22,570
+probably get an exception thank you yep
+
+00:27:22,630 --> 00:27:28,520
+hey Barry thanks for the talk you
+
+00:27:26,030 --> 00:27:32,030
+mentioned earlier on that there was 25
+
+00:27:28,520 --> 00:27:34,550
+to 50% speed up in some CL eyes I was
+
+00:27:32,030 --> 00:27:36,320
+wondering if you experimented that with
+
+00:27:34,550 --> 00:27:40,100
+our mercury and seen if he could make
+
+00:27:36,320 --> 00:27:42,780
+the CLI bit more competitive with git uh
+
+00:27:40,100 --> 00:27:45,900
+no III haven't
+
+00:27:42,780 --> 00:27:48,630
+i and i personally won't I'm certainly
+
+00:27:45,900 --> 00:27:52,790
+happy to help you know the mercurial
+
+00:27:48,630 --> 00:27:55,950
+folks or anybody else look at that I
+
+00:27:52,790 --> 00:27:57,960
+don't really have a good sense I don't
+
+00:27:55,950 --> 00:28:00,750
+know if Lauren does about how much is
+
+00:27:57,960 --> 00:28:05,520
+because of important lip resources and
+
+00:28:00,750 --> 00:28:07,520
+how much is because of Shiv but just
+
+00:28:05,520 --> 00:28:10,410
+getting rid of package resources alone
+
+00:28:07,520 --> 00:28:14,130
+lets you then concentrate on all your
+
+00:28:10,410 --> 00:28:16,980
+other you know import time costs right
+
+00:28:14,130 --> 00:28:19,200
+because you'll see if you use Python 3 7
+
+00:28:16,980 --> 00:28:20,730
+you'll see package resources like right
+
+00:28:19,200 --> 00:28:23,340
+up at the top there depending on how
+
+00:28:20,730 --> 00:28:25,350
+your sister is set up and so just
+
+00:28:23,340 --> 00:28:27,120
+getting rid of that and also getting rid
+
+00:28:25,350 --> 00:28:29,120
+of your dunder file usage because that
+
+00:28:27,120 --> 00:28:31,920
+also is really terrible
+
+00:28:29,120 --> 00:28:33,500
+thank you sure all right let's give
+
+00:28:31,920 --> 00:28:35,930
+Barry one last round of applause
+
+00:28:33,500 --> 00:28:39,009
+[Applause]
+
+00:28:35,930 --> 00:28:39,009
+
+YouTube URL: https://www.youtube.com/watch?v=ZsGFU2qh73E
+
+
