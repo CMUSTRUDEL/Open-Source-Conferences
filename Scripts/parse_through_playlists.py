@@ -1,7 +1,7 @@
-## Program: search_youtube.py
+## Program: parse_through_playlists.py 
 ## Author: Kimberly Truong
 ## Date: July 1st, 2021
-## Description: Parses through given channel ID's then finds and downloads captions for all the videos in all the playlists on that channel
+## Description: Parses through given channel ID's then finds and downloads captions for all the videos in all the playlists on that channel.
 
 # -*- coding: utf-8 -*-
 
