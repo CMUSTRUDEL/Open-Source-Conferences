@@ -20,6 +20,8 @@ from six import print_
 
 
 scopes = ["https://www.googleapis.com/auth/youtube.readonly"]
+directory = '/Users/kimberlytruong/CMU REUSE' #insert your current directory here
+video_files = 'OSS Video Files' #insert name of your video files directory here
 
 #see https://developers.google.com/youtube/v3/docs for further information on API set-up
 
@@ -61,14 +63,14 @@ def get_playlists(playlists, titles, youtube):
         videos = response.get("items", [])
 
         try:
-            os.mkdir('OSS Video Files/' + title) #make new directory here for playlist
+            os.mkdir(video_files + '/' + title) #make new directory here for playlist
         except:
             print("This directory already exists.")
 
         for video in videos:
             vid = Video(video["snippet"]["resourceId"]["videoId"], video["snippet"]["title"], video["snippet"]["publishedAt"], title, video["snippet"]["description"])
             vid.get_tags()
-            write_to_file(vid, '/Users/kimberlytruong/CMU REUSE/OSS Video Files/' + title + '/')
+            write_to_file(vid, directory + '/' + video_files + '/' + title + '/')
 
             urls.append(vid)
 
@@ -107,7 +109,7 @@ def get_channels(channels, youtube):
         playlists = response.get("items", [])
 
         try:
-            os.mkdir('OSS Video Files/' + playlists[0]["snippet"]["channelTitle"]) #make new directory here for channel
+            os.mkdir(video_files + '/' + playlists[0]["snippet"]["channelTitle"]) #make new directory here for channel
         except:
             print("This directory already exists.")
         
@@ -130,14 +132,14 @@ def get_channels(channels, youtube):
             if choice == 'y':
 
                 try:
-                    os.mkdir('OSS Video Files/' + playlists[0]["snippet"]["channelTitle"] + '/' + playlist["snippet"]["title"])
+                    os.mkdir(video_files + '/' + playlists[0]["snippet"]["channelTitle"] + '/' + playlist["snippet"]["title"])
                 except:
                     print("This directory already exists.")
 
                 for video in videos:
                     vid = Video(video["snippet"]["resourceId"]["videoId"], video["snippet"]["title"], video["snippet"]["publishedAt"], playlist["snippet"]["title"], video["snippet"]["description"])
                     vid.get_tags()
-                    write_to_file(vid, '/Users/kimberlytruong/CMU REUSE/OSS Video Files/' + playlists[0]["snippet"]["channelTitle"] + '/' + playlist["snippet"]["title"] + '/')
+                    write_to_file(vid, directory + '/' + video_files + '/' + playlists[0]["snippet"]["channelTitle"] + '/' + playlist["snippet"]["title"] + '/')
 
                     urls.append(vid)
     '''
@@ -162,7 +164,7 @@ def get_channels(channels, youtube):
 def get_video(videos, conference_name, youtube):
 
     try:
-        os.mkdir('OSS Video Files/' + conference_name)
+        os.mkdir(video_files + '/' + conference_name)
     except:
         print("This directory already exists.")
 
@@ -178,7 +180,7 @@ def get_video(videos, conference_name, youtube):
 
         vid = Video(videoID, video[0]["snippet"]["title"], video[0]["snippet"]["publishedAt"], conference_name, video[0]["snippet"]["description"])
         vid.get_tags()
-        write_to_file(vid, '/Users/kimberlytruong/CMU REUSE/OSS Video Files/' + conference_name + '/')
+        write_to_file(vid, directory + '/' + video_files + '/' + conference_name + '/')
         '''
         if len(vid.tags) >= 3:
             write_to_csv(vid)
