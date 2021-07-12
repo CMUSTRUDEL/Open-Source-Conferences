@@ -62,30 +62,6 @@ class Video:
                 nums = True
             saved += ch
 
-
-        line = True #if the captions are actual lines or just numbers
-        end = False #if the last character in the line ends the sentence
-
-        '''
-        for ch in caption:
-            if end and ch != '\n' or ch != ' ':
-                end = False
-            elif ch == '.' or '!' or '?':
-                end = True
-
-            if line and not(ch >= '0' and ch <= '9') and not ch == '\n':
-                self.captions += ch + ' '
-            elif line and not(ch >= '0' and ch <= '9') and end:
-                self.captions += ch + ' '
-            elif not line and ch == '\n':
-                line = True
-            else:
-                line = False
-                self.captions += ' '
-
-        self.captions = str(self.captions)
-        '''
-
     def filter(self):
         keywords = ["open source", "leave", "toxic", "quit", "pause", "disengage", "burnout", "maintainer", "core maintainer", "stepping down", "time", "money", "volunteer", "payment", "stress", "disappointment", "mental health", "hostile", "conflict", "hostility", "limited time", "no time", "lack of resources", "compensation"] #each key word has a count, leave
         #might want to change key words for each search term
