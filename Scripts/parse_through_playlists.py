@@ -2,6 +2,20 @@
 ## Author: Kimberly Truong
 ## Date: July 1st, 2021
 ## Description: Parses through given channel ID's then finds and downloads captions for all the videos in all the playlists on that channel.
+## Relevant functions:
+    # get_channels(channels, youtube, save_to_csv)
+        # Input: channels (list of channel IDs as strings), youtube (just the youtube variable), save_to_csv (bool)
+        # Pre-Conditions: Videos of interest must be in playlists.
+        # Outcome: Videos will be downloaded from all playlists on the channel (the user can choose which playlists are downloaded. Each playlist will be a seperate directory within the channel directory)
+    # get_channel_id(videoID, youtube)
+        # Input: videoID (string of only one video ID), youtube (just the youtube variable)
+        # Outcome: Channel ID is returned.
+    # get_playlists(playlists, titles, youtube, save_to_csv)
+        # Input: playlists (list of playlist IDs as strings), titles (list of names for each playlist in the same order as the playlist IDs as strings), youtube (just the youtube variable), save_to_csv (bool)
+        # Outcome: Videos will be saved from all given playlists and be saved to the directory with the given playlist titles.
+    # get_video(videos, conference_name, youtube, save_to_csv)
+        # Input: videos (list of video IDs as strings), conference_name (title of directory where the videos will be saved), youtube (just the youtube variable), save_to_csv (bool)
+        # Outcome: All videos will be saved into the given directory name.
 
 # -*- coding: utf-8 -*-
 
@@ -41,11 +55,11 @@ def main():
     youtube = googleapiclient.discovery.build(
         api_service_name, api_version, credentials=credentials)
 
-    get_channels(["UCWnPjmqvljcafA0z2U1fwKQ", "UC7c3Kb6jYCRj4JOHHZTxKsQ"], youtube)
+    get_channels(["UCWnPjmqvljcafA0z2U1fwKQ", "UC7c3Kb6jYCRj4JOHHZTxKsQ"], youtube, True)
     
     
 
-def get_playlists(playlists, titles, youtube):
+def get_playlists(playlists, titles, youtube, save_to_csv: bool):
 
     if len(playlists) != len(titles):
         print("Error: Playlist ID's don't have matching number of titles.")
@@ -75,25 +89,26 @@ def get_playlists(playlists, titles, youtube):
             urls.append(vid)
 
     #writes to csv
-    url = urls.head
-    before = url
+    if save_to_csv:
+        url = urls.head
+        before = url
 
-    print("Ready to write to file")
+        print("Ready to write to file")
 
-    while url != None:
-        if len(url.tags) < 3:
-            url = urls.delete(url, before)
-        else:
-            write_to_csv(url)
-            if before == url:
-                url = url.next
+        while url != None:
+            if len(url.tags) < 3:
+                url = urls.delete(url, before)
             else:
-                before = before.next
-                url = url.next
+                write_to_csv(url)
+                if before == url:
+                    url = url.next
+                else:
+                    before = before.next
+                    url = url.next
 
         
 
-def get_channels(channels, youtube):
+def get_channels(channels, youtube, save_to_csv: bool):
 
     urls = Linked_List()
 
@@ -109,7 +124,7 @@ def get_channels(channels, youtube):
         playlists = response.get("items", [])
 
         try:
-            os.mkdir(video_files + '/' + playlists[0]["snippet"]["channelTitle"]) #make new directory here for channel
+            os.mkdir(video_files + '/' + fix_title(playlists[0]["snippet"]["channelTitle"])) #make new directory here for channel
         except:
             print("This directory already exists.")
         
@@ -132,7 +147,7 @@ def get_channels(channels, youtube):
             if choice == 'y':
 
                 try:
-                    os.mkdir(video_files + '/' + playlists[0]["snippet"]["channelTitle"] + '/' + playlist["snippet"]["title"])
+                    os.mkdir(video_files + '/' + fix_title(playlists[0]["snippet"]["channelTitle"]) + '/' + fix_title(playlist["snippet"]["title"]))
                 except:
                     print("This directory already exists.")
 
@@ -142,26 +157,26 @@ def get_channels(channels, youtube):
                     write_to_file(vid, directory + '/' + video_files + '/' + playlists[0]["snippet"]["channelTitle"] + '/' + playlist["snippet"]["title"] + '/')
 
                     urls.append(vid)
-    '''
+    
     #writes to csv
-    url = urls.head
-    before = url
+    if save_to_csv:
+        url = urls.head
+        before = url
 
-    print("Ready to write to file")
+        print("Ready to write to file")
 
-    while url != None:
-        if len(url.tags) < 3:
-            url = urls.delete(url, before)
-        else:
-            write_to_csv(url)
-            if before == url:
-                url = url.next
+        while url != None:
+            if len(url.tags) < 3:
+                url = urls.delete(url, before)
             else:
-                before = before.next
-                url = url.next
-    '''
+                write_to_csv(url)
+                if before == url:
+                    url = url.next
+                else:
+                    before = before.next
+                    url = url.next
 
-def get_video(videos, conference_name, youtube):
+def get_video(videos, conference_name, youtube, save_to_csv:bool):
 
     try:
         os.mkdir(video_files + '/' + conference_name)
@@ -181,10 +196,8 @@ def get_video(videos, conference_name, youtube):
         vid = Video(videoID, video[0]["snippet"]["title"], video[0]["snippet"]["publishedAt"], conference_name, video[0]["snippet"]["description"])
         vid.get_tags()
         write_to_file(vid, directory + '/' + video_files + '/' + conference_name + '/')
-        '''
-        if len(vid.tags) >= 3:
+        if save_to_csv and len(vid.tags) >= 3:
             write_to_csv(vid)
-        '''
 
 def get_channel_id(videoID, youtube): #use any video from the channel
 
@@ -229,6 +242,14 @@ def write_to_file(url, directory):
     f.write(content)
     f.close() 
         
+def fix_title(title):
+    temp = ''
+    for ch in title:
+        if ch == '/':
+            temp += ' '
+        else:
+            temp += ch
+    return temp
 
 if __name__ == "__main__":
     main()
