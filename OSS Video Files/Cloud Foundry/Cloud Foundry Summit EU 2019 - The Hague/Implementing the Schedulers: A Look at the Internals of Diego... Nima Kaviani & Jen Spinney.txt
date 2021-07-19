@@ -1,0 +1,2304 @@
+Title: Implementing the Schedulers: A Look at the Internals of Diego... Nima Kaviani & Jen Spinney
+Publication date: 2019-09-13
+Playlist: Cloud Foundry Summit EU 2019 - The Hague
+Description: 
+	Implementing the Schedulers: A Look at the Internals of Diego and Eirini - Nima Kaviani, IBM & Jen Spinney, Pivotal 
+
+How does Cloud Foundry know where and how to run your app? It started with Droplet Execution Agents (DEAs) as the backend scheduler. Then, we re-architected Cloud Foundry to replace DEAs with the more-maintainable Diego. Today, with Eirini, we allow you to choose between Diego and Kubernetes as the scheduler. Cloud Foundry operators who are considering the switch from Diego to Eirini may find it valuable to know the key differences and how to troubleshoot the new Eirini/Kubernetes scheduler.  Nima and Jen have been contributors to both Diego and Eirini and have a deep understanding of the internal details of both. In this talk, they will do an in-depth comparison of the components of Diego and Eirini. They will discuss design differences across the two schedulers, and compare the pros and cons of each environment. They will also cover common debugging and troubleshooting tips for both. 
+
+For more info: https://www.cloudfoundry.org/
+Captions: 
+	00:00:00,030 --> 00:00:05,549
+one I think we're gonna get started
+
+00:00:03,200 --> 00:00:10,500
+thank you for coming to our talk at the
+
+00:00:05,549 --> 00:00:13,889
+very end of today my name is Jenna and
+
+00:00:10,500 --> 00:00:17,000
+this is Nima both of us have worked on
+
+00:00:13,889 --> 00:00:19,380
+Diego both for quite some time actually
+
+00:00:17,000 --> 00:00:20,820
+and both of us have been involved in the
+
+00:00:19,380 --> 00:00:23,310
+ireenie project so we thought it would
+
+00:00:20,820 --> 00:00:25,470
+be a cool experience to give this talk
+
+00:00:23,310 --> 00:00:29,029
+together as people that have experience
+
+00:00:25,470 --> 00:00:29,029
+with both Diego and ireenie
+
+00:00:29,090 --> 00:00:33,030
+so what we're going to do today is first
+
+00:00:31,349 --> 00:00:37,649
+just go through a really really quick
+
+00:00:33,030 --> 00:00:41,100
+overview of how CF works at a very
+
+00:00:37,649 --> 00:00:42,690
+high-level scope so you understand where
+
+00:00:41,100 --> 00:00:44,670
+the schedulers fit into the overall
+
+00:00:42,690 --> 00:00:47,670
+picture we're going to talk about the
+
+00:00:44,670 --> 00:00:49,890
+history of workload schedulers in Cloud
+
+00:00:47,670 --> 00:00:52,050
+Foundry then we're going to go through
+
+00:00:49,890 --> 00:00:53,670
+the architecture of ireenie and Diego
+
+00:00:52,050 --> 00:00:56,250
+and compare those and then we're going
+
+00:00:53,670 --> 00:00:58,289
+to walk through a couple scenarios to
+
+00:00:56,250 --> 00:01:00,570
+illustrate more concretely how the
+
+00:00:58,289 --> 00:01:04,170
+different schedulers are similar and
+
+00:01:00,570 --> 00:01:07,740
+where they differ so this is the very
+
+00:01:04,170 --> 00:01:10,170
+quick CF architecture overview on the
+
+00:01:07,740 --> 00:01:13,619
+Left we have this let's say app
+
+00:01:10,170 --> 00:01:15,840
+developer machine and these are sort of
+
+00:01:13,619 --> 00:01:19,170
+the subsystems that you find in an
+
+00:01:15,840 --> 00:01:21,180
+essential Cloud Foundry distribution so
+
+00:01:19,170 --> 00:01:23,100
+for example when you run like a CF login
+
+00:01:21,180 --> 00:01:25,259
+from the command line that's going to go
+
+00:01:23,100 --> 00:01:27,990
+and hit UA a which is responsible for
+
+00:01:25,259 --> 00:01:31,619
+authentication authorization via the go
+
+00:01:27,990 --> 00:01:33,240
+router to resolve where the UA a lives
+
+00:01:31,619 --> 00:01:35,310
+the next thing a developer might do is
+
+00:01:33,240 --> 00:01:36,600
+do a CF push that's going to go talk to
+
+00:01:35,310 --> 00:01:38,790
+the cloud controller the cloud
+
+00:01:36,600 --> 00:01:40,079
+controller is sort of a front-end for
+
+00:01:38,790 --> 00:01:43,110
+interacting with the Cloud Foundry
+
+00:01:40,079 --> 00:01:45,450
+system it's the API that gets hit when
+
+00:01:43,110 --> 00:01:46,860
+you're using the the CLI or any other
+
+00:01:45,450 --> 00:01:50,189
+tool that's interacting with Cloud
+
+00:01:46,860 --> 00:01:52,320
+Foundry the cloud controller in this
+
+00:01:50,189 --> 00:01:53,610
+case is going to stage your application
+
+00:01:52,320 --> 00:01:56,310
+it's going to take your app bits and
+
+00:01:53,610 --> 00:01:59,219
+then combine it with a droplet and it
+
+00:01:56,310 --> 00:02:01,259
+needs a container to do all that work or
+
+00:01:59,219 --> 00:02:03,299
+combine your outfits with a build pack
+
+00:02:01,259 --> 00:02:05,939
+to create a droplet and that piece of
+
+00:02:03,299 --> 00:02:08,849
+work gets sent over to the workload
+
+00:02:05,939 --> 00:02:10,590
+scheduler and a staging task the result
+
+00:02:08,849 --> 00:02:13,319
+of this is what we call a droplet and
+
+00:02:10,590 --> 00:02:13,860
+that gets stored off in a blob store the
+
+00:02:13,319 --> 00:02:16,520
+next thing
+
+00:02:13,860 --> 00:02:19,320
+the cloud controller is going to do is
+
+00:02:16,520 --> 00:02:21,780
+start your app this creates some
+
+00:02:19,320 --> 00:02:24,360
+long-running processes that the workload
+
+00:02:21,780 --> 00:02:25,410
+scheduler maintains and keeps healthy in
+
+00:02:24,360 --> 00:02:27,510
+this case we're going to assume that
+
+00:02:25,410 --> 00:02:29,640
+there are three instances of your app
+
+00:02:27,510 --> 00:02:33,720
+and the workload scheduler is keeping
+
+00:02:29,640 --> 00:02:35,970
+those healthy and active the workload
+
+00:02:33,720 --> 00:02:37,620
+scheduler then also registers these app
+
+00:02:35,970 --> 00:02:39,150
+instances with the go router so the
+
+00:02:37,620 --> 00:02:42,360
+governor knows where I can find
+
+00:02:39,150 --> 00:02:45,090
+instances of your running app so that
+
+00:02:42,360 --> 00:02:47,340
+when the developer or an end user tries
+
+00:02:45,090 --> 00:02:51,620
+to curl your app the go router knows
+
+00:02:47,340 --> 00:02:54,840
+exactly where to direct the request to
+
+00:02:51,620 --> 00:02:56,250
+at the same time any output that's going
+
+00:02:54,840 --> 00:02:57,600
+to standard out or standard error is
+
+00:02:56,250 --> 00:03:01,170
+being directed to the log Raider
+
+00:02:57,600 --> 00:03:03,480
+subsystem and it's collecting all the
+
+00:03:01,170 --> 00:03:06,360
+logs from all of your app instances and
+
+00:03:03,480 --> 00:03:08,880
+then as a dev you can run CF logs and
+
+00:03:06,360 --> 00:03:13,200
+get all the logs from all the instances
+
+00:03:08,880 --> 00:03:14,670
+of your app so this is really really
+
+00:03:13,200 --> 00:03:15,780
+high level picture and we've
+
+00:03:14,670 --> 00:03:17,490
+intentionally called this thing the
+
+00:03:15,780 --> 00:03:20,489
+workload scheduler without naming it
+
+00:03:17,490 --> 00:03:21,690
+Diego or ireenie because we're gonna get
+
+00:03:20,489 --> 00:03:24,620
+into more details about how those
+
+00:03:21,690 --> 00:03:28,350
+actually work very soon
+
+00:03:24,620 --> 00:03:30,840
+so a quick history of schedulers in
+
+00:03:28,350 --> 00:03:32,790
+cloud foundry in the beginning we had a
+
+00:03:30,840 --> 00:03:35,610
+component called the DEA s or the
+
+00:03:32,790 --> 00:03:37,470
+droplet execution agents these were
+
+00:03:35,610 --> 00:03:40,790
+tightly coupled to the cloud controller
+
+00:03:37,470 --> 00:03:45,030
+it was really tough to add new features
+
+00:03:40,790 --> 00:03:46,950
+really brittle and there wasn't a really
+
+00:03:45,030 --> 00:03:49,680
+strong line between the cloud controller
+
+00:03:46,950 --> 00:03:51,630
+and the component responsible for
+
+00:03:49,680 --> 00:03:54,959
+running your staging tasks in your app
+
+00:03:51,630 --> 00:03:58,530
+workloads so in 2015
+
+00:03:54,959 --> 00:04:01,110
+around that time we migrated to Diego
+
+00:03:58,530 --> 00:04:03,630
+which introduced a very strong line
+
+00:04:01,110 --> 00:04:05,160
+between the cloud controller and the
+
+00:04:03,630 --> 00:04:07,769
+component responsible for running your
+
+00:04:05,160 --> 00:04:10,380
+apps and running your tasks it allowed
+
+00:04:07,769 --> 00:04:13,290
+us to develop a lot of new features and
+
+00:04:10,380 --> 00:04:15,330
+add those to the system this was written
+
+00:04:13,290 --> 00:04:18,000
+and go the DEA is were written in Ruby
+
+00:04:15,330 --> 00:04:22,620
+so this was called Diego because it's de
+
+00:04:18,000 --> 00:04:25,289
+A's raining go and now we're like in the
+
+00:04:22,620 --> 00:04:27,430
+exploration phase of ireenie
+
+00:04:25,289 --> 00:04:29,650
+this is the idea that well since we
+
+00:04:27,430 --> 00:04:31,479
+this like strong boundary now between
+
+00:04:29,650 --> 00:04:33,220
+the workload scheduler and the cloud
+
+00:04:31,479 --> 00:04:36,039
+controller why don't we just put
+
+00:04:33,220 --> 00:04:38,440
+kubernetes there instead and to reuse
+
+00:04:36,039 --> 00:04:43,930
+kubernetes for our app workloads and our
+
+00:04:38,440 --> 00:04:45,190
+staging tasks I'm gonna head off to Mimi
+
+00:04:43,930 --> 00:04:48,400
+to talk about the details of the
+
+00:04:45,190 --> 00:04:52,150
+schedulers all right thank you very much
+
+00:04:48,400 --> 00:04:54,910
+so and a quick disclaimer that we are
+
+00:04:52,150 --> 00:04:57,460
+gonna show a lot of diagrams in this in
+
+00:04:54,910 --> 00:04:59,680
+this presentation so if you get confused
+
+00:04:57,460 --> 00:05:02,199
+feel free to interrupt me and tell me to
+
+00:04:59,680 --> 00:05:04,570
+just slow down or you know review things
+
+00:05:02,199 --> 00:05:06,190
+but this is the high level for Diego you
+
+00:05:04,570 --> 00:05:08,289
+see the components that are highlighted
+
+00:05:06,190 --> 00:05:11,289
+on the left we have the auction here the
+
+00:05:08,289 --> 00:05:13,750
+BBS in the database then we have the
+
+00:05:11,289 --> 00:05:15,190
+cells that are essentially the VMS with
+
+00:05:13,750 --> 00:05:17,710
+the rep and the executor as the
+
+00:05:15,190 --> 00:05:20,710
+processes garden as a container runtime
+
+00:05:17,710 --> 00:05:22,449
+and then blobstore logger gator and go
+
+00:05:20,710 --> 00:05:24,490
+writer Cloud Foundry components right
+
+00:05:22,449 --> 00:05:27,250
+we're going to come back to these but
+
+00:05:24,490 --> 00:05:29,349
+then the irony architecture basically
+
+00:05:27,250 --> 00:05:31,090
+with kubernetes as the scheduler you see
+
+00:05:29,349 --> 00:05:33,280
+on the Left we have ireenie and the
+
+00:05:31,090 --> 00:05:35,530
+kubernetes api server and the scheduler
+
+00:05:33,280 --> 00:05:38,110
+in the middle we have worker nodes which
+
+00:05:35,530 --> 00:05:40,720
+again are the VMS on the VMS we've got
+
+00:05:38,110 --> 00:05:43,659
+the couplet the coop proxy and also the
+
+00:05:40,720 --> 00:05:45,820
+container runtime and we also have the
+
+00:05:43,659 --> 00:05:48,849
+logger Gator and go to go router as the
+
+00:05:45,820 --> 00:05:50,860
+Cloud Foundry components so let's put
+
+00:05:48,849 --> 00:05:54,220
+them side-by-side and do a comparison of
+
+00:05:50,860 --> 00:05:59,020
+in the two schedulers so first of all
+
+00:05:54,220 --> 00:06:01,300
+the api's as I mentioned for Diego we
+
+00:05:59,020 --> 00:06:03,400
+have auctioneer BBS and the BBBS
+
+00:06:01,300 --> 00:06:06,130
+database and BBS essentially is the
+
+00:06:03,400 --> 00:06:08,259
+eight in the and the api for the
+
+00:06:06,130 --> 00:06:13,990
+container scheduler and for the runtime
+
+00:06:08,259 --> 00:06:15,759
+of Cloud Foundry for ireenie we have of
+
+00:06:13,990 --> 00:06:18,280
+course the Iranian component which
+
+00:06:15,759 --> 00:06:20,770
+serves similar to BBS as the entry point
+
+00:06:18,280 --> 00:06:22,570
+to the scheduler then we have the API
+
+00:06:20,770 --> 00:06:24,190
+server and the kubja scheduler that are
+
+00:06:22,570 --> 00:06:27,159
+responsible for actually scheduling the
+
+00:06:24,190 --> 00:06:30,940
+running of application instances and we
+
+00:06:27,159 --> 00:06:33,570
+have HCD as the database store so the
+
+00:06:30,940 --> 00:06:36,580
+source of truth between ireenie and
+
+00:06:33,570 --> 00:06:38,050
+diego are the databases and the BBS
+
+00:06:36,580 --> 00:06:41,080
+database and
+
+00:06:38,050 --> 00:06:43,180
+DHCD in kubernetes and star campaign has
+
+00:06:41,080 --> 00:06:46,210
+a very nice article comparing the source
+
+00:06:43,180 --> 00:06:47,560
+of truth between kubernetes and cloud
+
+00:06:46,210 --> 00:06:51,430
+foundry that if you're interested you
+
+00:06:47,560 --> 00:06:53,740
+can also read the next phase of it is
+
+00:06:51,430 --> 00:06:55,870
+the scheduler right so the scheduler in
+
+00:06:53,740 --> 00:06:58,659
+Diego is auctioneer and auctioneer is a
+
+00:06:55,870 --> 00:07:01,389
+component that looks at the cells and or
+
+00:06:58,659 --> 00:07:04,180
+the VMs measures whether they have
+
+00:07:01,389 --> 00:07:06,970
+enough resources in terms of memory you
+
+00:07:04,180 --> 00:07:10,030
+know desk and also CPU resources and
+
+00:07:06,970 --> 00:07:12,009
+then takes the request for the instances
+
+00:07:10,030 --> 00:07:14,080
+and based on the available resources on
+
+00:07:12,009 --> 00:07:15,699
+some other constraints decide on where
+
+00:07:14,080 --> 00:07:19,360
+each application instance needs to go
+
+00:07:15,699 --> 00:07:21,610
+this on the ireenie side is handled by
+
+00:07:19,360 --> 00:07:22,960
+the kubernetes is scheduling right so
+
+00:07:21,610 --> 00:07:25,270
+the kubernetes is a schedule it has a
+
+00:07:22,960 --> 00:07:26,770
+very similar task of understanding what
+
+00:07:25,270 --> 00:07:28,780
+is the resources available on the node
+
+00:07:26,770 --> 00:07:31,509
+and how the application instances are
+
+00:07:28,780 --> 00:07:33,430
+going to be distributed we have workers
+
+00:07:31,509 --> 00:07:35,680
+which are the VMS that actually run the
+
+00:07:33,430 --> 00:07:37,599
+application instances workers in the
+
+00:07:35,680 --> 00:07:39,580
+case of diego are managed by a process
+
+00:07:37,599 --> 00:07:41,800
+called the rep which collects all the
+
+00:07:39,580 --> 00:07:45,550
+information from resource usage from
+
+00:07:41,800 --> 00:07:47,500
+each of these virtual machines forwards
+
+00:07:45,550 --> 00:07:49,050
+them to the auction here for the
+
+00:07:47,500 --> 00:07:52,330
+auctioneer to make decisions about
+
+00:07:49,050 --> 00:07:54,310
+placements and then later on when the
+
+00:07:52,330 --> 00:07:56,529
+route those requests come in contacts
+
+00:07:54,310 --> 00:07:58,740
+the runtime and tells the run time to
+
+00:07:56,529 --> 00:08:01,240
+run and the application instances and
+
+00:07:58,740 --> 00:08:03,639
+for the case of Irena this is done by
+
+00:08:01,240 --> 00:08:05,400
+cubelet basically the same and set of
+
+00:08:03,639 --> 00:08:07,659
+actions collecting resource information
+
+00:08:05,400 --> 00:08:09,940
+letting the scheduler know about the
+
+00:08:07,659 --> 00:08:11,560
+available resources and in their
+
+00:08:09,940 --> 00:08:14,949
+scheduler taking care of placing
+
+00:08:11,560 --> 00:08:17,440
+instances then we have the content at
+
+00:08:14,949 --> 00:08:19,180
+run time in both architectures right for
+
+00:08:17,440 --> 00:08:20,800
+kubernetes the container run time is
+
+00:08:19,180 --> 00:08:23,020
+actually pluggable you can have
+
+00:08:20,800 --> 00:08:25,449
+container d you can have dr. demian you
+
+00:08:23,020 --> 00:08:28,990
+can have rocket you can have creo
+
+00:08:25,449 --> 00:08:32,140
+but for Cloud Foundry its garden and
+
+00:08:28,990 --> 00:08:33,899
+garden is basically an API to run C
+
+00:08:32,140 --> 00:08:36,279
+which is in charge of running
+
+00:08:33,899 --> 00:08:38,709
+application instances and it's not as
+
+00:08:36,279 --> 00:08:44,519
+plug you're less flexible the way it is
+
+00:08:38,709 --> 00:08:49,029
+with kubernetes so for routing with
+
+00:08:44,519 --> 00:08:50,829
+Diego we have the router meter which
+
+00:08:49,029 --> 00:08:51,440
+basically receives information about the
+
+00:08:50,829 --> 00:08:53,000
+IP address
+
+00:08:51,440 --> 00:08:55,430
+which container and the port for the
+
+00:08:53,000 --> 00:08:57,410
+application forwards that information to
+
+00:08:55,430 --> 00:09:00,259
+the go router and makes the application
+
+00:08:57,410 --> 00:09:02,480
+instance routable for kubernetes this is
+
+00:09:00,259 --> 00:09:04,129
+done through qu proxy which does some
+
+00:09:02,480 --> 00:09:06,230
+understanding of which has some
+
+00:09:04,129 --> 00:09:08,810
+understanding of the IP address of the
+
+00:09:06,230 --> 00:09:12,019
+the node and also when a pod starts up
+
+00:09:08,810 --> 00:09:14,149
+and running it collects the container
+
+00:09:12,019 --> 00:09:16,189
+port and then rewrite some of the IP
+
+00:09:14,149 --> 00:09:18,709
+table rules on the node so that it
+
+00:09:16,189 --> 00:09:21,379
+actually makes that information for
+
+00:09:18,709 --> 00:09:23,480
+routing of an application instance
+
+00:09:21,379 --> 00:09:24,649
+available that information that gets
+
+00:09:23,480 --> 00:09:26,980
+relate to ireenie
+
+00:09:24,649 --> 00:09:29,240
+which then contacts to go router and
+
+00:09:26,980 --> 00:09:30,769
+rewrites the go router information in
+
+00:09:29,240 --> 00:09:31,689
+order to make the application instance
+
+00:09:30,769 --> 00:09:35,720
+of it
+
+00:09:31,689 --> 00:09:37,850
+alright so let's have a deeper look at
+
+00:09:35,720 --> 00:09:41,300
+this schedule right from a kubernetes
+
+00:09:37,850 --> 00:09:44,089
+manual their scheduler in communities
+
+00:09:41,300 --> 00:09:47,029
+does two things it does filtering and it
+
+00:09:44,089 --> 00:09:49,310
+does score so by filtering it basically
+
+00:09:47,029 --> 00:09:52,160
+selects the NAM the set of nodes or the
+
+00:09:49,310 --> 00:09:54,560
+VMS that can run an application and then
+
+00:09:52,160 --> 00:09:56,630
+it runs and scoring algorithm in order
+
+00:09:54,560 --> 00:09:58,040
+to decide ok which one out of all the
+
+00:09:56,630 --> 00:09:59,660
+ones that are capable of running an
+
+00:09:58,040 --> 00:10:01,730
+application instance can in fact run
+
+00:09:59,660 --> 00:10:04,339
+that application instance right and the
+
+00:10:01,730 --> 00:10:06,680
+node with the higher score and basically
+
+00:10:04,339 --> 00:10:08,930
+picks up the instance and runs it let's
+
+00:10:06,680 --> 00:10:10,819
+look at the source code so you see for
+
+00:10:08,930 --> 00:10:12,649
+filtering there is like a part for
+
+00:10:10,819 --> 00:10:15,230
+filtered zone which actually does the
+
+00:10:12,649 --> 00:10:17,480
+filtering of nodes and for scoring there
+
+00:10:15,230 --> 00:10:21,680
+is a part that actually goes through all
+
+00:10:17,480 --> 00:10:23,930
+the VMS and essentially says hey pick
+
+00:10:21,680 --> 00:10:27,410
+this particular vm which has a higher
+
+00:10:23,930 --> 00:10:29,449
+score right pretty clear so the left we
+
+00:10:27,410 --> 00:10:31,009
+have the kubernetes scheduler the part
+
+00:10:29,449 --> 00:10:32,930
+that i didn't mention is that the code
+
+00:10:31,009 --> 00:10:35,899
+that i showed you is in fact diego's
+
+00:10:32,930 --> 00:10:38,209
+auctioneer right so what makes it clear
+
+00:10:35,899 --> 00:10:41,750
+is that you know in terms of design
+
+00:10:38,209 --> 00:10:45,639
+they're very similar in what they do in
+
+00:10:41,750 --> 00:10:47,839
+filtering and in calculating the score
+
+00:10:45,639 --> 00:10:51,800
+but the kubernetes the scheduler
+
+00:10:47,839 --> 00:10:54,490
+basically does the filtering and the
+
+00:10:51,800 --> 00:10:56,360
+scoring based on two sets of criteria
+
+00:10:54,490 --> 00:10:58,730
+predicates which are the hard
+
+00:10:56,360 --> 00:11:00,620
+constraints so if something if a node
+
+00:10:58,730 --> 00:11:02,059
+doesn't fit a predicate it's actually
+
+00:11:00,620 --> 00:11:04,279
+out of equation it's not going to be
+
+00:11:02,059 --> 00:11:04,970
+considered for schedule what priorities
+
+00:11:04,279 --> 00:11:07,879
+are softer
+
+00:11:04,970 --> 00:11:10,189
+constructs we're you know like a node
+
+00:11:07,879 --> 00:11:14,029
+that fills a priority still has a chance
+
+00:11:10,189 --> 00:11:17,149
+in basically having a placement of an
+
+00:11:14,029 --> 00:11:19,639
+application instance on the Diego side
+
+00:11:17,149 --> 00:11:21,699
+we have the scores again which calculate
+
+00:11:19,639 --> 00:11:24,649
+are calculated based on the available
+
+00:11:21,699 --> 00:11:27,079
+resources for a given view in terms of
+
+00:11:24,649 --> 00:11:29,089
+the available memory the available CPU
+
+00:11:27,079 --> 00:11:31,009
+and obviously like the algorithm works
+
+00:11:29,089 --> 00:11:33,319
+in such a way that if you have a VM that
+
+00:11:31,009 --> 00:11:35,750
+you know is already serving less load it
+
+00:11:33,319 --> 00:11:37,970
+has a higher score to actually house new
+
+00:11:35,750 --> 00:11:40,519
+application instances and then the egg
+
+00:11:37,970 --> 00:11:42,800
+also has some constraints for example
+
+00:11:40,519 --> 00:11:45,170
+the root filesystem constraint which is
+
+00:11:42,800 --> 00:11:47,509
+like in a Diego world in a kubernetes
+
+00:11:45,170 --> 00:11:49,459
+world is a hard constraint essentially
+
+00:11:47,509 --> 00:11:52,550
+if your application needs a particular
+
+00:11:49,459 --> 00:11:53,959
+file system requirements and then the
+
+00:11:52,550 --> 00:11:55,459
+scheduler makes sure that your
+
+00:11:53,959 --> 00:11:59,000
+application actually ends up on that
+
+00:11:55,459 --> 00:12:00,620
+particular node but the one thing that
+
+00:11:59,000 --> 00:12:02,449
+is interesting is that if you look at
+
+00:12:00,620 --> 00:12:04,639
+the set of predicates and priorities for
+
+00:12:02,449 --> 00:12:07,040
+kubernetes there is a lot of things that
+
+00:12:04,639 --> 00:12:09,800
+you can configure for this scheduler for
+
+00:12:07,040 --> 00:12:11,809
+diego on the other hand scores and
+
+00:12:09,800 --> 00:12:15,949
+constraints or predicates and priorities
+
+00:12:11,809 --> 00:12:18,379
+are a lot simpler scoring is only for
+
+00:12:15,949 --> 00:12:20,449
+CPU memory and disk and constraints are
+
+00:12:18,379 --> 00:12:22,309
+like a handful of options that you can
+
+00:12:20,449 --> 00:12:24,050
+configure so in that sense the
+
+00:12:22,309 --> 00:12:25,750
+kubernetes scheduler is a lot more
+
+00:12:24,050 --> 00:12:27,980
+flexible and you can do a lot of
+
+00:12:25,750 --> 00:12:31,939
+different considerations in order to
+
+00:12:27,980 --> 00:12:32,990
+decide how to do schedule one thing
+
+00:12:31,939 --> 00:12:34,430
+that's very interesting with the
+
+00:12:32,990 --> 00:12:36,559
+kubernetes scheduler is that it
+
+00:12:34,430 --> 00:12:39,019
+implements a pull based model when a pod
+
+00:12:36,559 --> 00:12:40,970
+is required to be scheduled what happens
+
+00:12:39,019 --> 00:12:42,649
+is that it's placed in a queue and then
+
+00:12:40,970 --> 00:12:44,509
+the scheduler looks at that queue and
+
+00:12:42,649 --> 00:12:46,459
+says hey there's a pod that requires a
+
+00:12:44,509 --> 00:12:48,379
+node so I'm going to take it do my
+
+00:12:46,459 --> 00:12:51,500
+scoring and calculations and then decide
+
+00:12:48,379 --> 00:12:53,569
+where to place it right so this is good
+
+00:12:51,500 --> 00:12:55,399
+in the sense that it's easily decoupled
+
+00:12:53,569 --> 00:12:57,290
+in the sense that I can bring get
+
+00:12:55,399 --> 00:12:59,240
+different scheduler look at the same
+
+00:12:57,290 --> 00:13:01,189
+queue look at the pods that are not
+
+00:12:59,240 --> 00:13:03,800
+scheduled and decide about how to place
+
+00:13:01,189 --> 00:13:05,540
+them right where it's difficult is that
+
+00:13:03,800 --> 00:13:06,740
+it's hard to scale so if you want a
+
+00:13:05,540 --> 00:13:08,540
+scheduler you bring you to the
+
+00:13:06,740 --> 00:13:10,759
+kubernetes world and then all of a
+
+00:13:08,540 --> 00:13:12,980
+sudden your queue starts growing long
+
+00:13:10,759 --> 00:13:14,839
+there is not really an easy way for you
+
+00:13:12,980 --> 00:13:16,550
+to load balance your scheduler so that
+
+00:13:14,839 --> 00:13:18,860
+you have multiple instances working on
+
+00:13:16,550 --> 00:13:20,690
+that queue but in terms of
+
+00:13:18,860 --> 00:13:22,550
+the coupling as you know you know
+
+00:13:20,690 --> 00:13:24,200
+writing custom kubernetes schedulers is
+
+00:13:22,550 --> 00:13:26,840
+a very common thing that a lot of people
+
+00:13:24,200 --> 00:13:29,660
+do on the Diego side the scheduling is
+
+00:13:26,840 --> 00:13:32,300
+more on demand in the sense that BBS
+
+00:13:29,660 --> 00:13:33,950
+which is the API server goes to the
+
+00:13:32,300 --> 00:13:36,050
+scheduler and says hey I've got these
+
+00:13:33,950 --> 00:13:38,120
+requests for for these number of
+
+00:13:36,050 --> 00:13:40,910
+applications please go ahead and find
+
+00:13:38,120 --> 00:13:44,180
+notes for me the good side of it is
+
+00:13:40,910 --> 00:13:46,400
+obviously that you can easily score load
+
+00:13:44,180 --> 00:13:48,050
+balances or basically scale it by
+
+00:13:46,400 --> 00:13:50,420
+putting the scheduler behind the load
+
+00:13:48,050 --> 00:13:52,610
+balancer as the BBS starts hitting the
+
+00:13:50,420 --> 00:13:54,560
+auctioneer more and more more instances
+
+00:13:52,610 --> 00:13:56,750
+of auctioneer can potentially operate on
+
+00:13:54,560 --> 00:13:58,010
+the requests that come in this is not
+
+00:13:56,750 --> 00:13:59,780
+the case reduction here really because
+
+00:13:58,010 --> 00:14:02,750
+auctioneer is only a single instance
+
+00:13:59,780 --> 00:14:04,820
+application so redundancy is mostly in
+
+00:14:02,750 --> 00:14:07,370
+the form of a master/slave kind of model
+
+00:14:04,820 --> 00:14:10,070
+but essentially if action here wants to
+
+00:14:07,370 --> 00:14:12,140
+scale it can but the problem is that
+
+00:14:10,070 --> 00:14:15,470
+because there's a tight coupling between
+
+00:14:12,140 --> 00:14:17,480
+the BBS API and the auctioneer endpoints
+
+00:14:15,470 --> 00:14:19,460
+it's not really easy to write custom
+
+00:14:17,480 --> 00:14:22,160
+schedulers so the notion of custom
+
+00:14:19,460 --> 00:14:27,170
+schedulers in case of Cloud Foundry is
+
+00:14:22,160 --> 00:14:28,520
+not very common one of the interesting
+
+00:14:27,170 --> 00:14:30,800
+reads that you can have in the same
+
+00:14:28,520 --> 00:14:33,590
+domain is like to message boss or not in
+
+00:14:30,800 --> 00:14:37,540
+case of distributed systems it's a nice
+
+00:14:33,590 --> 00:14:40,940
+blog post that Natalja Phi has written
+
+00:14:37,540 --> 00:14:42,560
+okay so the major takeaway of all you
+
+00:14:40,940 --> 00:14:44,450
+know the conversation that we had here
+
+00:14:42,560 --> 00:14:47,090
+is that the schedulers between our in
+
+00:14:44,450 --> 00:14:50,330
+Eid ago and our in in fact very similar
+
+00:14:47,090 --> 00:14:52,100
+right so this is not surprising and this
+
+00:14:50,330 --> 00:14:54,440
+shows why Cloud Foundry has been super
+
+00:14:52,100 --> 00:14:55,820
+successful in terms of you know having
+
+00:14:54,440 --> 00:14:58,940
+your scheduler and not needing
+
+00:14:55,820 --> 00:15:00,890
+kubernetes for the most part right okay
+
+00:14:58,940 --> 00:15:03,860
+so with that I'm going to very quickly
+
+00:15:00,890 --> 00:15:07,820
+go over what happens when you push on
+
+00:15:03,860 --> 00:15:11,210
+application for in the case of Diego and
+
+00:15:07,820 --> 00:15:13,580
+then compare it with Irene I'm going to
+
+00:15:11,210 --> 00:15:15,560
+keep it at a very high level but if you
+
+00:15:13,580 --> 00:15:18,080
+want further detail I think we can have
+
+00:15:15,560 --> 00:15:20,510
+that conversation after the talk all
+
+00:15:18,080 --> 00:15:22,220
+right so in case of Diego when a
+
+00:15:20,510 --> 00:15:24,230
+requests to schedule an application
+
+00:15:22,220 --> 00:15:26,480
+comes in obviously the first component
+
+00:15:24,230 --> 00:15:29,330
+that it hits is the BBS which is the API
+
+00:15:26,480 --> 00:15:31,160
+for the schedule the BBS then takes that
+
+00:15:29,330 --> 00:15:32,290
+information for the application which
+
+00:15:31,160 --> 00:15:33,759
+consists
+
+00:15:32,290 --> 00:15:35,649
+you know how much resources the
+
+00:15:33,759 --> 00:15:37,179
+application requires and what are the
+
+00:15:35,649 --> 00:15:39,220
+hard constraints for placement of this
+
+00:15:37,179 --> 00:15:41,889
+application and takes that information
+
+00:15:39,220 --> 00:15:44,110
+to the auctioneer Anna asks the
+
+00:15:41,889 --> 00:15:46,839
+auctioneer to go ahead and schedule the
+
+00:15:44,110 --> 00:15:48,549
+application auctioneer then looks at all
+
+00:15:46,839 --> 00:15:50,529
+the information that the reps have
+
+00:15:48,549 --> 00:15:52,509
+provided in terms of available resources
+
+00:15:50,529 --> 00:15:55,059
+for the notes take everything into
+
+00:15:52,509 --> 00:15:58,239
+consideration does its scoring that it's
+
+00:15:55,059 --> 00:16:02,049
+filtering etc etc and eventually finds
+
+00:15:58,239 --> 00:16:03,910
+the particular node that is the
+
+00:16:02,049 --> 00:16:07,119
+candidate for deploying the application
+
+00:16:03,910 --> 00:16:09,850
+instance contacts the app and that
+
+00:16:07,119 --> 00:16:12,160
+particular rep on that note and says hey
+
+00:16:09,850 --> 00:16:13,809
+okay you've been chosen to do the
+
+00:16:12,160 --> 00:16:16,329
+deployment go ahead and deploy an
+
+00:16:13,809 --> 00:16:19,449
+application instance the rep then
+
+00:16:16,329 --> 00:16:21,610
+contacts the blobstore and download the
+
+00:16:19,449 --> 00:16:23,980
+application artifacts these application
+
+00:16:21,610 --> 00:16:25,809
+artifacts or the droplet for the
+
+00:16:23,980 --> 00:16:27,639
+application and the potentially the
+
+00:16:25,809 --> 00:16:29,769
+build pack that the application requires
+
+00:16:27,639 --> 00:16:31,839
+to run and once that information is
+
+00:16:29,769 --> 00:16:34,029
+fresh it updates the BBS and says hey
+
+00:16:31,839 --> 00:16:36,579
+I've received successfully all the
+
+00:16:34,029 --> 00:16:39,220
+artifacts and I can try to run the
+
+00:16:36,579 --> 00:16:41,319
+application instance at that point it
+
+00:16:39,220 --> 00:16:43,449
+contacts the runtime which is garden and
+
+00:16:41,319 --> 00:16:46,480
+says hey these this is the code for the
+
+00:16:43,449 --> 00:16:48,279
+application create a container mount all
+
+00:16:46,480 --> 00:16:50,949
+these application artifacts into the
+
+00:16:48,279 --> 00:16:52,600
+container and run it so garden goes
+
+00:16:50,949 --> 00:16:55,420
+ahead and does it and if it's successful
+
+00:16:52,600 --> 00:16:56,980
+then it starts reporting information
+
+00:16:55,420 --> 00:17:00,429
+back on the execution of the application
+
+00:16:56,980 --> 00:17:02,769
+instance and pushes the logs out to the
+
+00:17:00,429 --> 00:17:04,569
+logger Gator contacts the router meter
+
+00:17:02,769 --> 00:17:07,240
+telling the router meter about the IP of
+
+00:17:04,569 --> 00:17:09,579
+the application instance and the port
+
+00:17:07,240 --> 00:17:11,740
+and then the router meter goes ahead and
+
+00:17:09,579 --> 00:17:13,360
+contacts to go router in order to update
+
+00:17:11,740 --> 00:17:17,679
+the go router so that the application is
+
+00:17:13,360 --> 00:17:20,350
+routable right now let's look at Irene
+
+00:17:17,679 --> 00:17:22,539
+with I really what happens is that they
+
+00:17:20,350 --> 00:17:25,689
+request from an Cloud Controller this
+
+00:17:22,539 --> 00:17:27,429
+time goes to ireenie which for which
+
+00:17:25,689 --> 00:17:30,669
+basically serves as the API for the
+
+00:17:27,429 --> 00:17:31,899
+system Irene e then contacts the API
+
+00:17:30,669 --> 00:17:34,000
+server for kubernetes
+
+00:17:31,899 --> 00:17:36,760
+and says hey I've got this request and
+
+00:17:34,000 --> 00:17:39,820
+to run this application instance create
+
+00:17:36,760 --> 00:17:41,950
+a part for me and so what API server
+
+00:17:39,820 --> 00:17:43,650
+does is that records that information in
+
+00:17:41,950 --> 00:17:46,680
+the HDD dataset and
+
+00:17:43,650 --> 00:17:50,220
+in the sed database and then puts the
+
+00:17:46,680 --> 00:17:52,530
+request for the pod in a queue that the
+
+00:17:50,220 --> 00:17:54,450
+scheduler actually monitors so the
+
+00:17:52,530 --> 00:17:57,990
+scheduler notices that oh there's a pod
+
+00:17:54,450 --> 00:18:01,530
+that needs a note to be placed on and
+
+00:17:57,990 --> 00:18:03,300
+then it goes contacts all the couplets
+
+00:18:01,530 --> 00:18:05,850
+on all the notes collects all the note
+
+00:18:03,300 --> 00:18:07,800
+information and then that it's filtering
+
+00:18:05,850 --> 00:18:09,540
+and scoring calculations and then
+
+00:18:07,800 --> 00:18:12,330
+chooses the node that is responsible for
+
+00:18:09,540 --> 00:18:14,190
+running the application and tags and
+
+00:18:12,330 --> 00:18:15,720
+apart we didn't know that it's
+
+00:18:14,190 --> 00:18:21,270
+responsible for actually running the
+
+00:18:15,720 --> 00:18:24,470
+application the couplet on the note then
+
+00:18:21,270 --> 00:18:27,000
+watches the number of paws that are
+
+00:18:24,470 --> 00:18:29,100
+required to run on that given note and
+
+00:18:27,000 --> 00:18:30,870
+as it notices that there is a pod
+
+00:18:29,100 --> 00:18:33,000
+assigned to it it goes and picks the
+
+00:18:30,870 --> 00:18:34,679
+part and it starts looking at things
+
+00:18:33,000 --> 00:18:37,620
+that it needs to do in order to get that
+
+00:18:34,679 --> 00:18:39,480
+part up and run that involves contacting
+
+00:18:37,620 --> 00:18:40,950
+the container runtime and telling the
+
+00:18:39,480 --> 00:18:42,960
+container run time to create a container
+
+00:18:40,950 --> 00:18:44,940
+and then mounting the application
+
+00:18:42,960 --> 00:18:47,309
+information into that container and from
+
+00:18:44,940 --> 00:18:51,090
+that point on it's very similar to what
+
+00:18:47,309 --> 00:18:53,670
+garden does it starts contacting their
+
+00:18:51,090 --> 00:18:55,350
+registry for pulling the application
+
+00:18:53,670 --> 00:18:56,760
+artifacts which in the case of
+
+00:18:55,350 --> 00:19:00,140
+kubernetes is the image for the
+
+00:18:56,760 --> 00:19:04,020
+application downloads the image and then
+
+00:19:00,140 --> 00:19:06,510
+starts that image on the node and once
+
+00:19:04,020 --> 00:19:08,850
+that happens it starts pushing the logs
+
+00:19:06,510 --> 00:19:10,770
+out to the log regatta and then the coop
+
+00:19:08,850 --> 00:19:13,650
+proxy which is the other process on the
+
+00:19:10,770 --> 00:19:16,530
+kubernetes node rewrites the IP table
+
+00:19:13,650 --> 00:19:18,270
+for the for the node to make that
+
+00:19:16,530 --> 00:19:20,070
+application instance accessible and
+
+00:19:18,270 --> 00:19:22,410
+provides that information back to
+
+00:19:20,070 --> 00:19:24,740
+ireenie in turn in the in the form of
+
+00:19:22,410 --> 00:19:29,550
+labels and ireenie uses that information
+
+00:19:24,740 --> 00:19:31,020
+to contact the the router meter and tell
+
+00:19:29,550 --> 00:19:32,730
+the router meter about the application
+
+00:19:31,020 --> 00:19:34,650
+instance which then sends that
+
+00:19:32,730 --> 00:19:38,010
+information to the go router and makes
+
+00:19:34,650 --> 00:19:42,090
+that instance available so with that you
+
+00:19:38,010 --> 00:19:44,610
+get an instance up and running on Irena
+
+00:19:42,090 --> 00:19:48,210
+and then Jen is going to talk about
+
+00:19:44,610 --> 00:19:52,800
+another case of how this is done between
+
+00:19:48,210 --> 00:19:55,080
+Diego and Ernie for Rudy face updates so
+
+00:19:52,800 --> 00:19:56,679
+one of the important things that Cloud
+
+00:19:55,080 --> 00:20:00,039
+Foundry can do
+
+00:19:56,679 --> 00:20:02,019
+to make it very easy to update the Rue
+
+00:20:00,039 --> 00:20:05,889
+de fess that your app is running on top
+
+00:20:02,019 --> 00:20:09,009
+of so this is the the OS image that your
+
+00:20:05,889 --> 00:20:11,950
+app is using by default in CF deployment
+
+00:20:09,009 --> 00:20:15,039
+we use CF Linux FS 3 which is based on
+
+00:20:11,950 --> 00:20:17,559
+Ubuntu and we're gonna walk through now
+
+00:20:15,039 --> 00:20:19,360
+here how this flow works when you have a
+
+00:20:17,559 --> 00:20:22,149
+new version of this root of s in both
+
+00:20:19,360 --> 00:20:25,029
+the Diego and the ireenie worlds
+
+00:20:22,149 --> 00:20:28,059
+so we're gonna start with Diego Diego is
+
+00:20:25,029 --> 00:20:29,529
+built to run really well on Bosch so
+
+00:20:28,059 --> 00:20:32,919
+we're also going to assume that there is
+
+00:20:29,529 --> 00:20:36,369
+a Bosch involved here in this case we
+
+00:20:32,919 --> 00:20:39,490
+have three Diego cells each Diego cell
+
+00:20:36,369 --> 00:20:42,100
+knows has a version of the root of s and
+
+00:20:39,490 --> 00:20:45,759
+then when garden starts up a container
+
+00:20:42,100 --> 00:20:49,419
+it also includes the root of s that that
+
+00:20:45,759 --> 00:20:50,919
+cell knows about so we're gonna start by
+
+00:20:49,419 --> 00:20:52,179
+assuming that the Bosch director has
+
+00:20:50,919 --> 00:20:54,100
+been informed that there is a new
+
+00:20:52,179 --> 00:20:56,950
+version of the CF Linux fs3
+
+00:20:54,100 --> 00:21:00,220
+release the Bosch director is then going
+
+00:20:56,950 --> 00:21:02,470
+to go contact one of the cells and say
+
+00:21:00,220 --> 00:21:08,019
+okay I need to restart the rep job in
+
+00:21:02,470 --> 00:21:11,590
+order to update the CF Linux FS 3 code
+
+00:21:08,019 --> 00:21:14,499
+that's on that so as part of that it
+
+00:21:11,590 --> 00:21:16,659
+needs to drain the rep this is a special
+
+00:21:14,499 --> 00:21:19,629
+script that the boss director runs on
+
+00:21:16,659 --> 00:21:23,049
+the Diego cell the rep interprets this
+
+00:21:19,629 --> 00:21:25,720
+by saying ok I'm draining in my language
+
+00:21:23,049 --> 00:21:27,909
+that means I'm evacuating so now it's in
+
+00:21:25,720 --> 00:21:30,220
+this special kind of mode it's not going
+
+00:21:27,909 --> 00:21:33,039
+to schedule any new work on this cell in
+
+00:21:30,220 --> 00:21:35,440
+this evacuating mode the rep is also
+
+00:21:33,039 --> 00:21:36,850
+going to inform BBS that all these app
+
+00:21:35,440 --> 00:21:38,409
+instances need to be placed somewhere
+
+00:21:36,850 --> 00:21:40,179
+else because we don't want to have any
+
+00:21:38,409 --> 00:21:44,590
+downtime when we're doing this kind of
+
+00:21:40,179 --> 00:21:46,450
+an upgrade the auctioneer then contacts
+
+00:21:44,590 --> 00:21:48,730
+the other cells and asks hey can you
+
+00:21:46,450 --> 00:21:50,499
+take on this work the cells in this case
+
+00:21:48,730 --> 00:21:55,749
+say yep we can take these app instances
+
+00:21:50,499 --> 00:21:58,299
+and then these other reps start up some
+
+00:21:55,749 --> 00:22:00,220
+extra containers representing the work
+
+00:21:58,299 --> 00:22:03,309
+that's now being moved off of cell
+
+00:22:00,220 --> 00:22:06,159
+number 1 and the route emitter is
+
+00:22:03,309 --> 00:22:08,590
+informed that we now need to have the go
+
+00:22:06,159 --> 00:22:10,059
+router know about these locations of
+
+00:22:08,590 --> 00:22:11,769
+these app instances
+
+00:22:10,059 --> 00:22:12,789
+and similarly we need to deregister the
+
+00:22:11,769 --> 00:22:15,820
+routes that are pointing to the
+
+00:22:12,789 --> 00:22:17,859
+evacuating cell after all of this the
+
+00:22:15,820 --> 00:22:20,469
+rep can then tell boss yep I'm done
+
+00:22:17,859 --> 00:22:21,940
+draining you can go ahead and restart
+
+00:22:20,469 --> 00:22:25,269
+all the jobs on this VM that's safe to
+
+00:22:21,940 --> 00:22:27,879
+do so now we've restarted our CF Linux
+
+00:22:25,269 --> 00:22:29,289
+FS 3 job we've restarted the rep we have
+
+00:22:27,879 --> 00:22:30,759
+no workloads running on this machine
+
+00:22:29,289 --> 00:22:33,309
+anymore and we're in a totally clean
+
+00:22:30,759 --> 00:22:34,989
+state then Bosch will go ahead and do
+
+00:22:33,309 --> 00:22:36,429
+the same thing to all the other cells
+
+00:22:34,989 --> 00:22:41,109
+and that's how all of our cells are
+
+00:22:36,429 --> 00:22:42,999
+going to get an updated root of s so
+
+00:22:41,109 --> 00:22:44,200
+let's look at ivory knee it's quite a
+
+00:22:42,999 --> 00:22:47,109
+different flow in ireenie
+
+00:22:44,200 --> 00:22:49,239
+there is no knowledge and so in Diego
+
+00:22:47,109 --> 00:22:51,489
+the idea of a root of s is baked into
+
+00:22:49,239 --> 00:22:54,279
+the cell itself in kubernetes each
+
+00:22:51,489 --> 00:22:58,419
+individual image that is running an app
+
+00:22:54,279 --> 00:23:01,179
+workload contains the root of s this
+
+00:22:58,419 --> 00:23:05,559
+gets bundled by the registry in this
+
+00:23:01,179 --> 00:23:09,369
+case so when you are starting up a pod
+
+00:23:05,559 --> 00:23:11,919
+for an app workload it the container
+
+00:23:09,369 --> 00:23:14,679
+runtime reaches out to the registry the
+
+00:23:11,919 --> 00:23:19,330
+registry grabs a droplet for your app
+
+00:23:14,679 --> 00:23:22,869
+and then sticks the root of s on to that
+
+00:23:19,330 --> 00:23:23,950
+image as a as the root affair so the
+
+00:23:22,869 --> 00:23:27,219
+very first thing that's going to happen
+
+00:23:23,950 --> 00:23:29,799
+in this flow so here what you see this 8
+
+00:23:27,219 --> 00:23:31,839
+6 D that is a particular version of a
+
+00:23:29,799 --> 00:23:34,509
+root of s in this case this is ireenie
+
+00:23:31,839 --> 00:23:36,580
+FS which is a repackaging of CS Linux FS
+
+00:23:34,509 --> 00:23:38,469
+3 so the first thing that's going to
+
+00:23:36,580 --> 00:23:40,659
+happen is we need to update that image
+
+00:23:38,469 --> 00:23:42,279
+on the registry this means that any new
+
+00:23:40,659 --> 00:23:43,899
+pods that are going to get created are
+
+00:23:42,279 --> 00:23:46,539
+going to now have the correct new
+
+00:23:43,899 --> 00:23:47,919
+version of the root of s however we
+
+00:23:46,539 --> 00:23:50,649
+still have all these existing app pods
+
+00:23:47,919 --> 00:23:53,080
+and they need to get updated too so
+
+00:23:50,649 --> 00:23:56,289
+ireenie is then going to update the
+
+00:23:53,080 --> 00:23:58,719
+stateful set that represents all of
+
+00:23:56,289 --> 00:24:02,080
+these app pods and controls all of these
+
+00:23:58,719 --> 00:24:04,690
+app pods it's going to update a label on
+
+00:24:02,080 --> 00:24:06,580
+that stateful set by updating this label
+
+00:24:04,690 --> 00:24:08,349
+and this label the value of the label
+
+00:24:06,580 --> 00:24:10,869
+corresponds to the version of the root
+
+00:24:08,349 --> 00:24:13,479
+of s by updating that label it's gonna
+
+00:24:10,869 --> 00:24:15,009
+cause kubernetes to say oh these app
+
+00:24:13,479 --> 00:24:17,409
+pods are out of date I need to go
+
+00:24:15,009 --> 00:24:19,629
+restart all of them and when we restart
+
+00:24:17,409 --> 00:24:20,889
+them that means I'm gonna have to the
+
+00:24:19,629 --> 00:24:22,659
+continued runtime is going to have to
+
+00:24:20,889 --> 00:24:23,900
+reach out to the registry again and get
+
+00:24:22,659 --> 00:24:26,420
+the new version of the
+
+00:24:23,900 --> 00:24:28,490
+image so then we're going to go through
+
+00:24:26,420 --> 00:24:30,820
+all the app pods one by one and update
+
+00:24:28,490 --> 00:24:33,650
+all of these pods
+
+00:24:30,820 --> 00:24:35,030
+so in summary like Nima said there are
+
+00:24:33,650 --> 00:24:36,800
+lots of similarities across the two
+
+00:24:35,030 --> 00:24:38,930
+platforms they're just like slight
+
+00:24:36,800 --> 00:24:40,790
+differences in how certain things get
+
+00:24:38,930 --> 00:24:42,530
+accomplished but by and large they're
+
+00:24:40,790 --> 00:24:44,090
+solving very similar problems and
+
+00:24:42,530 --> 00:24:47,720
+they're sometimes doing it in very
+
+00:24:44,090 --> 00:24:50,420
+similar ways in general kubernetes is a
+
+00:24:47,720 --> 00:24:52,220
+lot more pluggable you can choose what
+
+00:24:50,420 --> 00:24:54,110
+container runtime you want you can
+
+00:24:52,220 --> 00:24:56,870
+modify the scheduler if you want you
+
+00:24:54,110 --> 00:25:01,970
+have a lot more control whereas diego is
+
+00:24:56,870 --> 00:25:04,370
+a lot more more of a configuration that
+
+00:25:01,970 --> 00:25:06,560
+we know works really well together you
+
+00:25:04,370 --> 00:25:08,870
+can't go in and add your own container
+
+00:25:06,560 --> 00:25:10,460
+runtime but we guarantee that garden
+
+00:25:08,870 --> 00:25:14,240
+works really really well for Cloud
+
+00:25:10,460 --> 00:25:16,880
+Foundry with kubernetes you have a more
+
+00:25:14,240 --> 00:25:18,290
+of a declarative configuration and when
+
+00:25:16,880 --> 00:25:19,490
+things go wrong if you're using
+
+00:25:18,290 --> 00:25:22,400
+kubernetes and you're already familiar
+
+00:25:19,490 --> 00:25:24,590
+with the coop cuttle command-line tool
+
+00:25:22,400 --> 00:25:26,120
+or other kubernetes tools you can use
+
+00:25:24,590 --> 00:25:28,370
+that for troubleshooting and debugging
+
+00:25:26,120 --> 00:25:30,140
+with diego you're probably gonna be
+
+00:25:28,370 --> 00:25:32,780
+using like bosch skills for
+
+00:25:30,140 --> 00:25:33,980
+troubleshooting when things go wrong but
+
+00:25:32,780 --> 00:25:35,630
+by and large there are way more
+
+00:25:33,980 --> 00:25:37,580
+similarities than differences in the two
+
+00:25:35,630 --> 00:25:40,700
+which is why it was pretty natural for
+
+00:25:37,580 --> 00:25:43,820
+us to move to replace diego with
+
+00:25:40,700 --> 00:25:46,060
+kubernetes and with that are there any
+
+00:25:43,820 --> 00:25:46,060
+questions
+
+00:25:55,420 --> 00:25:59,260
+what kind of registry are you using for
+
+00:25:57,340 --> 00:26:05,230
+I'm reading can you speak a little bit
+
+00:25:59,260 --> 00:26:10,510
+about that sure right now we're using
+
+00:26:05,230 --> 00:26:14,020
+the bit service actually we're using the
+
+00:26:10,510 --> 00:26:16,930
+bit service because the bit service for
+
+00:26:14,020 --> 00:26:21,070
+those who are not aware is sort of a a
+
+00:26:16,930 --> 00:26:23,590
+project meant to pull a lot of the
+
+00:26:21,070 --> 00:26:24,880
+blobstore operation stuff out of the
+
+00:26:23,590 --> 00:26:27,400
+cloud controller into a separate
+
+00:26:24,880 --> 00:26:30,880
+component so if you're using the bit
+
+00:26:27,400 --> 00:26:32,890
+service then that component already
+
+00:26:30,880 --> 00:26:35,620
+knows about droplets and stuff so what
+
+00:26:32,890 --> 00:26:36,820
+the ireenie team is done is repurposed
+
+00:26:35,620 --> 00:26:38,470
+the bit service saying well since this
+
+00:26:36,820 --> 00:26:40,930
+thing already knows about droplets and
+
+00:26:38,470 --> 00:26:44,590
+knows where they live we can also just
+
+00:26:40,930 --> 00:26:46,090
+put on a registry on that and then we
+
+00:26:44,590 --> 00:26:48,250
+have access to the droplets and we can
+
+00:26:46,090 --> 00:26:51,040
+kind of sit in between and as long as we
+
+00:26:48,250 --> 00:26:53,440
+have an irony FS like a root of s we can
+
+00:26:51,040 --> 00:27:01,690
+easily just like shim that in whenever a
+
+00:26:53,440 --> 00:27:03,640
+request comes for an image at to that so
+
+00:27:01,690 --> 00:27:06,040
+essentially the docker image that is
+
+00:27:03,640 --> 00:27:06,700
+used for application instances are in
+
+00:27:06,040 --> 00:27:09,700
+ireenie
+
+00:27:06,700 --> 00:27:11,950
+has two layers in it the base layer is
+
+00:27:09,700 --> 00:27:15,940
+the irony FS layer which is like a
+
+00:27:11,950 --> 00:27:17,830
+pretty big and tar file that I think
+
+00:27:15,940 --> 00:27:20,590
+it's probably in nine hundred megabytes
+
+00:27:17,830 --> 00:27:22,630
+or something but that serves as the base
+
+00:27:20,590 --> 00:27:24,460
+layer which can have you know the CF
+
+00:27:22,630 --> 00:27:27,070
+Linux FS three for example in it right
+
+00:27:24,460 --> 00:27:30,640
+and then there is the other layer on top
+
+00:27:27,070 --> 00:27:31,690
+of it that gets created on the fly when
+
+00:27:30,640 --> 00:27:34,060
+you actually build an application
+
+00:27:31,690 --> 00:27:36,490
+instance and the way it's done is that
+
+00:27:34,060 --> 00:27:40,990
+when you when when Cloud Foundry runs
+
+00:27:36,490 --> 00:27:43,030
+and the build pack operations on a given
+
+00:27:40,990 --> 00:27:45,640
+application source code and creates the
+
+00:27:43,030 --> 00:27:49,330
+tar file for the droplet then it
+
+00:27:45,640 --> 00:27:52,960
+modifies the dark-hair manifest for the
+
+00:27:49,330 --> 00:27:56,650
+image by adding an extra layer on top of
+
+00:27:52,960 --> 00:27:59,530
+the irony FS layer referencing the newly
+
+00:27:56,650 --> 00:28:02,680
+created droplet as the additional layer
+
+00:27:59,530 --> 00:28:04,480
+on top and then creates that as so what
+
+00:28:02,680 --> 00:28:06,010
+bit service does is that bit service
+
+00:28:04,480 --> 00:28:08,530
+actually provides the shim
+
+00:28:06,010 --> 00:28:11,560
+on top of that combination of tar files
+
+00:28:08,530 --> 00:28:14,050
+and makes it available to the container
+
+00:28:11,560 --> 00:28:16,450
+runtime in kubernetes in the form of one
+
+00:28:14,050 --> 00:28:18,130
+image so when the container runtime
+
+00:28:16,450 --> 00:28:20,200
+contacts it it downloads the entire
+
+00:28:18,130 --> 00:28:29,290
+thing all the different layers and then
+
+00:28:20,200 --> 00:28:31,720
+can run yeah that's a quick follow up
+
+00:28:29,290 --> 00:28:33,610
+question I think it's service announcer
+
+00:28:31,720 --> 00:28:36,910
+it's only in maintenance mode for a
+
+00:28:33,610 --> 00:28:41,680
+rainy so will you be switching over to a
+
+00:28:36,910 --> 00:28:43,810
+new kind of registry I think the plan is
+
+00:28:41,680 --> 00:28:46,090
+to switch to a default registry right or
+
+00:28:43,810 --> 00:28:48,100
+essentially allow the users to bring in
+
+00:28:46,090 --> 00:28:50,860
+their own registries I think with
+
+00:28:48,100 --> 00:28:52,960
+kubernetes relying on you know just
+
+00:28:50,860 --> 00:28:56,770
+standard registries there is not really
+
+00:28:52,960 --> 00:28:58,870
+that much need for you know a standalone
+
+00:28:56,770 --> 00:29:01,420
+registry that is managed by client
+
+00:28:58,870 --> 00:29:02,800
+foundry but instead what can be done is
+
+00:29:01,420 --> 00:29:04,930
+that you actually create an image and
+
+00:29:02,800 --> 00:29:07,090
+then push that image that you create to
+
+00:29:04,930 --> 00:29:10,390
+a standard registry and then use that
+
+00:29:07,090 --> 00:29:12,640
+instead I think that also relies on a
+
+00:29:10,390 --> 00:29:13,990
+new kind of a replacement workflow for
+
+00:29:12,640 --> 00:29:17,020
+staging they're compared to how we do
+
+00:29:13,990 --> 00:29:18,970
+staging right now I think there's
+
+00:29:17,020 --> 00:29:22,480
+discussions going on about using some of
+
+00:29:18,970 --> 00:29:24,450
+the capex stuff I believe that's kind of
+
+00:29:22,480 --> 00:29:31,620
+more future looking I'm not sure exactly
+
+00:29:24,450 --> 00:29:36,010
+where that's gonna go there used to be
+
+00:29:31,620 --> 00:29:37,870
+mention of work around scalability in
+
+00:29:36,010 --> 00:29:40,900
+torini which was not yet matching
+
+00:29:37,870 --> 00:29:47,400
+Antigua can you tell us now about issues
+
+00:29:40,900 --> 00:29:51,400
+encountered and current status sure so
+
+00:29:47,400 --> 00:29:55,270
+the major scalability tests that we're
+
+00:29:51,400 --> 00:29:56,830
+done with Diego were thousand nodes two
+
+00:29:55,270 --> 00:30:00,100
+hundred and fifty thousand application
+
+00:29:56,830 --> 00:30:01,510
+instances which was I think still to
+
+00:30:00,100 --> 00:30:03,820
+date probably one of the biggest is
+
+00:30:01,510 --> 00:30:04,720
+scalability tests ever done what we've
+
+00:30:03,820 --> 00:30:06,340
+done with ireenie
+
+00:30:04,720 --> 00:30:07,840
+is a slightly different I think the
+
+00:30:06,340 --> 00:30:10,720
+biggest scale that we've reached with
+
+00:30:07,840 --> 00:30:14,130
+Irina is probably like 30 nodes or 40
+
+00:30:10,720 --> 00:30:17,560
+nodes with 2500 application instances so
+
+00:30:14,130 --> 00:30:19,630
+almost like 10 times smaller than the
+
+00:30:17,560 --> 00:30:21,940
+scalability test that we did for and
+
+00:30:19,630 --> 00:30:23,500
+and there are a number of bottlenecks
+
+00:30:21,940 --> 00:30:26,020
+and one of the bottlenecks is with the
+
+00:30:23,500 --> 00:30:28,150
+staging itself we noticed that you know
+
+00:30:26,020 --> 00:30:30,340
+with the staging for example the amount
+
+00:30:28,150 --> 00:30:31,990
+of time that it takes when the number of
+
+00:30:30,340 --> 00:30:34,480
+instances that you want to create in
+
+00:30:31,990 --> 00:30:36,160
+parallel as the number of instances
+
+00:30:34,480 --> 00:30:37,929
+increase the amount of time that it
+
+00:30:36,160 --> 00:30:40,660
+takes for those images to be created
+
+00:30:37,929 --> 00:30:42,610
+actually grows relatively exponentially
+
+00:30:40,660 --> 00:30:44,650
+and bit services being one of the
+
+00:30:42,610 --> 00:30:46,419
+bottlenecks right so there are a number
+
+00:30:44,650 --> 00:30:49,270
+of bottlenecks that you know the team
+
+00:30:46,419 --> 00:30:52,600
+has identified one another thing that is
+
+00:30:49,270 --> 00:30:55,630
+a problem is weed upgrades and rollout
+
+00:30:52,600 --> 00:30:58,990
+of the new instances of the application
+
+00:30:55,630 --> 00:31:03,010
+I think ireenie steel in has a little
+
+00:30:58,990 --> 00:31:05,429
+bit of problem you know doing you know
+
+00:31:03,010 --> 00:31:08,950
+like riot live rollouts
+
+00:31:05,429 --> 00:31:11,919
+so there are a few cases where and I
+
+00:31:08,950 --> 00:31:14,919
+also I really heavily relies on SCF at
+
+00:31:11,919 --> 00:31:16,630
+least the way it stands and there are
+
+00:31:14,919 --> 00:31:19,750
+some complications in terms of its
+
+00:31:16,630 --> 00:31:21,250
+scaling the SCF components too which
+
+00:31:19,750 --> 00:31:23,890
+slows down the overall performance
+
+00:31:21,250 --> 00:31:25,480
+already so altogether I think the
+
+00:31:23,890 --> 00:31:27,580
+content earners model is probably going
+
+00:31:25,480 --> 00:31:29,470
+to be have to be modified to a good
+
+00:31:27,580 --> 00:31:31,990
+extent for you and for our I'd I need to
+
+00:31:29,470 --> 00:31:36,220
+be more scalable that's I think the way
+
+00:31:31,990 --> 00:31:38,620
+we see it I think we're at time now so
+
+00:31:36,220 --> 00:31:40,270
+if you have more questions either find
+
+00:31:38,620 --> 00:31:41,710
+us or there are also some right arena
+
+00:31:40,270 --> 00:31:44,200
+team members in the back that you can
+
+00:31:41,710 --> 00:31:47,280
+ask I think thank you all for coming
+
+00:31:44,200 --> 00:31:47,280
+
+YouTube URL: https://www.youtube.com/watch?v=_eqCOOpZKfA
+
+
