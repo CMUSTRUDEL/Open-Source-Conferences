@@ -152,9 +152,9 @@ def get_channels(channels, youtube, save_to_csv: bool):
                     print("This directory already exists.")
 
                 for video in videos:
-                    vid = Video(video["snippet"]["resourceId"]["videoId"], video["snippet"]["title"], video["snippet"]["publishedAt"], playlist["snippet"]["title"], video["snippet"]["description"])
+                    vid = Video(video["snippet"]["resourceId"]["videoId"], video["snippet"]["title"], video["snippet"]["publishedAt"], fix_title(playlist["snippet"]["title"]), video["snippet"]["description"])
                     vid.get_tags()
-                    write_to_file(vid, directory + '/' + video_files + '/' + playlists[0]["snippet"]["channelTitle"] + '/' + playlist["snippet"]["title"] + '/')
+                    write_to_file(vid, directory + '/' + video_files + '/' + fix_title(playlists[0]["snippet"]["channelTitle"]) + '/' + fix_title(playlist["snippet"]["title"]) + '/')
 
                     urls.append(vid)
     
