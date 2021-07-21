@@ -1,0 +1,1817 @@
+Title: [2017] Vectoring in on QEMU's TCG Engine by Alex Bennée
+Publication date: 2017-11-23
+Playlist: KVM Forum 2017
+Description: 
+	Vector processing has existed since the 60s and lives on in modern CPUs as SIMD instructions. They are the main driver of performance for computationally intensive workloads such as multimedia and simulation. Vector registers have grown from MMX's 64 bit to 512 bit wide vectors today. ARM's Scalable Vector Extensions (SVE) take this growth to its logical conclusion and make the size of the registers an implementation detail while allowing binaries to run on any SVE capable processor.
+
+We need to consider the impact of vectors on the TCG. Currently time is spent marshalling vector data to normal registers before calling helper functions. We will discuss the path to supporting vectors as first-class TCG citizens and also cover the other challenges in correctly modelling behaviour and ask if we can move beyond helper functions and generate efficient JIT code in a generic way.
+
+---
+
+Alex Bennée
+Linaro
+Senior Software Engineer
+United Kingdom
+
+Alex is a senior software engineer working in Linaro's Virtualization team.
+An experienced FLOSS developer with over 20 years of experience in embedded and systems programming he currently spends most of his time on QEMU's TCG based emulation. The first piece of assembly he wrote was for the 6809 in his Dragon 32 followed by excessive pixel flinging on the 68000 before x86 took over the world.
+Captions: 
+	00:00:00,390 --> 00:00:02,709
+[Music]
+
+00:00:06,379 --> 00:00:12,150
+okay so first of all quick introduction
+
+00:00:09,420 --> 00:00:14,219
+my name is Alex Bonet I work for a
+
+00:00:12,150 --> 00:00:15,929
+company called enero I'm a member of the
+
+00:00:14,219 --> 00:00:18,210
+virtualization team there so I mostly
+
+00:00:15,929 --> 00:00:20,910
+work on creme use emulation abilities
+
+00:00:18,210 --> 00:00:23,400
+with the occasional side into KVM so my
+
+00:00:20,910 --> 00:00:27,869
+primary interest is having a decent
+
+00:00:23,400 --> 00:00:30,119
+emulation of arm systems so why vectors
+
+00:00:27,869 --> 00:00:32,219
+so a lot of the activities we take for
+
+00:00:30,119 --> 00:00:34,980
+granted in modern computing are enabled
+
+00:00:32,219 --> 00:00:36,750
+by vector processing things like video
+
+00:00:34,980 --> 00:00:39,120
+playback audio processing and 3d
+
+00:00:36,750 --> 00:00:41,040
+modeling or involve large amounts of
+
+00:00:39,120 --> 00:00:43,620
+data processing which have been enabled
+
+00:00:41,040 --> 00:00:45,600
+by the evolution of modern processors to
+
+00:00:43,620 --> 00:00:50,010
+cope with these computationally heavy
+
+00:00:45,600 --> 00:00:51,780
+workloads vectors can be leveraged in
+
+00:00:50,010 --> 00:00:54,270
+any algorithms that exhibits data
+
+00:00:51,780 --> 00:00:55,949
+parallelism so for example in audio
+
+00:00:54,270 --> 00:00:57,809
+processing if you want to attenuate a
+
+00:00:55,949 --> 00:00:59,430
+signal you might want to apply an
+
+00:00:57,809 --> 00:01:01,410
+identical transformation to each and
+
+00:00:59,430 --> 00:01:03,300
+every sample so the results of each
+
+00:01:01,410 --> 00:01:04,739
+calculation are independent of the
+
+00:01:03,300 --> 00:01:07,590
+samples before and after and they make a
+
+00:01:04,739 --> 00:01:08,970
+good candidate for being vectorized so
+
+00:01:07,590 --> 00:01:11,939
+let's talk a little bit about how
+
+00:01:08,970 --> 00:01:14,130
+vectors work in CPUs let's start with a
+
+00:01:11,939 --> 00:01:16,080
+vector register so this is a wide
+
+00:01:14,130 --> 00:01:18,330
+register that contains multiple elements
+
+00:01:16,080 --> 00:01:20,970
+usually refer to as lanes so in this
+
+00:01:18,330 --> 00:01:23,689
+example we have 128 bit vector holding
+
+00:01:20,970 --> 00:01:26,130
+for 32 bit values now why is this useful
+
+00:01:23,689 --> 00:01:29,430
+let's have a look at an example
+
+00:01:26,130 --> 00:01:32,340
+vector operation so this is a vectorized
+
+00:01:29,430 --> 00:01:34,680
+ad so we have a single instruction to
+
+00:01:32,340 --> 00:01:36,900
+add the contents of VN and VM together
+
+00:01:34,680 --> 00:01:39,570
+and importantly we are processing each
+
+00:01:36,900 --> 00:01:41,400
+lane separately so this is why these
+
+00:01:39,570 --> 00:01:43,290
+instructions are often referred to as
+
+00:01:41,400 --> 00:01:45,960
+single instruction multiple data or
+
+00:01:43,290 --> 00:01:47,610
+Sindhi instructions by saving the cost
+
+00:01:45,960 --> 00:01:49,740
+of the extra instruction decode for each
+
+00:01:47,610 --> 00:01:51,689
+operation and usually having multiple
+
+00:01:49,740 --> 00:01:53,729
+arithmetic units inside the CPU you get
+
+00:01:51,689 --> 00:01:57,299
+a simple level of parallelism in your
+
+00:01:53,729 --> 00:01:59,399
+processing another thing to note about
+
+00:01:57,299 --> 00:02:02,520
+vector registers is they support
+
+00:01:59,399 --> 00:02:04,530
+multiple sizes of operations so with 128
+
+00:02:02,520 --> 00:02:06,000
+bit vector you can process 2 double
+
+00:02:04,530 --> 00:02:08,849
+precision floating point numbers at a
+
+00:02:06,000 --> 00:02:10,500
+time however if the final precision of
+
+00:02:08,849 --> 00:02:12,780
+your calculation isn't required to be so
+
+00:02:10,500 --> 00:02:13,900
+high you can trade speed for accuracy
+
+00:02:12,780 --> 00:02:16,360
+and process twice as many
+
+00:02:13,900 --> 00:02:18,310
+single-precision numbers this is the
+
+00:02:16,360 --> 00:02:19,959
+reason for a lot of the drive for half
+
+00:02:18,310 --> 00:02:21,340
+precision support because you can
+
+00:02:19,959 --> 00:02:29,709
+increase your throughput again for the
+
+00:02:21,340 --> 00:02:32,140
+same memory bandwidth apologies that so
+
+00:02:29,709 --> 00:02:34,120
+other examples of highly data parallel
+
+00:02:32,140 --> 00:02:35,560
+tasks include things like general matrix
+
+00:02:34,120 --> 00:02:38,290
+multiplications so you may have come
+
+00:02:35,560 --> 00:02:40,209
+across this in 3d work we need to apply
+
+00:02:38,290 --> 00:02:43,540
+a matrix transformation to every pixel
+
+00:02:40,209 --> 00:02:45,670
+of vertex of your model you see similar
+
+00:02:43,540 --> 00:02:48,849
+transformations in AI and machine
+
+00:02:45,670 --> 00:02:50,440
+working machine learning workloads also
+
+00:02:48,849 --> 00:02:52,389
+scientific data processing and
+
+00:02:50,440 --> 00:02:54,700
+simulation often have parts that are
+
+00:02:52,389 --> 00:02:55,930
+highly data parallel so perhaps it's
+
+00:02:54,700 --> 00:02:59,319
+time we took a look at the history of
+
+00:02:55,930 --> 00:03:00,849
+vectors in computing so if X processing
+
+00:02:59,319 --> 00:03:02,530
+has been caught - a lot of
+
+00:03:00,849 --> 00:03:07,900
+supercomputing tasks since the early
+
+00:03:02,530 --> 00:03:10,659
+days can anyone named this machine Cray
+
+00:03:07,900 --> 00:03:12,189
+that's right it's the Cray one it's it
+
+00:03:10,659 --> 00:03:14,200
+was a powerful machine of its time it
+
+00:03:12,189 --> 00:03:15,970
+was one of the early supercomputers it
+
+00:03:14,200 --> 00:03:19,299
+was built only a few years after I was
+
+00:03:15,970 --> 00:03:22,030
+born so even though it clocked in only
+
+00:03:19,299 --> 00:03:23,769
+80 megahertz it could achieve 250
+
+00:03:22,030 --> 00:03:25,989
+million floating-point operations a
+
+00:03:23,769 --> 00:03:28,900
+second and this was mainly due to its
+
+00:03:25,989 --> 00:03:30,280
+vector base design it had eight vector
+
+00:03:28,900 --> 00:03:31,959
+registers and each of those vector
+
+00:03:30,280 --> 00:03:35,859
+registers was capable of holding up to
+
+00:03:31,959 --> 00:03:36,970
+64 64-bit elements so this allowed it to
+
+00:03:35,859 --> 00:03:38,859
+execute the same floating-point
+
+00:03:36,970 --> 00:03:41,069
+operation across multiple elements and
+
+00:03:38,859 --> 00:03:45,010
+the vector register giving it its
+
+00:03:41,069 --> 00:03:47,260
+comparatively high speed for the time so
+
+00:03:45,010 --> 00:03:48,849
+since the 1970s vector pipelines have
+
+00:03:47,260 --> 00:03:51,250
+been integral to many of the
+
+00:03:48,849 --> 00:03:53,229
+supercomputers the last 40 40 or so
+
+00:03:51,250 --> 00:03:54,430
+years as you can see there's been a
+
+00:03:53,229 --> 00:03:55,959
+steady growth in the number of
+
+00:03:54,430 --> 00:03:59,019
+floating-point operations the second
+
+00:03:55,959 --> 00:04:00,760
+they could achieve by the turn of the
+
+00:03:59,019 --> 00:04:04,209
+millennium processor knows we're running
+
+00:04:00,760 --> 00:04:07,120
+around about eight gigaflops so this is
+
+00:04:04,209 --> 00:04:09,090
+the last one that's like the NEC sx6
+
+00:04:07,120 --> 00:04:12,069
+which had eight vector pipeline units
+
+00:04:09,090 --> 00:04:16,479
+now each of these pipelines could have
+
+00:04:12,069 --> 00:04:18,699
+up to 72 256 word vector registers so
+
+00:04:16,479 --> 00:04:20,500
+this gave it a total processing power of
+
+00:04:18,699 --> 00:04:22,900
+about eight gigaflops per processing
+
+00:04:20,500 --> 00:04:24,880
+node but even with this growth in power
+
+00:04:22,900 --> 00:04:26,780
+supercomputer engineers had started to
+
+00:04:24,880 --> 00:04:29,690
+network nodes together
+
+00:04:26,780 --> 00:04:31,730
+cope with the increase in demand next
+
+00:04:29,690 --> 00:04:38,650
+quiz question can anyone name this
+
+00:04:31,730 --> 00:04:42,500
+machine so this is the earth simulator
+
+00:04:38,650 --> 00:04:44,480
+it was built out 640 of those sx6
+
+00:04:42,500 --> 00:04:47,840
+compute nodes and it had about total of
+
+00:04:44,480 --> 00:04:49,550
+5,000 vector processors so gave it for
+
+00:04:47,840 --> 00:04:52,790
+its time a pretty respectable
+
+00:04:49,550 --> 00:04:54,500
+performance of 35 teraflops it's spent
+
+00:04:52,790 --> 00:04:56,270
+most of its time running global climate
+
+00:04:54,500 --> 00:04:58,790
+models and help solving various
+
+00:04:56,270 --> 00:05:00,430
+geophysics problems and it held the
+
+00:04:58,790 --> 00:05:02,450
+record for the world's fastest
+
+00:05:00,430 --> 00:05:05,840
+supercomputer at the beginning of the
+
+00:05:02,450 --> 00:05:09,800
+millennium from 2002 to about 2004 when
+
+00:05:05,840 --> 00:05:11,990
+IBM's blue-jean exceeded it this is all
+
+00:05:09,800 --> 00:05:13,730
+very nice but in the 90s these vector
+
+00:05:11,990 --> 00:05:16,690
+processing approaches was starting to
+
+00:05:13,730 --> 00:05:19,540
+appear on workstations CPU architectures
+
+00:05:16,690 --> 00:05:22,130
+one of the first was Intel's MMX ins
+
+00:05:19,540 --> 00:05:24,110
+instructions these are sometimes known
+
+00:05:22,130 --> 00:05:25,820
+as the multimedia extensions because
+
+00:05:24,110 --> 00:05:27,710
+media processing was one of the first
+
+00:05:25,820 --> 00:05:31,760
+workloads these extensions were designed
+
+00:05:27,710 --> 00:05:33,950
+to accelerate it was capable of treating
+
+00:05:31,760 --> 00:05:36,740
+each MMX register as a single 64-bit
+
+00:05:33,950 --> 00:05:39,080
+number or two 32-bit numbers or four
+
+00:05:36,740 --> 00:05:42,410
+16-bit numbers or even eight individual
+
+00:05:39,080 --> 00:05:44,270
+bytes so the original MMX only supported
+
+00:05:42,410 --> 00:05:46,010
+integer operations and initially most of
+
+00:05:44,270 --> 00:05:48,590
+the code that took advantage of it was
+
+00:05:46,010 --> 00:05:53,030
+supplied by a library routine of common
+
+00:05:48,590 --> 00:05:57,070
+helper functions supplied by Intel but
+
+00:05:53,030 --> 00:05:59,810
+most of the workstation CPUs now have
+
+00:05:57,070 --> 00:06:01,430
+architect vector extensions so even
+
+00:05:59,810 --> 00:06:03,350
+though they're normally scalar
+
+00:06:01,430 --> 00:06:06,080
+architectures all those superscalar
+
+00:06:03,350 --> 00:06:08,180
+tries to stretch that a bit they've all
+
+00:06:06,080 --> 00:06:11,240
+added vector processing units but was
+
+00:06:08,180 --> 00:06:14,960
+early with its visual visual instruction
+
+00:06:11,240 --> 00:06:17,900
+set mips has M DMX PowerPC as altivec
+
+00:06:14,960 --> 00:06:20,890
+and four-armed there's advanced Indian
+
+00:06:17,900 --> 00:06:23,720
+neon AMD were the first to introduce
+
+00:06:20,890 --> 00:06:26,000
+floating-point operations with their 3d
+
+00:06:23,720 --> 00:06:28,010
+now extensions and now pretty much all
+
+00:06:26,000 --> 00:06:28,970
+modern sim D instruction sets support at
+
+00:06:28,010 --> 00:06:33,440
+least single and double precision
+
+00:06:28,970 --> 00:06:36,110
+floating point as time has gone on the
+
+00:06:33,440 --> 00:06:37,820
+vector sizes have also grown so in the
+
+00:06:36,110 --> 00:06:40,370
+x86 world for example the first
+
+00:06:37,820 --> 00:06:44,120
+expansion was SSE which doubled
+
+00:06:40,370 --> 00:06:46,400
+from MMX is 64-bit registers the current
+
+00:06:44,120 --> 00:06:49,040
+iteration is avx-512 which
+
+00:06:46,400 --> 00:06:51,380
+unsurprisingly is around 512 bits in
+
+00:06:49,040 --> 00:06:53,870
+length as you can see that can do eight
+
+00:06:51,380 --> 00:06:55,520
+double precision operations or sixteen
+
+00:06:53,870 --> 00:06:59,710
+single precision operations all the way
+
+00:06:55,520 --> 00:07:02,300
+down to 64 byte operations at a time
+
+00:06:59,710 --> 00:07:04,760
+armours taken this to its logical
+
+00:07:02,300 --> 00:07:06,470
+conclusion they've introduced the arm
+
+00:07:04,760 --> 00:07:08,270
+scalable vector extensions so this
+
+00:07:06,470 --> 00:07:10,729
+introduces vectors that are up to two
+
+00:07:08,270 --> 00:07:12,260
+kilobits in length along with a bunch of
+
+00:07:10,729 --> 00:07:14,360
+novel instructions that allow you to
+
+00:07:12,260 --> 00:07:15,889
+utilize these vectors without actually
+
+00:07:14,360 --> 00:07:19,639
+having to hard code the number of lanes
+
+00:07:15,889 --> 00:07:21,110
+you use at a time so the idea being the
+
+00:07:19,639 --> 00:07:23,419
+same code that can run on your phone
+
+00:07:21,110 --> 00:07:25,100
+which might implement a small total
+
+00:07:23,419 --> 00:07:27,050
+vector length can also run on a
+
+00:07:25,100 --> 00:07:28,490
+supercomputer with large of exercises
+
+00:07:27,050 --> 00:07:29,840
+and you get an automatic performance
+
+00:07:28,490 --> 00:07:34,460
+boost without having to rewrite your
+
+00:07:29,840 --> 00:07:35,870
+code so let's take a look at how this
+
+00:07:34,460 --> 00:07:40,729
+applies to our handling of vector
+
+00:07:35,870 --> 00:07:42,770
+operations in the tiny code generator so
+
+00:07:40,729 --> 00:07:45,020
+the process is relatively simple we
+
+00:07:42,770 --> 00:07:47,240
+on-demand we take a block machine code
+
+00:07:45,020 --> 00:07:50,090
+from the target and is converted into an
+
+00:07:47,240 --> 00:07:53,960
+intermediate form which we call TCG ops
+
+00:07:50,090 --> 00:08:00,440
+and then from those TCG ops we generated
+
+00:07:53,960 --> 00:08:02,479
+code this is a little fragment from a
+
+00:08:00,440 --> 00:08:04,910
+benchmarking utility I wrote for testing
+
+00:08:02,479 --> 00:08:07,099
+out vectorizable kernels it's very
+
+00:08:04,910 --> 00:08:08,840
+simple hopefully everyone can understand
+
+00:08:07,099 --> 00:08:10,820
+what it's doing it simply works its way
+
+00:08:08,840 --> 00:08:15,169
+through an array of bytes and XOR them
+
+00:08:10,820 --> 00:08:16,610
+together yeah let's have a look at the
+
+00:08:15,169 --> 00:08:18,080
+assembly that this generates and don't
+
+00:08:16,610 --> 00:08:20,449
+worry about taking in for now I'm going
+
+00:08:18,080 --> 00:08:22,340
+to go through it in a moment but first
+
+00:08:20,449 --> 00:08:26,110
+let's quickly review how register
+
+00:08:22,340 --> 00:08:28,520
+aliasing works so as I mentioned before
+
+00:08:26,110 --> 00:08:31,520
+you have multiple sizes but it's not
+
+00:08:28,520 --> 00:08:33,080
+unusual for the vector registers also to
+
+00:08:31,520 --> 00:08:35,630
+be alias to the existing system
+
+00:08:33,080 --> 00:08:37,849
+registers so in the arm case it's the
+
+00:08:35,630 --> 00:08:40,400
+floating-point registers the queue which
+
+00:08:37,849 --> 00:08:42,770
+stands for quad and D for double there's
+
+00:08:40,400 --> 00:08:44,990
+also s for single alias with the vector
+
+00:08:42,770 --> 00:08:47,540
+registers I'm just mentioning this so
+
+00:08:44,990 --> 00:08:49,190
+when you see QN being set up it's the
+
+00:08:47,540 --> 00:08:52,520
+same as loading it into the vector and
+
+00:08:49,190 --> 00:08:58,010
+register so let's go
+
+00:08:52,520 --> 00:09:00,170
+through the assembly step-by-step so
+
+00:08:58,010 --> 00:09:01,910
+first of all we need to load the data
+
+00:09:00,170 --> 00:09:04,640
+from the array so we're loading two
+
+00:09:01,910 --> 00:09:06,170
+quadrants at time one from our a pointer
+
+00:09:04,640 --> 00:09:10,070
+one from our B point - they're both
+
+00:09:06,170 --> 00:09:11,810
+indexed by the X zero register then we
+
+00:09:10,070 --> 00:09:14,209
+do the EO and the important thing to
+
+00:09:11,810 --> 00:09:18,740
+notice here as we're doing 16 bytes of a
+
+00:09:14,209 --> 00:09:21,290
+or as our X or at the same time finally
+
+00:09:18,740 --> 00:09:24,709
+we save our result and the destination
+
+00:09:21,290 --> 00:09:27,290
+pointer again index by x0 and then
+
+00:09:24,709 --> 00:09:31,580
+finally we loop round so as you can see
+
+00:09:27,290 --> 00:09:32,990
+we're doing 16 bytes at a time so let's
+
+00:09:31,580 --> 00:09:36,010
+have a look at how these instructions
+
+00:09:32,990 --> 00:09:38,270
+get broken into broken down into TCG ops
+
+00:09:36,010 --> 00:09:42,020
+the first one I'm going to look at is
+
+00:09:38,270 --> 00:09:44,810
+the load operation so we're like the ldq
+
+00:09:42,020 --> 00:09:47,740
+registers loaded as ldq operation is
+
+00:09:44,810 --> 00:09:52,820
+loading 128 bits from memory pointing at
+
+00:09:47,740 --> 00:09:54,790
+by X 21 indexed by X 0 so there's a
+
+00:09:52,820 --> 00:09:57,440
+couple of steps we need to go through
+
+00:09:54,790 --> 00:09:59,600
+first of all we need to calculate the
+
+00:09:57,440 --> 00:10:03,920
+address of the load and we do this by
+
+00:09:59,600 --> 00:10:06,529
+adding X 21 to X 0 the next step is to
+
+00:10:03,920 --> 00:10:09,560
+do the load from memory into one of our
+
+00:10:06,529 --> 00:10:11,510
+temporary registers now as you can see
+
+00:10:09,560 --> 00:10:12,800
+we're actually doing two loads here so
+
+00:10:11,510 --> 00:10:14,959
+it doesn't mean we also need to
+
+00:10:12,800 --> 00:10:17,750
+calculate an offset for the second load
+
+00:10:14,959 --> 00:10:20,060
+to get the right place and then finally
+
+00:10:17,750 --> 00:10:22,910
+we store these two temporary registers
+
+00:10:20,060 --> 00:10:25,310
+in to query CPU register file so this is
+
+00:10:22,910 --> 00:10:27,170
+basically a fixed offset of the per CPU
+
+00:10:25,310 --> 00:10:30,260
+environment structure which the
+
+00:10:27,170 --> 00:10:31,820
+generated code can access directly now
+
+00:10:30,260 --> 00:10:34,220
+the main takeaway you need to take from
+
+00:10:31,820 --> 00:10:36,950
+this is we're doing to 64-bit loads and
+
+00:10:34,220 --> 00:10:40,550
+to 64-bit store operations to cover the
+
+00:10:36,950 --> 00:10:43,300
+whole vector why is this well currently
+
+00:10:40,550 --> 00:10:47,839
+TCG is only really aware of two things
+
+00:10:43,300 --> 00:10:49,640
+that's 32 and 64-bit registers the
+
+00:10:47,839 --> 00:10:51,410
+remaining two are actually just aliases
+
+00:10:49,640 --> 00:10:53,750
+that depend on the pointer size of the
+
+00:10:51,410 --> 00:10:55,880
+emulated guest and the host so as a
+
+00:10:53,750 --> 00:10:57,560
+result all the vector operations have to
+
+00:10:55,880 --> 00:11:01,130
+be marshaled in and out of in this case
+
+00:10:57,560 --> 00:11:02,720
+64-bit registers so we have a look at
+
+00:11:01,130 --> 00:11:04,950
+how this affects the actual logical
+
+00:11:02,720 --> 00:11:07,410
+operation
+
+00:11:04,950 --> 00:11:09,750
+so this is the Eeyore operation the the
+
+00:11:07,410 --> 00:11:12,300
+computation is doing an exclusive for 16
+
+00:11:09,750 --> 00:11:16,529
+bytes from VIN v-0 and v1 and storing
+
+00:11:12,300 --> 00:11:17,910
+the result in V naught so again first we
+
+00:11:16,529 --> 00:11:20,310
+need to load the values from our
+
+00:11:17,910 --> 00:11:22,529
+environment structure into the temporary
+
+00:11:20,310 --> 00:11:26,070
+registers so here we load the first half
+
+00:11:22,529 --> 00:11:28,290
+of V naught and V 1 fortunately for us
+
+00:11:26,070 --> 00:11:29,730
+XOR is a bitwise operation so there's no
+
+00:11:28,290 --> 00:11:31,050
+particular reason why you need to do
+
+00:11:29,730 --> 00:11:34,399
+this a byte at a time
+
+00:11:31,050 --> 00:11:37,440
+so we emit a single 64 bit XOR here and
+
+00:11:34,399 --> 00:11:39,510
+then we do the same for the second half
+
+00:11:37,440 --> 00:11:45,449
+finally we store the results back into
+
+00:11:39,510 --> 00:11:48,240
+the CPU instructor now for this example
+
+00:11:45,449 --> 00:11:49,829
+performance isn't too bad in my test
+
+00:11:48,240 --> 00:11:52,529
+case cream you actually outperforms the
+
+00:11:49,829 --> 00:11:54,959
+native run now this is a little unfair
+
+00:11:52,529 --> 00:11:57,540
+because my development pops is a fairly
+
+00:11:54,959 --> 00:11:59,670
+modern x86 and the referee out 64
+
+00:11:57,540 --> 00:12:03,540
+reference platform was a under clot
+
+00:11:59,670 --> 00:12:05,040
+early development board but perhaps I'm
+
+00:12:03,540 --> 00:12:07,050
+worrying too much about the impact of
+
+00:12:05,040 --> 00:12:09,180
+vectors so let's look at a slightly more
+
+00:12:07,050 --> 00:12:13,079
+complex operation one that we can't lump
+
+00:12:09,180 --> 00:12:15,420
+all together like a bitwise operation so
+
+00:12:13,079 --> 00:12:17,279
+this is almost identical to the previous
+
+00:12:15,420 --> 00:12:19,079
+test except instead of doing next so
+
+00:12:17,279 --> 00:12:21,050
+we're multiplying two single precision
+
+00:12:19,079 --> 00:12:24,600
+numbers together and storing the result
+
+00:12:21,050 --> 00:12:28,140
+let's look at how the guess the compiler
+
+00:12:24,600 --> 00:12:30,120
+vectorized this code as you can see the
+
+00:12:28,140 --> 00:12:33,750
+main structure of the loop is identical
+
+00:12:30,120 --> 00:12:35,160
+to our first example but now you can see
+
+00:12:33,750 --> 00:12:39,029
+we're doing for single precision
+
+00:12:35,160 --> 00:12:40,949
+multiplies in a 128 bit vector let's
+
+00:12:39,029 --> 00:12:47,250
+look at how that gets broken down in our
+
+00:12:40,949 --> 00:12:49,620
+translation so the FMO instruction first
+
+00:12:47,250 --> 00:12:51,540
+of all we need to calculate the address
+
+00:12:49,620 --> 00:12:53,220
+of the FP status register so this is
+
+00:12:51,540 --> 00:12:56,339
+where we store things like exception
+
+00:12:53,220 --> 00:12:58,260
+flags then we need to load the taught
+
+00:12:56,339 --> 00:13:01,380
+two source values from our CPU
+
+00:12:58,260 --> 00:13:04,589
+environment the next thing we do is we
+
+00:13:01,380 --> 00:13:06,290
+call the vfp moles helper function and
+
+00:13:04,589 --> 00:13:08,550
+then finally we store the result back
+
+00:13:06,290 --> 00:13:11,519
+and then we have to do it three more
+
+00:13:08,550 --> 00:13:13,230
+times so this isn't too bad for for
+
+00:13:11,519 --> 00:13:15,000
+multiplies but it's going to add up soon
+
+00:13:13,230 --> 00:13:18,360
+if you're doing sixteen multiplies on an
+
+00:13:15,000 --> 00:13:20,160
+avx-512 X or or potentially on SV
+
+00:13:18,360 --> 00:13:24,240
+you might have to do 64 of these in a
+
+00:13:20,160 --> 00:13:28,529
+row so let's have a look at the helper
+
+00:13:24,240 --> 00:13:30,149
+function now this is a helper for vfp
+
+00:13:28,529 --> 00:13:32,370
+Mouse it's actually simply a wrapper
+
+00:13:30,149 --> 00:13:35,910
+around Crimea's internal copy of soft
+
+00:13:32,370 --> 00:13:39,540
+flow why we're using soft flow instead
+
+00:13:35,910 --> 00:13:41,550
+of cogeneration well in the pre TCG days
+
+00:13:39,540 --> 00:13:42,870
+premier templates did rely on the
+
+00:13:41,550 --> 00:13:45,839
+compiler generated floating-point
+
+00:13:42,870 --> 00:13:46,200
+operations however it quite often got it
+
+00:13:45,839 --> 00:13:49,920
+wrong
+
+00:13:46,200 --> 00:13:51,540
+there are enough ambiguities there are
+
+00:13:49,920 --> 00:13:53,550
+enough ambiguities and options and
+
+00:13:51,540 --> 00:13:55,649
+things like rounding behavior and
+
+00:13:53,550 --> 00:13:57,930
+exception behavior that made it hard to
+
+00:13:55,649 --> 00:13:59,550
+directly behavior directly map the
+
+00:13:57,930 --> 00:14:01,950
+behavior of one instruction set to
+
+00:13:59,550 --> 00:14:03,480
+another so as a result we switched a
+
+00:14:01,950 --> 00:14:05,399
+soft float where it's easier to
+
+00:14:03,480 --> 00:14:09,600
+explicitly control the behavior of the
+
+00:14:05,399 --> 00:14:11,760
+system there's also a small penalty you
+
+00:14:09,600 --> 00:14:13,820
+need to pay for loading each element up
+
+00:14:11,760 --> 00:14:16,950
+and marshaling it into the sea ABI
+
+00:14:13,820 --> 00:14:19,920
+because obviously you need to call a c
+
+00:14:16,950 --> 00:14:22,500
+function so now i've recapped the
+
+00:14:19,920 --> 00:14:24,690
+existing code generation let's look at
+
+00:14:22,500 --> 00:14:30,180
+the work that we've done to improve the
+
+00:14:24,690 --> 00:14:31,709
+handling of vectors in TCG now there
+
+00:14:30,180 --> 00:14:33,810
+have been attempts at better sim
+
+00:14:31,709 --> 00:14:36,510
+destruction behavior before so most
+
+00:14:33,810 --> 00:14:38,550
+recently those kiril's work posted at
+
+00:14:36,510 --> 00:14:40,880
+the beginning of the year so it added
+
+00:14:38,550 --> 00:14:43,920
+the concept of a 64-bit and 128-bit
+
+00:14:40,880 --> 00:14:46,350
+vector register along with a new memory
+
+00:14:43,920 --> 00:14:48,510
+operation for accessing 128 bits at a
+
+00:14:46,350 --> 00:14:51,449
+time now it was only a proof-of-concept
+
+00:14:48,510 --> 00:14:53,190
+so it simply dealt with the integer add
+
+00:14:51,449 --> 00:14:56,880
+operation but early benchmarks were
+
+00:14:53,190 --> 00:14:59,760
+promising kurosawa a 10% boost in
+
+00:14:56,880 --> 00:15:01,829
+processing 4x to 64 which is a media
+
+00:14:59,760 --> 00:15:03,920
+codec just from being able to use the
+
+00:15:01,829 --> 00:15:07,350
+larger registers to load and store stuff
+
+00:15:03,920 --> 00:15:10,649
+and he also saw a speed increase on
+
+00:15:07,350 --> 00:15:12,870
+simple loops however one problem that
+
+00:15:10,649 --> 00:15:14,730
+might become apparent from this work is
+
+00:15:12,870 --> 00:15:16,470
+you have to add quite a lot of extra TCG
+
+00:15:14,730 --> 00:15:19,140
+operations for each vector size you
+
+00:15:16,470 --> 00:15:21,000
+support you end up adding operations for
+
+00:15:19,140 --> 00:15:24,829
+each combination of Lane and vector size
+
+00:15:21,000 --> 00:15:24,829
+and that gets tiresome quite quickly
+
+00:15:25,650 --> 00:15:29,760
+so I'm just going to quickly go through
+
+00:15:27,750 --> 00:15:31,350
+the design principles of the the current
+
+00:15:29,760 --> 00:15:33,150
+work so the first thing we want to be
+
+00:15:31,350 --> 00:15:36,270
+able to do is easily support multiple
+
+00:15:33,150 --> 00:15:38,339
+exercises so as you saw from the earlier
+
+00:15:36,270 --> 00:15:39,900
+slide there's been a steady growth in
+
+00:15:38,339 --> 00:15:43,410
+the size of vectors and it's not a trend
+
+00:15:39,900 --> 00:15:45,210
+that's likely to start even sve s2k
+
+00:15:43,410 --> 00:15:47,310
+larger vectors support leaves plenty of
+
+00:15:45,210 --> 00:15:51,779
+space in the architectures to expand it
+
+00:15:47,310 --> 00:15:53,520
+later secondly helpers are still going
+
+00:15:51,779 --> 00:15:55,080
+to dominate floating-point processing
+
+00:15:53,520 --> 00:15:58,260
+and it's likely to do so for the
+
+00:15:55,080 --> 00:16:00,300
+foreseeable future so any interface that
+
+00:15:58,260 --> 00:16:01,830
+we had there for the interface that we
+
+00:16:00,300 --> 00:16:05,910
+present to helpers should be as
+
+00:16:01,830 --> 00:16:07,290
+efficient as possible and finally even
+
+00:16:05,910 --> 00:16:08,760
+though we're going to be mainly calling
+
+00:16:07,290 --> 00:16:10,710
+helpers for floating-point there are
+
+00:16:08,760 --> 00:16:12,180
+operations that can be dealt with in
+
+00:16:10,710 --> 00:16:17,040
+generator code and we should maintain
+
+00:16:12,180 --> 00:16:19,200
+the ability to do that so the current
+
+00:16:17,040 --> 00:16:21,330
+work is Richard Henson's patches which
+
+00:16:19,200 --> 00:16:22,830
+were posted about a month ago and they
+
+00:16:21,330 --> 00:16:25,770
+take a slightly different approach to
+
+00:16:22,830 --> 00:16:28,830
+Kiril so we've introduced a new type
+
+00:16:25,770 --> 00:16:31,020
+called TCG vac so this normally
+
+00:16:28,830 --> 00:16:33,209
+represents a pointer directly into the
+
+00:16:31,020 --> 00:16:36,660
+guest CPU register so directly into the
+
+00:16:33,209 --> 00:16:38,760
+EM structure and most importantly it's a
+
+00:16:36,660 --> 00:16:41,089
+size agnostic representation I'll show
+
+00:16:38,760 --> 00:16:43,830
+you how that works in the next slide so
+
+00:16:41,089 --> 00:16:44,940
+while most of the users this interface
+
+00:16:43,830 --> 00:16:46,430
+are likely to be guest
+
+00:16:44,940 --> 00:16:49,080
+architecture-specific
+
+00:16:46,430 --> 00:16:52,620
+it does also introduce some Universal
+
+00:16:49,080 --> 00:16:55,800
+ops in the core TCG code now that's done
+
+00:16:52,620 --> 00:16:58,920
+with a mixture of generic helpers which
+
+00:16:55,800 --> 00:17:01,350
+work like normal helpers do but it also
+
+00:16:58,920 --> 00:17:03,750
+allows the generation of code if we know
+
+00:17:01,350 --> 00:17:06,360
+the backend can support efficient code
+
+00:17:03,750 --> 00:17:11,069
+generation so let's look at a helper
+
+00:17:06,360 --> 00:17:14,160
+first so this is the default helper for
+
+00:17:11,069 --> 00:17:17,250
+a vectorized XOR now you can see its
+
+00:17:14,160 --> 00:17:19,370
+size agnostic as in there is no fixed
+
+00:17:17,250 --> 00:17:22,140
+size it needs to process what's actually
+
+00:17:19,370 --> 00:17:23,760
+happened is the size of the vector is
+
+00:17:22,140 --> 00:17:26,429
+passed in one of the parameters to the
+
+00:17:23,760 --> 00:17:29,940
+helper it's encoded than that 32-bit
+
+00:17:26,429 --> 00:17:33,300
+Desk field so one nice side effect of
+
+00:17:29,940 --> 00:17:35,280
+this is now the compiler knows that we
+
+00:17:33,300 --> 00:17:38,250
+can be going over a whole number of X
+
+00:17:35,280 --> 00:17:39,130
+ORS it can vectorize the helper so let's
+
+00:17:38,250 --> 00:17:41,700
+just have a quick look
+
+00:17:39,130 --> 00:17:46,000
+the inner loop of the vectorized helper
+
+00:17:41,700 --> 00:17:47,470
+so this is on my x86 64 host so even
+
+00:17:46,000 --> 00:17:48,760
+though it's a different instruction set
+
+00:17:47,470 --> 00:17:51,549
+hopefully you can see there's some
+
+00:17:48,760 --> 00:17:54,280
+similarities in the code so the main
+
+00:17:51,549 --> 00:17:56,559
+difference is because x86 can do an XOR
+
+00:17:54,280 --> 00:17:59,260
+straight from memory it's not loading
+
+00:17:56,559 --> 00:18:00,870
+two things into register but hopefully
+
+00:17:59,260 --> 00:18:03,460
+this will run as efficiently as possible
+
+00:18:00,870 --> 00:18:05,440
+so although you might pay a penalty for
+
+00:18:03,460 --> 00:18:07,750
+setting this up and calling and see
+
+00:18:05,440 --> 00:18:10,000
+function at least for very long vectors
+
+00:18:07,750 --> 00:18:13,059
+the helper function will run quite
+
+00:18:10,000 --> 00:18:16,480
+efficiently however for simple
+
+00:18:13,059 --> 00:18:19,750
+operations I think we can do better so
+
+00:18:16,480 --> 00:18:21,309
+let's just remind ourselves of the irf
+
+00:18:19,750 --> 00:18:23,470
+that we generated under the old scheme
+
+00:18:21,309 --> 00:18:28,090
+of things we end up doing eight
+
+00:18:23,470 --> 00:18:29,710
+operations for our 16 by XOR let's look
+
+00:18:28,090 --> 00:18:33,820
+at the ir that we generate with the new
+
+00:18:29,710 --> 00:18:36,039
+TCG vet work so as you can see this is
+
+00:18:33,820 --> 00:18:38,740
+already a more compact representation of
+
+00:18:36,039 --> 00:18:40,960
+what's going on importantly each
+
+00:18:38,740 --> 00:18:42,940
+operation has enough information encoded
+
+00:18:40,960 --> 00:18:48,130
+in it that the backend can also generate
+
+00:18:42,940 --> 00:18:50,919
+the most efficient code possible so this
+
+00:18:48,130 --> 00:18:53,289
+is the SSE code that it generates on my
+
+00:18:50,919 --> 00:18:55,690
+machine so now you can see we've got
+
+00:18:53,289 --> 00:18:59,740
+quite a close mapping for the ER we are
+
+00:18:55,690 --> 00:19:01,240
+using 128 bit SSE X mm register to do
+
+00:18:59,740 --> 00:19:04,030
+the XOR for the hundred and twenty eight
+
+00:19:01,240 --> 00:19:05,860
+bit guest register so let's see what
+
+00:19:04,030 --> 00:19:10,150
+amazing performance changes we have from
+
+00:19:05,860 --> 00:19:12,669
+these from this work well okay that's a
+
+00:19:10,150 --> 00:19:14,890
+little disappointing in most of the test
+
+00:19:12,669 --> 00:19:18,460
+cases the TCG vac enabled code runs
+
+00:19:14,890 --> 00:19:19,840
+slower than the existing TCG code but it
+
+00:19:18,460 --> 00:19:21,429
+does look as though one of the tests is
+
+00:19:19,840 --> 00:19:24,549
+running a little bit faster that's the
+
+00:19:21,429 --> 00:19:30,340
+byte wise bit fiddle test so let's have
+
+00:19:24,549 --> 00:19:31,929
+a quick look at what that's doing so the
+
+00:19:30,340 --> 00:19:33,700
+main difference here is bit fiddle is
+
+00:19:31,929 --> 00:19:36,580
+doing more logical operations in the
+
+00:19:33,700 --> 00:19:38,110
+loop in fact this is exactly the reason
+
+00:19:36,580 --> 00:19:40,450
+that Seymour Cray introduced vector
+
+00:19:38,110 --> 00:19:42,309
+registers back in the 70s so his
+
+00:19:40,450 --> 00:19:44,260
+observation was although the process of
+
+00:19:42,309 --> 00:19:46,539
+loading registers from memory was
+
+00:19:44,260 --> 00:19:47,890
+expensive when you chained operations
+
+00:19:46,539 --> 00:19:49,210
+together you could get that performance
+
+00:19:47,890 --> 00:19:51,580
+back
+
+00:19:49,210 --> 00:19:54,460
+as might be clearer if we look at the
+
+00:19:51,580 --> 00:19:56,110
+guest assembly so don't worry about
+
+00:19:54,460 --> 00:19:58,090
+following all of this but the key thing
+
+00:19:56,110 --> 00:20:00,460
+to note is that we're doing more
+
+00:19:58,090 --> 00:20:02,710
+calculations calculation operations in
+
+00:20:00,460 --> 00:20:05,620
+loop in each loop and therefore more
+
+00:20:02,710 --> 00:20:07,210
+operations in each translated block so
+
+00:20:05,620 --> 00:20:09,669
+this makes sense given the target
+
+00:20:07,210 --> 00:20:11,890
+workloads for these Cindy instruction
+
+00:20:09,669 --> 00:20:13,899
+sets they're aimed at processing large
+
+00:20:11,890 --> 00:20:16,090
+amounts large streams of data so as a
+
+00:20:13,899 --> 00:20:19,090
+result the CPU designers sacrifice
+
+00:20:16,090 --> 00:20:21,279
+latency in favor of throughput so
+
+00:20:19,090 --> 00:20:24,039
+executing one sim D instruction per loop
+
+00:20:21,279 --> 00:20:26,860
+is really going to be the worst case is
+
+00:20:24,039 --> 00:20:28,690
+there a way we can test this well maybe
+
+00:20:26,860 --> 00:20:31,750
+it's time for me to declare that I am in
+
+00:20:28,690 --> 00:20:35,470
+fact a gentle user so let's recompile
+
+00:20:31,750 --> 00:20:36,580
+all the tests with fun roll loops so for
+
+00:20:35,470 --> 00:20:38,679
+those of you not familiar with this
+
+00:20:36,580 --> 00:20:41,140
+compiler flag this basically instructs
+
+00:20:38,679 --> 00:20:43,870
+the compiler to unroll the loop as much
+
+00:20:41,140 --> 00:20:46,179
+as it can and do as many operations with
+
+00:20:43,870 --> 00:20:49,390
+the registers set that it has before it
+
+00:20:46,179 --> 00:20:51,940
+goes round again now as you can see the
+
+00:20:49,390 --> 00:20:54,370
+picture looks a lot better so while the
+
+00:20:51,940 --> 00:20:56,200
+existing TCG code has also seen an
+
+00:20:54,370 --> 00:20:58,659
+improvement the vector code is a lot
+
+00:20:56,200 --> 00:21:00,279
+closer in performance and importantly it
+
+00:20:58,659 --> 00:21:03,039
+now beats the existing code in two of
+
+00:21:00,279 --> 00:21:04,779
+the test cases so we've still got a
+
+00:21:03,039 --> 00:21:08,890
+little bit of a distance to go but let's
+
+00:21:04,779 --> 00:21:10,360
+talk about what else we can do so the
+
+00:21:08,890 --> 00:21:11,950
+first thing that needs improving the
+
+00:21:10,360 --> 00:21:14,169
+current work is the load and store of
+
+00:21:11,950 --> 00:21:15,820
+vector registers in this case we're
+
+00:21:14,169 --> 00:21:18,490
+still marshalling our loads through
+
+00:21:15,820 --> 00:21:20,200
+64-bit registers to get them into the
+
+00:21:18,490 --> 00:21:22,720
+CPU mm structure even though we're doing
+
+00:21:20,200 --> 00:21:27,250
+10 and 20 bit bit operations once we get
+
+00:21:22,720 --> 00:21:29,230
+there secondly we need to make better
+
+00:21:27,250 --> 00:21:31,510
+use of better use of the attempt
+
+00:21:29,230 --> 00:21:33,940
+registers so while we still have to
+
+00:21:31,510 --> 00:21:35,740
+store interim results into CPU m for
+
+00:21:33,940 --> 00:21:37,750
+correctness sakes we're not currently
+
+00:21:35,740 --> 00:21:39,760
+reusing the register for compare
+
+00:21:37,750 --> 00:21:43,090
+computing further chained operations so
+
+00:21:39,760 --> 00:21:45,159
+we end up loading from CPU M doing the
+
+00:21:43,090 --> 00:21:47,020
+operations storing back loading from CPM
+
+00:21:45,159 --> 00:21:50,559
+going back so we can make that a little
+
+00:21:47,020 --> 00:21:52,870
+bit more efficient now our main focus
+
+00:21:50,559 --> 00:21:54,370
+for this work is going to be supporting
+
+00:21:52,870 --> 00:21:56,409
+the upcoming sve work
+
+00:21:54,370 --> 00:21:58,659
+so once the prerequisites have been
+
+00:21:56,409 --> 00:22:00,840
+merged expect to see more work building
+
+00:21:58,659 --> 00:22:02,410
+on this framework as we implement SPE
+
+00:22:00,840 --> 00:22:04,150
+others are of course
+
+00:22:02,410 --> 00:22:12,370
+welcome to look at using this work for
+
+00:22:04,150 --> 00:22:14,560
+other architectures so in conclusion TCG
+
+00:22:12,370 --> 00:22:17,010
+vac offers a flexible solution for
+
+00:22:14,560 --> 00:22:20,530
+representing vectors of various sizes
+
+00:22:17,010 --> 00:22:23,350
+for the front ends the main benefit is
+
+00:22:20,530 --> 00:22:27,220
+it results in better TCG up density over
+
+00:22:23,350 --> 00:22:29,140
+having the existing marshaling approach
+
+00:22:27,220 --> 00:22:30,910
+now while helpers are still going to
+
+00:22:29,140 --> 00:22:33,310
+dominate for floating-point workloads
+
+00:22:30,910 --> 00:22:35,380
+the rich ranked face to the backend does
+
+00:22:33,310 --> 00:22:37,870
+allow us to vectorize integer and logic
+
+00:22:35,380 --> 00:22:39,310
+operations and we should see the
+
+00:22:37,870 --> 00:22:44,020
+performance benefits with heavily
+
+00:22:39,310 --> 00:23:01,150
+vectorized guest code so with that I'll
+
+00:22:44,020 --> 00:23:02,650
+open the floor to any questions thank
+
+00:23:01,150 --> 00:23:04,330
+you for reason why to except you windows
+
+00:23:02,650 --> 00:23:07,930
+so much time to add size agonistic
+
+00:23:04,330 --> 00:23:19,420
+instruction sets why it's a vendor so
+
+00:23:07,930 --> 00:23:21,910
+long to III I could only hazard a guess
+
+00:23:19,420 --> 00:23:26,770
+and I suspect it's because the early
+
+00:23:21,910 --> 00:23:29,980
+workloads for for workstation CPU
+
+00:23:26,770 --> 00:23:33,370
+architectures were targeting specific to
+
+00:23:29,980 --> 00:23:34,720
+test sets usually multimedia processing
+
+00:23:33,370 --> 00:23:37,780
+where you've got a limited size I mean
+
+00:23:34,720 --> 00:23:40,720
+as you can see the even with the to K
+
+00:23:37,780 --> 00:23:42,520
+vector in SVA that's actually fair way
+
+00:23:40,720 --> 00:23:44,170
+smaller than some of the sizes of
+
+00:23:42,520 --> 00:23:46,630
+vectors that the supercomputers were
+
+00:23:44,170 --> 00:23:49,270
+doing which are obviously geared towards
+
+00:23:46,630 --> 00:23:51,820
+doing much higher throughput data
+
+00:23:49,270 --> 00:23:55,120
+crunching but it's going to come so I
+
+00:23:51,820 --> 00:23:58,540
+think the sve architecture itself is as
+
+00:23:55,120 --> 00:24:01,170
+part of our strategy to you know tackle
+
+00:23:58,540 --> 00:24:03,190
+everything from the mobile chipset up to
+
+00:24:01,170 --> 00:24:05,530
+high-performance computing so that's why
+
+00:24:03,190 --> 00:24:08,100
+they've come up with this flexible
+
+00:24:05,530 --> 00:24:11,850
+approach
+
+00:24:08,100 --> 00:24:14,130
+to make sure but exactly six in their
+
+00:24:11,850 --> 00:24:20,490
+arm uses the same I Triple E floating
+
+00:24:14,130 --> 00:24:23,460
+point format almost so okay so most
+
+00:24:20,490 --> 00:24:26,250
+modern CPU architectures tend to follow
+
+00:24:23,460 --> 00:24:28,799
+I Triple E semantics for their
+
+00:24:26,250 --> 00:24:34,980
+operations but the I Triple E standards
+
+00:24:28,799 --> 00:24:36,630
+bit lacks about generally what rounding
+
+00:24:34,980 --> 00:24:38,549
+modes are enabled by default and what
+
+00:24:36,630 --> 00:24:41,010
+and what exceptions are generated by
+
+00:24:38,549 --> 00:24:43,230
+default and that's before you also add
+
+00:24:41,010 --> 00:24:45,780
+in things like extended floating-point
+
+00:24:43,230 --> 00:24:48,000
+formats so on arm you have an option of
+
+00:24:45,780 --> 00:24:50,730
+either using I Triple E format or using
+
+00:24:48,000 --> 00:24:53,809
+arms extended floating-point format
+
+00:24:50,730 --> 00:24:56,400
+which obviously needs to be higher so
+
+00:24:53,809 --> 00:24:59,159
+yes because the helper function does it
+
+00:24:56,400 --> 00:25:01,289
+all manually by hand it unpacks the
+
+00:24:59,159 --> 00:25:02,940
+exponent and the significant and does it
+
+00:25:01,289 --> 00:25:04,890
+all properly and then fits it all back
+
+00:25:02,940 --> 00:25:09,419
+so that's why we use the health
+
+00:25:04,890 --> 00:25:10,559
+functions I would like to live in a
+
+00:25:09,419 --> 00:25:12,570
+world where we could actually generate
+
+00:25:10,559 --> 00:25:15,390
+direct coders but it's going to be hard
+
+00:25:12,570 --> 00:25:18,150
+I think it would be it's easier if
+
+00:25:15,390 --> 00:25:19,860
+you're building a single architecture to
+
+00:25:18,150 --> 00:25:21,539
+single architecture translator because
+
+00:25:19,860 --> 00:25:23,669
+then you've got a lot more control over
+
+00:25:21,539 --> 00:25:25,110
+what you're running on obviously one of
+
+00:25:23,669 --> 00:25:27,330
+the benefits of chrome year is we
+
+00:25:25,110 --> 00:25:29,130
+support so many front ends and all of
+
+00:25:27,330 --> 00:25:35,039
+those front ends can run on any of our
+
+00:25:29,130 --> 00:25:37,490
+back-end code generators any more
+
+00:25:35,039 --> 00:25:37,490
+questions
+
+00:25:42,520 --> 00:25:48,730
+okay well I think
+
+00:25:45,600 --> 00:25:54,900
+[Applause]
+
+00:25:48,730 --> 00:25:54,900
+
+YouTube URL: https://www.youtube.com/watch?v=IYHTwnde0g8
+
+

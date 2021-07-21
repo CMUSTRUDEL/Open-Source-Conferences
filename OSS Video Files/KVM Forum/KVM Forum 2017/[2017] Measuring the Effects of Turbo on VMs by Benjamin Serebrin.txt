@@ -1,0 +1,1728 @@
+Title: [2017] Measuring the Effects of Turbo on VMs by Benjamin Serebrin
+Publication date: 2017-11-13
+Playlist: KVM Forum 2017
+Description: 
+	Turbo modes allow CPUs to operate above their specified base frequency. Modern CPUs change frequency dynamically and often due to CPU load, power consumption, temperature, cooling capacity of the system, and CPU SKU. A socket with half of its CPUs idle may run its active CPUs at a higher frequency than a socket with all CPUs busy.
+
+VMs expect consistent performance, which is in tension with turbo in a datacenter. A lightly-loaded host may provide better VM performance than a heavily-loaded host, and hosts have varying levels of load that are not directly visible to the VMs. Datacenter forensics on performance variation is valuable, but turbo effects were invisible to our performance monitoring trackers.
+
+This talk discusses upstream patches that track a VM’s per-VCPU turbo history. We describe turbo observations and measuring turbo occupancy per VM in our datacenters.
+
+---
+
+enjamin Serebrin
+Google
+Benjamin Serebrin works on Google’s Kernel Virtualization and Hypervisor team, focusing on low level hardware virtualization, devices, performance, and security. He has worked in the Hardware Platforms team, designing performance and security features for Google’s datacenter machines.
+Captions: 
+	00:00:00,390 --> 00:00:02,709
+[Music]
+
+00:00:06,290 --> 00:00:10,679
+hello I am a Ben Sarah and I work in the
+
+00:00:09,030 --> 00:00:13,230
+hypervisor group for a Google compute
+
+00:00:10,679 --> 00:00:14,700
+engine at Google and today I was going
+
+00:00:13,230 --> 00:00:16,289
+to talk about how we measure the effects
+
+00:00:14,700 --> 00:00:19,650
+of turbo on our VMs which is a fairly
+
+00:00:16,289 --> 00:00:21,570
+new thing we've been able to do so to do
+
+00:00:19,650 --> 00:00:22,800
+this requires a decent background on CPU
+
+00:00:21,570 --> 00:00:24,269
+turbo and this is sort of the
+
+00:00:22,800 --> 00:00:25,830
+documentation I wish I had when I
+
+00:00:24,269 --> 00:00:27,199
+started doing this so it's it's
+
+00:00:25,830 --> 00:00:29,970
+scattered in a lot of places
+
+00:00:27,199 --> 00:00:31,170
+documentation this is this is the primer
+
+00:00:29,970 --> 00:00:36,380
+I would write if I were reading the
+
+00:00:31,170 --> 00:00:38,730
+documentation so CPU turbo is defined
+
+00:00:36,380 --> 00:00:41,250
+moderately the same for most CPU vendors
+
+00:00:38,730 --> 00:00:42,090
+most CPUs and computers can run
+
+00:00:41,250 --> 00:00:43,620
+different components at different
+
+00:00:42,090 --> 00:00:45,809
+frequencies and they make different
+
+00:00:43,620 --> 00:00:49,140
+performance trade-offs battery life or
+
+00:00:45,809 --> 00:00:51,000
+absolute performance or thermals the
+
+00:00:49,140 --> 00:00:51,539
+general idea is that CPU turbo will run
+
+00:00:51,000 --> 00:00:53,730
+a few
+
+00:00:51,539 --> 00:00:55,829
+CPUs at different frequencies when the
+
+00:00:53,730 --> 00:00:58,160
+power and thermal margins allow and so
+
+00:00:55,829 --> 00:01:01,079
+if we look at this picture here it's a
+
+00:00:58,160 --> 00:01:02,609
+abstracted two socket machine 12 cores
+
+00:01:01,079 --> 00:01:04,439
+per socket in each core has two threads
+
+00:01:02,609 --> 00:01:06,000
+and so the sockets are moderately
+
+00:01:04,439 --> 00:01:08,640
+independent in terms of their power
+
+00:01:06,000 --> 00:01:11,130
+controls each thread in the same core is
+
+00:01:08,640 --> 00:01:12,960
+tied together in frequency and sometimes
+
+00:01:11,130 --> 00:01:13,890
+the cores are sharing frequency Islands
+
+00:01:12,960 --> 00:01:15,960
+and sometimes they don't
+
+00:01:13,890 --> 00:01:17,189
+depends on this architecture but in
+
+00:01:15,960 --> 00:01:19,110
+general I try to think about this is
+
+00:01:17,189 --> 00:01:20,759
+every CPU core might go at a different
+
+00:01:19,110 --> 00:01:23,850
+frequency it dependence on them on the
+
+00:01:20,759 --> 00:01:26,850
+architecture when they go fast is when
+
+00:01:23,850 --> 00:01:29,369
+they can each part has a thermal limit
+
+00:01:26,850 --> 00:01:30,630
+and a power consumption limit and so if
+
+00:01:29,369 --> 00:01:32,759
+they think they can go fast they might
+
+00:01:30,630 --> 00:01:35,700
+do so um the transistors only go so fast
+
+00:01:32,759 --> 00:01:37,530
+so there's an absolute maximum limit so
+
+00:01:35,700 --> 00:01:39,570
+when CPUs are halted on the same socket
+
+00:01:37,530 --> 00:01:41,400
+or emulating or in deeper sleep state C
+
+00:01:39,570 --> 00:01:43,860
+States the other scores have the
+
+00:01:41,400 --> 00:01:45,420
+opportunity to go fast conversely they
+
+00:01:43,860 --> 00:01:47,310
+go slow when they're going to consume a
+
+00:01:45,420 --> 00:01:49,799
+lot of power on until an AMD there's
+
+00:01:47,310 --> 00:01:51,180
+this wide vector unit called a V X and
+
+00:01:49,799 --> 00:01:52,710
+if that gets turned on you usually use
+
+00:01:51,180 --> 00:01:55,350
+several hundred megahertz or through
+
+00:01:52,710 --> 00:01:56,969
+performance frequency and whether that's
+
+00:01:55,350 --> 00:01:57,659
+all the CPUs in the socket or some of
+
+00:01:56,969 --> 00:01:59,759
+them depends
+
+00:01:57,659 --> 00:02:01,530
+generation and so as an example I've got
+
+00:01:59,759 --> 00:02:05,729
+this graph here which is taken out of
+
+00:02:01,530 --> 00:02:07,049
+the e5 processor line in version 3 it
+
+00:02:05,729 --> 00:02:08,700
+has a whole bunch of cores in it and
+
+00:02:07,049 --> 00:02:11,069
+when only one core is active and all the
+
+00:02:08,700 --> 00:02:13,080
+other cores are idle we get to go really
+
+00:02:11,069 --> 00:02:16,980
+fast 3.6 gigahertz on that blue line
+
+00:02:13,080 --> 00:02:18,900
+there and as more and more cores turn on
+
+00:02:16,980 --> 00:02:20,400
+we slow down all the cores because they
+
+00:02:18,900 --> 00:02:22,290
+have a maximum limit that they share
+
+00:02:20,400 --> 00:02:23,640
+until about half the cores and the
+
+00:02:22,290 --> 00:02:25,470
+socket are active and then it stays flat
+
+00:02:23,640 --> 00:02:27,739
+on this particular generation the graphs
+
+00:02:25,470 --> 00:02:30,269
+are different generation to generation
+
+00:02:27,739 --> 00:02:33,209
+this yellow line which actually rendered
+
+00:02:30,269 --> 00:02:34,440
+well is a V X so if some cores are in a
+
+00:02:33,209 --> 00:02:35,940
+V X and then they need to drop some
+
+00:02:34,440 --> 00:02:37,400
+frequency because the AV x you know it's
+
+00:02:35,940 --> 00:02:40,410
+consume more power and produce more heat
+
+00:02:37,400 --> 00:02:41,730
+this base frequency is something of a
+
+00:02:40,410 --> 00:02:46,019
+shared illusion I'll talk about in the
+
+00:02:41,730 --> 00:02:47,220
+next couple slides but these these
+
+00:02:46,019 --> 00:02:48,750
+numbers make it hard to figure out which
+
+00:02:47,220 --> 00:02:50,400
+CPU is actually faster when they were
+
+00:02:48,750 --> 00:02:52,230
+using all the cores to do throughput
+
+00:02:50,400 --> 00:02:53,459
+related things you know these these are
+
+00:02:52,230 --> 00:02:56,099
+three different CPUs they're sampled
+
+00:02:53,459 --> 00:02:59,400
+from various websites they have a 2.3 or
+
+00:02:56,099 --> 00:03:01,739
+2.2 sort of base kind of number some of
+
+00:02:59,400 --> 00:03:03,299
+them say 3.5 gigahertz I'm gonna say 2.7
+
+00:03:01,739 --> 00:03:05,190
+gigahertz for their maximum some of them
+
+00:03:03,299 --> 00:03:06,019
+don't say do you know which one is
+
+00:03:05,190 --> 00:03:09,389
+faster
+
+00:03:06,019 --> 00:03:10,980
+you can't tell so they all have this
+
+00:03:09,389 --> 00:03:13,200
+base frequency the illusion which is
+
+00:03:10,980 --> 00:03:16,410
+this red number that I never told you
+
+00:03:13,200 --> 00:03:17,880
+how CPUs run that fast or slow the first
+
+00:03:16,410 --> 00:03:19,410
+CPU is probably talking about the
+
+00:03:17,880 --> 00:03:20,760
+turbo-boost frequency when only one core
+
+00:03:19,410 --> 00:03:23,190
+is active over on the left side of the
+
+00:03:20,760 --> 00:03:24,540
+graph the 2.7 is probably talking about
+
+00:03:23,190 --> 00:03:26,130
+the turbo frequency when all cores are
+
+00:03:24,540 --> 00:03:29,190
+active the third one just didn't bother
+
+00:03:26,130 --> 00:03:31,049
+to say so these these make comparisons
+
+00:03:29,190 --> 00:03:36,840
+of both beams and parts I buy for myself
+
+00:03:31,049 --> 00:03:37,980
+really annoying and so to define this
+
+00:03:36,840 --> 00:03:40,109
+red line a little better there's this
+
+00:03:37,980 --> 00:03:41,880
+number called base frequency which is
+
+00:03:40,109 --> 00:03:43,290
+always equal to the TSC frequency the
+
+00:03:41,880 --> 00:03:45,870
+time stamp counter and that's important
+
+00:03:43,290 --> 00:03:47,579
+for timekeeping so the TSC tix as if it
+
+00:03:45,870 --> 00:03:48,900
+were a clock it always runs that's
+
+00:03:47,579 --> 00:03:50,130
+really useful but it's not useful
+
+00:03:48,900 --> 00:03:52,709
+because it's also the advertised
+
+00:03:50,130 --> 00:03:55,500
+frequency which the cores don't really
+
+00:03:52,709 --> 00:03:57,389
+go that fast they usually go faster the
+
+00:03:55,500 --> 00:04:00,060
+base frequency is some kind of somewhat
+
+00:03:57,389 --> 00:04:01,440
+hard floor of the frequency you'll drop
+
+00:04:00,060 --> 00:04:04,650
+to unless you go slower because you're
+
+00:04:01,440 --> 00:04:06,449
+in deep thermal straits so it's it's not
+
+00:04:04,650 --> 00:04:06,800
+particularly intuitive about how fast
+
+00:04:06,449 --> 00:04:10,100
+all
+
+00:04:06,800 --> 00:04:11,420
+in the in the common case the number
+
+00:04:10,100 --> 00:04:12,830
+that I like to use is when the cores are
+
+00:04:11,420 --> 00:04:14,210
+all busy we're probably from the all
+
+00:04:12,830 --> 00:04:16,220
+core turbo frequency which is this
+
+00:04:14,210 --> 00:04:18,050
+purple line over there purple box where
+
+00:04:16,220 --> 00:04:19,670
+they all keep going a two point eight on
+
+00:04:18,050 --> 00:04:22,640
+this particular part no matter how many
+
+00:04:19,670 --> 00:04:24,890
+more cores light up and that's more
+
+00:04:22,640 --> 00:04:26,240
+intuitive for how fast the court the
+
+00:04:24,890 --> 00:04:28,910
+computer can go when it's running all
+
+00:04:26,240 --> 00:04:30,680
+all cores doing work there's a similar
+
+00:04:28,910 --> 00:04:33,020
+plateau below that for the ATX
+
+00:04:30,680 --> 00:04:35,090
+running and whether or not each core is
+
+00:04:33,020 --> 00:04:38,510
+affected by its neighbor being a VX is
+
+00:04:35,090 --> 00:04:39,830
+part specific so I talked about but in
+
+00:04:38,510 --> 00:04:41,120
+general this base frequency is the
+
+00:04:39,830 --> 00:04:45,200
+number that typically gets advertised
+
+00:04:41,120 --> 00:04:47,630
+and it doesn't mean very much so so
+
+00:04:45,200 --> 00:04:49,400
+moving on to how I measure this if I
+
+00:04:47,630 --> 00:04:51,710
+have a post machine native machine I
+
+00:04:49,400 --> 00:04:53,900
+have a lot of capability to measure on
+
+00:04:51,710 --> 00:04:56,390
+this this gets x86 specific and a little
+
+00:04:53,900 --> 00:04:57,980
+Intel specific there's metal specific
+
+00:04:56,390 --> 00:04:59,270
+registers called a person in Perth that
+
+00:04:57,980 --> 00:05:02,150
+have been around for quite a while both
+
+00:04:59,270 --> 00:05:04,730
+in AMD and Intel they're not defined by
+
+00:05:02,150 --> 00:05:06,350
+themselves the ratio is defined and it
+
+00:05:04,730 --> 00:05:07,940
+indicates the ratio of total cycles you
+
+00:05:06,350 --> 00:05:09,530
+actually got including the bonus cycles
+
+00:05:07,940 --> 00:05:11,450
+when you're going faster due to turbo
+
+00:05:09,530 --> 00:05:15,440
+the ratio of that number of cycles to a
+
+00:05:11,450 --> 00:05:17,600
+constant clock which is mostly TSC but
+
+00:05:15,440 --> 00:05:18,920
+it might have a scale factor so you can
+
+00:05:17,600 --> 00:05:21,080
+think of it as how much did I get server
+
+00:05:18,920 --> 00:05:22,310
+boosted so if you have a 1.0 you didn't
+
+00:05:21,080 --> 00:05:24,530
+get to reboost it at all if you have a
+
+00:05:22,310 --> 00:05:26,450
+2.0 you've got a lot of turbo boost if
+
+00:05:24,530 --> 00:05:29,030
+you were below 1 then you're in some bad
+
+00:05:26,450 --> 00:05:31,730
+and thermal straits a proofing for both
+
+00:05:29,030 --> 00:05:33,020
+stop ticking when cores are halted so if
+
+00:05:31,730 --> 00:05:35,270
+you're halted a lot you're not going to
+
+00:05:33,020 --> 00:05:37,100
+go below 1.0 it's only going to tell you
+
+00:05:35,270 --> 00:05:39,320
+the turbo history you had when you're
+
+00:05:37,100 --> 00:05:42,470
+actually running if you look at turbo
+
+00:05:39,320 --> 00:05:44,030
+stat which is in Linux tools it has a
+
+00:05:42,470 --> 00:05:46,160
+bunch of formulas for calculating this
+
+00:05:44,030 --> 00:05:47,900
+they use they per annum for a co plus a
+
+00:05:46,160 --> 00:05:51,860
+model specific information about these
+
+00:05:47,900 --> 00:05:53,660
+dates it's they don't document the
+
+00:05:51,860 --> 00:05:54,620
+formulas but they're fairly easy to read
+
+00:05:53,660 --> 00:05:57,140
+out of the code and it's it's
+
+00:05:54,620 --> 00:05:58,340
+informative on until there's a few m/s
+
+00:05:57,140 --> 00:06:01,460
+ours that tell you the current frequency
+
+00:05:58,340 --> 00:06:03,320
+this one 9 8 MSR and then the one ad
+
+00:06:01,460 --> 00:06:05,169
+through NIF are actually the way you can
+
+00:06:03,320 --> 00:06:08,020
+read out the blue line on those graphs
+
+00:06:05,169 --> 00:06:09,190
+for any given model and they
+
+00:06:08,020 --> 00:06:10,419
+the manual because they changed the
+
+00:06:09,190 --> 00:06:13,270
+definition of these registers at some
+
+00:06:10,419 --> 00:06:15,129
+point most of these MS ARS or all of
+
+00:06:13,270 --> 00:06:17,440
+these emissaries don't get visible to BM
+
+00:06:15,129 --> 00:06:18,940
+so what do I do
+
+00:06:17,440 --> 00:06:20,080
+vm's really don't know anything about
+
+00:06:18,940 --> 00:06:21,729
+what they're doing unless I tell them
+
+00:06:20,080 --> 00:06:23,020
+you know they don't know what CPU socket
+
+00:06:21,729 --> 00:06:24,190
+they're on or how big it is they don't
+
+00:06:23,020 --> 00:06:26,110
+know how many cores there are or how
+
+00:06:24,190 --> 00:06:27,039
+many sockets there are they don't know
+
+00:06:26,110 --> 00:06:28,690
+where they might be running and
+
+00:06:27,039 --> 00:06:31,090
+depending on your scheduler B CPUs will
+
+00:06:28,690 --> 00:06:33,220
+move around the system different sockets
+
+00:06:31,090 --> 00:06:34,780
+or same socket they don't know the cpu
+
+00:06:33,220 --> 00:06:37,300
+curve frequency curve they're on or the
+
+00:06:34,780 --> 00:06:38,710
+frequency at the moment and if I'm
+
+00:06:37,300 --> 00:06:40,690
+investigating a performance anomaly
+
+00:06:38,710 --> 00:06:41,860
+where things were fast or but now
+
+00:06:40,690 --> 00:06:44,169
+they're slow or there's a lot of
+
+00:06:41,860 --> 00:06:46,000
+variation this stuff has a large effect
+
+00:06:44,169 --> 00:06:48,190
+but it's nothing the guest actually has
+
+00:06:46,000 --> 00:06:51,810
+access to in our systems and that's
+
+00:06:48,190 --> 00:06:54,099
+really annoying and confusing and so
+
+00:06:51,810 --> 00:06:56,560
+what do I care about this so these these
+
+00:06:54,099 --> 00:06:57,580
+and I'm almost performance events or
+
+00:06:56,560 --> 00:06:59,469
+have a lot of different things that
+
+00:06:57,580 --> 00:07:00,909
+influence them you might have unlucky
+
+00:06:59,469 --> 00:07:02,740
+scheduling you might be next to a thread
+
+00:07:00,909 --> 00:07:04,449
+that uses a BX and they've been heavily
+
+00:07:02,740 --> 00:07:05,979
+loaded socket you might be lucky and
+
+00:07:04,449 --> 00:07:08,740
+have an underutilized socket and then
+
+00:07:05,979 --> 00:07:10,300
+set your expectations badly this is also
+
+00:07:08,740 --> 00:07:12,759
+useful to kind of know how much time I
+
+00:07:10,300 --> 00:07:15,039
+got stolen from the VM to do VM services
+
+00:07:12,759 --> 00:07:16,690
+enough if the a prevent proof absolute
+
+00:07:15,039 --> 00:07:18,669
+count was significantly less than the
+
+00:07:16,690 --> 00:07:20,620
+absolute count of TSC I was paused for a
+
+00:07:18,669 --> 00:07:23,349
+long time and that's a useful indicator
+
+00:07:20,620 --> 00:07:25,000
+of spending time servicing the VM or
+
+00:07:23,349 --> 00:07:28,150
+confusion about how it was halted or
+
+00:07:25,000 --> 00:07:29,919
+other things and we have a lot of times
+
+00:07:28,150 --> 00:07:32,199
+where we get a good benchmark number
+
+00:07:29,919 --> 00:07:33,639
+when the system is idle both internally
+
+00:07:32,199 --> 00:07:35,259
+and externally and it looks really good
+
+00:07:33,639 --> 00:07:36,310
+because we had a lot of turbo up side
+
+00:07:35,259 --> 00:07:39,009
+and then we run it on a machine that's
+
+00:07:36,310 --> 00:07:41,500
+shared and things go slower and I'm
+
+00:07:39,009 --> 00:07:43,659
+trying to incorporate my notions of the
+
+00:07:41,500 --> 00:07:44,770
+history of turbo for the VM into a way
+
+00:07:43,659 --> 00:07:47,880
+to understand whether we have got
+
+00:07:44,770 --> 00:07:50,319
+comparable results between a and B so
+
+00:07:47,880 --> 00:07:52,630
+the code that I will aim to upstream in
+
+00:07:50,319 --> 00:07:55,120
+the next few weeks is relatively simple
+
+00:07:52,630 --> 00:07:56,560
+we track Purvi CPU the histogram the
+
+00:07:55,120 --> 00:07:58,569
+presidency at each hundred megahertz
+
+00:07:56,560 --> 00:08:01,479
+size frequency bucket and you put them
+
+00:07:58,569 --> 00:08:02,590
+in debug FS for reading out I'm assuming
+
+00:08:01,479 --> 00:08:04,509
+the processors aren't going to go
+
+00:08:02,590 --> 00:08:06,699
+massively faster or masterly slower so I
+
+00:08:04,509 --> 00:08:09,009
+set some constant overflow and underflow
+
+00:08:06,699 --> 00:08:11,020
+buckets at 1,100 megahertz and 5
+
+00:08:09,009 --> 00:08:12,659
+gigahertz and then between those it's
+
+00:08:11,020 --> 00:08:14,949
+hundred megahertz buckets I
+
+00:08:12,659 --> 00:08:16,270
+intentionally set them constant I didn't
+
+00:08:14,949 --> 00:08:17,290
+give any knobs to move the buckets
+
+00:08:16,270 --> 00:08:18,820
+around
+
+00:08:17,290 --> 00:08:19,960
+because if you've got a histogram you
+
+00:08:18,820 --> 00:08:22,240
+want to compare to some other history
+
+00:08:19,960 --> 00:08:24,010
+among some other machine and it doesn't
+
+00:08:22,240 --> 00:08:28,360
+take that much storage to just have this
+
+00:08:24,010 --> 00:08:30,400
+wide set of frequencies so currently I
+
+00:08:28,360 --> 00:08:32,110
+wrote it in until vmx dot C it should be
+
+00:08:30,400 --> 00:08:34,450
+a pretty straightforward port for SVM
+
+00:08:32,110 --> 00:08:35,740
+dot C and I added a disabled module
+
+00:08:34,450 --> 00:08:37,900
+parameter to turn it off but it will
+
+00:08:35,740 --> 00:08:39,640
+turn it on if it finds the hardware and
+
+00:08:37,900 --> 00:08:41,260
+only really old hardware and nested
+
+00:08:39,640 --> 00:08:45,160
+hardware wouldn't support vapors and
+
+00:08:41,260 --> 00:08:46,990
+embers the interesting choice we made
+
+00:08:45,160 --> 00:08:49,090
+was tracking P CPUs rather than the
+
+00:08:46,990 --> 00:08:51,730
+physical CPUs because the V CPUs wonder
+
+00:08:49,090 --> 00:08:53,380
+due to this scheduler so I I tracked the
+
+00:08:51,730 --> 00:08:57,130
+a proof and imperf deltas accumulated
+
+00:08:53,380 --> 00:08:58,630
+while the V CPU is running CPU cycles on
+
+00:08:57,130 --> 00:09:00,010
+the core it was on and if it moved
+
+00:08:58,630 --> 00:09:02,280
+somewhere else then I keep the check of
+
+00:09:00,010 --> 00:09:04,690
+the samples the deltas on that new core
+
+00:09:02,280 --> 00:09:07,060
+that gives me the effect of tracking the
+
+00:09:04,690 --> 00:09:08,530
+BCP use turbo history and it consistent
+
+00:09:07,060 --> 00:09:12,280
+fashion as it moves around the whole
+
+00:09:08,530 --> 00:09:13,960
+system and so to kind of describe the
+
+00:09:12,280 --> 00:09:16,060
+proof in improv a little bit better time
+
+00:09:13,960 --> 00:09:19,000
+goes to the right on this guest is the
+
+00:09:16,060 --> 00:09:21,610
+blue and host as the red pieces of time
+
+00:09:19,000 --> 00:09:23,140
+so TSC as seen by the guest always
+
+00:09:21,610 --> 00:09:25,840
+increases because it's needed as a time
+
+00:09:23,140 --> 00:09:27,940
+source and perf increases when the guest
+
+00:09:25,840 --> 00:09:31,270
+is running and freezes when the host is
+
+00:09:27,940 --> 00:09:33,580
+in effect and that directly is analogous
+
+00:09:31,270 --> 00:09:35,080
+to impersonate for stopping when we're
+
+00:09:33,580 --> 00:09:37,900
+in a halt State or otherwise not running
+
+00:09:35,080 --> 00:09:39,820
+CPU cycles and perf always has the same
+
+00:09:37,900 --> 00:09:40,960
+slope with CSC maybe maybe with the
+
+00:09:39,820 --> 00:09:44,920
+scale factor depending on the hardware
+
+00:09:40,960 --> 00:09:46,240
+and a perf slope is changes depending on
+
+00:09:44,920 --> 00:09:48,460
+whether we're in high or lower frequency
+
+00:09:46,240 --> 00:09:49,990
+and so a proof indicates the number of
+
+00:09:48,460 --> 00:09:51,580
+cycles we actually got em proof is the
+
+00:09:49,990 --> 00:09:54,430
+relative to wall clock cycles and the
+
+00:09:51,580 --> 00:09:56,470
+ratio tells is the turbo goodness vector
+
+00:09:54,430 --> 00:09:58,630
+so a proof in improv always our
+
+00:09:56,470 --> 00:10:00,280
+discontinuously paused during non
+
+00:09:58,630 --> 00:10:02,620
+guessed cycles and this this is a
+
+00:10:00,280 --> 00:10:04,240
+picture that's different for every B CPU
+
+00:10:02,620 --> 00:10:05,890
+because each V CPU and VM might be
+
+00:10:04,240 --> 00:10:09,940
+having a different turbo and halting
+
+00:10:05,890 --> 00:10:11,710
+history so we made a few
+
+00:10:09,940 --> 00:10:13,420
+trade-offs in the decision of a perf and
+
+00:10:11,710 --> 00:10:15,040
+M curve theoretically we should probably
+
+00:10:13,420 --> 00:10:16,210
+count those cycles while we're doing
+
+00:10:15,040 --> 00:10:18,010
+something on behalf of the guest
+
+00:10:16,210 --> 00:10:19,220
+intercepting and emulating CPU idea
+
+00:10:18,010 --> 00:10:20,930
+remember
+
+00:10:19,220 --> 00:10:22,279
+that gets really messy as soon as we hit
+
+00:10:20,930 --> 00:10:23,990
+any a sickness path that's where the
+
+00:10:22,279 --> 00:10:27,319
+hypervisor has to do work might get
+
+00:10:23,990 --> 00:10:29,089
+interrupted it might go to disk and in
+
+00:10:27,319 --> 00:10:31,749
+most cases things are pretty quick like
+
+00:10:29,089 --> 00:10:34,639
+CP OD emulation or really confusing like
+
+00:10:31,749 --> 00:10:35,720
+asynchronous network or hard drive so
+
+00:10:34,639 --> 00:10:37,309
+I'm just ignoring all the hypervisor
+
+00:10:35,720 --> 00:10:39,999
+time we start the stopwatch when the
+
+00:10:37,309 --> 00:10:43,910
+guest is running in a VM run octal and
+
+00:10:39,999 --> 00:10:45,620
+stop it on the hypervisor that's I think
+
+00:10:43,910 --> 00:10:46,990
+a pretty good trade-off it loses a small
+
+00:10:45,620 --> 00:10:50,569
+amount of precision but not very much
+
+00:10:46,990 --> 00:10:51,589
+and then this is certainly enough to get
+
+00:10:50,569 --> 00:10:53,629
+intuitions about where the guest is
+
+00:10:51,589 --> 00:10:55,610
+spending its time and frequency losses I
+
+00:10:53,629 --> 00:10:57,139
+used the same definition of average
+
+00:10:55,610 --> 00:10:59,329
+frequency if you look in turbo stabbed
+
+00:10:57,139 --> 00:11:01,129
+at Cu that's what they call it so we
+
+00:10:59,329 --> 00:11:03,499
+don't measure time in each frequency bin
+
+00:11:01,129 --> 00:11:05,329
+you know the CPU in this case has 100
+
+00:11:03,499 --> 00:11:06,800
+mega Hertz increments I can't see that I
+
+00:11:05,329 --> 00:11:08,660
+can only see the aggregate cycles that
+
+00:11:06,800 --> 00:11:10,579
+were given so if I spend half my time
+
+00:11:08,660 --> 00:11:12,709
+and 2 gigahertz and half my time into
+
+00:11:10,579 --> 00:11:15,170
+point 1 it will be probably in the 2
+
+00:11:12,709 --> 00:11:18,319
+Giga Hertz bucket and that's pretty good
+
+00:11:15,170 --> 00:11:19,339
+it's still a pretty good sampling given
+
+00:11:18,319 --> 00:11:20,689
+what we have from the hardware we don't
+
+00:11:19,339 --> 00:11:21,949
+directly know why we were throttled we
+
+00:11:20,689 --> 00:11:23,629
+can infer a few things and there are
+
+00:11:21,949 --> 00:11:24,709
+Hardware specific ways to know more but
+
+00:11:23,629 --> 00:11:28,639
+those are out of scope before we're
+
+00:11:24,709 --> 00:11:31,790
+doing here so as an example just a 1 V
+
+00:11:28,639 --> 00:11:33,290
+CPU VM the the first tuple is the
+
+00:11:31,790 --> 00:11:36,110
+histogram in the second is the histogram
+
+00:11:33,290 --> 00:11:38,779
+for all the VMS so if they're more Ivy
+
+00:11:36,110 --> 00:11:41,059
+CPUs the it's a history impaired all the
+
+00:11:38,779 --> 00:11:43,220
+B CPUs in the VM so if there are more
+
+00:11:41,059 --> 00:11:45,949
+VMs we'd have more V CPUs we'd have more
+
+00:11:43,220 --> 00:11:48,439
+entries in the non parenthesized areas
+
+00:11:45,949 --> 00:11:50,420
+so this is just some histogram of the
+
+00:11:48,439 --> 00:11:52,579
+frequencies we had and I also keep the
+
+00:11:50,420 --> 00:11:53,870
+TSC and perf in a per overall history so
+
+00:11:52,579 --> 00:11:57,709
+we can actually calculate the overall
+
+00:11:53,870 --> 00:11:59,540
+lifetime frequency that the guest got as
+
+00:11:57,709 --> 00:12:00,680
+well as infer how much time is stolen
+
+00:11:59,540 --> 00:12:04,399
+from the guest which is available
+
+00:12:00,680 --> 00:12:05,899
+elsewhere but this is convenient so this
+
+00:12:04,399 --> 00:12:08,000
+is an example measurement somewhat
+
+00:12:05,899 --> 00:12:11,629
+simulated so I didn't have to get real
+
+00:12:08,000 --> 00:12:13,639
+numbers put in here so if we look at the
+
+00:12:11,629 --> 00:12:15,230
+histogram buckets we see a little bit of
+
+00:12:13,639 --> 00:12:17,120
+weight over out on the right where the
+
+00:12:15,230 --> 00:12:18,290
+highest frequency is where we only can
+
+00:12:17,120 --> 00:12:20,029
+do that when there's one or two cores
+
+00:12:18,290 --> 00:12:23,480
+running and then as we get to the all
+
+00:12:20,029 --> 00:12:24,740
+cores frequency at 2800 to $28.99
+
+00:12:23,480 --> 00:12:25,720
+there's a decent amount of weight at
+
+00:12:24,740 --> 00:12:27,640
+that one in the bucket
+
+00:12:25,720 --> 00:12:28,810
+and do the way the histogram works I
+
+00:12:27,640 --> 00:12:30,850
+would kind of think of those together
+
+00:12:28,810 --> 00:12:34,150
+that we spent a good portion of our time
+
+00:12:30,850 --> 00:12:35,560
+in the all course turbo frequency but
+
+00:12:34,150 --> 00:12:38,080
+this workload had a significant amount
+
+00:12:35,560 --> 00:12:39,790
+of AVX going on so we had that 2600
+
+00:12:38,080 --> 00:12:41,880
+frequency which is the VIX all course
+
+00:12:39,790 --> 00:12:43,900
+turbo frequency for the part I looked at
+
+00:12:41,880 --> 00:12:45,520
+which is interesting to know there was a
+
+00:12:43,900 --> 00:12:48,160
+V X going on maybe in that workload
+
+00:12:45,520 --> 00:12:49,960
+maybe in some antagonist nearby and so
+
+00:12:48,160 --> 00:12:51,700
+we can dive in further with other tools
+
+00:12:49,960 --> 00:12:53,920
+to figure out was this work by doing AV
+
+00:12:51,700 --> 00:12:55,990
+x or is it being surprised by having a
+
+00:12:53,920 --> 00:13:00,460
+300 megahertz loss so this is the kind
+
+00:12:55,990 --> 00:13:02,320
+of investigations I've started doing so
+
+00:13:00,460 --> 00:13:03,730
+as an example if somebody says there's
+
+00:13:02,320 --> 00:13:05,740
+an analyst performance on this date we
+
+00:13:03,730 --> 00:13:07,510
+can look at these things and say what
+
+00:13:05,740 --> 00:13:09,250
+was co-located does it have a VX and
+
+00:13:07,510 --> 00:13:10,930
+this customer doesn't are there other
+
+00:13:09,250 --> 00:13:14,410
+things maybe Thermal events going on
+
+00:13:10,930 --> 00:13:15,610
+that we log or high high intensity
+
+00:13:14,410 --> 00:13:18,910
+workloads that could actually push you
+
+00:13:15,610 --> 00:13:20,380
+lower than the a VIX frequency and also
+
+00:13:18,910 --> 00:13:21,880
+show us if we had more weight over in
+
+00:13:20,380 --> 00:13:24,130
+the right side where the higher turbo
+
+00:13:21,880 --> 00:13:25,810
+bins are you can infer that the CPU who
+
+00:13:24,130 --> 00:13:27,310
+got lucky and was scheduled on an empty
+
+00:13:25,810 --> 00:13:28,240
+socket or something like that and know
+
+00:13:27,310 --> 00:13:31,270
+that this isn't necessarily
+
+00:13:28,240 --> 00:13:32,650
+representative of shearing machine and
+
+00:13:31,270 --> 00:13:34,450
+this is actually being pretty useful in
+
+00:13:32,650 --> 00:13:35,980
+an ongoing investigation we have about
+
+00:13:34,450 --> 00:13:39,040
+trying to find where these jitters and
+
+00:13:35,980 --> 00:13:41,110
+anomalies are coming from so looking
+
+00:13:39,040 --> 00:13:42,670
+forward I was considering exposing a
+
+00:13:41,110 --> 00:13:44,200
+proof and M proof to guests the the
+
+00:13:42,670 --> 00:13:46,710
+underlying accounts make it possible to
+
+00:13:44,200 --> 00:13:49,210
+do so with live migration and other
+
+00:13:46,710 --> 00:13:50,560
+concerns it's it's confusing to give it
+
+00:13:49,210 --> 00:13:53,740
+to the guests directly it seems more
+
+00:13:50,560 --> 00:13:55,090
+useful to have it as a host tool if we
+
+00:13:53,740 --> 00:13:56,380
+move you to a different B CPU a
+
+00:13:55,090 --> 00:13:57,460
+different physical CPU that has a
+
+00:13:56,380 --> 00:13:59,470
+different frequency or a different
+
+00:13:57,460 --> 00:14:01,120
+microarchitecture generation a proof and
+
+00:13:59,470 --> 00:14:02,740
+proof become inconsistent with the
+
+00:14:01,120 --> 00:14:04,600
+previous history and now we need to
+
+00:14:02,740 --> 00:14:06,220
+define whether we zero them notify the
+
+00:14:04,600 --> 00:14:08,850
+guests try to manipulate them so they're
+
+00:14:06,220 --> 00:14:11,320
+consistent it gets moderately messy I
+
+00:14:08,850 --> 00:14:12,970
+also would like to see virtualized
+
+00:14:11,320 --> 00:14:13,960
+performance counters coming and then the
+
+00:14:12,970 --> 00:14:15,160
+same kind of problems but
+
+00:14:13,960 --> 00:14:16,510
+inconsistencies with different
+
+00:14:15,160 --> 00:14:19,630
+frequencies or generations comes in
+
+00:14:16,510 --> 00:14:22,360
+there and it gets rather interesting and
+
+00:14:19,630 --> 00:14:25,030
+messy and so I would love to argue for a
+
+00:14:22,360 --> 00:14:26,200
+guest is profiling notification both
+
+00:14:25,030 --> 00:14:29,110
+directions where you can tell the guest
+
+00:14:26,200 --> 00:14:33,040
+your world just had to discontinuity but
+
+00:14:29,110 --> 00:14:34,279
+that's that's not for today's talk so to
+
+00:14:33,040 --> 00:14:36,290
+sum up
+
+00:14:34,279 --> 00:14:39,019
+lunch time we have the ability to
+
+00:14:36,290 --> 00:14:40,939
+aggregate the turbot residency Purvi cpu
+
+00:14:39,019 --> 00:14:43,160
+so we can see the history of each V CPU
+
+00:14:40,939 --> 00:14:45,170
+as it goes to the system to try to get
+
+00:14:43,160 --> 00:14:46,550
+insight about why we're having good or
+
+00:14:45,170 --> 00:14:50,779
+bad performance relative to our
+
+00:14:46,550 --> 00:14:52,370
+expectations and and it's a way to try
+
+00:14:50,779 --> 00:14:53,899
+to set expectations when I know I've got
+
+00:14:52,370 --> 00:14:55,910
+an idle machine that's getting too much
+
+00:14:53,899 --> 00:14:59,089
+turbo I should try to do something to my
+
+00:14:55,910 --> 00:15:02,269
+numbers to predict sharing performance
+
+00:14:59,089 --> 00:15:04,100
+and I also am advocating for using the
+
+00:15:02,269 --> 00:15:05,389
+all core turbo frequency as a comparison
+
+00:15:04,100 --> 00:15:07,069
+metric so we can understand the
+
+00:15:05,389 --> 00:15:08,829
+differences between CPUs and a better
+
+00:15:07,069 --> 00:15:12,129
+way than understanding base frequency
+
+00:15:08,829 --> 00:15:12,129
+any questions
+
+00:15:19,700 --> 00:15:29,820
+between so when you have a new mod it's
+
+00:15:26,970 --> 00:15:31,860
+moved from newman old one - no sorry no
+
+00:15:29,820 --> 00:15:34,350
+my node 0 - no my node 1 how do you take
+
+00:15:31,860 --> 00:15:35,610
+that into account so does the TSE differ
+
+00:15:34,350 --> 00:15:37,830
+if you move between different humanoids
+
+00:15:35,610 --> 00:15:39,420
+so there is I think starting with no
+
+00:15:37,830 --> 00:15:41,190
+hate in the Heylin my CP ID bitten host
+
+00:15:39,420 --> 00:15:43,110
+that says TSE is good for a time source
+
+00:15:41,190 --> 00:15:45,360
+and so it's up to the system integrator
+
+00:15:43,110 --> 00:15:46,800
+to make sure that the CICS on all the
+
+00:15:45,360 --> 00:15:49,860
+sockets are synchronized well which is
+
+00:15:46,800 --> 00:15:52,500
+mostly around deserting the correct
+
+00:15:49,860 --> 00:15:53,880
+reset at a good well-defined time and
+
+00:15:52,500 --> 00:15:56,400
+even if there's a little bit of jitter
+
+00:15:53,880 --> 00:15:59,100
+it's not visible yeah because the time
+
+00:15:56,400 --> 00:16:01,620
+to prove that you had a difference in in
+
+00:15:59,100 --> 00:16:03,830
+TSE is hundreds of nanoseconds to talk
+
+00:16:01,620 --> 00:16:05,820
+between the cores so i think that they
+
+00:16:03,830 --> 00:16:08,460
+what I know of the design they get it
+
+00:16:05,820 --> 00:16:10,050
+far below the detection threshold and so
+
+00:16:08,460 --> 00:16:11,370
+if that bit is set by the hardware them
+
+00:16:10,050 --> 00:16:12,000
+they would attest it that they've done
+
+00:16:11,370 --> 00:16:13,200
+the right thing
+
+00:16:12,000 --> 00:16:15,120
+yeah possibly and also because of
+
+00:16:13,200 --> 00:16:16,860
+averaging I guess it just possibly and
+
+00:16:15,120 --> 00:16:23,400
+also because of aggregating it over time
+
+00:16:16,860 --> 00:16:27,540
+it just drops I guess okay thanks what
+
+00:16:23,400 --> 00:16:29,430
+do you get a permanent per visit at the
+
+00:16:27,540 --> 00:16:31,980
+CPU load and B CPU puts on the
+
+00:16:29,430 --> 00:16:34,860
+preeminent e fires basically or is it at
+
+00:16:31,980 --> 00:16:37,950
+VM exit and VM entry so I sample it at
+
+00:16:34,860 --> 00:16:40,800
+the beginning at VM runner after at the
+
+00:16:37,950 --> 00:16:43,530
+end and what did I do
+
+00:16:40,800 --> 00:16:45,780
+every several hundred microseconds in
+
+00:16:43,530 --> 00:16:47,040
+between to try to capture differences
+
+00:16:45,780 --> 00:16:49,050
+that would happen because the CPU can
+
+00:16:47,040 --> 00:16:50,580
+asynchronously change its frequency so
+
+00:16:49,050 --> 00:16:52,980
+if I got a VM exit that will cause me to
+
+00:16:50,580 --> 00:16:55,140
+VM go back in without returning the act
+
+00:16:52,980 --> 00:16:57,300
+all sample it occasionally so you check
+
+00:16:55,140 --> 00:17:00,600
+how much time has passed so you don't do
+
+00:16:57,300 --> 00:17:04,350
+it too frequently yeah and the other
+
+00:17:00,600 --> 00:17:06,720
+question is because of the edx penalty
+
+00:17:04,350 --> 00:17:09,930
+would would could there be some
+
+00:17:06,720 --> 00:17:13,920
+workloads we're actually using as a si
+
+00:17:09,930 --> 00:17:17,160
+for some things instead of a VX turns
+
+00:17:13,920 --> 00:17:18,380
+out to be faster because in the majority
+
+00:17:17,160 --> 00:17:21,120
+of the code that doesn't use
+
+00:17:18,380 --> 00:17:24,600
+vectorization you actually can get
+
+00:17:21,120 --> 00:17:26,959
+boosted more so if I have a little bit
+
+00:17:24,600 --> 00:17:28,789
+of a VX I should avoid using a VX 2
+
+00:17:26,959 --> 00:17:30,019
+the frequency penalty a little bit of
+
+00:17:28,789 --> 00:17:34,490
+simd yeah
+
+00:17:30,019 --> 00:17:35,960
+can this happen yeah I think I'll direct
+
+00:17:34,490 --> 00:17:37,639
+you to insult for details that I know
+
+00:17:35,960 --> 00:17:39,049
+but I don't know if they've been exposed
+
+00:17:37,639 --> 00:17:40,669
+but if you look at some of the work
+
+00:17:39,049 --> 00:17:43,850
+they've done and GMC I think they've
+
+00:17:40,669 --> 00:17:46,399
+been trying to optimize for that and it
+
+00:17:43,850 --> 00:17:47,809
+there's some AVX is more expensive than
+
+00:17:46,399 --> 00:17:57,019
+others and they're trying to make the
+
+00:17:47,809 --> 00:17:59,419
+compilers a little more aware so despite
+
+00:17:57,019 --> 00:18:01,820
+the confusion of October to the
+
+00:17:59,419 --> 00:18:04,309
+customers do you think it's kind of
+
+00:18:01,820 --> 00:18:06,619
+warrants still you know your neighboring
+
+00:18:04,309 --> 00:18:10,210
+unit are are in VMs and they'll in what
+
+00:18:06,619 --> 00:18:12,830
+this is gonna keep your topper Boyd yeah
+
+00:18:10,210 --> 00:18:14,539
+well they get to remote unless somebody
+
+00:18:12,830 --> 00:18:16,970
+disabled it but they don't have a way to
+
+00:18:14,539 --> 00:18:21,289
+measure it directly well we cannot this
+
+00:18:16,970 --> 00:18:24,649
+disable Tahoe but so but you don't want
+
+00:18:21,289 --> 00:18:27,320
+to disable disable talk turbo was useful
+
+00:18:24,649 --> 00:18:29,330
+enough that it I want to know when it
+
+00:18:27,320 --> 00:18:30,470
+happened I want to use it and I want to
+
+00:18:29,330 --> 00:18:33,110
+know when their surprises okay
+
+00:18:30,470 --> 00:18:35,960
+expectation so long as clear you know
+
+00:18:33,110 --> 00:18:41,450
+when the top is a kicked in and that's
+
+00:18:35,960 --> 00:18:43,249
+good okay after Paulo there's a question
+
+00:18:41,450 --> 00:18:46,759
+way in the back so what's the overhead
+
+00:18:43,249 --> 00:18:47,869
+of measuring de perfil number for every
+
+00:18:46,759 --> 00:18:49,999
+sometime
+
+00:18:47,869 --> 00:18:51,740
+I didn't measure it directly because I
+
+00:18:49,999 --> 00:18:53,330
+am Erised it there's already a TSE read
+
+00:18:51,740 --> 00:18:55,279
+in the point where I need to know and so
+
+00:18:53,330 --> 00:18:57,369
+when I do the TSE read if not enough
+
+00:18:55,279 --> 00:19:01,299
+time has passed I don't read the MS ours
+
+00:18:57,369 --> 00:19:01,299
+so I assumed it was in the noise
+
+00:19:05,890 --> 00:19:15,669
+microphone is making its way back but
+
+00:19:10,929 --> 00:19:18,460
+add that the suggestion about using all
+
+00:19:15,669 --> 00:19:21,460
+quarter by frequency is a bit difficult
+
+00:19:18,460 --> 00:19:23,740
+because sky wake and aim the epic
+
+00:19:21,460 --> 00:19:29,760
+protocells use different frequency
+
+00:19:23,740 --> 00:19:31,059
+curves which make this self flat o
+
+00:19:29,760 --> 00:19:35,470
+core-toolbar
+
+00:19:31,059 --> 00:19:38,200
+basically inexistent and the second
+
+00:19:35,470 --> 00:19:40,330
+thing is that if I remember correctly
+
+00:19:38,200 --> 00:19:44,200
+there are motion specific registers
+
+00:19:40,330 --> 00:19:50,860
+which have all inspect whether we are
+
+00:19:44,200 --> 00:19:54,549
+heating temperature or power limits so
+
+00:19:50,860 --> 00:19:58,149
+you actually can absorb why there is
+
+00:19:54,549 --> 00:19:59,740
+frequency limit for the package okay
+
+00:19:58,149 --> 00:20:01,659
+I'll restate that because there's no
+
+00:19:59,740 --> 00:20:03,370
+monitor actually into me so I heard part
+
+00:20:01,659 --> 00:20:05,409
+of it I think you're saying there's
+
+00:20:03,370 --> 00:20:07,240
+differences in the MS ours for AMD
+
+00:20:05,409 --> 00:20:14,590
+versus Intel and I'm controlling the
+
+00:20:07,240 --> 00:20:17,549
+power not really well I am saying that
+
+00:20:14,590 --> 00:20:21,990
+on the modern processors different
+
+00:20:17,549 --> 00:20:25,899
+frequency curves that the first thing so
+
+00:20:21,990 --> 00:20:29,970
+yeah dependency of maximum frequency
+
+00:20:25,899 --> 00:20:35,320
+based on the amount of course active
+
+00:20:29,970 --> 00:20:42,490
+it's a far more lean on skylake and epic
+
+00:20:35,320 --> 00:20:46,510
+like you can have like far significantly
+
+00:20:42,490 --> 00:20:51,549
+higher frequency on for example 20
+
+00:20:46,510 --> 00:20:54,429
+course than 28 course on 0 on platinum
+
+00:20:51,549 --> 00:20:56,080
+80 or 160 for example so you're saying
+
+00:20:54,429 --> 00:20:57,940
+that when I have lots of cores on AMD
+
+00:20:56,080 --> 00:21:00,340
+parts of the nervous guy like parts I
+
+00:20:57,940 --> 00:21:02,049
+have a different turbo curve yeah yeah I
+
+00:21:00,340 --> 00:21:03,899
+think I mean you can use the measurement
+
+00:21:02,049 --> 00:21:07,269
+here to infer the shape of the curve
+
+00:21:03,899 --> 00:21:08,799
+this should be agnostic to what the
+
+00:21:07,269 --> 00:21:10,179
+hardware is capable of doing it'll just
+
+00:21:08,799 --> 00:21:13,750
+measure it because they perfect and
+
+00:21:10,179 --> 00:21:16,770
+perfect so if I misunderstand your
+
+00:21:13,750 --> 00:21:16,770
+question I'll come talk to you after
+
+00:21:24,390 --> 00:21:26,960
+cool
+
+00:21:27,750 --> 00:21:30,470
+anyone else
+
+00:21:32,310 --> 00:21:41,099
+[Applause]
+
+00:21:35,240 --> 00:21:41,099
+
+YouTube URL: https://www.youtube.com/watch?v=kcQfHTGPg2g
+
+

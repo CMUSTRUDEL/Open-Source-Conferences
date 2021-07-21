@@ -1,0 +1,2469 @@
+Title: PromCon EU 2019: What the Fork‽ Reporting Metrics in a Multi-process Environment
+Publication date: 2019-12-29
+Playlist: PromCon EU 2019
+Description: 
+	Speaker: Daniel Magliola
+
+For many years, most Ruby applications couldn't use Prometheus, because the Ruby client didn't support pre-fork servers. It turns out this wasn't solved for such a long time because it's a surprisingly hard problem. Many have tried to solve this with different approaches, but we found the best one to be the simplest. Let me show you the dark arts of inter-process communication, and how we ended up fully supporting metrics in Ruby.
+
+Slides: https://promcon.io/2019-munich/slides/what-the-fork-reporting-metrics-in-a-multi-process-environment.pdf
+Captions: 
+	00:00:00,650 --> 00:00:08,910
+[Music]
+
+00:00:10,360 --> 00:00:15,400
+so this is gonna be a slightly different
+
+00:00:13,059 --> 00:00:16,930
+talk to the previous ones we're gonna be
+
+00:00:15,400 --> 00:00:19,360
+looking at exporting metrics from the
+
+00:00:16,930 --> 00:00:21,880
+application side now last year we
+
+00:00:19,360 --> 00:00:23,860
+decided to revamp the Prometheus ruby
+
+00:00:21,880 --> 00:00:25,450
+client to bring it up to the standards
+
+00:00:23,860 --> 00:00:27,880
+of the other clients and I'm gonna talk
+
+00:00:25,450 --> 00:00:29,199
+a bit more about what that means and it
+
+00:00:27,880 --> 00:00:31,810
+was an interesting project I hope you'll
+
+00:00:29,199 --> 00:00:34,420
+find this this interesting first of all
+
+00:00:31,810 --> 00:00:36,400
+though hi my name is Daniel and I work
+
+00:00:34,420 --> 00:00:38,710
+at go Carles we are a payments company
+
+00:00:36,400 --> 00:00:40,449
+based in London now as you probably
+
+00:00:38,710 --> 00:00:41,949
+noticed I'm not originally from London I
+
+00:00:40,449 --> 00:00:45,370
+come from Argentina so if you were
+
+00:00:41,949 --> 00:00:47,650
+wondering that's the accent now for us
+
+00:00:45,370 --> 00:00:49,720
+ago catalyst uptime is critical and that
+
+00:00:47,650 --> 00:00:51,040
+means among other things that having
+
+00:00:49,720 --> 00:00:53,049
+good metrics for our apps is critical
+
+00:00:51,040 --> 00:00:54,549
+and as you probably guessed by the
+
+00:00:53,049 --> 00:00:57,339
+conference name we use Prometheus for
+
+00:00:54,549 --> 00:00:59,229
+this now we're not Prometheus but we had
+
+00:00:57,339 --> 00:01:01,690
+a pretty big issue trying to use it from
+
+00:00:59,229 --> 00:01:04,659
+groovy which is what our main app is
+
+00:01:01,690 --> 00:01:06,670
+written in know as you know promises
+
+00:01:04,659 --> 00:01:09,880
+will periodically scrape your app asking
+
+00:01:06,670 --> 00:01:11,500
+for metrics so we have wraps which in
+
+00:01:09,880 --> 00:01:13,090
+our case again mainly written in Ruby
+
+00:01:11,500 --> 00:01:14,860
+and I'll keeping a bunch of counters in
+
+00:01:13,090 --> 00:01:16,090
+there Prometheus hits you every few
+
+00:01:14,860 --> 00:01:17,520
+seconds and you respond with something
+
+00:01:16,090 --> 00:01:19,450
+that looks a little bit like this and
+
+00:01:17,520 --> 00:01:21,010
+for most languages
+
+00:01:19,450 --> 00:01:23,740
+you just use the appropriate client
+
+00:01:21,010 --> 00:01:26,020
+library and the story ends there however
+
+00:01:23,740 --> 00:01:28,000
+in Ruby lengths and also by the way in
+
+00:01:26,020 --> 00:01:30,280
+Python lengths the story is a little bit
+
+00:01:28,000 --> 00:01:32,890
+trickier because Ruby and Python have a
+
+00:01:30,280 --> 00:01:35,020
+global interpreter lock or Gil which
+
+00:01:32,890 --> 00:01:36,370
+basically doesn't let your app code
+
+00:01:35,020 --> 00:01:39,030
+running multiple threads at the same
+
+00:01:36,370 --> 00:01:41,050
+time so our web servers tend to not be
+
+00:01:39,030 --> 00:01:41,560
+multi-threaded that doesn't parallelize
+
+00:01:41,050 --> 00:01:43,060
+very well
+
+00:01:41,560 --> 00:01:44,920
+instead we tend to use separate
+
+00:01:43,060 --> 00:01:46,510
+processes right processes don't share
+
+00:01:44,920 --> 00:01:48,180
+memory which ends up solving the same
+
+00:01:46,510 --> 00:01:50,170
+problem that Gil was trying to solve and
+
+00:01:48,180 --> 00:01:52,330
+everybody can happily run in parallel
+
+00:01:50,170 --> 00:01:54,100
+ignoring each other this is for example
+
+00:01:52,330 --> 00:01:56,650
+how unicron works which is one of the
+
+00:01:54,100 --> 00:01:58,180
+most common web servers in Ruby so when
+
+00:01:56,650 --> 00:02:00,370
+you recon starts it will load your app
+
+00:01:58,180 --> 00:02:02,020
+and it will fork itself into a master
+
+00:02:00,370 --> 00:02:03,490
+orchestrated process and a bunch of
+
+00:02:02,020 --> 00:02:05,979
+worker processes that are actually going
+
+00:02:03,490 --> 00:02:08,229
+to work on them when a request comes in
+
+00:02:05,979 --> 00:02:09,940
+promises will pick a worker that is free
+
+00:02:08,229 --> 00:02:10,959
+and will send it at a question and take
+
+00:02:09,940 --> 00:02:13,450
+the response and send it back to the
+
+00:02:10,959 --> 00:02:15,730
+client now this system works great it
+
+00:02:13,450 --> 00:02:17,890
+scales really well across course and is
+
+00:02:15,730 --> 00:02:19,800
+how I would say the majority of Ruby web
+
+00:02:17,890 --> 00:02:22,750
+applications and running in production
+
+00:02:19,800 --> 00:02:23,990
+however for the primitives use case this
+
+00:02:22,750 --> 00:02:26,060
+is a bit of a problem we
+
+00:02:23,990 --> 00:02:27,860
+now we have separate processes and they
+
+00:02:26,060 --> 00:02:29,750
+don't share memory each one of them is
+
+00:02:27,860 --> 00:02:31,070
+going to have its own counters when
+
+00:02:29,750 --> 00:02:33,800
+Prometheus hits you asking for your
+
+00:02:31,070 --> 00:02:35,330
+numbers the Unicorn is gonna pick a
+
+00:02:33,800 --> 00:02:37,580
+random worker and that worker is gonna
+
+00:02:35,330 --> 00:02:38,990
+report its numbers but this is never
+
+00:02:37,580 --> 00:02:40,670
+what you want because this is a partial
+
+00:02:38,990 --> 00:02:43,430
+view of the system right what you want
+
+00:02:40,670 --> 00:02:45,860
+is this you want this aggregation of all
+
+00:02:43,430 --> 00:02:47,330
+of these numbers but again these are
+
+00:02:45,860 --> 00:02:49,220
+separate processes so there's no way for
+
+00:02:47,330 --> 00:02:51,320
+any worker process to see the numbers on
+
+00:02:49,220 --> 00:02:53,210
+the other to add them together this is
+
+00:02:51,320 --> 00:02:55,190
+by design and it's generally a very good
+
+00:02:53,210 --> 00:02:59,090
+thing but for Prometheus this is a
+
+00:02:55,190 --> 00:03:00,980
+problem so a huge chunk of room GUI
+
+00:02:59,090 --> 00:03:03,110
+applications are running prefix service
+
+00:03:00,980 --> 00:03:05,690
+in production and they promise use Ruby
+
+00:03:03,110 --> 00:03:07,850
+client doesn't really support this cross
+
+00:03:05,690 --> 00:03:10,100
+processor allegation which means most
+
+00:03:07,850 --> 00:03:12,950
+people that are running a ruby in
+
+00:03:10,100 --> 00:03:17,480
+production can't use prometheus and this
+
+00:03:12,950 --> 00:03:20,060
+included us so we wanted to do something
+
+00:03:17,480 --> 00:03:22,130
+about it and I wasn't just us this has
+
+00:03:20,060 --> 00:03:25,160
+been the case for quite some people for
+
+00:03:22,130 --> 00:03:27,200
+a pretty long time and in addition to
+
+00:03:25,160 --> 00:03:28,580
+this cross process thing the Ruby client
+
+00:03:27,200 --> 00:03:31,370
+was one of the first libraries to be
+
+00:03:28,580 --> 00:03:33,560
+made it was made very early in the life
+
+00:03:31,370 --> 00:03:35,240
+time of the Prometheus project which
+
+00:03:33,560 --> 00:03:36,860
+means it was made before the community
+
+00:03:35,240 --> 00:03:39,200
+had figured out some best practices
+
+00:03:36,860 --> 00:03:41,920
+around labels for example stuff like
+
+00:03:39,200 --> 00:03:44,150
+that so you had a bunch of other issues
+
+00:03:41,920 --> 00:03:45,110
+now there were some workarounds out
+
+00:03:44,150 --> 00:03:47,720
+there
+
+00:03:45,110 --> 00:03:49,610
+kidnap for example forked the official
+
+00:03:47,720 --> 00:03:51,170
+client and they had a multi-process
+
+00:03:49,610 --> 00:03:53,600
+solution that was using em ups
+
+00:03:51,170 --> 00:03:56,720
+however it wasn't getting merged into
+
+00:03:53,600 --> 00:03:57,710
+the official client and it also had all
+
+00:03:56,720 --> 00:03:59,330
+of the other problems with best
+
+00:03:57,710 --> 00:04:01,550
+practices so we we didn't want to use
+
+00:03:59,330 --> 00:04:02,990
+this this course had a completely
+
+00:04:01,550 --> 00:04:04,640
+different approach this course has a
+
+00:04:02,990 --> 00:04:06,680
+separate process that is running
+
+00:04:04,640 --> 00:04:08,270
+alongside Europe and then Europe pushes
+
+00:04:06,680 --> 00:04:10,820
+metrics to it and then that will report
+
+00:04:08,270 --> 00:04:15,740
+to Prometheus but this one also did a
+
+00:04:10,820 --> 00:04:17,810
+mesh very well with our setup so mainly
+
+00:04:15,740 --> 00:04:19,520
+we didn't want to be in a fork we wanted
+
+00:04:17,810 --> 00:04:21,590
+to be on the efficient client so we got
+
+00:04:19,520 --> 00:04:23,360
+in touch with the maintainer we roughly
+
+00:04:21,590 --> 00:04:24,440
+agreed on a plan of action and we
+
+00:04:23,360 --> 00:04:26,180
+decided we would pretty much do a
+
+00:04:24,440 --> 00:04:29,270
+rewrite fixing almost all of these
+
+00:04:26,180 --> 00:04:32,570
+issues but there's one more extra thing
+
+00:04:29,270 --> 00:04:34,040
+to consider the maintenance of these
+
+00:04:32,570 --> 00:04:35,449
+client apps really really care about
+
+00:04:34,040 --> 00:04:37,159
+performance they
+
+00:04:35,449 --> 00:04:38,300
+yes instrumentation should be free for
+
+00:04:37,159 --> 00:04:40,099
+Europe if you want to increment the
+
+00:04:38,300 --> 00:04:41,090
+counter a lot inside a tight loop you
+
+00:04:40,099 --> 00:04:43,849
+should be able to let her not even
+
+00:04:41,090 --> 00:04:46,069
+notice ideally and bearing in that long
+
+00:04:43,849 --> 00:04:48,199
+discussion in the 2015 ticket there was
+
+00:04:46,069 --> 00:04:49,580
+a target now changed names because wanna
+
+00:04:48,199 --> 00:04:52,339
+focus on the conversation and now who
+
+00:04:49,580 --> 00:04:53,779
+say what but basically one of the
+
+00:04:52,339 --> 00:04:55,509
+maintainer said incrementing a counter
+
+00:04:53,779 --> 00:04:57,379
+should take less than a microsecond and
+
+00:04:55,509 --> 00:04:59,330
+they started an interesting conversation
+
+00:04:57,379 --> 00:05:03,379
+of whether you could even do this in
+
+00:04:59,330 --> 00:05:06,800
+Ruby with comments like surely Ruby
+
+00:05:03,379 --> 00:05:08,870
+can't be that slow and what am i and one
+
+00:05:06,800 --> 00:05:10,189
+of my favorites I guess it's a reason
+
+00:05:08,870 --> 00:05:14,210
+people are great like writing C
+
+00:05:10,189 --> 00:05:16,069
+extensions right so whatever we did to
+
+00:05:14,210 --> 00:05:17,839
+solve this it had to be fast and we had
+
+00:05:16,069 --> 00:05:18,919
+an actual target we wanted to be able to
+
+00:05:17,839 --> 00:05:21,379
+increment counters in less than a
+
+00:05:18,919 --> 00:05:23,270
+microsecond finally there was one more
+
+00:05:21,379 --> 00:05:25,729
+thing that we and the maintainers agreed
+
+00:05:23,270 --> 00:05:27,680
+that we wanted to do instead of having
+
+00:05:25,729 --> 00:05:29,479
+matrix classes like this one where we
+
+00:05:27,680 --> 00:05:31,520
+store the value of the matrix in an
+
+00:05:29,479 --> 00:05:33,319
+instance variable we wanted to have a
+
+00:05:31,520 --> 00:05:34,490
+separate place to store these numbers
+
+00:05:33,319 --> 00:05:36,860
+we're going to have interchangeable
+
+00:05:34,490 --> 00:05:39,379
+stores so it will go from something like
+
+00:05:36,860 --> 00:05:40,939
+this to something more like that and the
+
+00:05:39,379 --> 00:05:42,020
+reason for this is that different
+
+00:05:40,939 --> 00:05:43,639
+projects would have different
+
+00:05:42,020 --> 00:05:45,110
+performance needs some people will be
+
+00:05:43,639 --> 00:05:46,550
+running on a single thread a single
+
+00:05:45,110 --> 00:05:48,680
+process and really care about
+
+00:05:46,550 --> 00:05:50,389
+performance some people would have a web
+
+00:05:48,680 --> 00:05:51,919
+app in multiple processes and they're
+
+00:05:50,389 --> 00:05:53,689
+hitting a database over the network so
+
+00:05:51,919 --> 00:05:57,979
+who care so a microseconds at that point
+
+00:05:53,689 --> 00:05:59,719
+right so we want to do this
+
+00:05:57,979 --> 00:06:01,370
+and this was the plan we were going to
+
+00:05:59,719 --> 00:06:03,499
+support prefix service we were going to
+
+00:06:01,370 --> 00:06:05,449
+abstract away the storage of numbers we
+
+00:06:03,499 --> 00:06:08,419
+were going to follow all of the current
+
+00:06:05,449 --> 00:06:12,169
+best practices and importantly we had to
+
+00:06:08,419 --> 00:06:13,939
+be very fast but the question was can we
+
+00:06:12,169 --> 00:06:15,080
+even do this within this budget right
+
+00:06:13,939 --> 00:06:17,599
+like according to this exchange it's a
+
+00:06:15,080 --> 00:06:19,610
+decoder couldn't and the truth is are
+
+00:06:17,599 --> 00:06:22,879
+the time I have I had no idea I am
+
+00:06:19,610 --> 00:06:25,819
+mostly a ruby backing engineer for my
+
+00:06:22,879 --> 00:06:27,889
+day job so my normal intuition for code
+
+00:06:25,819 --> 00:06:28,639
+and its timing system running the
+
+00:06:27,889 --> 00:06:30,469
+milliseconds
+
+00:06:28,639 --> 00:06:32,870
+done right I have no idea how long it
+
+00:06:30,469 --> 00:06:36,499
+takes to set a hash in Ruby or what you
+
+00:06:32,870 --> 00:06:37,699
+can do in a microsecond so we did a bit
+
+00:06:36,499 --> 00:06:39,800
+of experimentation when they send the
+
+00:06:37,699 --> 00:06:41,899
+answer is a bit long the short version
+
+00:06:39,800 --> 00:06:47,029
+of whether you can do this or not in a
+
+00:06:41,899 --> 00:06:49,310
+microsecond is both yes and no so yeah
+
+00:06:47,029 --> 00:06:50,960
+right like if the question is
+
+00:06:49,310 --> 00:06:53,389
+can you increment value in a hash in a
+
+00:06:50,960 --> 00:06:55,550
+microsecond we can loop a bunch of times
+
+00:06:53,389 --> 00:06:57,410
+and then we time that and then we can
+
+00:06:55,550 --> 00:06:59,300
+also time the empty loop to see how much
+
+00:06:57,410 --> 00:07:01,010
+overhead we have it by just measuring we
+
+00:06:59,300 --> 00:07:02,090
+subtract the two and you can totally do
+
+00:07:01,010 --> 00:07:03,950
+this you can do it about
+
+00:07:02,090 --> 00:07:05,800
+12 times in a microsecond which is
+
+00:07:03,950 --> 00:07:09,950
+awesome this is what within a budget
+
+00:07:05,800 --> 00:07:12,080
+however in our case it's not that simple
+
+00:07:09,950 --> 00:07:14,230
+now if you remember that github
+
+00:07:12,080 --> 00:07:17,720
+conversation they were talking about
+
+00:07:14,230 --> 00:07:19,970
+storing numbers in hashes why why do we
+
+00:07:17,720 --> 00:07:21,590
+use hashes instead of integers well
+
+00:07:19,970 --> 00:07:24,080
+there's the two that is labeled right in
+
+00:07:21,590 --> 00:07:25,700
+the Ruby client labels are specified in
+
+00:07:24,080 --> 00:07:27,350
+the hash with the key and keys and
+
+00:07:25,700 --> 00:07:29,540
+values which is the interface that makes
+
+00:07:27,350 --> 00:07:31,220
+more sense for Ruby programmers and we
+
+00:07:29,540 --> 00:07:34,220
+are internally storing numbers in hash
+
+00:07:31,220 --> 00:07:35,900
+index by those hashes and the problem
+
+00:07:34,220 --> 00:07:38,750
+with that is when you're going into
+
+00:07:35,900 --> 00:07:40,310
+these indexes into these hashes indexing
+
+00:07:38,750 --> 00:07:42,080
+by hash you're gonna be comparing one
+
+00:07:40,310 --> 00:07:43,940
+hash to another in that linked list
+
+00:07:42,080 --> 00:07:47,240
+instead of comparing constants which is
+
+00:07:43,940 --> 00:07:48,830
+slower now how slow depends on how big
+
+00:07:47,240 --> 00:07:50,389
+the hashes are which in our case is how
+
+00:07:48,830 --> 00:07:52,070
+many matches and how many labels you
+
+00:07:50,389 --> 00:07:54,020
+have in your metric so for example if
+
+00:07:52,070 --> 00:07:56,390
+you have three labels this is gonna be
+
+00:07:54,020 --> 00:07:58,580
+about 60 times slower which is pretty
+
+00:07:56,390 --> 00:08:00,500
+terrible for us now
+
+00:07:58,580 --> 00:08:02,360
+according to best practices most
+
+00:08:00,500 --> 00:08:04,160
+countries should have no labels so let's
+
+00:08:02,360 --> 00:08:05,300
+make sure that and it turns out we're
+
+00:08:04,160 --> 00:08:07,729
+still under a microsecond which is
+
+00:08:05,300 --> 00:08:09,560
+awesome but if you notice this is pretty
+
+00:08:07,729 --> 00:08:11,600
+close now right and we're just
+
+00:08:09,560 --> 00:08:13,160
+incrementing a little hash in real life
+
+00:08:11,600 --> 00:08:14,660
+we need to validate these labels we need
+
+00:08:13,160 --> 00:08:16,550
+to do some processing on them and we're
+
+00:08:14,660 --> 00:08:17,930
+not even sure it's safe you put a mutex
+
+00:08:16,550 --> 00:08:19,700
+around this thing and now you're in a
+
+00:08:17,930 --> 00:08:23,539
+microsecond and a half and you blew our
+
+00:08:19,700 --> 00:08:25,430
+target so turns out in a particular
+
+00:08:23,539 --> 00:08:27,770
+situation the second person this in this
+
+00:08:25,430 --> 00:08:31,039
+conversation was right we can't do it in
+
+00:08:27,770 --> 00:08:34,280
+a microsecond which is kinda sad but I
+
+00:08:31,039 --> 00:08:36,110
+think it's important to be on looking at
+
+00:08:34,280 --> 00:08:37,610
+just that number looking at the spirit
+
+00:08:36,110 --> 00:08:39,919
+of the target right like the important
+
+00:08:37,610 --> 00:08:41,570
+thing here is we really care about
+
+00:08:39,919 --> 00:08:43,490
+making this as fast as humanly possible
+
+00:08:41,570 --> 00:08:45,290
+and this is going to impact a lot of
+
+00:08:43,490 --> 00:08:47,000
+projects in a lot of companies so we
+
+00:08:45,290 --> 00:08:49,610
+really is really worth investing a lot
+
+00:08:47,000 --> 00:08:52,310
+of time in trying to do that now at this
+
+00:08:49,610 --> 00:08:54,440
+point we have a rough idea of times we
+
+00:08:52,310 --> 00:08:56,570
+have obstructed our stores so we can
+
+00:08:54,440 --> 00:08:58,010
+exchange them easily now we need to
+
+00:08:56,570 --> 00:08:59,570
+actually solve the problem of sharing
+
+00:08:58,010 --> 00:09:03,150
+these numbers across processes and how
+
+00:08:59,570 --> 00:09:04,950
+do we do that well we experiment a lot
+
+00:09:03,150 --> 00:09:06,480
+basically at this point we made it
+
+00:09:04,950 --> 00:09:07,950
+really easy for ourselves to try
+
+00:09:06,480 --> 00:09:09,960
+different stores because it was
+
+00:09:07,950 --> 00:09:11,430
+extracted away so we should started
+
+00:09:09,960 --> 00:09:13,740
+trying everything we could think of and
+
+00:09:11,430 --> 00:09:16,620
+I would like to walk you through four of
+
+00:09:13,740 --> 00:09:18,839
+these experiments that we did now first
+
+00:09:16,620 --> 00:09:21,210
+up let's make it really easy for self
+
+00:09:18,839 --> 00:09:23,820
+rew because this unusual data structure
+
+00:09:21,210 --> 00:09:26,430
+called AP store basically it's a hash
+
+00:09:23,820 --> 00:09:27,660
+backed by file on disk so every time you
+
+00:09:26,430 --> 00:09:29,220
+set the hash the whole thing gets
+
+00:09:27,660 --> 00:09:31,260
+serialized and put into a file every
+
+00:09:29,220 --> 00:09:32,490
+time you read the hash and value you
+
+00:09:31,260 --> 00:09:34,680
+just read the whole thing from this guy
+
+00:09:32,490 --> 00:09:36,390
+and you get the latest value and if this
+
+00:09:34,680 --> 00:09:37,770
+file happens to have a look around it so
+
+00:09:36,390 --> 00:09:39,779
+you can actually do this from multiple
+
+00:09:37,770 --> 00:09:41,730
+processes at the same time and it's
+
+00:09:39,779 --> 00:09:45,270
+finally everybody sees the latest data
+
+00:09:41,730 --> 00:09:46,589
+and it's safe um if you think about it
+
+00:09:45,270 --> 00:09:48,089
+this is pretty much exactly what we need
+
+00:09:46,589 --> 00:09:49,950
+right we have this global hash that all
+
+00:09:48,089 --> 00:09:51,330
+of the processes can see everybody has
+
+00:09:49,950 --> 00:09:53,339
+to like this data and it's amazing
+
+00:09:51,330 --> 00:09:56,370
+except that from a performance point of
+
+00:09:53,339 --> 00:09:58,890
+view it's pretty slow so that wasn't
+
+00:09:56,370 --> 00:10:00,930
+gonna work so we have to stake take a
+
+00:09:58,890 --> 00:10:02,310
+step back right and and think like what
+
+00:10:00,930 --> 00:10:05,070
+are we really what are we really trying
+
+00:10:02,310 --> 00:10:06,900
+to do here well we want to have a chunk
+
+00:10:05,070 --> 00:10:09,450
+of memory that is shared between
+
+00:10:06,900 --> 00:10:12,180
+different processes now as a complete
+
+00:10:09,450 --> 00:10:13,920
+aside one of the great reasons about
+
+00:10:12,180 --> 00:10:16,589
+working on vocalist is the amazing
+
+00:10:13,920 --> 00:10:20,339
+people I'm surrounded with now granted
+
+00:10:16,589 --> 00:10:22,950
+some of those people are trolls but the
+
+00:10:20,339 --> 00:10:24,900
+trolls sometimes how good ideas because
+
+00:10:22,950 --> 00:10:26,820
+sequel I was probably not gonna be the
+
+00:10:24,900 --> 00:10:28,350
+solution but he got me thinking you know
+
+00:10:26,820 --> 00:10:30,630
+what's a great way of having a bunch of
+
+00:10:28,350 --> 00:10:32,459
+memory share between processes it's my
+
+00:10:30,630 --> 00:10:34,500
+good friend radius of course where this
+
+00:10:32,459 --> 00:10:36,330
+is literally a bunch of memory outside
+
+00:10:34,500 --> 00:10:37,529
+your process that you're all of the
+
+00:10:36,330 --> 00:10:38,910
+processes in your app can read and write
+
+00:10:37,529 --> 00:10:41,430
+very easily and we all know it's super
+
+00:10:38,910 --> 00:10:43,950
+fast right so this also sounds like
+
+00:10:41,430 --> 00:10:46,050
+exactly what we need and actually they
+
+00:10:43,950 --> 00:10:47,580
+promised this client for PHP uses Redis
+
+00:10:46,050 --> 00:10:50,250
+for the same reason so that was
+
+00:10:47,580 --> 00:10:53,040
+promising so I wrote up a new store that
+
+00:10:50,250 --> 00:10:55,589
+we use for this back-end and I fired up
+
+00:10:53,040 --> 00:10:57,180
+the benchmarks and it's actually slower
+
+00:10:55,589 --> 00:11:02,520
+than dumping the entire hash to disk
+
+00:10:57,180 --> 00:11:04,020
+every time which is no great now this
+
+00:11:02,520 --> 00:11:05,760
+makes sense right like I was very
+
+00:11:04,020 --> 00:11:07,320
+surprised at the beginning but talking
+
+00:11:05,760 --> 00:11:09,540
+to radius involves a lot of ceremony and
+
+00:11:07,320 --> 00:11:11,760
+networking and stuff like that even if
+
+00:11:09,540 --> 00:11:13,350
+it's in localhost so compared to just
+
+00:11:11,760 --> 00:11:15,420
+writing a tiny file on your this from
+
+00:11:13,350 --> 00:11:16,300
+your own process never really stood a
+
+00:11:15,420 --> 00:11:18,550
+chance
+
+00:11:16,300 --> 00:11:20,680
+now this is what surprising and
+
+00:11:18,550 --> 00:11:23,320
+disappointing to me but it was a kind of
+
+00:11:20,680 --> 00:11:25,270
+a relief because I didn't want to force
+
+00:11:23,320 --> 00:11:26,470
+everyone that one's metric for the Ruby
+
+00:11:25,270 --> 00:11:28,060
+app to also have to have a separate
+
+00:11:26,470 --> 00:11:32,050
+credits process so it's actually kind of
+
+00:11:28,060 --> 00:11:33,670
+good that this didn't work finally I had
+
+00:11:32,050 --> 00:11:36,250
+no choice but to face the elephant in
+
+00:11:33,670 --> 00:11:37,600
+the room the consensus from pretty much
+
+00:11:36,250 --> 00:11:40,270
+everyone on how to solve this problem
+
+00:11:37,600 --> 00:11:42,760
+was to use memory Maps this is what the
+
+00:11:40,270 --> 00:11:45,570
+Python client library does and it's what
+
+00:11:42,760 --> 00:11:47,800
+the kid lab for calls with us however
+
+00:11:45,570 --> 00:11:49,900
+three most of this project I was trying
+
+00:11:47,800 --> 00:11:51,850
+really hard to avoid them the main
+
+00:11:49,900 --> 00:11:53,410
+reason being I didn't know how to use
+
+00:11:51,850 --> 00:11:55,450
+them very well but I had also heard that
+
+00:11:53,410 --> 00:11:57,430
+somebody mentioned that may we get love
+
+00:11:55,450 --> 00:12:00,490
+in the past had had issues with sexual
+
+00:11:57,430 --> 00:12:04,720
+things which is a little scary
+
+00:12:00,490 --> 00:12:06,010
+so I was trying to avoid this now as a
+
+00:12:04,720 --> 00:12:08,530
+super quick introduction to what we're
+
+00:12:06,010 --> 00:12:11,170
+doing we're doing a shared memory map
+
+00:12:08,530 --> 00:12:14,920
+file basically you map them file into
+
+00:12:11,170 --> 00:12:17,260
+memory and you use the shared flag and
+
+00:12:14,920 --> 00:12:19,510
+if two processes do this they both end
+
+00:12:17,260 --> 00:12:21,250
+with the same page in memory for the
+
+00:12:19,510 --> 00:12:22,840
+same file which means that if one
+
+00:12:21,250 --> 00:12:25,260
+process rights to it the other process
+
+00:12:22,840 --> 00:12:28,000
+can immediately see that new value and
+
+00:12:25,260 --> 00:12:29,500
+actually famously this is one of the
+
+00:12:28,000 --> 00:12:32,530
+fastest ways to do inter process
+
+00:12:29,500 --> 00:12:34,030
+communication as I understand it so I
+
+00:12:32,530 --> 00:12:35,370
+can see why everyone was suggesting this
+
+00:12:34,030 --> 00:12:38,860
+right it sounds like a perfect solution
+
+00:12:35,370 --> 00:12:40,810
+it's only one slight problem a map it's
+
+00:12:38,860 --> 00:12:43,900
+a Cisco does anybody here know how to
+
+00:12:40,810 --> 00:12:47,440
+call a Cisco from Ruby you don't you do
+
+00:12:43,900 --> 00:12:48,730
+it in C now this this which has the most
+
+00:12:47,440 --> 00:12:51,400
+hilarious line I've ever seen in
+
+00:12:48,730 --> 00:12:54,490
+official documentation but it's not
+
+00:12:51,400 --> 00:12:56,020
+particularly useful and also let's say
+
+00:12:54,490 --> 00:12:57,580
+you manage to actually call em up with
+
+00:12:56,020 --> 00:13:00,940
+this now you have a chunk of memory that
+
+00:12:57,580 --> 00:13:02,320
+is yours and a pointer to it now what
+
+00:13:00,940 --> 00:13:04,990
+how you're gonna read and write that
+
+00:13:02,320 --> 00:13:06,940
+from Ruby right so we need some sort of
+
+00:13:04,990 --> 00:13:08,350
+wrapper we need a gem that is written in
+
+00:13:06,940 --> 00:13:10,270
+C or something similar but it's gonna
+
+00:13:08,350 --> 00:13:13,150
+help us do this unfortunately there's
+
+00:13:10,270 --> 00:13:16,540
+this which is maintained by one of the
+
+00:13:13,150 --> 00:13:17,890
+core contributors to Ruby core and this
+
+00:13:16,540 --> 00:13:20,020
+this gentleman called Aaron Patterson
+
+00:13:17,890 --> 00:13:22,480
+also goes by tender love and the
+
+00:13:20,020 --> 00:13:24,370
+Internet's and he's normally hacking on
+
+00:13:22,480 --> 00:13:26,170
+the memory management part of Ruby so he
+
+00:13:24,370 --> 00:13:28,930
+knows what he's doing and this fill me
+
+00:13:26,170 --> 00:13:29,680
+with confidence now how do we use this
+
+00:13:28,930 --> 00:13:31,570
+gem well
+
+00:13:29,680 --> 00:13:34,000
+you basically make a file you initialize
+
+00:13:31,570 --> 00:13:36,820
+it to a certain size say one megabyte
+
+00:13:34,000 --> 00:13:38,500
+and then you init this a map object and
+
+00:13:36,820 --> 00:13:40,450
+now you have this M variable that
+
+00:13:38,500 --> 00:13:44,170
+behaves sort of kind of like a byte
+
+00:13:40,450 --> 00:13:46,270
+array now importantly it is not a ruby
+
+00:13:44,170 --> 00:13:48,850
+array the nmap gem is doing a bunch of
+
+00:13:46,270 --> 00:13:50,890
+magic to make it look like one but you
+
+00:13:48,850 --> 00:13:52,540
+cannot kind of use uses like one so if
+
+00:13:50,890 --> 00:13:53,980
+you have a bunch of bytes to write
+
+00:13:52,540 --> 00:13:56,310
+you should set a range in this array
+
+00:13:53,980 --> 00:13:59,050
+Tania and this array and you're done
+
+00:13:56,310 --> 00:14:01,060
+now the tricky bit is stunning stuff
+
+00:13:59,050 --> 00:14:04,890
+that the stuff that you want to store in
+
+00:14:01,060 --> 00:14:07,690
+two bytes it's Julius where's Julius oh
+
+00:14:04,890 --> 00:14:10,390
+that's a shame well I'm a iodine man all
+
+00:14:07,690 --> 00:14:12,070
+of the beers now this is called that
+
+00:14:10,390 --> 00:14:14,230
+Julius wrote in some branch that I
+
+00:14:12,070 --> 00:14:17,020
+shamelessly stole and I adapted a little
+
+00:14:14,230 --> 00:14:18,820
+bit now basically first we need to tell
+
+00:14:17,020 --> 00:14:20,500
+turn our label set into a string because
+
+00:14:18,820 --> 00:14:23,920
+you can't just dump a hash into a file
+
+00:14:20,500 --> 00:14:25,450
+right so we do that and then to turn
+
+00:14:23,920 --> 00:14:27,040
+them into pies we do it like we did in
+
+00:14:25,450 --> 00:14:31,240
+the old days we take the string we Pat
+
+00:14:27,040 --> 00:14:33,700
+it to either four or eight bytes sizes
+
+00:14:31,240 --> 00:14:35,470
+and then we store the length then the
+
+00:14:33,700 --> 00:14:36,640
+string itself and then the value that
+
+00:14:35,470 --> 00:14:38,470
+would the float value that we're gonna
+
+00:14:36,640 --> 00:14:40,240
+store right so we use this back function
+
+00:14:38,470 --> 00:14:42,250
+that Ruby has to turn that into a bunch
+
+00:14:40,240 --> 00:14:45,430
+of bytes and then we set the range in
+
+00:14:42,250 --> 00:14:47,680
+the air map this is a clever part in
+
+00:14:45,430 --> 00:14:49,690
+addition to that we take a little hash
+
+00:14:47,680 --> 00:14:52,990
+of our own that we keep in memory and we
+
+00:14:49,690 --> 00:14:54,730
+keep track of where we put the float in
+
+00:14:52,990 --> 00:14:57,310
+the file which offset we put the float
+
+00:14:54,730 --> 00:14:59,260
+for that particular key so the next time
+
+00:14:57,310 --> 00:15:01,029
+we need to update that we just need to
+
+00:14:59,260 --> 00:15:04,060
+find the position and update those eight
+
+00:15:01,029 --> 00:15:05,800
+bytes it's super super quick now this is
+
+00:15:04,060 --> 00:15:08,260
+pretty clever like I would never have
+
+00:15:05,800 --> 00:15:11,020
+come up with this myself so props to
+
+00:15:08,260 --> 00:15:13,870
+shield Julius now the question is how
+
+00:15:11,020 --> 00:15:17,079
+fast is this well it's pretty fast
+
+00:15:13,870 --> 00:15:18,579
+actually it's about six microseconds so
+
+00:15:17,079 --> 00:15:21,700
+this was looking very promising as a
+
+00:15:18,579 --> 00:15:23,320
+solution but it has one tiny problem in
+
+00:15:21,700 --> 00:15:25,660
+addition to having my little benchmark
+
+00:15:23,320 --> 00:15:27,940
+that I used to time these stores I also
+
+00:15:25,660 --> 00:15:29,470
+had a stress test script that which is
+
+00:15:27,940 --> 00:15:31,329
+basically hammered in to make sure
+
+00:15:29,470 --> 00:15:32,470
+they're safe it was just too terrible
+
+00:15:31,329 --> 00:15:34,540
+thing to these things you would have
+
+00:15:32,470 --> 00:15:36,130
+super high numbers of metrics with a
+
+00:15:34,540 --> 00:15:38,200
+ridiculous number of different labels
+
+00:15:36,130 --> 00:15:39,550
+and it would hit them from different
+
+00:15:38,200 --> 00:15:40,660
+threads in different processes all
+
+00:15:39,550 --> 00:15:42,560
+competing for the same file you know
+
+00:15:40,660 --> 00:15:44,900
+just making sure that were safe
+
+00:15:42,560 --> 00:15:49,220
+and as soon as I run that script on my
+
+00:15:44,900 --> 00:15:50,810
+em map store I got one of these now I
+
+00:15:49,220 --> 00:15:52,730
+don't know about you but I had never
+
+00:15:50,810 --> 00:15:56,810
+encountered a sec faulting Ruby or at
+
+00:15:52,730 --> 00:15:59,839
+least no one that was my fault and so
+
+00:15:56,810 --> 00:16:02,000
+now I am using this gem that does some
+
+00:15:59,839 --> 00:16:05,779
+magic memory voodoo that I don't fully
+
+00:16:02,000 --> 00:16:06,950
+understand and I have this seg fault and
+
+00:16:05,779 --> 00:16:08,180
+this is kind of the reason I was trying
+
+00:16:06,950 --> 00:16:09,800
+to avoid them in the first place right
+
+00:16:08,180 --> 00:16:13,580
+like this is what I was afraid might
+
+00:16:09,800 --> 00:16:16,640
+happen and it precisely happened so this
+
+00:16:13,580 --> 00:16:18,950
+is not great and given that this gem was
+
+00:16:16,640 --> 00:16:21,440
+written by channel off and he was being
+
+00:16:18,950 --> 00:16:23,570
+used by me it was almost certainly not a
+
+00:16:21,440 --> 00:16:26,510
+bug in the gym I was almost surely using
+
+00:16:23,570 --> 00:16:28,010
+this wrong but this is a fairly obscure
+
+00:16:26,510 --> 00:16:30,140
+gem like there's no many people and
+
+00:16:28,010 --> 00:16:31,880
+mapping from Ruby there's no much
+
+00:16:30,140 --> 00:16:34,310
+documentation I didn't find anyone
+
+00:16:31,880 --> 00:16:35,870
+actually using it so it's kind of hard
+
+00:16:34,310 --> 00:16:39,020
+to figure out what I'm doing wrong here
+
+00:16:35,870 --> 00:16:40,930
+and I'm not very strong at sea but I
+
+00:16:39,020 --> 00:16:43,430
+still try to read the code it's a
+
+00:16:40,930 --> 00:16:46,550
+gigantic C file with two and a half
+
+00:16:43,430 --> 00:16:48,710
+thousand lines of code and I generally
+
+00:16:46,550 --> 00:16:54,760
+had no way of figuring out what the
+
+00:16:48,710 --> 00:16:57,710
+problem was so yeah we were here and
+
+00:16:54,760 --> 00:16:59,960
+what I managed to figure out by random
+
+00:16:57,710 --> 00:17:02,750
+experimentation is that the problem was
+
+00:16:59,960 --> 00:17:04,310
+some code that that I had to resize the
+
+00:17:02,750 --> 00:17:06,230
+air map if that initial one megabyte
+
+00:17:04,310 --> 00:17:08,540
+that I gave it was it wasn't enough if
+
+00:17:06,230 --> 00:17:10,910
+that co-run then eventually ended up
+
+00:17:08,540 --> 00:17:12,470
+getting the seg fault so that's great
+
+00:17:10,910 --> 00:17:14,179
+because we have no idea why that happens
+
+00:17:12,470 --> 00:17:16,280
+but at least we can reproduce it
+
+00:17:14,179 --> 00:17:17,569
+reliably so how do we fix it we
+
+00:17:16,280 --> 00:17:19,939
+obviously try random things until
+
+00:17:17,569 --> 00:17:21,589
+something sticks right and it took a
+
+00:17:19,939 --> 00:17:23,600
+while because I have no idea what I was
+
+00:17:21,589 --> 00:17:25,819
+looking for but I ended up making the
+
+00:17:23,600 --> 00:17:27,199
+sec . through an elaborate dance-off
+
+00:17:25,819 --> 00:17:28,790
+just first closing the file then
+
+00:17:27,199 --> 00:17:30,080
+reopening it just to resize it closing
+
+00:17:28,790 --> 00:17:31,460
+it again then reopening and mapping
+
+00:17:30,080 --> 00:17:32,270
+again i don't know why but if you did
+
+00:17:31,460 --> 00:17:35,920
+all of those things
+
+00:17:32,270 --> 00:17:35,920
+the sexual didn't happen anymore
+
+00:17:37,790 --> 00:17:44,669
+so if you have a problem right you don't
+
+00:17:42,450 --> 00:17:45,990
+understand the problem you try random
+
+00:17:44,669 --> 00:17:47,610
+stuff until the broom stops happening
+
+00:17:45,990 --> 00:17:50,760
+but you don't know why was happening or
+
+00:17:47,610 --> 00:17:51,960
+why it stopped how confident are you
+
+00:17:50,760 --> 00:17:53,700
+that that's not gonna happen again in
+
+00:17:51,960 --> 00:17:55,799
+production in some random server in some
+
+00:17:53,700 --> 00:17:58,530
+random Michigan mission-critical app
+
+00:17:55,799 --> 00:18:02,130
+right I was really really not
+
+00:17:58,530 --> 00:18:03,900
+comfortable with this and again this is
+
+00:18:02,130 --> 00:18:05,460
+precisely why I was avoiding memory maps
+
+00:18:03,900 --> 00:18:09,090
+from the beginning this is what I was
+
+00:18:05,460 --> 00:18:12,900
+afraid of so it was fast but I didn't
+
+00:18:09,090 --> 00:18:14,549
+really trust them which leads us to our
+
+00:18:12,900 --> 00:18:17,400
+final experiment right if you look at
+
+00:18:14,549 --> 00:18:20,130
+this code again we are opening a file
+
+00:18:17,400 --> 00:18:21,360
+and we are doing things to a thing that
+
+00:18:20,130 --> 00:18:23,220
+looks like a file and we do the kind of
+
+00:18:21,360 --> 00:18:25,260
+things that we normally do with files we
+
+00:18:23,220 --> 00:18:27,630
+just do it in memory because it's a bit
+
+00:18:25,260 --> 00:18:29,309
+faster than files but what happens if we
+
+00:18:27,630 --> 00:18:32,010
+ditch the memory maps and which is do
+
+00:18:29,309 --> 00:18:34,020
+this to a file right from the code
+
+00:18:32,010 --> 00:18:35,370
+perspective the only difference is
+
+00:18:34,020 --> 00:18:37,169
+instead of setting this range in this
+
+00:18:35,370 --> 00:18:39,750
+thing that pretends to be an array which
+
+00:18:37,169 --> 00:18:43,799
+is use good old file functions we seek
+
+00:18:39,750 --> 00:18:45,120
+to a specific place are we right so if
+
+00:18:43,799 --> 00:18:47,700
+you change the value it just looks like
+
+00:18:45,120 --> 00:18:50,910
+this so it's a file which is you know
+
+00:18:47,700 --> 00:18:52,770
+pretty slow but we're just doing six and
+
+00:18:50,910 --> 00:18:54,150
+writing eight bytes which is much more
+
+00:18:52,770 --> 00:18:56,790
+efficient than taking the entire hash
+
+00:18:54,150 --> 00:18:58,650
+and serializing it every time right and
+
+00:18:56,790 --> 00:19:00,179
+we're also for example using separate
+
+00:18:58,650 --> 00:19:02,610
+files for each metric so if you're in a
+
+00:19:00,179 --> 00:19:04,020
+multi-threaded app for some reason in
+
+00:19:02,610 --> 00:19:05,669
+addition to have multiple processes
+
+00:19:04,020 --> 00:19:08,730
+you're not having so much contention
+
+00:19:05,669 --> 00:19:10,740
+among these files and it's pretty much
+
+00:19:08,730 --> 00:19:13,500
+it you have no memory Maps there's no C
+
+00:19:10,740 --> 00:19:16,020
+there's no sec faults it's nothing fancy
+
+00:19:13,500 --> 00:19:19,890
+it's just plain old Ruby writing plain
+
+00:19:16,020 --> 00:19:21,120
+old boring files but it's files and we
+
+00:19:19,890 --> 00:19:23,160
+all know that those are pretty slow
+
+00:19:21,120 --> 00:19:26,220
+right so the question was how slow this
+
+00:19:23,160 --> 00:19:28,169
+is going to be and the truth is this
+
+00:19:26,220 --> 00:19:32,220
+completely blew my mind like I did not
+
+00:19:28,169 --> 00:19:33,090
+expect that at all if you think about it
+
+00:19:32,220 --> 00:19:35,160
+it makes sense
+
+00:19:33,090 --> 00:19:37,200
+we are not f syncing we don't care about
+
+00:19:35,160 --> 00:19:38,580
+that data actually staying in the disk
+
+00:19:37,200 --> 00:19:40,440
+so we're not actually touching the disk
+
+00:19:38,580 --> 00:19:43,890
+which is she's putting it there and then
+
+00:19:40,440 --> 00:19:46,169
+the kernel figures it out but it's still
+
+00:19:43,890 --> 00:19:46,919
+surprisingly fast and if we compare this
+
+00:19:46,169 --> 00:19:49,980
+to memory lapse
+
+00:19:46,919 --> 00:19:50,500
+we have no external dependencies we have
+
+00:19:49,980 --> 00:19:54,070
+no
+
+00:19:50,500 --> 00:19:55,690
+Kesey code definitely no segfault it's
+
+00:19:54,070 --> 00:19:57,850
+compatible with all editions of ruby
+
+00:19:55,690 --> 00:19:59,070
+because the emmab gem for example wasn't
+
+00:19:57,850 --> 00:20:02,770
+very happy with JRuby
+
+00:19:59,070 --> 00:20:05,320
+it's 100% understandable by any Ruby
+
+00:20:02,770 --> 00:20:06,820
+programmer and this is the most
+
+00:20:05,320 --> 00:20:07,510
+important part it had nothing that kept
+
+00:20:06,820 --> 00:20:09,580
+me up at night
+
+00:20:07,510 --> 00:20:12,880
+all of this which is three extra
+
+00:20:09,580 --> 00:20:14,470
+microseconds this is a no-brainer that's
+
+00:20:12,880 --> 00:20:16,420
+it we were pretty much done I mean we
+
+00:20:14,470 --> 00:20:19,950
+ended up going to with disk as our
+
+00:20:16,420 --> 00:20:22,330
+solution because it was fast enough and
+
+00:20:19,950 --> 00:20:25,300
+it had all of these other trade-off that
+
+00:20:22,330 --> 00:20:27,730
+made it much safer now we do have a
+
+00:20:25,300 --> 00:20:29,500
+separate gem with the end map store and
+
+00:20:27,730 --> 00:20:31,330
+actually have a better way of resizing
+
+00:20:29,500 --> 00:20:32,530
+the file now which I'm pretty sure is
+
+00:20:31,330 --> 00:20:34,750
+the right way to do it and it's pretty
+
+00:20:32,530 --> 00:20:36,640
+I'm pretty sure it doesn't seg fault but
+
+00:20:34,750 --> 00:20:38,320
+I don't trust it so if you really want
+
+00:20:36,640 --> 00:20:40,270
+those three microseconds back you can
+
+00:20:38,320 --> 00:20:41,890
+use that at your own risk but we don't
+
+00:20:40,270 --> 00:20:43,420
+particularly recommend it so we put it
+
+00:20:41,890 --> 00:20:47,050
+somewhere separate just to make that
+
+00:20:43,420 --> 00:20:49,180
+clear and this is what we're now we have
+
+00:20:47,050 --> 00:20:50,670
+after the rewrite three built-in stores
+
+00:20:49,180 --> 00:20:53,020
+that you can choose from we have
+
+00:20:50,670 --> 00:20:54,220
+basically an unsynchronized hash in case
+
+00:20:53,020 --> 00:20:57,160
+you're doing single through this stuff
+
+00:20:54,220 --> 00:20:58,540
+we have the synchronize hash which is
+
+00:20:57,160 --> 00:21:00,520
+the default which is the same thing but
+
+00:20:58,540 --> 00:21:02,010
+with a mutex around it and we have the
+
+00:21:00,520 --> 00:21:05,830
+file store for multi process
+
+00:21:02,010 --> 00:21:07,390
+environments we also have configurable
+
+00:21:05,830 --> 00:21:08,620
+aggregation for what to do with this
+
+00:21:07,390 --> 00:21:10,120
+multiple values so now that you have
+
+00:21:08,620 --> 00:21:12,030
+multiple processes you can have a lot of
+
+00:21:10,120 --> 00:21:14,140
+values and you need to combine them for
+
+00:21:12,030 --> 00:21:16,000
+counters and histograms this is very
+
+00:21:14,140 --> 00:21:18,790
+easy you just sum them but forget just
+
+00:21:16,000 --> 00:21:20,320
+this may not make so much sense so by
+
+00:21:18,790 --> 00:21:21,970
+default what we're doing with cages is
+
+00:21:20,320 --> 00:21:23,820
+we're tagging them with a process ID as
+
+00:21:21,970 --> 00:21:26,080
+a label and then you can get all of them
+
+00:21:23,820 --> 00:21:27,700
+but you can change that to have the
+
+00:21:26,080 --> 00:21:30,670
+maximum or the minimum or the sum like
+
+00:21:27,700 --> 00:21:32,440
+whatever make sense in your use case we
+
+00:21:30,670 --> 00:21:34,510
+now require require declaring your
+
+00:21:32,440 --> 00:21:36,100
+labels upfront when you register your
+
+00:21:34,510 --> 00:21:39,070
+matrix which is what the best practice
+
+00:21:36,100 --> 00:21:40,690
+is asked for we're better lying with
+
+00:21:39,070 --> 00:21:42,190
+groovy conventions most importantly we
+
+00:21:40,690 --> 00:21:43,900
+have keyword arguments which is where
+
+00:21:42,190 --> 00:21:47,800
+the groovy code is is sort of moving
+
+00:21:43,900 --> 00:21:50,530
+towards and there's a bunch of
+
+00:21:47,800 --> 00:21:51,970
+performance optimization we as part of
+
+00:21:50,530 --> 00:21:53,380
+the profiling the stores that were
+
+00:21:51,970 --> 00:21:55,360
+sailors profiling the actual code that
+
+00:21:53,380 --> 00:21:57,970
+was there anyway so a bunch of things
+
+00:21:55,360 --> 00:21:59,920
+just got faster in the process mainly
+
+00:21:57,970 --> 00:22:03,250
+histograms histograms had a lot of fast
+
+00:21:59,920 --> 00:22:03,910
+enough and we have this idea that was in
+
+00:22:03,250 --> 00:22:06,040
+that long
+
+00:22:03,910 --> 00:22:07,630
+20:15 ticket which is having a benchmark
+
+00:22:06,040 --> 00:22:10,030
+script so that if you're making your own
+
+00:22:07,630 --> 00:22:11,800
+store or if you want to see how much the
+
+00:22:10,030 --> 00:22:13,330
+different stores will impact your run
+
+00:22:11,800 --> 00:22:15,190
+time scenarios you can tune a few
+
+00:22:13,330 --> 00:22:18,190
+parameters to make it similar to your
+
+00:22:15,190 --> 00:22:20,920
+use case and test it so that's pretty
+
+00:22:18,190 --> 00:22:22,540
+useful I think and that's it I mean we
+
+00:22:20,920 --> 00:22:24,790
+have this giant PR with a massive
+
+00:22:22,540 --> 00:22:26,730
+refactor open for a while and as part of
+
+00:22:24,790 --> 00:22:29,560
+getting this merged we ended up getting
+
+00:22:26,730 --> 00:22:31,990
+becoming maintainer of the gem which is
+
+00:22:29,560 --> 00:22:33,250
+pretty nice I know this is merged it's
+
+00:22:31,990 --> 00:22:35,890
+been running in production in go
+
+00:22:33,250 --> 00:22:37,360
+catalyst for almost a year now we do
+
+00:22:35,890 --> 00:22:39,610
+some little improvements here and there
+
+00:22:37,360 --> 00:22:42,850
+lately - mostly to documentation and
+
+00:22:39,610 --> 00:22:44,320
+making it easier - to get started but we
+
+00:22:42,850 --> 00:22:46,570
+think this is very solid and we've
+
+00:22:44,320 --> 00:22:48,730
+recently just released at one point out
+
+00:22:46,570 --> 00:22:51,670
+so hopefully everyone will trust this
+
+00:22:48,730 --> 00:22:54,100
+and be able to use it if any of you are
+
+00:22:51,670 --> 00:22:55,330
+a ruby shop and you had this problem now
+
+00:22:54,100 --> 00:23:00,430
+you can have permissions in Ruby it's
+
+00:22:55,330 --> 00:23:02,650
+like yay there's a bunch of other things
+
+00:23:00,430 --> 00:23:05,050
+that I want to talk about for the near
+
+00:23:02,650 --> 00:23:07,240
+future so one issue we have right now
+
+00:23:05,050 --> 00:23:09,070
+for example is the way you have a
+
+00:23:07,240 --> 00:23:10,750
+counter they count the time series
+
+00:23:09,070 --> 00:23:12,730
+doesn't appear until you increment that
+
+00:23:10,750 --> 00:23:14,380
+counter for the first time and so when
+
+00:23:12,730 --> 00:23:17,080
+you do a rate then you miss that first
+
+00:23:14,380 --> 00:23:19,150
+update so we're gonna add a method where
+
+00:23:17,080 --> 00:23:21,460
+we're if you know what your label set is
+
+00:23:19,150 --> 00:23:22,780
+going to look like upfront you can
+
+00:23:21,460 --> 00:23:26,650
+declare those and you get this time
+
+00:23:22,780 --> 00:23:28,090
+series starting at zero we have a
+
+00:23:26,650 --> 00:23:29,500
+situation where you need to start with
+
+00:23:28,090 --> 00:23:30,640
+an empty directory for the place where
+
+00:23:29,500 --> 00:23:32,050
+ever you put these files because
+
+00:23:30,640 --> 00:23:34,360
+otherwise you're gonna be reporting the
+
+00:23:32,050 --> 00:23:35,590
+metrics of your previous run this is
+
+00:23:34,360 --> 00:23:37,330
+very easy for us because we're running
+
+00:23:35,590 --> 00:23:39,700
+containers that don't have persistent
+
+00:23:37,330 --> 00:23:42,640
+file systems but some people don't have
+
+00:23:39,700 --> 00:23:45,250
+that and we want to help with that we
+
+00:23:42,640 --> 00:23:47,200
+also have too many files if you have a
+
+00:23:45,250 --> 00:23:50,140
+lot of matrix because we have one
+
+00:23:47,200 --> 00:23:51,970
+separate file per metric per process you
+
+00:23:50,140 --> 00:23:55,690
+may end up with lots of files which ends
+
+00:23:51,970 --> 00:23:57,880
+up being problematic sometimes and we
+
+00:23:55,690 --> 00:24:00,010
+were massively optimizing the path for
+
+00:23:57,880 --> 00:24:01,390
+incrementing counters but exports if you
+
+00:24:00,010 --> 00:24:03,490
+have lots of metrics are a bit slow
+
+00:24:01,390 --> 00:24:06,700
+mostly Caitlyn has been reporting on
+
+00:24:03,490 --> 00:24:07,510
+this so we want to work on that but
+
+00:24:06,700 --> 00:24:10,000
+we're also working on some new
+
+00:24:07,510 --> 00:24:12,010
+interesting ideas so we have this
+
+00:24:10,000 --> 00:24:13,900
+problem for example with long running
+
+00:24:12,010 --> 00:24:15,340
+tasks what if you do this which is the
+
+00:24:13,900 --> 00:24:16,960
+obvious thing to do to count how long
+
+00:24:15,340 --> 00:24:17,710
+you win working you're gonna have a
+
+00:24:16,960 --> 00:24:18,820
+chart that shows
+
+00:24:17,710 --> 00:24:20,289
+you're not doing anything and then all
+
+00:24:18,820 --> 00:24:22,450
+of a sudden you did all of all at once
+
+00:24:20,289 --> 00:24:24,789
+right and even if you don't have longer
+
+00:24:22,450 --> 00:24:27,610
+long running tasks basically if you have
+
+00:24:24,789 --> 00:24:28,630
+a bunch of workers all 100% vc your
+
+00:24:27,610 --> 00:24:30,760
+chair should look like the one at the
+
+00:24:28,630 --> 00:24:32,049
+bottom but they will probably look spiky
+
+00:24:30,760 --> 00:24:34,419
+like the ones to the top depending on
+
+00:24:32,049 --> 00:24:36,720
+what's running when you get scraped so
+
+00:24:34,419 --> 00:24:38,890
+that's no great and this will actually
+
+00:24:36,720 --> 00:24:39,970
+fit us a little bit when we've had an
+
+00:24:38,890 --> 00:24:41,950
+incident that we're trying to figure out
+
+00:24:39,970 --> 00:24:44,110
+what to do with it so one of our
+
+00:24:41,950 --> 00:24:45,760
+history's Lawrence has made a
+
+00:24:44,110 --> 00:24:48,429
+complimentary gem that will allow you to
+
+00:24:45,760 --> 00:24:50,200
+create a custom collector that is
+
+00:24:48,429 --> 00:24:52,149
+keeping time while your tasks are
+
+00:24:50,200 --> 00:24:55,000
+running instead of just at the end it's
+
+00:24:52,149 --> 00:24:56,649
+just during the execution which gives
+
+00:24:55,000 --> 00:24:59,470
+you that smooth graph at the bottom that
+
+00:24:56,649 --> 00:25:01,570
+I showed earlier and we were thinking of
+
+00:24:59,470 --> 00:25:03,850
+maybe incorporating this idea into the
+
+00:25:01,570 --> 00:25:05,080
+official client or maybe an idea that
+
+00:25:03,850 --> 00:25:06,250
+other clients may want to incorporate so
+
+00:25:05,080 --> 00:25:08,409
+this is something I'd like to discuss
+
+00:25:06,250 --> 00:25:11,110
+with you guys mostly see what you think
+
+00:25:08,409 --> 00:25:14,200
+so I encourage you guys to read this
+
+00:25:11,110 --> 00:25:16,600
+blog post that is beautifully off you
+
+00:25:14,200 --> 00:25:19,600
+skated by the monitor and get your
+
+00:25:16,600 --> 00:25:21,250
+opinions on it now finally there were a
+
+00:25:19,600 --> 00:25:23,230
+lot of people that did a lot of amazing
+
+00:25:21,250 --> 00:25:25,539
+work before we got here so when I
+
+00:25:23,230 --> 00:25:27,340
+mention some of you now I will first
+
+00:25:25,539 --> 00:25:29,169
+apologize for anyone I will definitely
+
+00:25:27,340 --> 00:25:30,850
+have missed or any crate that may miss
+
+00:25:29,169 --> 00:25:33,039
+appropriate I tried to do this as
+
+00:25:30,850 --> 00:25:33,970
+accurate as possible well we have in no
+
+00:25:33,039 --> 00:25:35,770
+particular order
+
+00:25:33,970 --> 00:25:37,630
+Jeffery otter who did a bunch of
+
+00:25:35,770 --> 00:25:40,450
+experiments with P stores and raindrops
+
+00:25:37,630 --> 00:25:43,899
+and he had a working implementation of
+
+00:25:40,450 --> 00:25:46,539
+abstract estores Kevin Leda and some
+
+00:25:43,899 --> 00:25:48,429
+Suffern they did they work for the ice
+
+00:25:46,539 --> 00:25:50,440
+I think the gate lab one was leader and
+
+00:25:48,429 --> 00:25:52,299
+Safran did the one for this course which
+
+00:25:50,440 --> 00:25:54,760
+a really interesting takes on these
+
+00:25:52,299 --> 00:25:57,760
+clients truly involves for figuring out
+
+00:25:54,760 --> 00:25:59,590
+that Julius falls sorry for figuring out
+
+00:25:57,760 --> 00:26:01,149
+how to use M maps in Ruby and that
+
+00:25:59,590 --> 00:26:04,840
+amazing code that I stole which is
+
+00:26:01,149 --> 00:26:06,970
+awesome and last but not least Tobias
+
+00:26:04,840 --> 00:26:09,820
+who shepherded the client for many years
+
+00:26:06,970 --> 00:26:11,110
+and then guided us quite a bit when we
+
+00:26:09,820 --> 00:26:13,270
+were trying to approach this figure out
+
+00:26:11,110 --> 00:26:16,890
+what's the best way so thanks to all of
+
+00:26:13,270 --> 00:26:16,890
+you thanks for listening
+
+00:26:22,760 --> 00:26:26,370
+I'm not sure if you want to look here
+
+00:26:24,960 --> 00:26:38,700
+nay around for lunch
+
+00:26:26,370 --> 00:26:40,830
+to be honest burned Wow super clear have
+
+00:26:38,700 --> 00:26:42,480
+you tried putting those files in sh m
+
+00:26:40,830 --> 00:26:44,430
+file system or is it perhaps not
+
+00:26:42,480 --> 00:26:45,330
+practical in your application I haven't
+
+00:26:44,430 --> 00:26:48,600
+tried SH M
+
+00:26:45,330 --> 00:26:50,040
+I've tried tempeh fess and basically it
+
+00:26:48,600 --> 00:26:52,290
+makes no difference so because we are
+
+00:26:50,040 --> 00:26:54,600
+actually touching the disk an HDD and
+
+00:26:52,290 --> 00:26:56,970
+SSD or tempeh fests have pretty much the
+
+00:26:54,600 --> 00:27:08,670
+same performance because is not actually
+
+00:26:56,970 --> 00:27:12,170
+hitting X I this is super interesting
+
+00:27:08,670 --> 00:27:14,220
+and maybe this is a naive question for
+
+00:27:12,170 --> 00:27:15,840
+people who have worked in Ruby and
+
+00:27:14,220 --> 00:27:18,270
+Python unlike me
+
+00:27:15,840 --> 00:27:20,130
+is there a reason not to treat each of
+
+00:27:18,270 --> 00:27:21,540
+the processes is essentially a separate
+
+00:27:20,130 --> 00:27:24,570
+instance of the application and let
+
+00:27:21,540 --> 00:27:27,060
+Prometheus do the aggregation like you
+
+00:27:24,570 --> 00:27:28,770
+just label each one well one of the
+
+00:27:27,060 --> 00:27:30,930
+parts you have is so it's very common
+
+00:27:28,770 --> 00:27:34,140
+for big machines to have like 20-30
+
+00:27:30,930 --> 00:27:35,610
+unicorn purses right and so when you
+
+00:27:34,140 --> 00:27:37,500
+when you get hit by Prometheus asking
+
+00:27:35,610 --> 00:27:39,060
+for your metrics one of those are random
+
+00:27:37,500 --> 00:27:40,590
+will get your metrics will get these
+
+00:27:39,060 --> 00:27:43,710
+metrics so there are some that won't
+
+00:27:40,590 --> 00:27:47,460
+report on average like they will report
+
+00:27:43,710 --> 00:27:49,710
+once every 30 scrape intervals which is
+
+00:27:47,460 --> 00:27:51,780
+definitely not good and you will get
+
+00:27:49,710 --> 00:27:58,370
+very uneven distributions of them so
+
+00:27:51,780 --> 00:27:58,370
+it's it's no ideal sorry
+
+00:27:59,649 --> 00:28:08,389
+yeah not the way unikom works so that's
+
+00:28:03,950 --> 00:28:12,019
+why belted out from the pipe inside this
+
+00:28:08,389 --> 00:28:13,309
+is a staple question and some cases we
+
+00:28:12,019 --> 00:28:14,119
+just don't even know because someone
+
+00:28:13,309 --> 00:28:16,820
+would like be using the mostly
+
+00:28:14,119 --> 00:28:17,960
+processing module or something and we
+
+00:28:16,820 --> 00:28:19,489
+literally don't know how many there
+
+00:28:17,960 --> 00:28:21,139
+going to be so the reasonable service
+
+00:28:19,489 --> 00:28:25,009
+discovery because someone is just using
+
+00:28:21,139 --> 00:28:27,169
+it so yeah it's potentially works Luigi
+
+00:28:25,009 --> 00:28:29,059
+unicorn this case in both languages but
+
+00:28:27,169 --> 00:28:35,299
+not in the general case if I want to
+
+00:28:29,059 --> 00:28:37,399
+monitor something multi-process no no so
+
+00:28:35,299 --> 00:28:40,669
+so you talked a lot about the
+
+00:28:37,399 --> 00:28:43,220
+benchmarking of the inserts into the
+
+00:28:40,669 --> 00:28:47,629
+library what about the bunch marks for
+
+00:28:43,220 --> 00:28:50,539
+the marshaling because when when we were
+
+00:28:47,629 --> 00:28:53,599
+doing our testing of the gitlab fork of
+
+00:28:50,539 --> 00:28:54,979
+the multi-process library we were having
+
+00:28:53,599 --> 00:28:58,369
+we were running into issues where it was
+
+00:28:54,979 --> 00:29:00,830
+taking 45 seconds to marshal the metrics
+
+00:28:58,369 --> 00:29:03,099
+we were reading I think a hundred and
+
+00:29:00,830 --> 00:29:06,129
+fifty megabytes from the EM map files
+
+00:29:03,099 --> 00:29:12,080
+because we were outputting like 40,000
+
+00:29:06,129 --> 00:29:14,539
+metrics / multi-process you know yeah
+
+00:29:12,080 --> 00:29:16,639
+well that was that was fixed number one
+
+00:29:14,539 --> 00:29:20,119
+no so this is why I mention like future
+
+00:29:16,639 --> 00:29:21,379
+work one of those was slow exports so my
+
+00:29:20,119 --> 00:29:22,789
+understanding at the time of work in
+
+00:29:21,379 --> 00:29:25,489
+this was like the the focus was on
+
+00:29:22,789 --> 00:29:29,960
+incrementing counter performance I did
+
+00:29:25,489 --> 00:29:33,019
+know I buy this I'd like intentionally I
+
+00:29:29,960 --> 00:29:35,090
+didn't look into exporting exporting
+
+00:29:33,019 --> 00:29:36,590
+performance and I would take decisions
+
+00:29:35,090 --> 00:29:39,049
+that if if something allows me to
+
+00:29:36,590 --> 00:29:40,489
+increment the counter faster but the
+
+00:29:39,049 --> 00:29:43,970
+export will suffer I would take that
+
+00:29:40,489 --> 00:29:49,190
+trade-off and now now I know that for
+
+00:29:43,970 --> 00:29:51,590
+some cases that's not good enough so now
+
+00:29:49,190 --> 00:29:56,269
+you know I don't throw high when I throw
+
+00:29:51,590 --> 00:29:58,929
+far anyone else who'd be a Sketchup
+
+00:29:56,269 --> 00:29:58,929
+microphone
+
+00:30:01,450 --> 00:30:08,679
+it's good lab using now this this Fork I
+
+00:30:05,399 --> 00:30:11,049
+I believe the answer is no because of
+
+00:30:08,679 --> 00:30:15,299
+word workbenches she's mentioned I
+
+00:30:11,049 --> 00:30:15,299
+believe Gadhafi still using their fork
+
+00:30:25,840 --> 00:30:30,370
+cool we're gonna have secret back I'm
+
+00:30:27,700 --> 00:30:32,080
+sure yeah yeah so basically what you
+
+00:30:30,370 --> 00:30:34,660
+said is the qibla people are discussing
+
+00:30:32,080 --> 00:30:37,990
+this right now and they will they will
+
+00:30:34,660 --> 00:30:41,050
+end up possibly sending C code but they
+
+00:30:37,990 --> 00:30:44,740
+have C code for the export part and we
+
+00:30:41,050 --> 00:30:48,790
+may end up with that upstream movie okay
+
+00:30:44,740 --> 00:30:50,120
+then we have lunch I think they won't
+
+00:30:48,790 --> 00:30:54,580
+let you in for another five minutes
+
+00:30:50,120 --> 00:31:04,290
+[Applause]
+
+00:30:54,580 --> 00:31:04,290
+
+YouTube URL: https://www.youtube.com/watch?v=Or_LMxyHwWY
+
+

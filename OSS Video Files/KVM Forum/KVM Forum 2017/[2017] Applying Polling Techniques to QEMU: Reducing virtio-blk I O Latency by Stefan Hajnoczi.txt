@@ -1,0 +1,2026 @@
+Title: [2017] Applying Polling Techniques to QEMU: Reducing virtio-blk I O Latency by Stefan Hajnoczi
+Publication date: 2017-11-15
+Playlist: KVM Forum 2017
+Description: 
+	Polling was recently merged in QEMU to improve disk I/O performance on high IOPS devices like NVMe drives. Notification latency has become a significant factor in the total request time because these devices complete I/O so quickly. Polling allows QEMU to skip notifications, thereby reducing latency.
+
+This talk explains the pros and cons of polling and how a self-tuning algorithm can adapt for best results with each workload. The state of userspace polling is examined and how various event sources like sockets, timers, and BHs can be incorporated.
+
+This talks covers the interaction between device emulation and the event loop, and how this affects I/O performance. By understanding how polling works with virtio-blk it is possible to consider the technique for other devices in the future.
+
+---
+
+Stefan Hajnoczi
+Red Hat, Inc.
+Principal Software Engineer
+
+Stefan works on open source virtualization in Red Hat's KVM team. He has contributed to QEMU since 2010 with a focus on the block layer and tracing.
+
+Stefan is a member of the QEMU Leadership Committee which represents the project with Software Freedom Conservancy. He also acts as organization administrator and mentor for Google Summer of Code and Outreachy internships for QEMU.
+Captions: 
+	00:00:00,390 --> 00:00:02,709
+[Music]
+
+00:00:06,140 --> 00:00:12,240
+okay so my name is Stefan hi Nazi I'm
+
+00:00:09,330 --> 00:00:13,889
+gonna be talking about applying polling
+
+00:00:12,240 --> 00:00:19,410
+techniques to the Verdejo block
+
+00:00:13,889 --> 00:00:21,750
+emulation inside qemu so basically what
+
+00:00:19,410 --> 00:00:23,910
+the problem is is that heii ops devices
+
+00:00:21,750 --> 00:00:25,920
+they're very fast they have very low
+
+00:00:23,910 --> 00:00:28,080
+latency to complete an i/o request and
+
+00:00:25,920 --> 00:00:32,489
+so any virtualization any software
+
+00:00:28,080 --> 00:00:34,620
+overhead that we impose / io is just
+
+00:00:32,489 --> 00:00:36,000
+going to become a really big problem it
+
+00:00:34,620 --> 00:00:37,860
+used to not be such a big problem
+
+00:00:36,000 --> 00:00:40,320
+because disks were slower now they're
+
+00:00:37,860 --> 00:00:42,890
+very fast and so we need to optimize
+
+00:00:40,320 --> 00:00:45,270
+this so that's what this talk is about
+
+00:00:42,890 --> 00:00:47,640
+just a little bit about me I work in Red
+
+00:00:45,270 --> 00:00:51,180
+Hat's virtualization team I focus mainly
+
+00:00:47,640 --> 00:00:54,270
+on storage tracing and performance okay
+
+00:00:51,180 --> 00:00:57,960
+so this trend that I just mentioned on
+
+00:00:54,270 --> 00:01:01,739
+this graph you can see a spinning disk a
+
+00:00:57,960 --> 00:01:04,409
+serial ata disk you can see still a
+
+00:01:01,739 --> 00:01:07,530
+spinning disk serial Attached scuzzy
+
+00:01:04,409 --> 00:01:10,350
+disk and then we start to get into solid
+
+00:01:07,530 --> 00:01:11,580
+state storage devices and you can see
+
+00:01:10,350 --> 00:01:15,450
+from the graph that immediately the
+
+00:01:11,580 --> 00:01:18,330
+IUP's jumps up these devices are capable
+
+00:01:15,450 --> 00:01:22,200
+of doing a lot more IO requests per
+
+00:01:18,330 --> 00:01:24,630
+second and if you look at both extremes
+
+00:01:22,200 --> 00:01:26,490
+of the graphs with a spinning disk you
+
+00:01:24,630 --> 00:01:30,420
+might have a seek time of around a
+
+00:01:26,490 --> 00:01:33,780
+millisecond with a with some of the
+
+00:01:30,420 --> 00:01:36,570
+latest Intel nvme drives the spec says
+
+00:01:33,780 --> 00:01:39,960
+the device spec says that it might take
+
+00:01:36,570 --> 00:01:41,939
+10 microseconds for reads and writes so
+
+00:01:39,960 --> 00:01:43,259
+there's a huge huge orders of magnitude
+
+00:01:41,939 --> 00:01:45,090
+difference between these two so
+
+00:01:43,259 --> 00:01:48,030
+obviously the software stacks that we
+
+00:01:45,090 --> 00:01:50,399
+have they might be fine for spinning
+
+00:01:48,030 --> 00:01:53,460
+disks but we're going to notice the
+
+00:01:50,399 --> 00:01:57,090
+problems in the overhead with high I ops
+
+00:01:53,460 --> 00:01:58,469
+devices and I'm just really making this
+
+00:01:57,090 --> 00:02:00,810
+point here when I started working on
+
+00:01:58,469 --> 00:02:04,729
+CUNY in 2010 one of the first things I
+
+00:02:00,810 --> 00:02:08,580
+did was a Verdejo block performance
+
+00:02:04,729 --> 00:02:10,229
+tracing latency tracing work and I
+
+00:02:08,580 --> 00:02:12,080
+published that back then and so I went
+
+00:02:10,229 --> 00:02:14,210
+back to it now and I looked at it
+
+00:02:12,080 --> 00:02:17,000
+and if we have that same software
+
+00:02:14,210 --> 00:02:20,570
+overhead and the truth is we do we
+
+00:02:17,000 --> 00:02:23,900
+haven't massively changed that it was
+
+00:02:20,570 --> 00:02:26,780
+fine back then but now it's really
+
+00:02:23,900 --> 00:02:29,360
+painful because since the overall time
+
+00:02:26,780 --> 00:02:32,600
+to complete requests on an nvme drive is
+
+00:02:29,360 --> 00:02:36,020
+so low it's just a much bigger fraction
+
+00:02:32,600 --> 00:02:39,500
+of the total request latency and so this
+
+00:02:36,020 --> 00:02:41,360
+talk is basically all about latency it's
+
+00:02:39,500 --> 00:02:43,160
+all about benchmarks with queue depth
+
+00:02:41,360 --> 00:02:45,380
+one it's not about trying to do lots of
+
+00:02:43,160 --> 00:02:47,690
+parallel i/o getting the most throughput
+
+00:02:45,380 --> 00:02:50,000
+in the most I ops it's not about scaling
+
+00:02:47,690 --> 00:02:51,680
+it it's just about latency sensitive
+
+00:02:50,000 --> 00:02:53,510
+workloads they might send out one
+
+00:02:51,680 --> 00:02:55,160
+request and they need to wait for
+
+00:02:53,510 --> 00:02:57,560
+completion before they can do the next
+
+00:02:55,160 --> 00:03:01,250
+thing so how can we make the time for a
+
+00:02:57,560 --> 00:03:03,080
+single request as small as possible feel
+
+00:03:01,250 --> 00:03:07,520
+free to interrupt me at any point if you
+
+00:03:03,080 --> 00:03:09,920
+have any questions the end game of all
+
+00:03:07,520 --> 00:03:11,780
+this is obviously that you can do PCI
+
+00:03:09,920 --> 00:03:15,709
+pass-through and then you can get rid of
+
+00:03:11,780 --> 00:03:18,170
+the software layer the problem is that
+
+00:03:15,709 --> 00:03:20,840
+the software layer does offer a lot of
+
+00:03:18,170 --> 00:03:24,709
+features it offers things like the
+
+00:03:20,840 --> 00:03:26,780
+ability to take a device and split it up
+
+00:03:24,709 --> 00:03:29,150
+and share it between multiple VMs and
+
+00:03:26,780 --> 00:03:30,590
+they each have their slice it also
+
+00:03:29,150 --> 00:03:32,420
+offers things like snapshots or
+
+00:03:30,590 --> 00:03:35,330
+encryption or there's i/o throttling
+
+00:03:32,420 --> 00:03:39,650
+backup storage migration there's a bunch
+
+00:03:35,330 --> 00:03:41,390
+of features that it supports so for
+
+00:03:39,650 --> 00:03:44,030
+general-purpose virtualization you
+
+00:03:41,390 --> 00:03:46,730
+probably still want those features if
+
+00:03:44,030 --> 00:03:49,670
+you have the the money if you're willing
+
+00:03:46,730 --> 00:03:52,760
+to spend the money on the hardware or if
+
+00:03:49,670 --> 00:03:54,680
+oh and if performance is your number one
+
+00:03:52,760 --> 00:03:56,810
+priority you might decide to do
+
+00:03:54,680 --> 00:03:59,380
+pass-through but I think for the general
+
+00:03:56,810 --> 00:04:02,540
+purpose case we still need to be able to
+
+00:03:59,380 --> 00:04:03,920
+use high ops devices in a
+
+00:04:02,540 --> 00:04:05,390
+general-purpose setting where we're not
+
+00:04:03,920 --> 00:04:07,700
+gonna be able to dedicate and throw so
+
+00:04:05,390 --> 00:04:09,920
+much hardware out of the problem so this
+
+00:04:07,700 --> 00:04:11,420
+is what this is about and originally in
+
+00:04:09,920 --> 00:04:15,620
+the Red Hat performance team Karl
+
+00:04:11,420 --> 00:04:17,630
+wrister about a year ago he was looking
+
+00:04:15,620 --> 00:04:19,760
+into this because he found that he was
+
+00:04:17,630 --> 00:04:22,040
+running storage benchmarks on the Intel
+
+00:04:19,760 --> 00:04:23,240
+nvme drives and he saw that over
+
+00:04:22,040 --> 00:04:24,830
+had was very high and so he's trying to
+
+00:04:23,240 --> 00:04:26,540
+get to the bottom of this and one of the
+
+00:04:24,830 --> 00:04:29,690
+things he did in order to find the
+
+00:04:26,540 --> 00:04:31,760
+overhead is he used tracing and he
+
+00:04:29,690 --> 00:04:34,880
+traced events that happened throughout
+
+00:04:31,760 --> 00:04:36,740
+the lifecycle of an i/o request so from
+
+00:04:34,880 --> 00:04:39,860
+when the i/o request starts and when the
+
+00:04:36,740 --> 00:04:42,860
+guest submits the i/o request and he was
+
+00:04:39,860 --> 00:04:44,210
+looking at the the time it takes because
+
+00:04:42,860 --> 00:04:46,430
+each of these trace events has a
+
+00:04:44,210 --> 00:04:48,110
+timestamp and so you can figure out okay
+
+00:04:46,430 --> 00:04:53,630
+took this long to get from point A to
+
+00:04:48,110 --> 00:04:55,280
+get to point B I'm not gonna I'm not
+
+00:04:53,630 --> 00:04:56,930
+gonna present a lot of tracing data
+
+00:04:55,280 --> 00:05:00,500
+instead let's just look at the
+
+00:04:56,930 --> 00:05:03,830
+high-level flow of an i/o request let's
+
+00:05:00,500 --> 00:05:05,750
+look at the life cycle so this is the
+
+00:05:03,830 --> 00:05:08,210
+submission path this is when the guest
+
+00:05:05,750 --> 00:05:10,550
+submits an i/o request a read or write
+
+00:05:08,210 --> 00:05:12,350
+to the storage device and this is
+
+00:05:10,550 --> 00:05:13,730
+somewhat simplified but the main parts
+
+00:05:12,350 --> 00:05:15,440
+are there especially the main parts that
+
+00:05:13,730 --> 00:05:19,310
+we're going to optimize in this
+
+00:05:15,440 --> 00:05:21,590
+discussion okay so the first thing is
+
+00:05:19,310 --> 00:05:24,890
+that when an i/o request is ready to be
+
+00:05:21,590 --> 00:05:26,780
+sent to the disk the guest will kick the
+
+00:05:24,890 --> 00:05:28,490
+vert cue the request has been put in the
+
+00:05:26,780 --> 00:05:30,650
+ver queue and this kick is actually a
+
+00:05:28,490 --> 00:05:34,580
+hardware register right and it traps out
+
+00:05:30,650 --> 00:05:36,680
+into the k vm kernel module so control
+
+00:05:34,580 --> 00:05:40,100
+switches over to the host from the v cpu
+
+00:05:36,680 --> 00:05:42,230
+to the host and the k vm kernel code it
+
+00:05:40,100 --> 00:05:45,650
+recognizes that address it knows that
+
+00:05:42,230 --> 00:05:48,170
+there is a ver el bloque device or it
+
+00:05:45,650 --> 00:05:50,480
+knows that this is a special address and
+
+00:05:48,170 --> 00:05:52,400
+there is an i/o even FD a file
+
+00:05:50,480 --> 00:05:55,910
+descriptor associated with that address
+
+00:05:52,400 --> 00:05:58,960
+and that file descriptor gets signaled
+
+00:05:55,910 --> 00:06:02,840
+so it's it's written - it's made active
+
+00:05:58,960 --> 00:06:05,900
+q mu has event loop threads so Hume
+
+00:06:02,840 --> 00:06:09,020
+using event-driven architecture and so Q
+
+00:06:05,900 --> 00:06:11,720
+mu on a separate CPU can have a thread
+
+00:06:09,020 --> 00:06:13,370
+that is waiting for this if n FD and as
+
+00:06:11,720 --> 00:06:16,010
+soon as it sees that that event FD is
+
+00:06:13,370 --> 00:06:17,900
+ready and is active it can go and look
+
+00:06:16,010 --> 00:06:19,430
+into the vert Q because Q mu has access
+
+00:06:17,900 --> 00:06:20,960
+to the guest memory so it can go into
+
+00:06:19,430 --> 00:06:24,730
+that descriptor ring to pull out the
+
+00:06:20,960 --> 00:06:27,170
+request and it can begin processing it
+
+00:06:24,730 --> 00:06:29,900
+so this doesn't happen synchronously
+
+00:06:27,170 --> 00:06:33,230
+instead what happens is that the KVM
+
+00:06:29,900 --> 00:06:35,360
+kernel module marks that event FD is
+
+00:06:33,230 --> 00:06:35,900
+ready and then it returns straight back
+
+00:06:35,360 --> 00:06:37,370
+to the V
+
+00:06:35,900 --> 00:06:38,840
+CPU so that the guests can continue
+
+00:06:37,370 --> 00:06:41,389
+executing because you don't want the
+
+00:06:38,840 --> 00:06:45,020
+guests CPU to be paused while IO
+
+00:06:41,389 --> 00:06:46,669
+emulation is taking place the problem
+
+00:06:45,020 --> 00:06:48,710
+with doing that of course is that you
+
+00:06:46,669 --> 00:06:50,389
+can see I've drawn a dotted line on the
+
+00:06:48,710 --> 00:06:52,850
+sequence diagram is that there's this
+
+00:06:50,389 --> 00:06:55,490
+dependency qumu is gonna get woken up
+
+00:06:52,850 --> 00:06:57,050
+some time after the event FD was
+
+00:06:55,490 --> 00:06:58,550
+signaled but that's really up to the
+
+00:06:57,050 --> 00:07:01,520
+scheduler it's really up to the host
+
+00:06:58,550 --> 00:07:03,949
+kernel scheduler to decide when can this
+
+00:07:01,520 --> 00:07:06,650
+qumu event loop wake up there might be
+
+00:07:03,949 --> 00:07:07,190
+other things running on all the CPUs on
+
+00:07:06,650 --> 00:07:08,900
+the host
+
+00:07:07,190 --> 00:07:10,370
+so maybe cume we can't even react right
+
+00:07:08,900 --> 00:07:12,110
+away even the guest has already kicked
+
+00:07:10,370 --> 00:07:14,990
+us and we know there's gonna be work
+
+00:07:12,110 --> 00:07:18,340
+coming qmu isn't able to run yet so
+
+00:07:14,990 --> 00:07:21,800
+that's one possible source of latency
+
+00:07:18,340 --> 00:07:24,889
+one skew actually runs and it grabs the
+
+00:07:21,800 --> 00:07:28,220
+requests so for this discussion I'm just
+
+00:07:24,889 --> 00:07:30,650
+going to talk about the Linux a IO also
+
+00:07:28,220 --> 00:07:32,419
+known as the a IO equals native option
+
+00:07:30,650 --> 00:07:35,449
+because that's usually the the most high
+
+00:07:32,419 --> 00:07:37,970
+performance option for local disks so
+
+00:07:35,449 --> 00:07:40,520
+that's often deployed and so basically Q
+
+00:07:37,970 --> 00:07:43,550
+mu will call the Linux a IO IO submit
+
+00:07:40,520 --> 00:07:46,550
+system call in order to submit that I
+
+00:07:43,550 --> 00:07:47,960
+request on behalf of the guest and now
+
+00:07:46,550 --> 00:07:50,210
+we've submitted it and eventually the
+
+00:07:47,960 --> 00:07:53,240
+disk will see the request once the Linux
+
+00:07:50,210 --> 00:07:54,530
+kernel block layer has given it to the
+
+00:07:53,240 --> 00:07:58,699
+driver and the driver has given it to
+
+00:07:54,530 --> 00:07:59,990
+the device okay so we've talked about
+
+00:07:58,699 --> 00:08:02,659
+the submission we've talked about how
+
+00:07:59,990 --> 00:08:05,030
+requests are given to the disk the
+
+00:08:02,659 --> 00:08:08,120
+reverse is the completion path so that's
+
+00:08:05,030 --> 00:08:11,060
+when the disk completes a request it
+
+00:08:08,120 --> 00:08:13,400
+will raise and interrupt and the host
+
+00:08:11,060 --> 00:08:15,349
+kernel will see that a request is
+
+00:08:13,400 --> 00:08:17,750
+complete and then the Linux a IO
+
+00:08:15,349 --> 00:08:19,699
+code inside the host kernel will match
+
+00:08:17,750 --> 00:08:22,550
+up that request with the Linux a i/o
+
+00:08:19,699 --> 00:08:24,380
+request and it will signal an even F T
+
+00:08:22,550 --> 00:08:26,090
+so again we have an event ft file
+
+00:08:24,380 --> 00:08:28,220
+descriptor here that's used to signal
+
+00:08:26,090 --> 00:08:30,979
+and again we have the qmue vent loop
+
+00:08:28,220 --> 00:08:32,419
+which wants to respond to that and it's
+
+00:08:30,979 --> 00:08:34,010
+going to get scheduled by the host
+
+00:08:32,419 --> 00:08:37,789
+kernel scheduler at some point in time
+
+00:08:34,010 --> 00:08:41,060
+hopefully soon so that's the completion
+
+00:08:37,789 --> 00:08:42,800
+path and the issue that I've highlighted
+
+00:08:41,060 --> 00:08:46,270
+as I've explained it is that we have
+
+00:08:42,800 --> 00:08:49,040
+these asynchronous points where the qmu
+
+00:08:46,270 --> 00:08:50,690
+event loop that's read
+
+00:08:49,040 --> 00:08:52,820
+not be scheduled and it will take some
+
+00:08:50,690 --> 00:08:55,070
+time for it to wake up so we have a
+
+00:08:52,820 --> 00:08:57,649
+notification latency that we're adding
+
+00:08:55,070 --> 00:08:59,870
+this is something that's purely a QR
+
+00:08:57,649 --> 00:09:04,130
+code extra thing it's something that is
+
+00:08:59,870 --> 00:09:05,449
+really not there if you run on the host
+
+00:09:04,130 --> 00:09:06,769
+right if you run on the host you gonna
+
+00:09:05,449 --> 00:09:08,089
+have this cumulate you don't have these
+
+00:09:06,769 --> 00:09:12,350
+event F DS you know jumping back and
+
+00:09:08,089 --> 00:09:16,250
+forth so what's one way to tackle that
+
+00:09:12,350 --> 00:09:19,850
+so when we saw that the latency that was
+
+00:09:16,250 --> 00:09:20,839
+being introduced was was due to
+
+00:09:19,850 --> 00:09:22,850
+notifications
+
+00:09:20,839 --> 00:09:24,649
+one approach to tackling notifications
+
+00:09:22,850 --> 00:09:27,259
+is Pauling and I think a lot of other
+
+00:09:24,649 --> 00:09:29,149
+presentations and talks at KVM forum
+
+00:09:27,259 --> 00:09:33,050
+this year have also applied polling in
+
+00:09:29,149 --> 00:09:34,579
+different places and that's because it's
+
+00:09:33,050 --> 00:09:37,220
+a technique you can use to reduce
+
+00:09:34,579 --> 00:09:40,040
+latency when notifications are slow
+
+00:09:37,220 --> 00:09:43,250
+because the wake up operation just takes
+
+00:09:40,040 --> 00:09:45,440
+a long time you can use polling instead
+
+00:09:43,250 --> 00:09:47,329
+and what polling does is you
+
+00:09:45,440 --> 00:09:49,279
+continuously monitor the object you're
+
+00:09:47,329 --> 00:09:52,040
+interested in and when it changes you
+
+00:09:49,279 --> 00:09:53,269
+can react immediately the reason why you
+
+00:09:52,040 --> 00:09:54,670
+react immediately is because you don't
+
+00:09:53,269 --> 00:09:57,800
+have to wake up you're already running
+
+00:09:54,670 --> 00:09:59,630
+so you can you can see polling on the
+
+00:09:57,800 --> 00:10:04,069
+left side there or on the right side for
+
+00:09:59,630 --> 00:10:07,130
+you so it has some obvious drawbacks so
+
+00:10:04,069 --> 00:10:09,050
+first of all if we're doing polling if
+
+00:10:07,130 --> 00:10:10,850
+we're sitting in a loop watching this
+
+00:10:09,050 --> 00:10:13,670
+register change or whatever we're doing
+
+00:10:10,850 --> 00:10:16,069
+that CPU on the host is tied up and it's
+
+00:10:13,670 --> 00:10:19,519
+dedicated to that task nothing else can
+
+00:10:16,069 --> 00:10:21,110
+run on it also if if you go back to what
+
+00:10:19,519 --> 00:10:23,829
+I said in the beginning a spinning disk
+
+00:10:21,110 --> 00:10:25,790
+might have a seek time of 1 millisecond
+
+00:10:23,829 --> 00:10:27,740
+imagine your i/o requests take 1
+
+00:10:25,790 --> 00:10:30,260
+millisecond we really don't want to pull
+
+00:10:27,740 --> 00:10:32,209
+the CPU for one whole millisecond just
+
+00:10:30,260 --> 00:10:33,380
+to have a fast wake up time right at the
+
+00:10:32,209 --> 00:10:35,779
+end there because it's very inefficient
+
+00:10:33,380 --> 00:10:38,600
+we're hogging the CPU all the time but
+
+00:10:35,779 --> 00:10:42,500
+there's very little work to do very few
+
+00:10:38,600 --> 00:10:43,880
+events that are happening so these are
+
+00:10:42,500 --> 00:10:47,300
+some of the drawbacks of polling and
+
+00:10:43,880 --> 00:10:50,740
+especially if you deploy it in a kind of
+
+00:10:47,300 --> 00:10:53,750
+general-purpose virtualization solution
+
+00:10:50,740 --> 00:10:55,610
+you might not want to have outright
+
+00:10:53,750 --> 00:10:58,069
+polling threads that are dedicated and
+
+00:10:55,610 --> 00:11:01,060
+that are using up an entire CPU all the
+
+00:10:58,069 --> 00:11:01,060
+time and running flat out
+
+00:11:02,400 --> 00:11:07,840
+so luckily there are some things we can
+
+00:11:05,140 --> 00:11:09,340
+take advantage of that take advantage of
+
+00:11:07,840 --> 00:11:12,430
+in order to make this more efficient and
+
+00:11:09,340 --> 00:11:17,020
+not to suffer these drawbacks so this
+
+00:11:12,430 --> 00:11:19,990
+graph shows you the i/o latency on the
+
+00:11:17,020 --> 00:11:20,950
+host running an i/o benchmark and what's
+
+00:11:19,990 --> 00:11:22,360
+interesting is you can see the
+
+00:11:20,950 --> 00:11:24,640
+percentiles on this graph you can see
+
+00:11:22,360 --> 00:11:28,390
+that this particular end beam and vme
+
+00:11:24,640 --> 00:11:30,400
+drive that iran 90% of all requests that
+
+00:11:28,390 --> 00:11:34,810
+we did they all completed within about
+
+00:11:30,400 --> 00:11:36,910
+10 microseconds and what's interesting
+
+00:11:34,810 --> 00:11:39,940
+is that in order to get to 95 in order
+
+00:11:36,910 --> 00:11:42,160
+to go from 90% to 95% there's a huge
+
+00:11:39,940 --> 00:11:43,480
+jump things got a lot slower there so
+
+00:11:42,160 --> 00:11:46,450
+you would have to if you were polling
+
+00:11:43,480 --> 00:11:48,340
+you could pull for just 10 microseconds
+
+00:11:46,450 --> 00:11:51,010
+and you'd be able to see the completions
+
+00:11:48,340 --> 00:11:52,450
+of 90% of all your i/o requests and then
+
+00:11:51,010 --> 00:11:54,640
+you've got 10% left that are going to
+
+00:11:52,450 --> 00:11:56,050
+take longer that's that's that tail end
+
+00:11:54,640 --> 00:11:58,930
+over there where it starts to take a
+
+00:11:56,050 --> 00:12:01,300
+really long time so we were talking
+
+00:11:58,930 --> 00:12:03,400
+about polling efficiency it's obviously
+
+00:12:01,300 --> 00:12:05,560
+worth polling for just 10 microseconds
+
+00:12:03,400 --> 00:12:07,990
+and then you kind of have to decide at
+
+00:12:05,560 --> 00:12:09,910
+what point is it is it just too
+
+00:12:07,990 --> 00:12:14,380
+expensive to continue polling waiting
+
+00:12:09,910 --> 00:12:16,180
+for those last few stragglers and so
+
+00:12:14,380 --> 00:12:19,060
+this is what adaptive polling algorithms
+
+00:12:16,180 --> 00:12:20,920
+are about so adaptive holding algorithms
+
+00:12:19,060 --> 00:12:21,430
+instead of just flat-out polling all the
+
+00:12:20,920 --> 00:12:24,670
+time
+
+00:12:21,430 --> 00:12:26,260
+they they will only pull for a certain
+
+00:12:24,670 --> 00:12:28,060
+amount of time when it seems like it's
+
+00:12:26,260 --> 00:12:30,670
+efficient to poll and we're actually
+
+00:12:28,060 --> 00:12:32,610
+going to do useful work and at some
+
+00:12:30,670 --> 00:12:35,020
+point they'll let go of the CPU and say
+
+00:12:32,610 --> 00:12:36,790
+polling is probably no longer effective
+
+00:12:35,020 --> 00:12:38,980
+this is taking a long time if the
+
+00:12:36,790 --> 00:12:40,960
+request is taking such a long time why
+
+00:12:38,980 --> 00:12:43,060
+not just use the notification mechanism
+
+00:12:40,960 --> 00:12:45,790
+that way I can let go of the CPU other
+
+00:12:43,060 --> 00:12:48,640
+tasks can run and I'm not hogging the
+
+00:12:45,790 --> 00:12:51,040
+entire system okay
+
+00:12:48,640 --> 00:12:52,930
+so those are those are those are two
+
+00:12:51,040 --> 00:12:55,180
+basic principles but that's not really
+
+00:12:52,930 --> 00:12:56,920
+enough to do adaptive polling so the
+
+00:12:55,180 --> 00:12:59,080
+problem is when you have a graph like
+
+00:12:56,920 --> 00:13:01,900
+this
+
+00:12:59,080 --> 00:13:05,080
+io latency isn't deterministic it's not
+
+00:13:01,900 --> 00:13:07,300
+the case that no matter what io throw I
+
+00:13:05,080 --> 00:13:10,360
+throw at a disk it's always going to be
+
+00:13:07,300 --> 00:13:11,710
+that 90% finishes within 10 microseconds
+
+00:13:10,360 --> 00:13:13,150
+there are a lot of factors that can
+
+00:13:11,710 --> 00:13:15,130
+influence the perform
+
+00:13:13,150 --> 00:13:17,320
+so if you can think about things like
+
+00:13:15,130 --> 00:13:19,750
+how many reads versus how many writes or
+
+00:13:17,320 --> 00:13:21,880
+am I doing parallel i/o requests or am I
+
+00:13:19,750 --> 00:13:23,260
+only just doing one at a time what about
+
+00:13:21,880 --> 00:13:25,210
+the block size or what about the
+
+00:13:23,260 --> 00:13:28,000
+internal state of the device the cache
+
+00:13:25,210 --> 00:13:29,830
+is on the device or what the firmware is
+
+00:13:28,000 --> 00:13:31,360
+doing right so it means the device is
+
+00:13:29,830 --> 00:13:33,700
+gonna respond differently and this graph
+
+00:13:31,360 --> 00:13:35,760
+is not really static as your workload
+
+00:13:33,700 --> 00:13:37,960
+runs and as it does different things
+
+00:13:35,760 --> 00:13:41,080
+it's actually going to shift around and
+
+00:13:37,960 --> 00:13:43,360
+move so if we thought we had the perfect
+
+00:13:41,080 --> 00:13:45,790
+algorithm and we tuned and we set in one
+
+00:13:43,360 --> 00:13:48,580
+value it would probably be terrible on
+
+00:13:45,790 --> 00:13:51,490
+some machines so an adaptive poling
+
+00:13:48,580 --> 00:13:53,860
+algorithm needs to be able to self tune
+
+00:13:51,490 --> 00:13:56,260
+itself it needs to be able to adjust so
+
+00:13:53,860 --> 00:13:58,120
+that it will be efficient and it will
+
+00:13:56,260 --> 00:13:59,980
+also recognize workloads where polling
+
+00:13:58,120 --> 00:14:01,120
+is useless say you're on a spinning disk
+
+00:13:59,980 --> 00:14:03,190
+and you're doing lots of seeks
+
+00:14:01,120 --> 00:14:04,420
+let's not whole let's just to use
+
+00:14:03,190 --> 00:14:05,740
+notifications because they're gonna take
+
+00:14:04,420 --> 00:14:07,450
+a long time anyway and we don't want to
+
+00:14:05,740 --> 00:14:07,900
+tie up the CPU so that's what this is
+
+00:14:07,450 --> 00:14:11,140
+all about
+
+00:14:07,900 --> 00:14:13,780
+and in QEMU we've implemented a polling
+
+00:14:11,140 --> 00:14:16,500
+algorithm in the event loop it's based
+
+00:14:13,780 --> 00:14:20,080
+on so the algorithm is kind of the same
+
+00:14:16,500 --> 00:14:23,650
+same approach as the KVM kernel modules
+
+00:14:20,080 --> 00:14:25,000
+halt poll and s algorithm and the idea
+
+00:14:23,650 --> 00:14:27,550
+is basically tries to find a sweet spot
+
+00:14:25,000 --> 00:14:30,550
+and it stays there but if the graph
+
+00:14:27,550 --> 00:14:32,290
+shifts if if behavior changes then it
+
+00:14:30,550 --> 00:14:34,570
+will scale back the polling if polling
+
+00:14:32,290 --> 00:14:36,070
+is not effective or if or if it can find
+
+00:14:34,570 --> 00:14:38,110
+a sweet spot somewhere else it'll try to
+
+00:14:36,070 --> 00:14:39,460
+find it I'm not gonna go into great
+
+00:14:38,110 --> 00:14:42,430
+detail about that we don't have time for
+
+00:14:39,460 --> 00:14:44,980
+that but I do want to talk a little bit
+
+00:14:42,430 --> 00:14:46,300
+about the implementation because for
+
+00:14:44,980 --> 00:14:47,560
+those of you who are familiar with
+
+00:14:46,300 --> 00:14:49,150
+polling you might be like yeah this is
+
+00:14:47,560 --> 00:14:52,840
+how we can reduce latency this this all
+
+00:14:49,150 --> 00:14:55,390
+makes sense but if you know Q mu Q mu is
+
+00:14:52,840 --> 00:14:57,460
+an event-driven program and it uses an
+
+00:14:55,390 --> 00:14:59,650
+event loop and all it ever does in the
+
+00:14:57,460 --> 00:15:02,110
+event loop is wait for file descriptors
+
+00:14:59,650 --> 00:15:04,420
+so you might be thinking how do we pull
+
+00:15:02,110 --> 00:15:07,270
+file descriptors there's no good API
+
+00:15:04,420 --> 00:15:09,220
+there's no low latency efficient API to
+
+00:15:07,270 --> 00:15:11,170
+pull file descriptors because the way to
+
+00:15:09,220 --> 00:15:12,760
+interact with file descriptors is to use
+
+00:15:11,170 --> 00:15:16,600
+system calls and we don't want to use a
+
+00:15:12,760 --> 00:15:18,700
+bunch of system calls it will be hard to
+
+00:15:16,600 --> 00:15:21,550
+do this stuff efficiently because we
+
+00:15:18,700 --> 00:15:24,490
+have sockets we have other types of file
+
+00:15:21,550 --> 00:15:25,800
+descriptors in the event loop what we
+
+00:15:24,490 --> 00:15:27,779
+need for efficient polling is
+
+00:15:25,800 --> 00:15:30,000
+we need a memory location something
+
+00:15:27,779 --> 00:15:33,060
+where we can literally just load fetch
+
+00:15:30,000 --> 00:15:34,080
+that memory location check its value we
+
+00:15:33,060 --> 00:15:35,640
+don't want to do something really heavy
+
+00:15:34,080 --> 00:15:39,570
+weight because that in itself has its
+
+00:15:35,640 --> 00:15:41,190
+own latency so it might seem like it's
+
+00:15:39,570 --> 00:15:43,290
+gonna be impossible to integrate polling
+
+00:15:41,190 --> 00:15:44,310
+with the Kumu it main loop and what
+
+00:15:43,290 --> 00:15:45,839
+we're gonna have to do is just have a
+
+00:15:44,310 --> 00:15:47,519
+separate thread that's dedicated to it
+
+00:15:45,839 --> 00:15:49,709
+but luckily it turns out we don't have
+
+00:15:47,519 --> 00:15:52,500
+to do that at least not for Verdejo
+
+00:15:49,709 --> 00:15:54,510
+block and vertigo scuzzy so that's what
+
+00:15:52,500 --> 00:15:56,640
+I'm gonna explain now the implementation
+
+00:15:54,510 --> 00:16:00,000
+so we've seen this graph before this is
+
+00:15:56,640 --> 00:16:02,760
+the vertical block submission sequence
+
+00:16:00,000 --> 00:16:06,329
+diagram it's how we submit requests and
+
+00:16:02,760 --> 00:16:09,240
+we said that the steps that can incur
+
+00:16:06,329 --> 00:16:11,550
+extra latency our steps 1 & 2 when we're
+
+00:16:09,240 --> 00:16:14,640
+signaling the event of T and where we
+
+00:16:11,550 --> 00:16:16,050
+need to get scheduled so the trick is we
+
+00:16:14,640 --> 00:16:19,079
+don't need to really wait for the event
+
+00:16:16,050 --> 00:16:21,660
+ft qmu has access to guest memory it has
+
+00:16:19,079 --> 00:16:23,579
+access to this descriptor ring so what
+
+00:16:21,660 --> 00:16:25,529
+it can do is it can just peek inside the
+
+00:16:23,579 --> 00:16:27,089
+descriptor ring and see as soon as the
+
+00:16:25,529 --> 00:16:28,200
+guest driver has already put a request
+
+00:16:27,089 --> 00:16:30,959
+in there doesn't need to wait for the
+
+00:16:28,200 --> 00:16:32,430
+kick at all actually and so that's what
+
+00:16:30,959 --> 00:16:34,860
+we can do and that's how we pull the
+
+00:16:32,430 --> 00:16:36,209
+descriptor ring we still keep the vert
+
+00:16:34,860 --> 00:16:38,040
+cue kick though because remember the
+
+00:16:36,209 --> 00:16:39,420
+adaptive algorithm after a while is
+
+00:16:38,040 --> 00:16:42,000
+going to give up and say let's go back
+
+00:16:39,420 --> 00:16:44,339
+to notifications so it will use the
+
+00:16:42,000 --> 00:16:48,390
+event if T if it has to in the case of
+
+00:16:44,339 --> 00:16:51,540
+slow requests ok that's good but what
+
+00:16:48,390 --> 00:16:54,750
+about Linux a i/o so once we've passed
+
+00:16:51,540 --> 00:16:56,100
+the request to the kernel you know we
+
+00:16:54,750 --> 00:16:57,990
+have a file descriptor with pasture
+
+00:16:56,100 --> 00:17:00,450
+request to the kernel how do we pull
+
+00:16:57,990 --> 00:17:03,060
+that can we do it turns out we got lucky
+
+00:17:00,450 --> 00:17:05,100
+the API the the user space kernel API
+
+00:17:03,060 --> 00:17:07,110
+actually has a thing that will allow us
+
+00:17:05,100 --> 00:17:11,010
+to pull the reason for that is because
+
+00:17:07,110 --> 00:17:12,959
+Linux a i/o has a piece of memory a ring
+
+00:17:11,010 --> 00:17:15,390
+that's shared by the kernel and user
+
+00:17:12,959 --> 00:17:17,429
+space and whenever Linux AO in the
+
+00:17:15,390 --> 00:17:19,650
+kernel completes a request it actually
+
+00:17:17,429 --> 00:17:21,300
+marks it in the user space and then it
+
+00:17:19,650 --> 00:17:23,280
+expects you to use some system calls to
+
+00:17:21,300 --> 00:17:24,300
+find out the state and and complete the
+
+00:17:23,280 --> 00:17:27,929
+request but you don't have to do that
+
+00:17:24,300 --> 00:17:31,320
+turns out you can actually just pull
+
+00:17:27,929 --> 00:17:33,690
+that ring directly so we got lucky that
+
+00:17:31,320 --> 00:17:35,010
+wasn't really something you know it's
+
+00:17:33,690 --> 00:17:36,090
+not gonna work for every type of file
+
+00:17:35,010 --> 00:17:38,160
+descriptor you can't
+
+00:17:36,090 --> 00:17:40,530
+everything but for Verdi walk inverted
+
+00:17:38,160 --> 00:17:42,930
+Oh scusi these two mechanisms mean we
+
+00:17:40,530 --> 00:17:47,730
+can really just do polling and it's
+
+00:17:42,930 --> 00:17:51,450
+integrated into the cue event loop okay
+
+00:17:47,730 --> 00:17:53,370
+so what does performance look like this
+
+00:17:51,450 --> 00:17:55,620
+is on an Intel nvme drive it's not the
+
+00:17:53,370 --> 00:18:00,450
+very latest generation but it's still
+
+00:17:55,620 --> 00:18:04,530
+very fast so these are the 4k random
+
+00:18:00,450 --> 00:18:06,810
+reads and basically what what you can
+
+00:18:04,530 --> 00:18:10,590
+see here is that without polling with
+
+00:18:06,810 --> 00:18:13,620
+polling polling increased the eye ops by
+
+00:18:10,590 --> 00:18:15,330
+37% so that that's a very nice increase
+
+00:18:13,620 --> 00:18:17,280
+that we get from polling and that shows
+
+00:18:15,330 --> 00:18:20,040
+you that by eliminating this overhead
+
+00:18:17,280 --> 00:18:23,460
+we've really cut out a significant chunk
+
+00:18:20,040 --> 00:18:25,380
+of the i/o latency this is with queue
+
+00:18:23,460 --> 00:18:27,090
+depth one again just a reminder this is
+
+00:18:25,380 --> 00:18:28,530
+all just about latency I'm not trying to
+
+00:18:27,090 --> 00:18:32,700
+put a lot of i/o through but just
+
+00:18:28,530 --> 00:18:35,360
+latency sensitive now on this graph the
+
+00:18:32,700 --> 00:18:38,940
+the host performed extremely well it did
+
+00:18:35,360 --> 00:18:41,130
+48k Alps and actually I've just learned
+
+00:18:38,940 --> 00:18:42,420
+here at KVM forum what my mistake was
+
+00:18:41,130 --> 00:18:44,640
+because I was seeing inconsistent
+
+00:18:42,420 --> 00:18:45,900
+results but what I forgot to do when I
+
+00:18:44,640 --> 00:18:48,780
+round this benchmark is I didn't
+
+00:18:45,900 --> 00:18:51,660
+initialize the nvme drive properly so
+
+00:18:48,780 --> 00:18:54,060
+that it was fully populated and so since
+
+00:18:51,660 --> 00:18:57,510
+it has the flash translation layer it's
+
+00:18:54,060 --> 00:18:59,790
+possible that there was some regions of
+
+00:18:57,510 --> 00:19:01,230
+this device we're still zeroed so when
+
+00:18:59,790 --> 00:19:04,860
+you do an i/o to it it completes very
+
+00:19:01,230 --> 00:19:06,030
+very very quickly so I'm not sure if I
+
+00:19:04,860 --> 00:19:08,400
+can trust the host part of this
+
+00:19:06,030 --> 00:19:09,630
+benchmark depending on how much you've
+
+00:19:08,400 --> 00:19:11,640
+written to the device it will perform
+
+00:19:09,630 --> 00:19:13,680
+differently but what I do remember is
+
+00:19:11,640 --> 00:19:15,750
+that when I ran these benchmarks both
+
+00:19:13,680 --> 00:19:17,460
+the know pulling and pulling were run
+
+00:19:15,750 --> 00:19:19,170
+side by side and there were no rights in
+
+00:19:17,460 --> 00:19:21,930
+between so the device stayed in the same
+
+00:19:19,170 --> 00:19:25,320
+state so that's comparable the hosting
+
+00:19:21,930 --> 00:19:29,640
+I'll need to revisit but if any of you
+
+00:19:25,320 --> 00:19:30,930
+do nvme benchmark you need to do this
+
+00:19:29,640 --> 00:19:34,290
+okay
+
+00:19:30,930 --> 00:19:36,450
+so another thing that might be
+
+00:19:34,290 --> 00:19:37,950
+interesting is for those of you who have
+
+00:19:36,450 --> 00:19:39,720
+been following kernel development you
+
+00:19:37,950 --> 00:19:41,700
+might know that the kernel itself does
+
+00:19:39,720 --> 00:19:44,100
+some polling too so if we're doing
+
+00:19:41,700 --> 00:19:46,410
+polling inside QEMU and the kernel is
+
+00:19:44,100 --> 00:19:48,820
+also doing polling will they interfere
+
+00:19:46,410 --> 00:19:52,029
+or what's the relationship what's going
+
+00:19:48,820 --> 00:19:54,879
+so the colonel block layer in Linux has
+
+00:19:52,029 --> 00:19:57,129
+two types of polling one is called irq
+
+00:19:54,879 --> 00:20:00,100
+poll and that is basically an interrupt
+
+00:19:57,129 --> 00:20:02,499
+mitigation mechanism it's not really a
+
+00:20:00,100 --> 00:20:05,830
+request polling thing comparable to what
+
+00:20:02,499 --> 00:20:07,440
+we do in CUNY what it means is that if
+
+00:20:05,830 --> 00:20:09,460
+an interrupt comes in instead of
+
+00:20:07,440 --> 00:20:11,590
+handling that interrupt and then
+
+00:20:09,460 --> 00:20:13,330
+re-enabling the interrupt and waiting
+
+00:20:11,590 --> 00:20:15,940
+for the next one what the kernel does is
+
+00:20:13,330 --> 00:20:17,950
+it just leaves it disabled and instead
+
+00:20:15,940 --> 00:20:20,499
+it has a soft irq that will pull the
+
+00:20:17,950 --> 00:20:22,779
+completion ring so some drivers use this
+
+00:20:20,499 --> 00:20:24,399
+and it means that they can avoid having
+
+00:20:22,779 --> 00:20:27,129
+lots and lots of interrupts coming in
+
+00:20:24,399 --> 00:20:30,279
+and interrupting the CPU during periods
+
+00:20:27,129 --> 00:20:31,809
+of high completion but it doesn't really
+
+00:20:30,279 --> 00:20:33,999
+interfere with qmu so that's not a bad
+
+00:20:31,809 --> 00:20:36,970
+thing that that's fine the other one is
+
+00:20:33,999 --> 00:20:39,220
+the new mechanism called block mq polls
+
+00:20:36,970 --> 00:20:41,289
+so the multi cue block layer has added
+
+00:20:39,220 --> 00:20:44,019
+this driver interface and it makes it
+
+00:20:41,289 --> 00:20:48,129
+possible for the kernel and and also
+
+00:20:44,019 --> 00:20:51,399
+obviously for user space to say please
+
+00:20:48,129 --> 00:20:54,460
+poll on this i/o request and let me know
+
+00:20:51,399 --> 00:20:56,860
+as soon as it completes however it's
+
+00:20:54,460 --> 00:20:59,259
+only really useful for synchronous i/o
+
+00:20:56,860 --> 00:21:02,590
+and since the configuration we're
+
+00:20:59,259 --> 00:21:04,720
+talking about here is Linux a i/o that
+
+00:21:02,590 --> 00:21:06,519
+block mq poll doesn't kick in at all
+
+00:21:04,720 --> 00:21:08,259
+it's not it's not used in this case so
+
+00:21:06,519 --> 00:21:10,149
+if you have if you're using a oh and
+
+00:21:08,259 --> 00:21:11,409
+user space you can still do your own
+
+00:21:10,149 --> 00:21:13,090
+polling because the kernel is not going
+
+00:21:11,409 --> 00:21:14,799
+to do it for you it won't help you there
+
+00:21:13,090 --> 00:21:16,809
+so I just wanted to mention that in case
+
+00:21:14,799 --> 00:21:20,320
+anyone was wondering how it interacts
+
+00:21:16,809 --> 00:21:23,409
+and this brings up another topic that's
+
+00:21:20,320 --> 00:21:25,269
+also related so I explained how we pull
+
+00:21:23,409 --> 00:21:27,759
+the completion path but what we're doing
+
+00:21:25,269 --> 00:21:30,879
+there is we're not actually polling down
+
+00:21:27,759 --> 00:21:33,519
+to the Intel nvme device we're not
+
+00:21:30,879 --> 00:21:36,009
+pulling the completion ring from qemu
+
+00:21:33,519 --> 00:21:37,929
+we're only polling Linux a iOS
+
+00:21:36,009 --> 00:21:39,809
+completion ring so there's actually a
+
+00:21:37,929 --> 00:21:41,860
+little bit that we're not polling and
+
+00:21:39,809 --> 00:21:44,110
+we're leaving it up to the Linux kernel
+
+00:21:41,860 --> 00:21:45,730
+to to get those completions and put them
+
+00:21:44,110 --> 00:21:48,549
+into that software ring that software
+
+00:21:45,730 --> 00:21:50,799
+queue that we poll so there's two levels
+
+00:21:48,549 --> 00:21:52,450
+at which you can do polling and it kind
+
+00:21:50,799 --> 00:21:53,769
+of makes sense that maybe if you pull at
+
+00:21:52,450 --> 00:21:55,090
+the lowest level directly at the
+
+00:21:53,769 --> 00:21:57,490
+hardware you're going to get the best
+
+00:21:55,090 --> 00:21:59,980
+performance so that's an obvious
+
+00:21:57,490 --> 00:22:01,630
+question and cume you cannot do it from
+
+00:21:59,980 --> 00:22:03,820
+user space while the kernel
+
+00:22:01,630 --> 00:22:05,860
+as a block driver that's using that
+
+00:22:03,820 --> 00:22:08,110
+device because the block driver has his
+
+00:22:05,860 --> 00:22:11,190
+own state and Hume you can't interfere
+
+00:22:08,110 --> 00:22:16,540
+with that so we're kind of stuck except
+
+00:22:11,190 --> 00:22:18,910
+that there is a Huy mu V fi o nvme
+
+00:22:16,540 --> 00:22:20,590
+driver so what that driver is and it was
+
+00:22:18,910 --> 00:22:24,820
+presented here yesterday there was a
+
+00:22:20,590 --> 00:22:26,830
+there was a talk by it from fan and he's
+
+00:22:24,820 --> 00:22:31,600
+one who wrote the driver what it does is
+
+00:22:26,830 --> 00:22:34,450
+it adds a nvme driver into Q mu so Q mu
+
+00:22:31,600 --> 00:22:37,840
+itself uses basically PCI pass-through
+
+00:22:34,450 --> 00:22:40,240
+to directly talk to this device and the
+
+00:22:37,840 --> 00:22:42,070
+great thing is Pham also added the
+
+00:22:40,240 --> 00:22:44,500
+polling interface that we have in human
+
+00:22:42,070 --> 00:22:47,440
+he added that for his nvme driver so who
+
+00:22:44,500 --> 00:22:49,600
+can pull that too and what's interesting
+
+00:22:47,440 --> 00:22:51,300
+is that the type of performance benefit
+
+00:22:49,600 --> 00:22:53,800
+you get from doing the polling is
+
+00:22:51,300 --> 00:22:57,520
+basically the same as what you get if
+
+00:22:53,800 --> 00:23:00,280
+you're not using this driver if you're
+
+00:22:57,520 --> 00:23:07,480
+just using files in Linux a i/o so we
+
+00:23:00,280 --> 00:23:09,750
+consistently see this speed-up okay so I
+
+00:23:07,480 --> 00:23:14,080
+just want to mention the status of this
+
+00:23:09,750 --> 00:23:16,390
+it was merged a i/o context polling was
+
+00:23:14,080 --> 00:23:21,010
+already merged it's already in q2 point
+
+00:23:16,390 --> 00:23:23,140
+nine it's automatically enabled when you
+
+00:23:21,010 --> 00:23:24,730
+use vertical block data plane so when
+
+00:23:23,140 --> 00:23:27,310
+you use Verdejo block with i/o threats
+
+00:23:24,730 --> 00:23:28,510
+it's not automatically enabled in the
+
+00:23:27,310 --> 00:23:30,250
+main loop so if you're not using i/o
+
+00:23:28,510 --> 00:23:33,610
+thread you can't get it and the reason
+
+00:23:30,250 --> 00:23:35,890
+why is I mentioned earlier and in this
+
+00:23:33,610 --> 00:23:37,420
+talk that there's lots of different
+
+00:23:35,890 --> 00:23:39,700
+types of file descriptors that we have
+
+00:23:37,420 --> 00:23:41,260
+in the event loop and if we have some
+
+00:23:39,700 --> 00:23:44,590
+types of file descriptors that we cannot
+
+00:23:41,260 --> 00:23:46,630
+pull then we disable polling because we
+
+00:23:44,590 --> 00:23:49,090
+don't want to sit there polling for for
+
+00:23:46,630 --> 00:23:50,860
+whatever it is say 30 microseconds and
+
+00:23:49,090 --> 00:23:52,390
+add latency to those poor file
+
+00:23:50,860 --> 00:23:54,370
+descriptors that don't know how to pull
+
+00:23:52,390 --> 00:23:56,080
+so if someone doesn't know how to pull
+
+00:23:54,370 --> 00:23:58,330
+we don't pull it all and therefore if
+
+00:23:56,080 --> 00:24:01,030
+you want to use this feature please use
+
+00:23:58,330 --> 00:24:02,890
+i/o thread and just put your vertical
+
+00:24:01,030 --> 00:24:04,240
+block device or your vertice device in
+
+00:24:02,890 --> 00:24:06,940
+there and then you'll get polling and
+
+00:24:04,240 --> 00:24:11,080
+then you'll you'll be able to take
+
+00:24:06,940 --> 00:24:13,350
+advantage of this okay are there any
+
+00:24:11,080 --> 00:24:13,350
+questions
+
+00:24:36,059 --> 00:24:42,130
+hi did you try any other measurements we
+
+00:24:39,820 --> 00:24:45,520
+higher EQ deaths to see if you bump into
+
+00:24:42,130 --> 00:24:47,050
+any other bottlenecks okay so I couldn't
+
+00:24:45,520 --> 00:24:48,790
+hear you very well I think the question
+
+00:24:47,050 --> 00:24:53,020
+was did you try higher q-dubs
+
+00:24:48,790 --> 00:24:54,640
+yeah that's it okay no I focused well at
+
+00:24:53,020 --> 00:24:56,470
+least on the benchmarks that I gathered
+
+00:24:54,640 --> 00:24:58,480
+here for this presentation I focused
+
+00:24:56,470 --> 00:25:08,740
+just on the latency sensitive cue depth
+
+00:24:58,480 --> 00:25:10,720
+one benchmark so I have some more slides
+
+00:25:08,740 --> 00:25:12,490
+that I have that I can show America's
+
+00:25:10,720 --> 00:25:17,590
+tell me when we're out of time and then
+
+00:25:12,490 --> 00:25:21,670
+I'll stop so so I have a few more things
+
+00:25:17,590 --> 00:25:23,320
+probably worth mentioning so I this is
+
+00:25:21,670 --> 00:25:26,230
+already available in communion can use
+
+00:25:23,320 --> 00:25:28,570
+it today and we we had to choose a
+
+00:25:26,230 --> 00:25:30,910
+default value where polling makes sense
+
+00:25:28,570 --> 00:25:33,760
+so today the default value that qumu
+
+00:25:30,910 --> 00:25:36,010
+will use is 32 microseconds and we found
+
+00:25:33,760 --> 00:25:40,059
+that it works very well with the nvme
+
+00:25:36,010 --> 00:25:41,770
+drives and that it also means that in
+
+00:25:40,059 --> 00:25:43,240
+practice you won't get much benefit from
+
+00:25:41,770 --> 00:25:45,970
+polling if you have a spinning disk
+
+00:25:43,240 --> 00:25:47,980
+because it's just too slow not you know
+
+00:25:45,970 --> 00:25:53,290
+it's probably won't complete within
+
+00:25:47,980 --> 00:25:55,059
+those 32 microseconds okay and instead
+
+00:25:53,290 --> 00:25:57,850
+of just showing you those bar charts you
+
+00:25:55,059 --> 00:25:59,470
+can also take a look and see the latency
+
+00:25:57,850 --> 00:26:01,330
+percentiles again after applying this
+
+00:25:59,470 --> 00:26:02,770
+optimization we can take a look at how
+
+00:26:01,330 --> 00:26:05,740
+many requests finished and it's kind of
+
+00:26:02,770 --> 00:26:08,500
+interesting to compare this you can see
+
+00:26:05,740 --> 00:26:11,320
+on the host which so we still have that
+
+00:26:08,500 --> 00:26:12,850
+data set where on the host we got 90% of
+
+00:26:11,320 --> 00:26:15,070
+all requests finished within 10
+
+00:26:12,850 --> 00:26:16,900
+microseconds and you can see the
+
+00:26:15,070 --> 00:26:20,260
+difference between with polling and
+
+00:26:16,900 --> 00:26:22,270
+without polling so what happens is that
+
+00:26:20,260 --> 00:26:24,760
+and this makes a lot of sense is that
+
+00:26:22,270 --> 00:26:27,130
+when polling is enabled that yellow line
+
+00:26:24,760 --> 00:26:29,080
+is is significantly and consistently
+
+00:26:27,130 --> 00:26:30,429
+lower than the orange line and that's
+
+00:26:29,080 --> 00:26:32,800
+because now we're pulling and we're not
+
+00:26:30,429 --> 00:26:33,610
+taking that notification so our latency
+
+00:26:32,800 --> 00:26:36,460
+is going to be lower
+
+00:26:33,610 --> 00:26:39,220
+see we dropped down to 20 microseconds
+
+00:26:36,460 --> 00:26:41,470
+and this these results are from inside
+
+00:26:39,220 --> 00:26:44,260
+the guest so this is what fiyo benchmark
+
+00:26:41,470 --> 00:26:46,210
+running inside the guest reports and
+
+00:26:44,260 --> 00:26:47,890
+what you can also see is that for those
+
+00:26:46,210 --> 00:26:48,740
+requests that take a long time polling
+
+00:26:47,890 --> 00:26:50,330
+is not effective
+
+00:26:48,740 --> 00:26:52,370
+then the yellow line basically becomes
+
+00:26:50,330 --> 00:26:53,600
+the same as the orange line why because
+
+00:26:52,370 --> 00:26:55,100
+we're not pulling anymore because we
+
+00:26:53,600 --> 00:26:57,080
+have an adaptive algorithm that gives up
+
+00:26:55,100 --> 00:27:01,720
+after some point so they become the same
+
+00:26:57,080 --> 00:27:04,429
+and why is there that final asymptotic
+
+00:27:01,720 --> 00:27:07,460
+to infinity and beyond thing there I'm
+
+00:27:04,429 --> 00:27:08,809
+not sure so I still need to figure that
+
+00:27:07,460 --> 00:27:10,700
+out but I thought this was a nice graph
+
+00:27:08,809 --> 00:27:14,450
+to show that poling is really effective
+
+00:27:10,700 --> 00:27:17,179
+over all the percentiles where you would
+
+00:27:14,450 --> 00:27:19,309
+expect it to work okay and then here's
+
+00:27:17,179 --> 00:27:21,530
+just a final thing too if anyone is
+
+00:27:19,309 --> 00:27:23,330
+interested about the exact benchmark
+
+00:27:21,530 --> 00:27:25,429
+configuration you're welcome to download
+
+00:27:23,330 --> 00:27:27,470
+the slide deck and check it out I've
+
+00:27:25,429 --> 00:27:30,020
+kind of put all the details for you
+
+00:27:27,470 --> 00:27:32,680
+thank you very much
+
+00:27:30,020 --> 00:27:38,539
+[Applause]
+
+00:27:32,680 --> 00:27:38,539
+
+YouTube URL: https://www.youtube.com/watch?v=g2Wlia9bo88
+
+

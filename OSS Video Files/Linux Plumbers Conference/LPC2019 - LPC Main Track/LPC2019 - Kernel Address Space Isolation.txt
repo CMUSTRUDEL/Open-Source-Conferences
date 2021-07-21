@@ -1,0 +1,2323 @@
+Title: LPC2019 - Kernel Address Space Isolation
+Publication date: 2019-11-18
+Playlist: LPC2019 - LPC Main Track
+Description: 
+	Kernel Address Space Isolation
+
+Speakers
+ Alexandre Chartre (Oracle)
+ James Bottomley (IBM)
+ Mike Rapoport (IBM)
+ Joel Nider (IBM Research)
+
+Description
+Recent vulnerabilities like L1 Terminal Fault (L1TF) and Microarchitectural Data Sampling (MDS) have shown that the cpu hyper-threading architecture is very prone to leaking data with speculative execution attacks.
+
+Address space separation is a proven technology to prevent side channel vulnerabilities when speculative execution attacks are used. It has, in particular, been successfully used to fix the Meltdown vulnerability with the implementation of Kernel Page Table Isolation (KPTI).
+
+Kernel Address Space Isolation aims to use address spaces to isolate some parts of the kernel to prevent leaking sensitive data under speculative execution attacks.
+
+A particularly good example is KVM. When running KVM, a guest VM can use speculative execution attacks to leak data from the sibling hyper-thread, thus potentially accessing data from the host kernel, from the hypervisor or from another VM, as soon as they run on the same hyper-thread.
+
+If KVM can be run in an address space containing no sensitive data, and separated from the full kernel address space, then KVM would be immune from leaking secrets no matter on which cpu it is running, and no matter what is running on the sibling hyper-threads.
+
+A first proposal to implement KVM Address Space Isolation has recently been submitted and got some good feedback and discussions:
+
+https://lkml.org/lkml/2019/5/13/515
+
+This presentation would show progress and challenges faced while implementing KVM Address Space Isolation. It also looks forward to discuss the possibility to have a more generic kernel address space isolation framework (not limited to KVM), and how it can be interfaced with the current memory management subsystem in particular.
+
+MERGED with:
+
+Address space isolation has been used to protect the kernel from the
+userspace and userspace programs from each other since the invention of
+the virtual memory.
+
+Assuming that kernel bugs and therefore vulnerabilities are inevitable
+it might be worth isolating parts of the kernel to minimize damage
+that these vulnerabilities can cause.
+
+Recently we've implemented a proof-of-concept for "system call
+isolation (SCI)" mechanism that allows running a system call with
+significantly reduced page tables. In our model, the accesses to a
+significant part of the kernel memory generate page faults, thus
+giving the "core kernel" an opportunity to inspect the access and
+refuse it on a pre-defined policy.
+
+Our first target for the system call isolation was an attempt to
+prevent ROP gadget execution [1], and despite its weakness it makes a
+ROP attack harder to execute and as a nice side effect SCI can be used
+as Spectre mitigation.
+
+Another topic of interest is a marriage between namespaces and address
+spaces. For instance, the kernel objects that belong to a particular
+network namespace can be considered as private data and they should
+not be mapped in other network namespaces.
+
+This data separation greatly reduces the ability of a tenant in one
+namespace to exfiltrate data from a tenant in a different namespace
+via a kernel exploit because the data is no longer mapped in the
+global shared kernel address space.
+
+We believe it would be helpful to discuss the general idea of address
+space isolation inside the kernel, both from the technical aspect of
+how it can be achieved simply and efficiently and from the isolation
+aspect of what actual security guarantees it usefully provides.
+
+[1] https://lore.kernel.org/lkml/1556228754-12996-1-git-send-email-rppt@linux.ibm.com/
+Captions: 
+	00:00:00,000 --> 00:00:01,520
+- [Man] And to our two speakers.
+
+00:00:01,520 --> 00:00:03,970
+So they're going to share the 45 minute slot
+
+00:00:04,990 --> 00:00:08,110
+and share with us Kernel Address Space Isolation.
+
+00:00:08,110 --> 00:00:09,500
+Of course, we have folks that are working
+
+00:00:09,500 --> 00:00:14,003
+on both VM documentation and security virtualization.
+
+00:00:15,080 --> 00:00:18,484
+So first up Alexandre is working at Oracle
+
+00:00:18,484 --> 00:00:21,850
+on Linux kernel virtualization in their security team.
+
+00:00:21,850 --> 00:00:23,983
+Time spent with Spectre and Meltdown.
+
+00:00:25,050 --> 00:00:27,290
+New to Linux and x86,
+
+00:00:27,290 --> 00:00:30,130
+but 20 years in development virtualization,
+
+00:00:30,130 --> 00:00:32,637
+previously Solaris and Sparc.
+
+00:00:32,637 --> 00:00:36,240
+And joining him and I'm not gonna try your last name,
+
+00:00:36,240 --> 00:00:37,912
+I apologize, I'll let you do that.
+
+00:00:37,912 --> 00:00:38,830
+- Just say Mike, it's okay.
+
+00:00:38,830 --> 00:00:43,500
+- Mike, longtime user of Linux,
+
+00:00:43,500 --> 00:00:46,810
+more recent contributor maintaining the Memblock
+
+00:00:46,810 --> 00:00:48,823
+and looking after boot time memory.
+
+00:00:49,910 --> 00:00:53,280
+Focusing on documentation on the VM and subsystem
+
+00:00:53,280 --> 00:00:55,270
+and working in kernel page tables.
+
+00:00:55,270 --> 00:00:59,010
+So, again, they've got about 20 minutes each,
+
+00:00:59,010 --> 00:01:01,070
+questions towards the end preferred
+
+00:01:01,070 --> 00:01:03,570
+and with that I'm gonna turn the time over to you.
+
+00:01:04,408 --> 00:01:07,230
+- Okay, so I'm gonna start,
+
+00:01:07,230 --> 00:01:09,793
+so this presentation is about some idea
+
+00:01:09,793 --> 00:01:11,300
+that I've been thinking around
+
+00:01:11,300 --> 00:01:14,960
+about trying to tweak the kernel page table
+
+00:01:15,980 --> 00:01:18,660
+to make a more secure environment in some context,
+
+00:01:18,660 --> 00:01:21,930
+in particular around virtualization containers
+
+00:01:21,930 --> 00:01:22,933
+and virtual machine.
+
+00:01:25,127 --> 00:01:27,910
+So this is legal stuff from Oracle.
+
+00:01:27,910 --> 00:01:32,474
+You can ignore, but it says I'm not committing to anything.
+
+00:01:32,474 --> 00:01:33,920
+(audience laughing)
+
+00:01:33,920 --> 00:01:35,290
+And I may say something wrong,
+
+00:01:35,290 --> 00:01:36,330
+because I'm a newcomer to Linux,
+
+00:01:36,330 --> 00:01:38,543
+So feel free to educate me too.
+
+00:01:40,060 --> 00:01:44,323
+So VM and containers, they rely on a secure host kernel,
+
+00:01:45,236 --> 00:01:47,760
+because host kernel can have access to all the memory,
+
+00:01:47,760 --> 00:01:51,201
+they can have a secret, you can have an encryption key,
+
+00:01:51,201 --> 00:01:55,680
+The kernel can have data from other VM and container,
+
+00:01:55,680 --> 00:01:58,180
+so we need very secure host kernel
+
+00:01:58,180 --> 00:02:03,180
+and this is what all the the cloud provider are fearing
+
+00:02:03,690 --> 00:02:06,660
+is that there is an attack from the VM to the host
+
+00:02:06,660 --> 00:02:11,660
+and we're able to gather data from other VM or containers.
+
+00:02:12,520 --> 00:02:17,520
+So we should be safe, because in theory
+
+00:02:17,630 --> 00:02:20,397
+VM and containers, they cannot access this data,
+
+00:02:20,397 --> 00:02:24,473
+but we have seen recently that they can in some cases.
+
+00:02:25,394 --> 00:02:29,030
+There's been some derivative of the Spectre attack,
+
+00:02:29,030 --> 00:02:32,020
+like the L1TF and MDS which have shown
+
+00:02:32,020 --> 00:02:34,817
+that in particular the hyper-threads are not safe
+
+00:02:34,817 --> 00:02:38,000
+and we can collect data from the other thread.
+
+00:02:38,000 --> 00:02:42,850
+So this is a major concern about secrecy and cloud.
+
+00:02:42,850 --> 00:02:47,193
+So the idea is can we limit these damages,
+
+00:02:49,107 --> 00:02:53,170
+if the access is compromised can we restrict the view
+
+00:02:53,170 --> 00:02:56,620
+that we have over data, over compromised source
+
+00:02:56,620 --> 00:03:00,166
+so that we don't have visibility of the entire kernel
+
+00:03:00,166 --> 00:03:01,833
+and all the data.
+
+00:03:06,000 --> 00:03:10,100
+The issue is that, not the issue, it's a way to use today,
+
+00:03:10,100 --> 00:03:12,760
+the kernel uses a singular address space,
+
+00:03:12,760 --> 00:03:15,630
+so all the kernel components have the same view
+
+00:03:15,630 --> 00:03:17,760
+of the kernel, so if you're breaking from one component
+
+00:03:17,760 --> 00:03:19,823
+you can access anything in the kernel.
+
+00:03:21,660 --> 00:03:25,630
+We also know that unmapped memory is harder to access,
+
+00:03:25,630 --> 00:03:27,480
+because, yeah, there's no mapping
+
+00:03:27,480 --> 00:03:29,380
+so you don't know where to go.
+
+00:03:29,380 --> 00:03:32,560
+I'm talking specifically about mapping
+
+00:03:32,560 --> 00:03:34,130
+and not mapping protection,
+
+00:03:34,130 --> 00:03:36,473
+because we have seen in some cases, like Meltdown,
+
+00:03:36,473 --> 00:03:41,473
+that you can during the speculation mapping protection
+
+00:03:42,360 --> 00:03:45,330
+is not necessarily taken into account.
+
+00:03:45,330 --> 00:03:50,330
+So if your mapping is done with a protection
+
+00:03:50,520 --> 00:03:52,757
+it's possible to overwrite it.
+
+00:03:59,160 --> 00:04:01,430
+- [Man] That's only true for a present entry,
+
+00:04:01,430 --> 00:04:03,290
+if you guarantee the entry doesn't become present
+
+00:04:03,290 --> 00:04:04,860
+you can do it.
+
+00:04:04,860 --> 00:04:05,693
+- Yeah.
+
+00:04:06,630 --> 00:04:08,180
+- [Man] It's stronger than what you're saying.
+
+00:04:08,180 --> 00:04:09,770
+- Okay.
+
+00:04:09,770 --> 00:04:10,940
+- [Man] Meltdown only lets you
+
+00:04:10,940 --> 00:04:13,090
+on a populated entry do that.
+
+00:04:13,090 --> 00:04:14,494
+- [Man] Sometimes that depends on things
+
+00:04:14,494 --> 00:04:16,050
+like how big is your TLB.
+
+00:04:16,050 --> 00:04:19,670
+- [Man] No, no, no, no, it's property of the L1.
+
+00:04:19,670 --> 00:04:21,483
+It doesn't work quite like that.
+
+00:04:22,580 --> 00:04:23,413
+- [Man] James.
+
+00:04:24,320 --> 00:04:25,153
+- [James] Too late, I don't need it.
+
+00:04:25,153 --> 00:04:26,790
+- [Man] Okay.
+
+00:04:26,790 --> 00:04:28,930
+- But still, but there are some cases
+
+00:04:28,930 --> 00:04:32,840
+from what Intel is saying is that--
+
+00:04:32,840 --> 00:04:34,650
+- You need a populated TLB to have it.
+
+00:04:34,650 --> 00:04:37,250
+So if you order your events so that you cannot
+
+00:04:37,250 --> 00:04:38,730
+populate the TLB, because you're going
+
+00:04:38,730 --> 00:04:41,890
+from a less secure to a more secure mapping
+
+00:04:41,890 --> 00:04:43,710
+you can't have that is the key.
+
+00:04:44,652 --> 00:04:45,485
+- Okay.
+
+00:04:48,117 --> 00:04:51,950
+Yeah, so page devel is a good feat of mapping,
+
+00:04:53,311 --> 00:04:56,400
+because it is enforced by VMware, but VMMU,
+
+00:04:56,400 --> 00:04:58,450
+so that's non reliable solution
+
+00:04:59,480 --> 00:05:02,490
+to currently isolate the kernel and the process.
+
+00:05:02,490 --> 00:05:04,643
+And it's enforced here during speculation.
+
+00:05:05,560 --> 00:05:08,220
+So the idea is can we change some of the kernel mapping
+
+00:05:08,220 --> 00:05:13,220
+and some context so that we can have a better protection
+
+00:05:13,409 --> 00:05:17,390
+for some data by having a restricted mapping.
+
+00:05:17,390 --> 00:05:19,430
+One idea I'm going to present
+
+00:05:19,430 --> 00:05:24,430
+is about having more than one PGD
+
+00:05:24,480 --> 00:05:26,683
+for the kernel in some context.
+
+00:05:29,170 --> 00:05:34,170
+Yeah, the use case we have for that being one
+
+00:05:34,910 --> 00:05:37,080
+which is already used, that's the PTI
+
+00:05:37,080 --> 00:05:39,250
+which has been fixing the Meltdown issue
+
+00:05:39,250 --> 00:05:42,360
+where the kernel and mapping has been restricted,
+
+00:05:42,360 --> 00:05:45,633
+so that we could fix that issue.
+
+00:05:46,760 --> 00:05:50,510
+What I'm going to talk more about is this idea
+
+00:05:50,510 --> 00:05:52,986
+of address space isolation and in particular
+
+00:05:52,986 --> 00:05:55,383
+this application to KVM.
+
+00:05:56,910 --> 00:06:01,270
+Another idea that has been proposed by Amazon
+
+00:06:01,270 --> 00:06:03,170
+is to have a process local memory,
+
+00:06:03,170 --> 00:06:06,240
+so you've got memory specific to a process
+
+00:06:06,240 --> 00:06:08,520
+which is not accessible from the other process
+
+00:06:08,520 --> 00:06:10,180
+form the kernel.
+
+00:06:10,180 --> 00:06:14,200
+And Mike is going to talk about another idea
+
+00:06:14,200 --> 00:06:17,530
+which is somewhat related to a previous one
+
+00:06:17,530 --> 00:06:20,560
+to have local memory, but for a name space,
+
+00:06:20,560 --> 00:06:23,593
+a particular name space like the network name space.
+
+00:06:25,510 --> 00:06:29,220
+So first let's start with address based isolation
+
+00:06:29,220 --> 00:06:31,080
+which is more complex.
+
+00:06:31,080 --> 00:06:33,100
+So we know from Specter Meltdown
+
+00:06:33,100 --> 00:06:37,113
+that data can link between sibling CPU hyper-thread,
+
+00:06:37,990 --> 00:06:39,760
+like in L1TF and MDS,
+
+00:06:39,760 --> 00:06:41,980
+so that's a major issue for virtualization,
+
+00:06:41,980 --> 00:06:44,430
+because we sort of guess attacks,
+
+00:06:44,430 --> 00:06:47,180
+so you've got two different VM running
+
+00:06:47,180 --> 00:06:48,750
+on the same CPU core,
+
+00:06:48,750 --> 00:06:52,150
+you can possibly see data from the other VM.
+
+00:06:52,150 --> 00:06:54,060
+And also a guest to host attack.
+
+00:06:54,060 --> 00:06:58,770
+So a thread running in the VM while there is in the kernel
+
+00:06:58,770 --> 00:07:01,410
+you can possibly attack the kernel from there.
+
+00:07:01,410 --> 00:07:05,130
+The basic mitigation is just disabling CPU hyper-threading,
+
+00:07:05,130 --> 00:07:08,640
+but yeah, this has significant impact on performance.
+
+00:07:08,640 --> 00:07:13,230
+So the idea was, can we try to run something,
+
+00:07:13,230 --> 00:07:16,548
+so keep hyper-thread running, something in one thread
+
+00:07:16,548 --> 00:07:20,757
+and run something in a secure environment in another thread.
+
+00:07:23,500 --> 00:07:28,080
+So this original idea was proposed by Liran
+
+00:07:28,080 --> 00:07:32,610
+which is working on Oracle via Oracle Cloud.
+
+00:07:32,610 --> 00:07:36,400
+The idea is to define a new page table with limited mappings
+
+00:07:37,550 --> 00:07:40,490
+typically with no secret and no sensitive data.
+
+00:07:40,490 --> 00:07:42,597
+You've got two to approach to do that,
+
+00:07:42,597 --> 00:07:44,900
+you can either start from the full kernel
+
+00:07:44,900 --> 00:07:49,210
+and you remove mapping and you remove some of the mapping
+
+00:07:49,210 --> 00:07:52,918
+or start from blank page table and you add the mapping
+
+00:07:52,918 --> 00:07:54,683
+until you have what you need.
+
+00:07:56,950 --> 00:08:01,140
+Liran, the purpose was to remove mappings,
+
+00:08:01,140 --> 00:08:04,350
+but I've gone the other way to add mapping,
+
+00:08:04,350 --> 00:08:07,600
+because I was fearing there could be some synchronization
+
+00:08:07,600 --> 00:08:10,270
+issue if you start from the full
+
+00:08:10,270 --> 00:08:13,360
+and you remove something and something is changing
+
+00:08:13,360 --> 00:08:15,690
+in the initial kernel mapping.
+
+00:08:15,690 --> 00:08:20,320
+So once you have this limited page table
+
+00:08:20,320 --> 00:08:23,850
+the idea is you switch to that page table explicitly,
+
+00:08:23,850 --> 00:08:26,730
+so what we call an ASI Enter.
+
+00:08:26,730 --> 00:08:29,480
+And from this point we are running hopefully
+
+00:08:29,480 --> 00:08:31,053
+with no sensitive data.
+
+00:08:32,490 --> 00:08:34,240
+When you are done you switch back
+
+00:08:34,240 --> 00:08:37,347
+and it returns to the full kernel page table.
+
+00:08:37,347 --> 00:08:39,280
+For example, if you're just done
+
+00:08:39,280 --> 00:08:41,150
+and you need to continue your work
+
+00:08:41,150 --> 00:08:44,453
+or your work is requiring a full access to the kernel.
+
+00:08:45,777 --> 00:08:48,710
+There are other cases where if you're going
+
+00:08:48,710 --> 00:08:50,410
+to switch back which are implicit,
+
+00:08:51,350 --> 00:08:52,730
+this is when you get an interrupt,
+
+00:08:52,730 --> 00:08:54,610
+because you will need to process the interrupt,
+
+00:08:54,610 --> 00:08:56,620
+an exception or a context switch
+
+00:08:56,620 --> 00:08:58,450
+and that will also switch back
+
+00:08:58,450 --> 00:08:59,950
+to the full kernel page table.
+
+00:09:03,570 --> 00:09:07,363
+So the minimum page table I was able to create was
+
+00:09:10,997 --> 00:09:14,024
+needed really to include so called kernel mapping.
+
+00:09:14,024 --> 00:09:17,043
+That's the kernel text so that you can execute your code.
+
+00:09:17,976 --> 00:09:21,030
+The GDT so that you can, yeah, process the exception,
+
+00:09:21,030 --> 00:09:23,940
+an interrupt and a stack and the simplest way to do that
+
+00:09:23,940 --> 00:09:25,690
+is to get the current stack mapped.
+
+00:09:26,890 --> 00:09:29,980
+And that way with this minimum mappings
+
+00:09:29,980 --> 00:09:34,620
+you can enter ASI, run some code which is until some point,
+
+00:09:34,620 --> 00:09:37,893
+exit ASI and process the interrupt.
+
+00:09:38,945 --> 00:09:42,300
+The way it is implemented also currently
+
+00:09:42,300 --> 00:09:45,520
+is the problem if you are reaching some point, some data
+
+00:09:45,520 --> 00:09:48,760
+which is not mapped you are going to get a page fault.
+
+00:09:48,760 --> 00:09:52,540
+So there is a special processing in the page fault handler
+
+00:09:52,540 --> 00:09:56,390
+where it's going to switch to, so this is an exception,
+
+00:09:56,390 --> 00:09:59,310
+so you are going to switch to a full kernel page table,
+
+00:09:59,310 --> 00:10:03,943
+but we will retry the fault with the full kernel page table.
+
+00:10:04,970 --> 00:10:08,100
+So if that's just a missing mapping
+
+00:10:08,100 --> 00:10:11,640
+in your page table then it's going to retry
+
+00:10:11,640 --> 00:10:12,643
+and hopefully work.
+
+00:10:13,970 --> 00:10:15,920
+Otherwise, yeah, that's a kernel fault.
+
+00:10:17,690 --> 00:10:21,580
+There was optional mapping, but they are not mandatory
+
+00:10:21,580 --> 00:10:24,283
+for just entering and exiting ASI.
+
+00:10:26,140 --> 00:10:28,030
+But most of the time you will need it
+
+00:10:28,030 --> 00:10:31,700
+if you have fairly some code to run,
+
+00:10:31,700 --> 00:10:33,580
+because most of the code are going to use that.
+
+00:10:33,580 --> 00:10:34,990
+So you've got the stack canary,
+
+00:10:34,990 --> 00:10:37,440
+but you need it for some function,
+
+00:10:37,440 --> 00:10:41,020
+often you will need to access CPU revivable,
+
+00:10:41,020 --> 00:10:43,914
+so you'll need a CPU offset and sometimes you need also
+
+00:10:43,914 --> 00:10:45,963
+the current stack to be accessible.
+
+00:10:46,820 --> 00:10:49,253
+But the idea is that you are going to map what you need
+
+00:10:49,253 --> 00:10:51,300
+and you try not to map any secret
+
+00:10:51,300 --> 00:10:54,163
+or sensitive data in that address space.
+
+00:10:56,640 --> 00:11:00,343
+So this is something I have applied to KVM
+
+00:11:00,343 --> 00:11:05,343
+and the idea is to run ASI with a KVM virtual machine.
+
+00:11:08,340 --> 00:11:13,057
+You will have a KVM run ioctl invoked usually by QMU.
+
+00:11:14,000 --> 00:11:16,823
+So you enter the KVM address space,
+
+00:11:18,150 --> 00:11:20,640
+you run your VM, so you do the VM enter,
+
+00:11:20,640 --> 00:11:21,940
+so that it's going to your running
+
+00:11:21,940 --> 00:11:24,810
+with this restricted address space.
+
+00:11:24,810 --> 00:11:29,810
+When you exit you're still on this restricted address space
+
+00:11:30,550 --> 00:11:35,063
+and the goal is to process the VM exit handler with the ASI.
+
+00:11:37,730 --> 00:11:40,460
+So that way if you've got everything mapped correctly
+
+00:11:40,460 --> 00:11:44,460
+so that you can process the VM exit handler
+
+00:11:44,460 --> 00:11:48,460
+you can loop and run your entire virtual machine
+
+00:11:48,460 --> 00:11:50,533
+on this restricted address space.
+
+00:11:54,001 --> 00:11:56,690
+So the good thing is that it protects you
+
+00:11:56,690 --> 00:12:01,690
+from guest to host attack, because if you have guest running
+
+00:12:02,060 --> 00:12:04,800
+and you have a sibling thread,
+
+00:12:04,800 --> 00:12:09,680
+then if it tries to attack the host it will see,
+
+00:12:09,680 --> 00:12:11,833
+yeah, non sensitive data.
+
+00:12:15,111 --> 00:12:19,277
+In that case the ASI is a page table as mapping
+
+00:12:20,190 --> 00:12:23,310
+limited to the particular guest you are running,
+
+00:12:23,310 --> 00:12:26,083
+so you need to map the KVM module, obviously,
+
+00:12:27,180 --> 00:12:30,300
+in addition to other data and some data specific
+
+00:12:30,300 --> 00:12:32,814
+to the guest you want to run.
+
+00:12:32,814 --> 00:12:35,390
+So there is two different ways to implement this,
+
+00:12:35,390 --> 00:12:37,990
+either you have data specific to a guest
+
+00:12:37,990 --> 00:12:40,610
+or the second version I've done,
+
+00:12:40,610 --> 00:12:44,993
+I had only data specific to the VCPU itself.
+
+00:12:46,920 --> 00:12:51,270
+So as I said, this is medication for attack
+
+00:12:51,270 --> 00:12:53,193
+between guest and host.
+
+00:12:56,250 --> 00:12:59,107
+The thing is that when you exit ASI,
+
+00:13:00,240 --> 00:13:02,940
+if you exit ASI you are not secure anymore,
+
+00:13:02,940 --> 00:13:05,511
+so you need to make the other thread idle.
+
+00:13:05,511 --> 00:13:10,354
+So this is the point where we need to do some interaction
+
+00:13:10,354 --> 00:13:13,020
+with the scheduler or something like co-scheduling
+
+00:13:13,020 --> 00:13:16,590
+to make sure that when we exit ASI
+
+00:13:16,590 --> 00:13:19,670
+we make sure that the other thread running in the VM
+
+00:13:19,670 --> 00:13:22,723
+is going to be idle or at least exit the VM.
+
+00:13:27,470 --> 00:13:30,660
+Benefits, so yeah, this prevents the guest to host attack,
+
+00:13:30,660 --> 00:13:33,810
+this prevents also guest to guest attack through the host,
+
+00:13:33,810 --> 00:13:36,780
+so if you attack the host you won't see any data
+
+00:13:36,780 --> 00:13:38,453
+from other guest.
+
+00:13:40,110 --> 00:13:43,410
+But this is only valid when ASI page table
+
+00:13:43,410 --> 00:13:46,510
+is effectively in use, so as I was saying,
+
+00:13:46,510 --> 00:13:50,670
+as soon as you exit you need to make sure
+
+00:13:50,670 --> 00:13:54,380
+that the other thread is running something
+
+00:13:54,380 --> 00:13:57,243
+where it cannot attack your kernel, so exit the VM.
+
+00:14:02,210 --> 00:14:04,800
+And this is where we need some interact,
+
+00:14:04,800 --> 00:14:06,800
+this is something we haven't implemented yet,
+
+00:14:06,800 --> 00:14:09,230
+but we would need some other interaction
+
+00:14:09,230 --> 00:14:11,934
+with the scheduler or part of the co-scheduler
+
+00:14:11,934 --> 00:14:14,963
+to make sure there's no issue.
+
+00:14:16,036 --> 00:14:18,580
+The limitation is that it doesn't prevent
+
+00:14:18,580 --> 00:14:21,330
+the guest to guest attacks, so if you get two VM
+
+00:14:21,330 --> 00:14:24,840
+running on the same sibling hyper-thread
+
+00:14:24,840 --> 00:14:26,490
+they can still attack each other.
+
+00:14:27,520 --> 00:14:30,653
+But there is a simple solution for that,
+
+00:14:30,653 --> 00:14:34,570
+it's to pin each VM to a distinct CPU core,
+
+00:14:34,570 --> 00:14:37,650
+I think that's a reasonable exploitation
+
+00:14:37,650 --> 00:14:41,273
+if you want to have some good performance for your VM.
+
+00:14:45,830 --> 00:14:49,260
+So ASI is currently implemented as a generic framework,
+
+00:14:49,260 --> 00:14:52,930
+but the only use case we have so far is only for KVM.
+
+00:14:52,930 --> 00:14:57,350
+So we couldn't think of any other use cases at the moment,
+
+00:14:57,350 --> 00:15:01,350
+so if anyone has an idea of what it could be useful to
+
+00:15:01,350 --> 00:15:03,453
+feel free to connect with me.
+
+00:15:04,330 --> 00:15:07,670
+Another issue, it's difficult to identify
+
+00:15:07,670 --> 00:15:08,923
+all the code to map.
+
+00:15:09,920 --> 00:15:12,680
+So currently when some code is unmapped
+
+00:15:12,680 --> 00:15:16,070
+and you need it while running ASI it's going to page fault
+
+00:15:16,070 --> 00:15:17,800
+and we have a page fault handler
+
+00:15:17,800 --> 00:15:20,060
+which is going to dump the stack
+
+00:15:20,060 --> 00:15:23,590
+where the fault is occurring.
+
+00:15:23,590 --> 00:15:26,603
+This was, yeah, an original idea from Paul.
+
+00:15:27,610 --> 00:15:30,220
+And this works pretty well, because you run your stuff,
+
+00:15:30,220 --> 00:15:33,120
+you've got a stack, you can identify from the stack the data
+
+00:15:33,120 --> 00:15:35,360
+which is missing, you map it, but yeah,
+
+00:15:35,360 --> 00:15:39,810
+it's taking a long time and you don't know
+
+00:15:39,810 --> 00:15:43,253
+if you're going to go through all the flow of everything.
+
+00:15:45,160 --> 00:15:47,190
+The mapping granularity is an issue too,
+
+00:15:47,190 --> 00:15:49,950
+because it's limited to 4K.
+
+00:15:49,950 --> 00:15:52,240
+So if you've got a small buffer to map
+
+00:15:52,240 --> 00:15:54,180
+which is less than 4K, yeah?
+
+00:15:54,180 --> 00:15:56,090
+- I was just gonna say there was an extension
+
+00:15:56,090 --> 00:15:57,620
+to that as well that you didn't actually
+
+00:15:57,620 --> 00:15:59,560
+have to necessarily map it through,
+
+00:15:59,560 --> 00:16:02,340
+you could just take the fault, switch to the higher table
+
+00:16:02,340 --> 00:16:05,370
+and that's when you trigger the isolation
+
+00:16:05,370 --> 00:16:06,760
+for the hyper-thread,
+
+00:16:06,760 --> 00:16:09,850
+so you can do it transparent runtime as well as statically.
+
+00:16:09,850 --> 00:16:10,683
+- Yeah, yeah.
+
+00:16:13,730 --> 00:16:15,640
+Yeah, the mapping granularity is an issue,
+
+00:16:15,640 --> 00:16:17,600
+because it's limited to 4K,
+
+00:16:17,600 --> 00:16:20,410
+so if you've got a smaller buffer to map
+
+00:16:20,410 --> 00:16:22,470
+you're going to map the entire page
+
+00:16:22,470 --> 00:16:26,760
+and you're going to leak the adjacent data.
+
+00:16:26,760 --> 00:16:30,030
+So if you've got sensitive data
+
+00:16:30,030 --> 00:16:33,393
+next to your non sensitive data, it can leak.
+
+00:16:34,920 --> 00:16:37,580
+There is some interaction with the memory allocation
+
+00:16:37,580 --> 00:16:39,430
+that we didn't investigate yet,
+
+00:16:39,430 --> 00:16:41,840
+because we are not mapping everything,
+
+00:16:41,840 --> 00:16:45,500
+so if you do a malloc it's going to go deep down the stack
+
+00:16:45,500 --> 00:16:47,300
+and look at the SLAB SLUB
+
+00:16:47,300 --> 00:16:48,860
+and most of the time it's not mapped,
+
+00:16:48,860 --> 00:16:51,670
+so it's going to fault every time
+
+00:16:51,670 --> 00:16:53,100
+it's going to have an allocation
+
+00:16:53,100 --> 00:16:55,483
+and we'll exit ASI at this time.
+
+00:16:57,050 --> 00:17:00,870
+And we need also some integration with the scheduler,
+
+00:17:00,870 --> 00:17:03,093
+as I was mentioning, to interact
+
+00:17:04,760 --> 00:17:07,644
+with the sibling hyper-thread when we are entering
+
+00:17:07,644 --> 00:17:10,750
+or exiting ASI to know what we can schedule
+
+00:17:12,039 --> 00:17:13,393
+on the other threads.
+
+00:17:14,430 --> 00:17:16,740
+Another point is we have un-assessed performance
+
+00:17:16,740 --> 00:17:20,970
+at the moment, so there is at least one update
+
+00:17:20,970 --> 00:17:25,180
+of ASI free registering edition to what we have
+
+00:17:25,180 --> 00:17:26,683
+when running the Syscon.
+
+00:17:30,740 --> 00:17:34,746
+So another approach which was proposed by Julian
+
+00:17:34,746 --> 00:17:39,746
+and Marius from Amazon is to have some kernel data
+
+00:17:41,690 --> 00:17:43,230
+non globally visible.
+
+00:17:43,230 --> 00:17:46,443
+So this is another way to tweak the kernel page table.
+
+00:17:48,650 --> 00:17:51,375
+And make some data only visible in the context
+
+00:17:51,375 --> 00:17:53,240
+of a specified process.
+
+00:17:53,240 --> 00:17:55,520
+Actually, there was a comment about that,
+
+00:17:55,520 --> 00:17:58,300
+it's more precisely about a specified MM.
+
+00:17:58,300 --> 00:18:03,300
+So for MM you would have a specific region
+
+00:18:03,404 --> 00:18:05,780
+where you store your data.
+
+00:18:05,780 --> 00:18:07,980
+And secret in that case should be
+
+00:18:07,980 --> 00:18:10,113
+explicitly stored in that region.
+
+00:18:11,240 --> 00:18:14,950
+This prevents other process basically from peaking
+
+00:18:14,950 --> 00:18:19,360
+at some secret you can have in the process from the kernel.
+
+00:18:20,420 --> 00:18:23,930
+So the addition of a private memory mapping is done
+
+00:18:23,930 --> 00:18:26,620
+to the process kernel page table,
+
+00:18:26,620 --> 00:18:29,870
+so it's add a new exclusive PGD entry
+
+00:18:29,870 --> 00:18:34,870
+and then you can use some memory specific function
+
+00:18:38,055 --> 00:18:41,870
+to allocate the memory in that PGD
+
+00:18:41,870 --> 00:18:43,810
+and then you can store your data.
+
+00:18:43,810 --> 00:18:47,340
+So only the allocation, the way you look at your memory
+
+00:18:47,340 --> 00:18:49,370
+is going to change and you will have
+
+00:18:49,370 --> 00:18:51,363
+only this process for this memory.
+
+00:18:52,750 --> 00:18:55,230
+Also the memory you allocate is removed
+
+00:18:55,230 --> 00:18:58,370
+from the direct map so that it cannot be accessed
+
+00:18:58,370 --> 00:19:00,713
+from the regular kernel address space.
+
+00:19:03,240 --> 00:19:05,523
+So this was also used for KVM
+
+00:19:07,843 --> 00:19:11,170
+to store KVM guest data in the process local memory
+
+00:19:11,170 --> 00:19:14,203
+instead of in the regular kernel page table.
+
+00:19:15,470 --> 00:19:18,910
+So you store the general purpose register,
+
+00:19:18,910 --> 00:19:21,683
+FPU register, things like that.
+
+00:19:22,720 --> 00:19:25,390
+The good thing is, these prevent KVM in the kernel
+
+00:19:25,390 --> 00:19:28,210
+from sharing data among all the guests
+
+00:19:29,470 --> 00:19:32,040
+and that way you can prevent guest to guest attack
+
+00:19:32,040 --> 00:19:35,223
+through those, so if you've got a VM,
+
+00:19:36,722 --> 00:19:39,907
+a thread in the guest and another thread in the VM,
+
+00:19:39,907 --> 00:19:41,630
+the VM can attack those,
+
+00:19:41,630 --> 00:19:45,193
+but it won't see the data from the other VM.
+
+00:19:48,920 --> 00:19:52,000
+But it has some limitation too,
+
+00:19:52,000 --> 00:19:54,343
+a good benefit is also that the implementation
+
+00:19:54,343 --> 00:19:56,847
+is very simple compared to ASI,
+
+00:19:57,900 --> 00:19:59,940
+but it doesn't prevent the guest to guest attack,
+
+00:19:59,940 --> 00:20:02,670
+but the same thing, you should pin your VM
+
+00:20:02,670 --> 00:20:04,053
+to different CPU core.
+
+00:20:05,080 --> 00:20:07,370
+And the guest to host attack is still possible
+
+00:20:07,370 --> 00:20:10,053
+to collect non guest data.
+
+00:20:10,890 --> 00:20:13,690
+So that's a different approach which is good,
+
+00:20:13,690 --> 00:20:16,717
+because it's very, very simple compared to ASI.
+
+00:20:18,200 --> 00:20:19,640
+And I will let Mike continue
+
+00:20:19,640 --> 00:20:21,510
+with a variant of that with namespace
+
+00:20:21,510 --> 00:20:23,513
+local memory. - Thanks, Alex.
+
+00:20:25,080 --> 00:20:27,470
+Unlike Amazon and Oracle guys
+
+00:20:27,470 --> 00:20:31,260
+we are not trying to solve any class of speculation
+
+00:20:31,260 --> 00:20:34,340
+attacks and we're not trying to improve mitigation,
+
+00:20:34,340 --> 00:20:37,593
+we are doing a research about how we can make
+
+00:20:37,593 --> 00:20:40,050
+containers more secure in general.
+
+00:20:40,050 --> 00:20:44,343
+And since MMU and the page tables are known
+
+00:20:44,343 --> 00:20:47,320
+to be one of the best protection methods
+
+00:20:47,320 --> 00:20:50,960
+for like since invention of the virtual memory
+
+00:20:50,960 --> 00:20:55,960
+we are trying to somehow marry Linux namespaces
+
+00:20:56,198 --> 00:20:57,723
+with other spaces.
+
+00:20:59,491 --> 00:21:04,397
+The idea is that since many kernel objects
+
+00:21:05,340 --> 00:21:08,930
+inside the container or inside the namespace
+
+00:21:08,930 --> 00:21:10,280
+are logically private to that namespace
+
+00:21:10,280 --> 00:21:15,280
+and it should not be accessed normally from other namespaces
+
+00:21:16,460 --> 00:21:19,920
+they could be mapped only for the processes
+
+00:21:19,920 --> 00:21:23,020
+that run inside that namespaces.
+
+00:21:23,020 --> 00:21:27,650
+For instance, with the netns the entire networking stack
+
+00:21:27,650 --> 00:21:30,900
+or at least most of the networking stack internal objects
+
+00:21:30,900 --> 00:21:33,930
+are replicated for each struct net.
+
+00:21:33,930 --> 00:21:37,380
+And they are mostly accessed in the context
+
+00:21:37,380 --> 00:21:42,380
+of the processes that run inside that network namespace,
+
+00:21:43,010 --> 00:21:45,400
+at least for the day X pass
+
+00:21:45,400 --> 00:21:48,280
+and starting from some point on their X pass
+
+00:21:49,570 --> 00:21:54,570
+There are also structures that cross namespaces boundaries
+
+00:21:55,950 --> 00:22:00,630
+for very simple cases, sk buff,
+
+00:22:00,630 --> 00:22:02,277
+it has to travel through all the namespaces
+
+00:22:02,277 --> 00:22:05,390
+on the way to the actual physical card
+
+00:22:05,390 --> 00:22:09,393
+and on the way back for our X pass.
+
+00:22:13,888 --> 00:22:17,530
+Initially what we started to do is looking
+
+00:22:17,530 --> 00:22:19,780
+into adding context which each time
+
+00:22:19,780 --> 00:22:22,930
+somebody tries to de-reference netns,
+
+00:22:22,930 --> 00:22:25,370
+but then we realized it would not fly,
+
+00:22:25,370 --> 00:22:28,610
+because it will screw performance completely.
+
+00:22:28,610 --> 00:22:33,610
+And the next, let's say, generation of our attempts
+
+00:22:34,240 --> 00:22:39,240
+to do this is to create a namespace local memory
+
+00:22:40,180 --> 00:22:44,433
+and then to have a PGD pair namespace
+
+00:22:46,030 --> 00:22:49,000
+so that it will have different mappings
+
+00:22:49,000 --> 00:22:51,466
+than init MM PGD.
+
+00:22:51,466 --> 00:22:56,466
+And whenever process belongs to these namespaces
+
+00:22:57,713 --> 00:23:01,330
+it will have the namespace specific view
+
+00:23:01,330 --> 00:23:06,330
+of the kernel mappings and there will be kernel objects
+
+00:23:07,120 --> 00:23:08,670
+that are mapped exclusively
+
+00:23:08,670 --> 00:23:11,883
+in the page tables of that namespace.
+
+00:23:19,100 --> 00:23:24,100
+To achieve this we are going to go through
+
+00:23:25,430 --> 00:23:29,060
+whichever object's allocated in the namespace,
+
+00:23:29,060 --> 00:23:30,760
+we're starting with netns.
+
+00:23:32,210 --> 00:23:37,210
+And for instance, whenever you allocate object for socket
+
+00:23:37,440 --> 00:23:42,440
+or object for TCP state machine
+
+00:23:42,680 --> 00:23:47,680
+it can be allocated with private versions of alloc page
+
+00:23:48,490 --> 00:23:53,490
+and kmalloc that whenever a page is allocated
+
+00:23:54,350 --> 00:23:58,143
+from such context it's dropped,
+
+00:24:02,340 --> 00:24:05,810
+whenever a page is allocated with, say,
+
+00:24:05,810 --> 00:24:08,677
+additional GFP flag it is dropped from the direct map
+
+00:24:08,677 --> 00:24:11,336
+and it's not mapped in other namespaces
+
+00:24:11,336 --> 00:24:13,753
+as well as in init MM PGD.
+
+00:24:15,730 --> 00:24:18,400
+So since we were requested by the plumbers committee
+
+00:24:18,400 --> 00:24:21,180
+to make it one coherent talk
+
+00:24:21,180 --> 00:24:25,560
+and make it a generic framework for address space management
+
+00:24:25,560 --> 00:24:30,000
+and I think during the discussions of one of the versions
+
+00:24:30,000 --> 00:24:34,090
+of these side patches Tomas summarized it pretty well,
+
+00:24:37,103 --> 00:24:40,477
+he's saying, "Okay, if we do want to use restricted
+
+00:24:40,477 --> 00:24:43,657
+"namespaces we need some way to create them.
+
+00:24:43,657 --> 00:24:46,337
+"We need to take care of context switches
+
+00:24:46,337 --> 00:24:51,337
+"and some logic around context management",
+
+00:24:51,350 --> 00:24:52,713
+if I remember correctly.
+
+00:24:54,144 --> 00:24:57,430
+- Just a quick question, sorry for interrupting you,
+
+00:24:57,430 --> 00:25:02,200
+does it mean whenever we're maintaining separate page table
+
+00:25:02,200 --> 00:25:07,200
+for the namespace we will still map this page
+
+00:25:08,400 --> 00:25:10,510
+into the whole kernel memory,
+
+00:25:10,510 --> 00:25:13,143
+because the kernel should be able to access it?
+
+00:25:14,020 --> 00:25:18,073
+For example, write-back, for example, network drivers?
+
+00:25:23,360 --> 00:25:26,930
+- We are thinking that in some points
+
+00:25:26,930 --> 00:25:30,220
+kernel only needs to access the struct page
+
+00:25:30,220 --> 00:25:31,870
+and it would be enough.
+
+00:25:31,870 --> 00:25:35,380
+For instance, if it needs to DMA
+
+00:25:35,380 --> 00:25:38,010
+it doesn't need to access the page itself,
+
+00:25:38,010 --> 00:25:39,603
+the page data itself.
+
+00:25:41,670 --> 00:25:43,220
+That's weird.
+
+00:25:43,220 --> 00:25:46,860
+And whenever this access will be required
+
+00:25:46,860 --> 00:25:50,790
+kernel can map it back, because
+
+00:25:55,447 --> 00:25:57,850
+we should be able to use struct page
+
+00:25:57,850 --> 00:26:01,221
+or struct page extension to give kernel enough information
+
+00:26:01,221 --> 00:26:04,807
+that this page is coming from restricted context
+
+00:26:04,807 --> 00:26:08,340
+and to do something with it it needs special care.
+
+00:26:08,340 --> 00:26:11,120
+- Okay, have you otherwise
+
+00:26:11,120 --> 00:26:12,820
+the overhead of that operation?
+
+00:26:12,820 --> 00:26:17,300
+- It should start working before we can analyze costs.
+
+00:26:17,300 --> 00:26:21,325
+It's very early stages, I can't tell what will be
+
+00:26:21,325 --> 00:26:24,010
+the implication performance wise and memory wise
+
+00:26:24,010 --> 00:26:24,843
+and everything wise.
+
+00:26:24,843 --> 00:26:27,947
+- [Tomas] High mem and 32 bit.
+
+00:26:27,947 --> 00:26:29,067
+- Can you take the mic, Tomas?
+
+00:26:29,067 --> 00:26:33,574
+- Yeah.
+
+00:26:33,574 --> 00:26:36,030
+So basically it's going to be the same trouble
+
+00:26:36,880 --> 00:26:39,983
+as we have with high mem and 32 bit machines.
+
+00:26:41,630 --> 00:26:44,540
+Because there you have no direct map
+
+00:26:44,540 --> 00:26:47,280
+for all the user pages and whatever
+
+00:26:47,280 --> 00:26:50,623
+and you have to temporarily map them in.
+
+00:26:53,500 --> 00:26:58,020
+That's pretty similar to what you are going to do.
+
+00:26:58,020 --> 00:26:59,620
+- [Mike] Right.
+
+00:26:59,620 --> 00:27:00,453
+- I mean,
+
+00:27:03,679 --> 00:27:06,170
+for the data which is only relevant
+
+00:27:06,170 --> 00:27:09,990
+if you are in the context of that namespace
+
+00:27:09,990 --> 00:27:12,870
+and the page table is mapped anyway,
+
+00:27:12,870 --> 00:27:14,620
+I mean, then the kernel can see it.
+
+00:27:15,570 --> 00:27:17,517
+But if you're in a different context
+
+00:27:17,517 --> 00:27:19,650
+and you have to access it,
+
+00:27:19,650 --> 00:27:21,360
+then you have to do the same thing
+
+00:27:21,360 --> 00:27:25,290
+what we do for 32 bit high mem--
+
+00:27:25,290 --> 00:27:28,750
+- [Mike] Like it came up in France, right.
+
+00:27:28,750 --> 00:27:29,760
+- Right.
+
+00:27:29,760 --> 00:27:32,170
+- The question here is that we don't know yet to answer
+
+00:27:32,170 --> 00:27:35,063
+is how many such transitions would be required.
+
+00:27:36,960 --> 00:27:38,270
+- I can tell.
+
+00:27:38,270 --> 00:27:42,310
+- No, I mean, what are the points
+
+00:27:42,310 --> 00:27:45,143
+when you need to access the data from different context.
+
+00:27:47,640 --> 00:27:50,240
+- It's pretty much anything which has to do with IO.
+
+00:27:52,740 --> 00:27:56,040
+If you cannot directly DMA into the page,
+
+00:27:56,040 --> 00:28:00,680
+if you have to copy fragments or stuff like that
+
+00:28:00,680 --> 00:28:03,430
+then you basically have that thing.
+
+00:28:03,430 --> 00:28:04,560
+- [Mike] Yes.
+
+00:28:04,560 --> 00:28:07,240
+- And how much that is depends on the workload,
+
+00:28:07,240 --> 00:28:10,690
+so there's no universal answer.
+
+00:28:10,690 --> 00:28:11,523
+- [Mike] Right.
+
+00:28:11,523 --> 00:28:13,120
+- You need a crystal ball for that.
+
+00:28:13,120 --> 00:28:15,933
+- I'll need to make it work to start benchmarking.
+
+00:28:17,250 --> 00:28:19,692
+- [Tomas] And then you still need a crystal ball.
+
+00:28:19,692 --> 00:28:22,340
+- I think the problem where you really need a crystal ball
+
+00:28:22,340 --> 00:28:25,210
+is that most kernel data structures
+
+00:28:25,210 --> 00:28:28,233
+refer to other kernel data structures by their address.
+
+00:28:29,490 --> 00:28:32,090
+And that address is not going to be valid
+
+00:28:32,090 --> 00:28:34,730
+in your address space,
+
+00:28:34,730 --> 00:28:36,830
+so you don't even know what memory to map.
+
+00:28:41,900 --> 00:28:42,913
+- Probably,
+
+00:28:44,320 --> 00:28:47,700
+well, at least for the network namespace, for instance,
+
+00:28:47,700 --> 00:28:50,660
+many kernel data structures refer to kernel data structures
+
+00:28:50,660 --> 00:28:52,710
+that live in the same namespace.
+
+00:28:52,710 --> 00:28:55,210
+They do not refer to data structures
+
+00:28:55,210 --> 00:28:57,360
+that are outside the namespace.
+
+00:28:58,630 --> 00:28:59,558
+- [Man] One.
+
+00:28:59,558 --> 00:29:01,106
+- [Tomas] That's not--
+
+00:29:01,106 --> 00:29:04,220
+- One cost difference on the isolation for security
+
+00:29:04,220 --> 00:29:05,795
+versus the isolation for namespaces
+
+00:29:05,795 --> 00:29:09,560
+is that on the security front we do have the choice
+
+00:29:09,560 --> 00:29:12,300
+of pushing them out to the more privileged namespace
+
+00:29:12,300 --> 00:29:14,860
+or sorry, the more privileged page mapping
+
+00:29:14,860 --> 00:29:17,200
+and suspending the other hyper-thread
+
+00:29:17,200 --> 00:29:20,650
+versus doing some sort of re-proxy to the map.
+
+00:29:20,650 --> 00:29:23,810
+Which does have a different repeated read cost
+
+00:29:23,810 --> 00:29:26,143
+for the topic Tomas was talking about.
+
+00:29:28,400 --> 00:29:30,714
+- [Man] It also seems like you need to be able to know
+
+00:29:30,714 --> 00:29:33,148
+that you're not repeating the same address
+
+00:29:33,148 --> 00:29:37,060
+in different namespaces so then you could possibly
+
+00:29:37,060 --> 00:29:38,680
+think you're referring to one data structure
+
+00:29:38,680 --> 00:29:41,360
+and actually be referring to something completely unrelated,
+
+00:29:41,360 --> 00:29:43,570
+you'd rather have it panic than do that.
+
+00:29:45,860 --> 00:29:49,510
+- Yeah, that's exactly the problem I wanted to point out,
+
+00:29:49,510 --> 00:29:53,740
+you can't reuse the same virtual address,
+
+00:29:53,740 --> 00:29:55,303
+you have to split it up.
+
+00:29:56,440 --> 00:29:59,190
+- [Mike] It's not going to be the same virtual address.
+
+00:30:00,497 --> 00:30:05,497
+- And the dangerous part is not the private namespace
+
+00:30:05,810 --> 00:30:10,160
+pointing to some other kernel object,
+
+00:30:10,160 --> 00:30:12,530
+the dangerous part is some other kernel object
+
+00:30:12,530 --> 00:30:15,000
+pointing to the namespace. - Pointing into the namespace.
+
+00:30:15,000 --> 00:30:15,833
+Yes.
+
+00:30:15,833 --> 00:30:18,773
+- That's the part where it really gets scary.
+
+00:30:19,702 --> 00:30:20,785
+- It is.
+
+00:30:20,785 --> 00:30:23,500
+(Thomas laughing)
+
+00:30:23,500 --> 00:30:24,523
+No objection.
+
+00:30:25,770 --> 00:30:28,303
+- [Tomas] Yeah, have fun watching the explosions.
+
+00:30:29,350 --> 00:30:30,183
+- Thank you.
+
+00:30:31,320 --> 00:30:32,153
+- They will be colorful. - I'll try to get back
+
+00:30:32,153 --> 00:30:34,033
+on track, Tomas, if you don't mind.
+
+00:30:36,670 --> 00:30:39,900
+Since there are different part is doing similar
+
+00:30:39,900 --> 00:30:41,310
+syncing the things in the way
+
+00:30:41,310 --> 00:30:44,902
+and everything starts with restricted context management
+
+00:30:44,902 --> 00:30:48,580
+context switches and some logic of managing them
+
+00:30:48,580 --> 00:30:52,070
+we are trying to come up with some more
+
+00:30:52,070 --> 00:30:56,620
+or less generic framework for, oh, sh.
+
+00:30:56,620 --> 00:30:59,779
+(audience laughing)
+
+00:30:59,779 --> 00:31:01,330
+And I'm running out of battery,
+
+00:31:01,330 --> 00:31:02,600
+so probably I need to recharge.
+
+00:31:02,600 --> 00:31:06,220
+Anyway, we are trying to come up with some generic
+
+00:31:11,940 --> 00:31:12,793
+It's complicated.
+
+00:31:13,810 --> 00:31:15,180
+Can you hold it, please?
+
+00:31:15,180 --> 00:31:16,013
+- Yeah.
+
+00:31:39,060 --> 00:31:41,140
+- Thanks, sorry about that.
+
+00:31:41,990 --> 00:31:43,600
+We are trying to come up with a more or less
+
+00:31:43,600 --> 00:31:47,260
+generic framework for managing kernel page tables.
+
+00:31:47,260 --> 00:31:50,120
+So what is happening now from
+
+00:31:51,490 --> 00:31:53,610
+struct MM is the page table,
+
+00:31:53,610 --> 00:31:56,290
+but struct MM is designed to be a representation
+
+00:31:56,290 --> 00:31:58,653
+of user space address space mostly.
+
+00:32:01,930 --> 00:32:06,480
+What I've been trying to do for last a couple of weeks
+
+00:32:06,480 --> 00:32:10,320
+is to decouple actual page table from struct MM
+
+00:32:10,320 --> 00:32:12,363
+and to see what I can get out of it.
+
+00:32:14,383 --> 00:32:19,330
+Then when it's done we can introduce methods
+
+00:32:19,330 --> 00:32:22,090
+for cloning and populating page table
+
+00:32:22,090 --> 00:32:25,796
+on the page table basis and it most probably
+
+00:32:25,796 --> 00:32:29,290
+will be able to reuse existing copy page range,
+
+00:32:29,290 --> 00:32:32,260
+at least the most parts of it
+
+00:32:32,260 --> 00:32:36,170
+and free page table and the whole MMU gather stuff
+
+00:32:37,140 --> 00:32:42,140
+as soon as I can get it not de-referencing MM pointer.
+
+00:32:47,240 --> 00:32:52,240
+So currently the only kernel context
+
+00:32:53,130 --> 00:32:57,370
+that is not init MM PGD is that is actively used,
+
+00:32:57,370 --> 00:32:59,283
+it's a PTI implementation.
+
+00:33:04,000 --> 00:33:09,000
+Apparently ASI will create its contexts when
+
+00:33:13,470 --> 00:33:16,940
+calling a VM create to VCPU create.
+
+00:33:16,940 --> 00:33:21,940
+And the process local memory and the namespace local memory,
+
+00:33:23,420 --> 00:33:26,693
+the page table will be propagated and created
+
+00:33:26,693 --> 00:33:29,553
+at the time of call, un-share or setns.
+
+00:33:31,168 --> 00:33:35,610
+And the problem of creation restricted spacing
+
+00:33:35,610 --> 00:33:38,530
+is technically easy, but another problem
+
+00:33:38,530 --> 00:33:41,020
+which is much more difficult what to put there
+
+00:33:41,020 --> 00:33:42,550
+and what mappings should be present
+
+00:33:42,550 --> 00:33:45,150
+and what mappings can we exclude from them.
+
+00:33:45,150 --> 00:33:47,050
+It's completely open question,
+
+00:33:47,050 --> 00:33:50,930
+but I've started to see how to implement the machinery
+
+00:33:50,930 --> 00:33:55,620
+to make, let's say, PTI and DSI use the same mechanism
+
+00:33:55,620 --> 00:33:58,980
+for creation of the page tables instead of having
+
+00:33:58,980 --> 00:34:01,773
+like five, 10 of them or whatever.
+
+00:34:03,450 --> 00:34:08,450
+And the context switches which is the third part,
+
+00:34:10,020 --> 00:34:13,250
+for ASI it's very similar to PTI
+
+00:34:13,250 --> 00:34:16,550
+and I presume it could be done
+
+00:34:16,550 --> 00:34:20,393
+with the same assembler magic and alternatives.
+
+00:34:21,430 --> 00:34:25,510
+Probably ASI would be able to use the same trick as PIT does
+
+00:34:25,510 --> 00:34:28,240
+and just clone PGD page with bit flips
+
+00:34:28,240 --> 00:34:32,573
+and make it order two page instead of order one.
+
+00:34:35,091 --> 00:34:37,330
+For the process local memory
+
+00:34:37,330 --> 00:34:40,400
+and for the namespace local memory
+
+00:34:40,400 --> 00:34:43,344
+the context switches are implicit,
+
+00:34:43,344 --> 00:34:48,220
+because the process already has its PGD
+
+00:34:48,220 --> 00:34:49,500
+with the restricted mapping.
+
+00:34:49,500 --> 00:34:51,190
+So whenever we call to switch
+
+00:34:51,190 --> 00:34:53,423
+we get the restricted mapping active.
+
+00:34:56,950 --> 00:35:00,523
+So this is kind of the beginning of what I'm doing,
+
+00:35:01,680 --> 00:35:06,680
+I added the struct page table with a few fields.
+
+00:35:07,120 --> 00:35:09,913
+I don't know what else would be required yet.
+
+00:35:11,190 --> 00:35:12,920
+But it mostly covers
+
+00:35:15,985 --> 00:35:19,223
+the things live currently in MM struct
+
+00:35:20,196 --> 00:35:24,890
+and are used by page table management primitives
+
+00:35:25,740 --> 00:35:27,283
+throughout the code.
+
+00:35:28,120 --> 00:35:33,120
+And what I currently have is I have the page table
+
+00:35:33,736 --> 00:35:37,163
+as aggregated inside MM struct.
+
+00:35:39,630 --> 00:35:43,260
+Probably eventually I'll make it a pointer.
+
+00:35:43,260 --> 00:35:46,340
+There is quite a few issues here I've seen
+
+00:35:46,340 --> 00:35:49,433
+with the first approach and with the second one.
+
+00:35:52,230 --> 00:35:56,210
+In some time I will have better idea what is better.
+
+00:35:56,210 --> 00:35:59,822
+But the trouble with having page table aggregated
+
+00:35:59,822 --> 00:36:02,023
+inside the MM struct,
+
+00:36:04,270 --> 00:36:06,580
+it somewhat lacks the flexibility
+
+00:36:06,580 --> 00:36:10,150
+and probably we just repeat using MM struct
+
+00:36:10,150 --> 00:36:12,360
+for kernel page tables as well
+
+00:36:12,360 --> 00:36:15,150
+and just don't use the whole VMM,
+
+00:36:15,150 --> 00:36:16,680
+et cetera, et cetera, et cetera.
+
+00:36:16,680 --> 00:36:19,063
+And it will definitely save lots of turns,
+
+00:36:20,140 --> 00:36:24,493
+but it's less correct semantically from my point of view.
+
+00:36:27,000 --> 00:36:30,740
+I can't say I have a strong opinion here at the moment,
+
+00:36:30,740 --> 00:36:33,265
+maybe in two, three weeks or so.
+
+00:36:33,265 --> 00:36:35,560
+(laughing)
+
+00:36:35,560 --> 00:36:39,150
+But if we make it a pointer,
+
+00:36:39,150 --> 00:36:44,150
+first it breaks the randomization of struct MM.
+
+00:36:46,100 --> 00:36:50,502
+Next it will need more care when allocating and freeing
+
+00:36:50,502 --> 00:36:52,770
+and it will require additional allocation
+
+00:36:52,770 --> 00:36:56,010
+for allocation of the memory management struct
+
+00:36:56,010 --> 00:37:01,010
+and it should be followed by allocation of the page table.
+
+00:37:02,380 --> 00:37:03,660
+But on the other hand
+
+00:37:06,860 --> 00:37:09,233
+whenever we create a kernel page table
+
+00:37:09,233 --> 00:37:14,233
+that is not init page table will get proper
+
+00:37:16,738 --> 00:37:20,917
+page table object and will not have to deal with MM struct.
+
+00:37:28,170 --> 00:37:30,230
+When I was playing with all these things
+
+00:37:30,230 --> 00:37:35,130
+I found that one of the pinpoint is freeing, actually,
+
+00:37:35,130 --> 00:37:37,272
+page table and especially when it shares
+
+00:37:37,272 --> 00:37:42,153
+some of lower levels with init MM PGD.
+
+00:37:43,510 --> 00:37:46,670
+So either you need to track all the pages
+
+00:37:46,670 --> 00:37:50,460
+it will allocate it for restricted page table
+
+00:37:50,460 --> 00:37:53,540
+or you need to have some other mechanism
+
+00:37:57,660 --> 00:37:59,760
+to be able to free page table without screwing
+
+00:37:59,760 --> 00:38:02,400
+the init MM PGD.
+
+00:38:02,400 --> 00:38:05,188
+So what I was thinking is that we have like
+
+00:38:05,188 --> 00:38:08,430
+two unsigned logs in struct page
+
+00:38:08,430 --> 00:38:12,480
+which are not used, surprisingly, for the page table pages.
+
+00:38:14,450 --> 00:38:18,810
+Whenever page type is page table we have two unsigned logs
+
+00:38:18,810 --> 00:38:22,400
+and these can be used to track page tables
+
+00:38:22,400 --> 00:38:25,090
+allocated for the restricted context.
+
+00:38:25,090 --> 00:38:28,247
+And then freeing them would be a simple traversal
+
+00:38:28,247 --> 00:38:30,040
+of the page table trend,
+
+00:38:30,040 --> 00:38:32,570
+if it's page table restricted to free,
+
+00:38:32,570 --> 00:38:35,750
+if it's shared you don't free and it's simple.
+
+00:38:35,750 --> 00:38:39,150
+One minor issue, page table flag
+
+00:38:39,150 --> 00:38:41,763
+is not set for every page table in the kernel,
+
+00:38:42,650 --> 00:38:44,251
+at least at x86.
+
+00:38:44,251 --> 00:38:45,950
+(coughing)
+
+00:38:45,950 --> 00:38:48,840
+Sorry, the initial page table that come
+
+00:38:48,840 --> 00:38:51,140
+from very early mappings
+
+00:38:51,140 --> 00:38:53,523
+never marked as page tables afterwards.
+
+00:38:56,660 --> 00:39:01,042
+And then per-context allocations I've been looking to
+
+00:39:01,042 --> 00:39:04,500
+is an addition of a GFP flags that will say,
+
+00:39:04,500 --> 00:39:08,510
+okay, we want this page dropped from direct map
+
+00:39:08,510 --> 00:39:12,290
+and then it can be extended to SLAB caches as well.
+
+00:39:12,290 --> 00:39:17,040
+And whenever SLAB cache is marked with some flag
+
+00:39:17,040 --> 00:39:19,000
+I called it exclusive for now,
+
+00:39:19,000 --> 00:39:21,973
+because private is overloaded in many places anyway.
+
+00:39:25,020 --> 00:39:27,080
+Every allocation from that SLAB cache
+
+00:39:27,080 --> 00:39:29,010
+will be dropped from the direct map
+
+00:39:29,010 --> 00:39:32,193
+and then it would be seen only in the allocating context.
+
+00:39:35,673 --> 00:39:38,340
+And whenever the page needs to be accessed
+
+00:39:40,650 --> 00:39:43,047
+from other context it needs to be mapped back
+
+00:39:43,047 --> 00:39:47,350
+with something like kmap or set memory present,
+
+00:39:47,350 --> 00:39:48,633
+set memory not present.
+
+00:39:52,560 --> 00:39:57,560
+And another thing that is required for extending kmalloc
+
+00:39:58,063 --> 00:40:00,500
+with these private or exclusive allocations
+
+00:40:02,242 --> 00:40:07,242
+is creation of a malloc cache
+
+00:40:09,030 --> 00:40:12,266
+that is specific to certain address space.
+
+00:40:12,266 --> 00:40:16,970
+Pretty much like cgroups do for cgroup specific caches
+
+00:40:18,460 --> 00:40:21,528
+in order not to mix objects
+
+00:40:21,528 --> 00:40:25,363
+from different address spaces in the same pages.
+
+00:40:29,850 --> 00:40:33,360
+Whenever a first time request for private kmalloc
+
+00:40:33,360 --> 00:40:38,360
+comes into SLUB, whatever it creates a new cache
+
+00:40:40,090 --> 00:40:44,330
+that is a child object of parent cache.
+
+00:40:44,330 --> 00:40:48,820
+For instance, kmalloc-1K and kmalloc-1K(1).
+
+00:40:48,820 --> 00:40:52,710
+And then everything is allocated from the pages
+
+00:40:52,710 --> 00:40:55,100
+belonging to that cache
+
+00:40:58,252 --> 00:40:59,837
+and the mappings remain in the allocating context.
+
+00:41:04,400 --> 00:41:08,233
+Again, here we will have out of context access,
+
+00:41:08,233 --> 00:41:10,191
+it's for instance SLUB debugging
+
+00:41:10,191 --> 00:41:15,191
+and SLAB puts some of its metadata inside the page itself
+
+00:41:17,180 --> 00:41:22,180
+and it's not enough to use struct page for SLAB.
+
+00:41:22,670 --> 00:41:25,397
+So we'll need to adjust accordingly
+
+00:41:25,397 --> 00:41:29,710
+and we'll get performance hit from there as well,
+
+00:41:29,710 --> 00:41:34,543
+need to see how much it is for the crystal ball workloads.
+
+00:41:37,120 --> 00:41:40,834
+Another idea, actually, James run away,
+
+00:41:40,834 --> 00:41:45,834
+another idea was James to have a new mmap, madvise flags
+
+00:41:49,130 --> 00:41:52,461
+that allow you to create an area that is visible
+
+00:41:52,461 --> 00:41:55,223
+only in the context of certain process.
+
+00:41:57,669 --> 00:42:02,373
+And then do something like open and decrypt file,
+
+00:42:04,030 --> 00:42:09,030
+read data into such areas it is dropped from the direct map
+
+00:42:10,240 --> 00:42:13,593
+and you can actually store secrets in such areas.
+
+00:42:15,659 --> 00:42:18,463
+I haven't done anything in that direction yet,
+
+00:42:19,840 --> 00:42:22,530
+it seems not too hard to implement it,
+
+00:42:22,530 --> 00:42:24,830
+but there are surely tiny bits which I missed.
+
+00:42:30,750 --> 00:42:32,060
+Do you want to?
+
+00:42:32,060 --> 00:42:36,880
+- Yeah, so I think we can say that reducing
+
+00:42:36,880 --> 00:42:39,394
+the kernel address space mapping can help reduce
+
+00:42:39,394 --> 00:42:41,681
+scope of some attacks,
+
+00:42:41,681 --> 00:42:46,051
+especially on the cloud environment and virtualization.
+
+00:42:46,051 --> 00:42:48,248
+And what we have found out also
+
+00:42:48,248 --> 00:42:53,000
+is that there's probably some way to improve the way
+
+00:42:53,000 --> 00:42:55,050
+management of page table is done
+
+00:42:55,050 --> 00:42:57,533
+and management of context is done.
+
+00:42:59,655 --> 00:43:02,940
+What we are proposing is first go on
+
+00:43:02,940 --> 00:43:05,510
+and improve this function which are used
+
+00:43:05,510 --> 00:43:08,790
+for management page table and managing context
+
+00:43:10,390 --> 00:43:13,610
+so that we improve what's already there,
+
+00:43:13,610 --> 00:43:14,950
+but we also provide some building blocks
+
+00:43:14,950 --> 00:43:18,813
+to do an extension we think could be useful.
+
+00:43:19,770 --> 00:43:24,600
+And then the next step would be to continue
+
+00:43:24,600 --> 00:43:27,840
+with this kernel local memory, iVeritus process
+
+00:43:27,840 --> 00:43:30,413
+or a namespace local memory.
+
+00:43:30,413 --> 00:43:33,310
+It was also suggested the process local memory
+
+00:43:33,310 --> 00:43:37,080
+could be used to refactor the LDT in the KPTI case,
+
+00:43:37,080 --> 00:43:38,903
+so that can be something useful.
+
+00:43:40,640 --> 00:43:43,547
+For ASI there's still many hurdles
+
+00:43:43,547 --> 00:43:46,320
+before ASI is near production ready,
+
+00:43:46,320 --> 00:43:50,490
+there's a lot more investigation I need to do.
+
+00:43:50,490 --> 00:43:54,570
+There's also the question of complexity worth the benefits,
+
+00:43:54,570 --> 00:43:55,820
+really need to investigate.
+
+00:43:55,820 --> 00:43:58,775
+So the idea is continue some evaluation on ASI
+
+00:43:58,775 --> 00:44:03,775
+and see if we can find out and build something from it.
+
+00:44:06,940 --> 00:44:08,197
+I think that's all we have.
+
+00:44:08,197 --> 00:44:12,070
+And the appendix we just have some, yeah,
+
+00:44:12,070 --> 00:44:13,600
+references to different blogs
+
+00:44:13,600 --> 00:44:16,223
+and RFC that have been submitted so far.
+
+00:44:17,520 --> 00:44:18,853
+- That's all.
+
+00:44:20,430 --> 00:44:22,553
+If anybody wants to go to lunch.
+
+00:44:23,516 --> 00:44:24,708
+(laughing)
+
+00:44:24,708 --> 00:44:26,270
+- [Alexandre] Yeah, otherwise we can take--
+
+00:44:26,270 --> 00:44:28,270
+- [Mike] I think we've run out, yes?
+
+00:44:28,270 --> 00:44:29,103
+- [Alexandre] Yeah.
+
+00:44:29,103 --> 00:44:30,679
+- Thanks, everybody. - Thank you.
+
+00:44:30,679 --> 00:44:33,031
+
+YouTube URL: https://www.youtube.com/watch?v=rp_WawkcHeU
+
+

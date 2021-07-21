@@ -1,0 +1,1863 @@
+Title: [2020] Changing Paravirt Lock-ops for a Changing World by Ankur Arora
+Publication date: 2020-12-09
+Playlist: KVM Forum 2020
+Description: 
+	Paravirt ops are set in stone once a guest has booted. As an example we might expose `KVM_HINTS_REALTIME` to a guest and this hint is expected to stay true for the lifetime of the guest. However, events in a guest's life, like changed host conditions or migration might mean that it would be more optimal to revoke this hint. This talk discusses two aspects of this revocation: one, support for revocable `KVM_HINTS_REALTIME` and, second, work done in the paravirt ops subsystem to dynamically modify spinlock-ops.
+
+---
+
+Ankur Arora
+Oracle Corp, PMTS
+
+Ankur Arora is a PMTS in the Linux and Virtualization group at Oracle. His focus for the past few years has been on x86 virtualization for KVM and Xen. In past lives, he's worked on highly parallel HW for Oracle, and on near memory storage for Virident. In days of yore, he did research on user space PGO for cache/tlb effects and has had abiding interest in runtime code generation.
+Captions: 
+	00:00:06,480 --> 00:00:12,400
+and today i'll be talking about
+
+00:00:08,240 --> 00:00:12,400
+a dynamic power word block ops
+
+00:00:13,519 --> 00:00:18,000
+so i start off talking about the
+
+00:00:15,839 --> 00:00:20,480
+motivation for this feature
+
+00:00:18,000 --> 00:00:23,600
+then i'll talk about the state machine
+
+00:00:20,480 --> 00:00:23,600
+for qt spin locks
+
+00:00:23,680 --> 00:00:30,160
+and then i'll talk about you know
+
+00:00:27,199 --> 00:00:31,760
+what does switching pv lock ops what
+
+00:00:30,160 --> 00:00:34,160
+what does that involve
+
+00:00:31,760 --> 00:00:36,800
+mostly the requirements and you know
+
+00:00:34,160 --> 00:00:38,640
+what do we need for safety
+
+00:00:36,800 --> 00:00:41,120
+and then i'll talk about the patching
+
+00:00:38,640 --> 00:00:44,719
+mechanism which is breakpoint based
+
+00:00:41,120 --> 00:00:47,920
+and the the design and and
+
+00:00:44,719 --> 00:00:51,440
+implementation of v1 and then the design
+
+00:00:47,920 --> 00:00:53,199
+of the v2 for this feature
+
+00:00:51,440 --> 00:00:54,960
+so this whole thing started with wanting
+
+00:00:53,199 --> 00:00:57,520
+yes to be more dynamic
+
+00:00:54,960 --> 00:00:58,399
+and dynamic specifically in the sense
+
+00:00:57,520 --> 00:01:01,760
+that
+
+00:00:58,399 --> 00:01:04,640
+uh kvm advertises to guests
+
+00:01:01,760 --> 00:01:05,519
+um i gave him host advertisers to to
+
+00:01:04,640 --> 00:01:09,200
+guess
+
+00:01:05,519 --> 00:01:12,240
+you know this uh feature whether the
+
+00:01:09,200 --> 00:01:15,439
+the vcpus for the for the guest
+
+00:01:12,240 --> 00:01:16,159
+are over subscribed or not and if
+
+00:01:15,439 --> 00:01:18,880
+they're not
+
+00:01:16,159 --> 00:01:20,000
+then in quite a lot of specs it's fairly
+
+00:01:18,880 --> 00:01:22,080
+similar to bare metal
+
+00:01:20,000 --> 00:01:23,119
+where you know at least you know that a
+
+00:01:22,080 --> 00:01:28,159
+different uh
+
+00:01:23,119 --> 00:01:32,320
+process will not schedule out your vcpu
+
+00:01:28,159 --> 00:01:35,280
+and and and so if the center's true uh
+
+00:01:32,320 --> 00:01:36,640
+a kvm guest would basically use native
+
+00:01:35,280 --> 00:01:40,000
+pb locks
+
+00:01:36,640 --> 00:01:42,960
+if it isn't uh meaning
+
+00:01:40,000 --> 00:01:43,520
+it is possible that that your uh threads
+
+00:01:42,960 --> 00:01:45,600
+vcp
+
+00:01:43,520 --> 00:01:48,880
+threads can get scheduled out you use
+
+00:01:45,600 --> 00:01:52,000
+power word pb lock ops
+
+00:01:48,880 --> 00:01:55,360
+and that's
+
+00:01:52,000 --> 00:01:58,719
+that's good except that if
+
+00:01:55,360 --> 00:02:01,200
+this this hint becomes
+
+00:01:58,719 --> 00:02:02,479
+untrue at some point in the lifetime of
+
+00:02:01,200 --> 00:02:05,520
+the guest
+
+00:02:02,479 --> 00:02:08,319
+um you know the host could
+
+00:02:05,520 --> 00:02:10,319
+could move to an over subscribe mode for
+
+00:02:08,319 --> 00:02:14,000
+for whatever reason and the guest has
+
+00:02:10,319 --> 00:02:15,280
+um no control over that then typically
+
+00:02:14,000 --> 00:02:17,280
+you know the guest would see soft
+
+00:02:15,280 --> 00:02:19,280
+lockups
+
+00:02:17,280 --> 00:02:20,319
+and and you know the the recommended fix
+
+00:02:19,280 --> 00:02:21,840
+for this is that
+
+00:02:20,319 --> 00:02:24,400
+a host should only advertise this
+
+00:02:21,840 --> 00:02:26,640
+particular feature
+
+00:02:24,400 --> 00:02:27,760
+at this particular hint if it can
+
+00:02:26,640 --> 00:02:31,200
+guarantee
+
+00:02:27,760 --> 00:02:35,040
+the hint for the lifetime of the guest
+
+00:02:31,200 --> 00:02:38,959
+now that seems kind of reasonable but
+
+00:02:35,040 --> 00:02:38,959
+it it does seem unsatisfying
+
+00:02:41,120 --> 00:02:45,760
+uh given that most of this presentation
+
+00:02:43,519 --> 00:02:48,239
+is about
+
+00:02:45,760 --> 00:02:50,160
+switching power logs which are based on
+
+00:02:48,239 --> 00:02:52,160
+on cued spin logs
+
+00:02:50,160 --> 00:02:54,800
+let's uh you know go over some of the
+
+00:02:52,160 --> 00:02:58,239
+interfaces involved
+
+00:02:54,800 --> 00:02:59,760
+um so there are five interfaces for this
+
+00:02:58,239 --> 00:03:02,560
+and you know you can see them all of
+
+00:02:59,760 --> 00:03:05,360
+them outlined in blue
+
+00:03:02,560 --> 00:03:06,239
+interestingly the the one interface
+
+00:03:05,360 --> 00:03:09,440
+which is
+
+00:03:06,239 --> 00:03:12,640
+which is not a pv lockup is
+
+00:03:09,440 --> 00:03:15,519
+huge spinner spin lock
+
+00:03:12,640 --> 00:03:17,280
+and and that's pretty interesting and
+
+00:03:15,519 --> 00:03:20,959
+and you know that's the fact that
+
+00:03:17,280 --> 00:03:22,239
+that causes a fair amount of trouble
+
+00:03:20,959 --> 00:03:24,159
+you know when you're dominant switching
+
+00:03:22,239 --> 00:03:25,360
+these because now you have no way of
+
+00:03:24,159 --> 00:03:28,879
+getting
+
+00:03:25,360 --> 00:03:32,080
+entry into um
+
+00:03:28,879 --> 00:03:36,879
+into the state machine essentially right
+
+00:03:32,080 --> 00:03:39,840
+um you you can get the pv lock ops
+
+00:03:36,879 --> 00:03:40,720
+but you cannot get cued spin lock for
+
+00:03:39,840 --> 00:03:43,040
+one thing you don't
+
+00:03:40,720 --> 00:03:44,720
+even know or you know all the call sides
+
+00:03:43,040 --> 00:03:48,159
+that cudespinlock
+
+00:03:44,720 --> 00:03:50,560
+is called from um
+
+00:03:48,159 --> 00:03:51,920
+so the other notable thing in this state
+
+00:03:50,560 --> 00:03:55,200
+machine
+
+00:03:51,920 --> 00:03:57,280
+is is you know the squiggly lines so
+
+00:03:55,200 --> 00:03:58,799
+all of the interfaces on the other side
+
+00:03:57,280 --> 00:04:02,720
+of those that's basically
+
+00:03:58,799 --> 00:04:03,200
+fate kick vcpu is preempted is somewhat
+
+00:04:02,720 --> 00:04:06,000
+special
+
+00:04:03,200 --> 00:04:07,840
+i'll come to it but uh weight and kick
+
+00:04:06,000 --> 00:04:11,599
+are basically no ops for
+
+00:04:07,840 --> 00:04:15,920
+for the native case um did
+
+00:04:11,599 --> 00:04:19,440
+which of course i mean make sense um
+
+00:04:15,920 --> 00:04:22,880
+for the in kvm weight is kvm weight
+
+00:04:19,440 --> 00:04:26,000
+it basically goes and does a halt
+
+00:04:22,880 --> 00:04:30,320
+uh in in the host and and kick
+
+00:04:26,000 --> 00:04:32,479
+essentially it does a kvm hyper call
+
+00:04:30,320 --> 00:04:33,360
+and you know it it does what you would
+
+00:04:32,479 --> 00:04:36,479
+really expect
+
+00:04:33,360 --> 00:04:38,720
+so now having seen the state machine
+
+00:04:36,479 --> 00:04:40,000
+let's go a little bit into why don't we
+
+00:04:38,720 --> 00:04:43,040
+just use parallel locks
+
+00:04:40,000 --> 00:04:46,560
+uh all the time um
+
+00:04:43,040 --> 00:04:47,280
+so you can see that you know the unlock
+
+00:04:46,560 --> 00:04:49,199
+fast path
+
+00:04:47,280 --> 00:04:50,320
+is different for for both of them and
+
+00:04:49,199 --> 00:04:53,280
+this slide doesn't say
+
+00:04:50,320 --> 00:04:54,960
+which is which but i'm sure it's easy to
+
+00:04:53,280 --> 00:04:57,680
+guess that you know the native case
+
+00:04:54,960 --> 00:04:58,160
+it's just literally a move the parallel
+
+00:04:57,680 --> 00:05:00,320
+case
+
+00:04:58,160 --> 00:05:01,440
+is a lot compare exchange and uh you
+
+00:05:00,320 --> 00:05:03,360
+know
+
+00:05:01,440 --> 00:05:04,639
+if that comparison fails you you take
+
+00:05:03,360 --> 00:05:07,919
+the slow path
+
+00:05:04,639 --> 00:05:12,160
+where you find the next node and
+
+00:05:07,919 --> 00:05:14,479
+kick it um and i mean clearly they are
+
+00:05:12,160 --> 00:05:18,000
+optimized for different use cases but
+
+00:05:14,479 --> 00:05:20,639
+you would pay the extra cost of a
+
+00:05:18,000 --> 00:05:22,840
+compare exchange even when you don't
+
+00:05:20,639 --> 00:05:26,800
+don't need it
+
+00:05:22,840 --> 00:05:28,639
+um okay another example is that queued
+
+00:05:26,800 --> 00:05:31,360
+spin lock slow path
+
+00:05:28,639 --> 00:05:32,800
+it's uh pessimistic by default for for
+
+00:05:31,360 --> 00:05:36,080
+parabot
+
+00:05:32,800 --> 00:05:38,880
+uh so in the native case yes you know um
+
+00:05:36,080 --> 00:05:39,280
+cued spin lock slow path would um you
+
+00:05:38,880 --> 00:05:42,560
+know
+
+00:05:39,280 --> 00:05:45,280
+spin for a little bit uh and then
+
+00:05:42,560 --> 00:05:45,840
+queue up uh if it still hasn't gotten a
+
+00:05:45,280 --> 00:05:48,479
+lock
+
+00:05:45,840 --> 00:05:50,160
+powered case the first thing it does is
+
+00:05:48,479 --> 00:05:54,080
+it gets the mcs node
+
+00:05:50,160 --> 00:05:55,440
+you know incorporation to connect you up
+
+00:05:54,080 --> 00:05:58,080
+all right now that i've hopefully
+
+00:05:55,440 --> 00:05:58,560
+convinced you uh on why we need this
+
+00:05:58,080 --> 00:06:02,000
+feature
+
+00:05:58,560 --> 00:06:04,639
+what does it involve
+
+00:06:02,000 --> 00:06:06,240
+so fundamentally what you need to do is
+
+00:06:04,639 --> 00:06:08,080
+you have five interfaces
+
+00:06:06,240 --> 00:06:10,479
+um these are spread all over you know
+
+00:06:08,080 --> 00:06:12,960
+the kernel modules and so on
+
+00:06:10,479 --> 00:06:14,160
+and you need to switch all of them
+
+00:06:12,960 --> 00:06:18,000
+atomically
+
+00:06:14,160 --> 00:06:20,880
+what does actually switching them
+
+00:06:18,000 --> 00:06:21,199
+involve so you know this is the example
+
+00:06:20,880 --> 00:06:24,479
+of
+
+00:06:21,199 --> 00:06:27,360
+spin unlock so you have to transform
+
+00:06:24,479 --> 00:06:28,560
+between the the op codes between you
+
+00:06:27,360 --> 00:06:31,919
+know one of uh
+
+00:06:28,560 --> 00:06:33,600
+from one to the other uh sequence
+
+00:06:31,919 --> 00:06:35,360
+and of course you might be doing it like
+
+00:06:33,600 --> 00:06:38,479
+multiple times
+
+00:06:35,360 --> 00:06:38,880
+um so the native cute spin unlock as i
+
+00:06:38,479 --> 00:06:42,639
+think
+
+00:06:38,880 --> 00:06:46,000
+i showed in a previous slide it's
+
+00:06:42,639 --> 00:06:51,360
+it's basically a move three bytes and
+
+00:06:46,000 --> 00:06:54,160
+a four byte nope the pvq spin unlock
+
+00:06:51,360 --> 00:06:54,880
+is a is a call to the actual function
+
+00:06:54,160 --> 00:06:58,080
+which you know
+
+00:06:54,880 --> 00:07:00,560
+does the qa and it's an exchange
+
+00:06:58,080 --> 00:07:01,199
+uh which is basically a two byte knob
+
+00:07:00,560 --> 00:07:03,840
+the
+
+00:07:01,199 --> 00:07:04,639
+the call is interesting because no it's
+
+00:07:03,840 --> 00:07:07,680
+a call
+
+00:07:04,639 --> 00:07:08,639
+now you imagine a different cpu is doing
+
+00:07:07,680 --> 00:07:12,479
+the patching
+
+00:07:08,639 --> 00:07:15,199
+um while you know one cpu is in the pvq
+
+00:07:12,479 --> 00:07:16,560
+it's been unlocked call
+
+00:07:15,199 --> 00:07:18,479
+and and it's called you know whatever
+
+00:07:16,560 --> 00:07:21,599
+this address might be
+
+00:07:18,479 --> 00:07:23,280
+when it when the sky returns uh the
+
+00:07:21,599 --> 00:07:26,240
+queued spin unlocked when it returns
+
+00:07:23,280 --> 00:07:27,039
+from the call it returns to address 5
+
+00:07:26,240 --> 00:07:31,840
+and
+
+00:07:27,039 --> 00:07:31,840
+it expects to execute 66.90
+
+00:07:32,400 --> 00:07:40,720
+however if you have managed to
+
+00:07:36,639 --> 00:07:40,720
+finish the the switching by that point
+
+00:07:41,199 --> 00:07:48,000
+the contents of address five here
+
+00:07:44,560 --> 00:07:50,240
+are four zero zero zero
+
+00:07:48,000 --> 00:07:51,039
+and as you can imagine that probably
+
+00:07:50,240 --> 00:07:53,599
+will not go
+
+00:07:51,039 --> 00:07:53,599
+very well
+
+00:07:54,960 --> 00:07:58,879
+and you know just to be able to point a
+
+00:07:56,960 --> 00:08:00,960
+little bit more
+
+00:07:58,879 --> 00:08:02,240
+uh you might you might have other ops
+
+00:08:00,960 --> 00:08:06,080
+which uh
+
+00:08:02,240 --> 00:08:10,800
+similarly go from a call plus no op 2
+
+00:08:06,080 --> 00:08:10,800
+to just to know up 7 or back
+
+00:08:11,280 --> 00:08:15,199
+uh now one nice thing is that spinlocks
+
+00:08:14,319 --> 00:08:16,800
+cannot sleep
+
+00:08:15,199 --> 00:08:18,639
+they could be present for for active
+
+00:08:16,800 --> 00:08:23,919
+threats but they will not be present for
+
+00:08:18,639 --> 00:08:23,919
+sleeping threats and and that's great
+
+00:08:24,879 --> 00:08:32,159
+all right so what are the possible
+
+00:08:28,560 --> 00:08:34,159
+active users uh
+
+00:08:32,159 --> 00:08:35,599
+of spinlocks while we are doing this
+
+00:08:34,159 --> 00:08:37,599
+patching
+
+00:08:35,599 --> 00:08:38,959
+so it's really the standard suspects you
+
+00:08:37,599 --> 00:08:41,760
+have tasks you have
+
+00:08:38,959 --> 00:08:42,719
+software queues you have interrupt
+
+00:08:41,760 --> 00:08:45,360
+handlers
+
+00:08:42,719 --> 00:08:46,959
+you have nmi handlers the the only thing
+
+00:08:45,360 --> 00:08:50,480
+which might not be taking spin lock
+
+00:08:46,959 --> 00:08:52,399
+is if it's in a user thread context
+
+00:08:50,480 --> 00:08:54,000
+interrupt handlers especially are
+
+00:08:52,399 --> 00:08:56,720
+interesting because
+
+00:08:54,000 --> 00:08:57,360
+uh the mechanism which i i'll describe a
+
+00:08:56,720 --> 00:09:00,959
+little more
+
+00:08:57,360 --> 00:09:04,000
+uh in a later slide is textbook pp
+
+00:09:00,959 --> 00:09:08,800
+which uses breakpoints and
+
+00:09:04,000 --> 00:09:11,680
+it's essentially a three-phased um
+
+00:09:08,800 --> 00:09:12,160
+patching process for for each call side
+
+00:09:11,680 --> 00:09:16,000
+and
+
+00:09:12,160 --> 00:09:19,200
+and so you would you know do a
+
+00:09:16,000 --> 00:09:20,959
+write write an op code um
+
+00:09:19,200 --> 00:09:22,480
+after you've finished writing the op
+
+00:09:20,959 --> 00:09:24,240
+code you need to synchro
+
+00:09:22,480 --> 00:09:26,480
+you need to ensure that all cpu
+
+00:09:24,240 --> 00:09:28,800
+pipelines they're synchronized
+
+00:09:26,480 --> 00:09:30,000
+um so the caches are synchronized by by
+
+00:09:28,800 --> 00:09:31,600
+default
+
+00:09:30,000 --> 00:09:33,920
+what you have to worry about is the
+
+00:09:31,600 --> 00:09:36,320
+pipeline synchronization
+
+00:09:33,920 --> 00:09:39,680
+um because it's possible that you know
+
+00:09:36,320 --> 00:09:42,320
+you have the pipeline cache which has
+
+00:09:39,680 --> 00:09:44,080
+uh which is prefetched prefetched you
+
+00:09:42,320 --> 00:09:45,760
+know some of these instructions
+
+00:09:44,080 --> 00:09:48,959
+uh maybe they've been decoded into
+
+00:09:45,760 --> 00:09:52,880
+microps and so on
+
+00:09:48,959 --> 00:09:55,600
+so so the ipi is sent out to
+
+00:09:52,880 --> 00:09:56,080
+to essentially synchronize the pipeline
+
+00:09:55,600 --> 00:09:58,000
+and
+
+00:09:56,080 --> 00:10:00,560
+essentially what happens in the ipi is
+
+00:09:58,000 --> 00:10:04,000
+that you know when the remote cpu
+
+00:10:00,560 --> 00:10:06,240
+receives an api it executes uh or it'll
+
+00:10:04,000 --> 00:10:08,640
+eventually execute an audit
+
+00:10:06,240 --> 00:10:10,560
+to make sure that it synchronizes the
+
+00:10:08,640 --> 00:10:15,440
+pipeline system fetches the
+
+00:10:10,560 --> 00:10:18,480
+the recent the latest version of
+
+00:10:15,440 --> 00:10:21,920
+instructions written so
+
+00:10:18,480 --> 00:10:24,160
+ipis also takes pin locks
+
+00:10:21,920 --> 00:10:28,800
+so so yeah we need to be kind of
+
+00:10:24,160 --> 00:10:30,800
+prepared for it or handle it in some way
+
+00:10:28,800 --> 00:10:32,000
+all right now let's talk a little bit
+
+00:10:30,800 --> 00:10:34,959
+about the mechanism
+
+00:10:32,000 --> 00:10:36,959
+that we use for this so the mechanism is
+
+00:10:34,959 --> 00:10:40,000
+a fairly standard uh
+
+00:10:36,959 --> 00:10:40,399
+linux mechanism um which which we use
+
+00:10:40,000 --> 00:10:42,640
+for
+
+00:10:40,399 --> 00:10:44,160
+modifying cross modifying code uh
+
+00:10:42,640 --> 00:10:47,839
+there's a there's a typo
+
+00:10:44,160 --> 00:10:47,839
+in that in the second line
+
+00:10:47,920 --> 00:10:54,320
+uh the problem it solves is of
+
+00:10:51,040 --> 00:10:57,680
+patching while potentially executing
+
+00:10:54,320 --> 00:11:00,399
+code that is being patched and
+
+00:10:57,680 --> 00:11:02,560
+the the great thing about this is that
+
+00:11:00,399 --> 00:11:06,000
+it's a single byte instruction
+
+00:11:02,560 --> 00:11:07,360
+um so
+
+00:11:06,000 --> 00:11:09,279
+so you know that you can always
+
+00:11:07,360 --> 00:11:12,560
+atomically both
+
+00:11:09,279 --> 00:11:12,560
+write it and execute it
+
+00:11:12,839 --> 00:11:19,680
+um and the the way you use it
+
+00:11:16,160 --> 00:11:21,760
+is by writing the replacing the first
+
+00:11:19,680 --> 00:11:24,399
+byte of the sequence that you are
+
+00:11:21,760 --> 00:11:25,920
+that you're modifying by you know the
+
+00:11:24,399 --> 00:11:29,120
+soft code
+
+00:11:25,920 --> 00:11:32,880
+um it serves as a barrier to
+
+00:11:29,120 --> 00:11:34,000
+to to entry uh the the one thing that
+
+00:11:32,880 --> 00:11:37,839
+you do need for that
+
+00:11:34,000 --> 00:11:39,600
+is that uh this instruction sequence
+
+00:11:37,839 --> 00:11:42,560
+that that you are in the process of
+
+00:11:39,600 --> 00:11:44,880
+writing should have just one entry uh
+
+00:11:42,560 --> 00:11:45,839
+from you know it should only be entered
+
+00:11:44,880 --> 00:11:48,399
+from the first by
+
+00:11:45,839 --> 00:11:51,120
+from the from the first byte which you
+
+00:11:48,399 --> 00:11:53,920
+just replaced with 0xcc
+
+00:11:51,120 --> 00:11:55,680
+and you know if if this barrier gets hit
+
+00:11:53,920 --> 00:11:59,040
+uh the controlled flow shifts
+
+00:11:55,680 --> 00:12:00,000
+in three handler and in the in 300 based
+
+00:11:59,040 --> 00:12:02,959
+on the
+
+00:12:00,000 --> 00:12:03,920
+on the address of where this was hit you
+
+00:12:02,959 --> 00:12:07,600
+know
+
+00:12:03,920 --> 00:12:09,200
+um you you know what
+
+00:12:07,600 --> 00:12:11,279
+what is the sequence that was supposed
+
+00:12:09,200 --> 00:12:13,680
+to be there or you know
+
+00:12:11,279 --> 00:12:15,680
+that you know that was a pv lock-off or
+
+00:12:13,680 --> 00:12:19,519
+what have you so so you know
+
+00:12:15,680 --> 00:12:24,320
+what you should emulate now
+
+00:12:19,519 --> 00:12:27,040
+and and p-lock-ops
+
+00:12:24,320 --> 00:12:28,079
+they they start their life when the
+
+00:12:27,040 --> 00:12:30,880
+kernel boots
+
+00:12:28,079 --> 00:12:31,279
+as indirect calls so fundamentally you
+
+00:12:30,880 --> 00:12:33,279
+are
+
+00:12:31,279 --> 00:12:35,040
+really just just executing those
+
+00:12:33,279 --> 00:12:36,079
+indirect calls which are functionally
+
+00:12:35,040 --> 00:12:38,079
+equivalent
+
+00:12:36,079 --> 00:12:39,440
+to the to the opcodes that were stored
+
+00:12:38,079 --> 00:12:42,880
+here
+
+00:12:39,440 --> 00:12:46,240
+all right uh now let's talk about what
+
+00:12:42,880 --> 00:12:46,240
+we actually do in v1
+
+00:12:46,320 --> 00:12:50,160
+so one way of sidestepping you know a
+
+00:12:48,720 --> 00:12:52,800
+lot of the difficulties i
+
+00:12:50,160 --> 00:12:55,200
+outlined earlier is basically to use
+
+00:12:52,800 --> 00:12:57,839
+stop machine
+
+00:12:55,200 --> 00:12:58,480
+um so how we use it is basically there's
+
+00:12:57,839 --> 00:13:01,760
+a
+
+00:12:58,480 --> 00:13:04,720
+patching cpu the cpu patcher and
+
+00:13:01,760 --> 00:13:06,480
+a bunch of you know secondary cpus all
+
+00:13:04,720 --> 00:13:08,959
+of them essentially work in a
+
+00:13:06,480 --> 00:13:10,000
+lock step state machine interrupts are
+
+00:13:08,959 --> 00:13:13,040
+disabled
+
+00:13:10,000 --> 00:13:16,399
+you don't need ipis uh for
+
+00:13:13,040 --> 00:13:19,440
+sync core um
+
+00:13:16,399 --> 00:13:21,120
+and you also know that
+
+00:13:19,440 --> 00:13:22,560
+given that you are essentially hogging
+
+00:13:21,120 --> 00:13:26,560
+all the vcpus
+
+00:13:22,560 --> 00:13:27,200
+uh all the cpus you know that no pv lock
+
+00:13:26,560 --> 00:13:29,279
+ops
+
+00:13:27,200 --> 00:13:31,040
+are on the stack because you know all
+
+00:13:29,279 --> 00:13:33,040
+other threads are scheduled out
+
+00:13:31,040 --> 00:13:34,160
+and you are not executing any pv
+
+00:13:33,040 --> 00:13:37,360
+lock-offs
+
+00:13:34,160 --> 00:13:37,360
+so it's a cowardly way of
+
+00:13:38,079 --> 00:13:45,839
+getting rid of a lot of the difficulties
+
+00:13:41,360 --> 00:13:49,839
+and the the only remaining risk
+
+00:13:45,839 --> 00:13:54,079
+is is and because you know nmis can come
+
+00:13:49,839 --> 00:13:55,519
+they can on on the primary or the
+
+00:13:54,079 --> 00:13:58,000
+secondary
+
+00:13:55,519 --> 00:13:58,000
+or both
+
+00:13:59,839 --> 00:14:06,320
+and you know the nmi handler
+
+00:14:02,959 --> 00:14:09,360
+can then you know execute a spin lock
+
+00:14:06,320 --> 00:14:11,040
+um this so that's been locked if you're
+
+00:14:09,360 --> 00:14:14,320
+modifying that particular site
+
+00:14:11,040 --> 00:14:16,639
+right then would end up going to the
+
+00:14:14,320 --> 00:14:18,079
+in three handler and you know you could
+
+00:14:16,639 --> 00:14:20,959
+have a deadlock there
+
+00:14:18,079 --> 00:14:21,920
+so so to avoid that the m3 handler also
+
+00:14:20,959 --> 00:14:24,000
+needs to implement
+
+00:14:21,920 --> 00:14:25,279
+a subset of the state machine it
+
+00:14:24,000 --> 00:14:29,199
+essentially
+
+00:14:25,279 --> 00:14:30,800
+uh because all cpus are participating in
+
+00:14:29,199 --> 00:14:32,800
+the state machine
+
+00:14:30,800 --> 00:14:34,720
+you have to kind of ensure that the
+
+00:14:32,800 --> 00:14:38,000
+state machine keeps moving
+
+00:14:34,720 --> 00:14:39,440
+and uh and and you know whichever
+
+00:14:38,000 --> 00:14:40,560
+context you are in whether in thread
+
+00:14:39,440 --> 00:14:43,600
+context
+
+00:14:40,560 --> 00:14:46,399
+or in three context and
+
+00:14:43,600 --> 00:14:48,399
+with that you can make forward progress
+
+00:14:46,399 --> 00:14:50,399
+um
+
+00:14:48,399 --> 00:14:52,000
+if you have multiple nmis that
+
+00:14:50,399 --> 00:14:56,480
+complicates matters somewhat
+
+00:14:52,000 --> 00:14:56,480
+but i won't go into that right now
+
+00:14:56,880 --> 00:15:00,880
+all right so this is kind of an example
+
+00:14:59,440 --> 00:15:03,920
+of um
+
+00:15:00,880 --> 00:15:06,560
+what the state machine really looks like
+
+00:15:03,920 --> 00:15:07,120
+normally you would you would use iprs to
+
+00:15:06,560 --> 00:15:09,440
+to do
+
+00:15:07,120 --> 00:15:10,240
+some of this here as you can see you
+
+00:15:09,440 --> 00:15:13,519
+know
+
+00:15:10,240 --> 00:15:16,959
+the cpux essentially uh does
+
+00:15:13,519 --> 00:15:19,920
+uh has does smp con
+
+00:15:16,959 --> 00:15:21,839
+load uh with require semantics to you
+
+00:15:19,920 --> 00:15:25,040
+know progress to the next stage
+
+00:15:21,839 --> 00:15:26,880
+now what is each stage so
+
+00:15:25,040 --> 00:15:28,320
+uh the the commented out section
+
+00:15:26,880 --> 00:15:31,040
+actually goes through you know
+
+00:15:28,320 --> 00:15:32,560
+how the the op codes are really arranged
+
+00:15:31,040 --> 00:15:37,519
+so the first step is
+
+00:15:32,560 --> 00:15:39,600
+you you just patch the the end three
+
+00:15:37,519 --> 00:15:41,759
+that's that's what the patcher does it
+
+00:15:39,600 --> 00:15:42,959
+just replaces the first byte within
+
+00:15:41,759 --> 00:15:46,000
+three
+
+00:15:42,959 --> 00:15:48,000
+it does a local sync and it's
+
+00:15:46,000 --> 00:15:49,120
+you know changes some state with release
+
+00:15:48,000 --> 00:15:53,199
+semantics
+
+00:15:49,120 --> 00:15:55,519
+um and all the secondary cpus
+
+00:15:53,199 --> 00:15:57,199
+they basically do acquire for that state
+
+00:15:55,519 --> 00:15:59,440
+you know so the state will be saying
+
+00:15:57,199 --> 00:16:01,680
+three written
+
+00:15:59,440 --> 00:16:03,680
+once they see that you know essentially
+
+00:16:01,680 --> 00:16:07,519
+e3 has been written
+
+00:16:03,680 --> 00:16:09,600
+they do the sync then you know you can
+
+00:16:07,519 --> 00:16:10,720
+go and safely uh the patchwork cpu can
+
+00:16:09,600 --> 00:16:14,320
+go and safely write
+
+00:16:10,720 --> 00:16:16,959
+the rest of uh the state a rest of the
+
+00:16:14,320 --> 00:16:18,160
+opcode bits and you know anybody trying
+
+00:16:16,959 --> 00:16:20,560
+to execute this
+
+00:16:18,160 --> 00:16:22,079
+would at this point in time end up in
+
+00:16:20,560 --> 00:16:25,199
+the in the in 300
+
+00:16:22,079 --> 00:16:28,320
+right uh yeah so so you
+
+00:16:25,199 --> 00:16:29,040
+write the rest of the state um you make
+
+00:16:28,320 --> 00:16:33,440
+sure that
+
+00:16:29,040 --> 00:16:36,399
+uh that the patcher has written it um
+
+00:16:33,440 --> 00:16:38,240
+on on the secondaries if it has you you
+
+00:16:36,399 --> 00:16:40,959
+do your sync
+
+00:16:38,240 --> 00:16:42,560
+and then all that remains is for the
+
+00:16:40,959 --> 00:16:46,399
+patching cpu to write the first
+
+00:16:42,560 --> 00:16:50,959
+byte which it does and your iteration is
+
+00:16:46,399 --> 00:16:54,000
+is complete it works
+
+00:16:50,959 --> 00:16:55,120
+the only problem is this is stock
+
+00:16:54,000 --> 00:16:58,240
+machine which
+
+00:16:55,120 --> 00:17:01,360
+kind of sucks and
+
+00:16:58,240 --> 00:17:04,240
+um you know when i send the stop stream
+
+00:17:01,360 --> 00:17:04,480
+there was a review comment which i think
+
+00:17:04,240 --> 00:17:07,039
+in
+
+00:17:04,480 --> 00:17:10,000
+in hindsight was pretty understated
+
+00:17:07,039 --> 00:17:13,280
+which called it bonkett's crazy code
+
+00:17:10,000 --> 00:17:16,640
+so so now v2
+
+00:17:13,280 --> 00:17:20,640
+so you want to patch multiple
+
+00:17:16,640 --> 00:17:24,160
+sites atomically right
+
+00:17:20,640 --> 00:17:25,520
+uh your other cpus could be executing
+
+00:17:24,160 --> 00:17:28,959
+arbitrary code
+
+00:17:25,520 --> 00:17:28,959
+including spin lock code
+
+00:17:29,200 --> 00:17:33,679
+um and in any case you know patching
+
+00:17:32,320 --> 00:17:35,919
+even a single site
+
+00:17:33,679 --> 00:17:36,799
+is not atomic there are multiple steps
+
+00:17:35,919 --> 00:17:40,960
+and each step
+
+00:17:36,799 --> 00:17:44,559
+um even in itself can get interrupted
+
+00:17:40,960 --> 00:17:44,559
+by an nmi
+
+00:17:45,679 --> 00:17:49,600
+all right so so the first step is you
+
+00:17:48,480 --> 00:17:55,120
+first introduce
+
+00:17:49,600 --> 00:17:55,120
+a site local barrier everywhere
+
+00:17:55,520 --> 00:18:01,679
+and the
+
+00:17:59,200 --> 00:18:02,960
+what this allows you to do is it allows
+
+00:18:01,679 --> 00:18:06,320
+you to control
+
+00:18:02,960 --> 00:18:08,480
+what executes so until the site local
+
+00:18:06,320 --> 00:18:11,520
+barrier is everywhere
+
+00:18:08,480 --> 00:18:12,320
+um you know you just emulate the old
+
+00:18:11,520 --> 00:18:16,720
+code
+
+00:18:12,320 --> 00:18:19,520
+so once step one is done um
+
+00:18:16,720 --> 00:18:20,960
+you need to introduce a global barrier
+
+00:18:19,520 --> 00:18:22,880
+um
+
+00:18:20,960 --> 00:18:24,160
+and the idea behind the global barrier
+
+00:18:22,880 --> 00:18:27,679
+is
+
+00:18:24,160 --> 00:18:30,160
+that before this this barrier
+
+00:18:27,679 --> 00:18:31,840
+you are only going to be executing all
+
+00:18:30,160 --> 00:18:34,880
+pb lock-ups
+
+00:18:31,840 --> 00:18:38,480
+after this barrier you execute only new
+
+00:18:34,880 --> 00:18:41,679
+new orbs the
+
+00:18:38,480 --> 00:18:45,360
+the important condition for this barrier
+
+00:18:41,679 --> 00:18:45,360
+is that there should be no
+
+00:18:46,400 --> 00:18:52,799
+spin locks uh and and thus you know no
+
+00:18:50,000 --> 00:18:55,760
+executing pv lock ups in the system
+
+00:18:52,799 --> 00:18:56,000
+and and once you have transitioned you
+
+00:18:55,760 --> 00:18:59,280
+know
+
+00:18:56,000 --> 00:18:59,919
+to the the new pv or co-ops you're kind
+
+00:18:59,280 --> 00:19:02,240
+of done
+
+00:18:59,919 --> 00:19:03,039
+all you need to do is you need to stop
+
+00:19:02,240 --> 00:19:06,640
+emulating
+
+00:19:03,039 --> 00:19:08,720
+so you go back and and uh replace the
+
+00:19:06,640 --> 00:19:11,919
+entry that you that you prefixed with
+
+00:19:08,720 --> 00:19:11,919
+the with the real op code
+
+00:19:13,760 --> 00:19:19,679
+okay so so you know most of the
+
+00:19:16,880 --> 00:19:20,400
+the work is really in the in the global
+
+00:19:19,679 --> 00:19:22,240
+barrier
+
+00:19:20,400 --> 00:19:24,880
+how do we actually get a global barrier
+
+00:19:22,240 --> 00:19:26,240
+when you have multiple vcpus
+
+00:19:24,880 --> 00:19:28,080
+fundamentally what you need to do is you
+
+00:19:26,240 --> 00:19:30,080
+need to count all spin locks under
+
+00:19:28,080 --> 00:19:32,480
+execution
+
+00:19:30,080 --> 00:19:33,600
+and uh the counting needs to happen in
+
+00:19:32,480 --> 00:19:35,520
+the in three hander
+
+00:19:33,600 --> 00:19:38,480
+which is good you know a single point
+
+00:19:35,520 --> 00:19:41,840
+where everything kind of converges
+
+00:19:38,480 --> 00:19:42,640
+uh of course there is no real way of
+
+00:19:41,840 --> 00:19:46,160
+counting
+
+00:19:42,640 --> 00:19:47,440
+spin locks uh good spin lock is is not a
+
+00:19:46,160 --> 00:19:51,360
+pv lock op
+
+00:19:47,440 --> 00:19:53,520
+so so so you don't even know where
+
+00:19:51,360 --> 00:19:55,520
+where all of them are in the in the
+
+00:19:53,520 --> 00:19:58,880
+kernel or in the modules
+
+00:19:55,520 --> 00:20:01,120
+all that you have uh is
+
+00:19:58,880 --> 00:20:02,240
+what you can get via the in three
+
+00:20:01,120 --> 00:20:04,400
+handler
+
+00:20:02,240 --> 00:20:05,440
+which is the rest of the five op codes
+
+00:20:04,400 --> 00:20:09,520
+not uh
+
+00:20:05,440 --> 00:20:11,600
+spin lock um
+
+00:20:09,520 --> 00:20:12,559
+what's the property that this global
+
+00:20:11,600 --> 00:20:16,960
+barrier
+
+00:20:12,559 --> 00:20:19,120
+uh holds essentially
+
+00:20:16,960 --> 00:20:20,559
+so so the barrier itself is is you know
+
+00:20:19,120 --> 00:20:23,679
+pretty simple
+
+00:20:20,559 --> 00:20:26,480
+um you either via rcu
+
+00:20:23,679 --> 00:20:27,679
+or or above queue or something that you
+
+00:20:26,480 --> 00:20:32,000
+essentially execute
+
+00:20:27,679 --> 00:20:34,880
+this patch barrier on all cpus
+
+00:20:32,000 --> 00:20:36,720
+except for the worker let's say this is
+
+00:20:34,880 --> 00:20:38,159
+in the queue context so at this point
+
+00:20:36,720 --> 00:20:40,000
+you know
+
+00:20:38,159 --> 00:20:42,000
+when you're executing this barrier you
+
+00:20:40,000 --> 00:20:45,280
+know that you're not
+
+00:20:42,000 --> 00:20:49,200
+you don't actually have any locks uh
+
+00:20:45,280 --> 00:20:52,640
+on that cpu you there are no spin locks
+
+00:20:49,200 --> 00:20:55,760
+in that context on that cpu
+
+00:20:52,640 --> 00:20:56,480
+so at that point in time you can switch
+
+00:20:55,760 --> 00:20:59,360
+that
+
+00:20:56,480 --> 00:21:03,280
+cpu to a state where it says you know
+
+00:20:59,360 --> 00:21:06,880
+barrier executed right
+
+00:21:03,280 --> 00:21:10,799
+um and then you can essentially act
+
+00:21:06,880 --> 00:21:14,799
+that yeah this the cpu has executed
+
+00:21:10,799 --> 00:21:18,320
+the barrier and that from this point on
+
+00:21:14,799 --> 00:21:20,000
+the cpu needs to count uh active lock
+
+00:21:18,320 --> 00:21:24,240
+ops
+
+00:21:20,000 --> 00:21:27,360
+active lock ops then it falls to zero
+
+00:21:24,240 --> 00:21:31,760
+um means that
+
+00:21:27,360 --> 00:21:34,559
+there are no
+
+00:21:31,760 --> 00:21:35,760
+ongoing spin locks let's say or pv lock
+
+00:21:34,559 --> 00:21:38,880
+ops really
+
+00:21:35,760 --> 00:21:40,720
+in the system and at that point it's
+
+00:21:38,880 --> 00:21:42,080
+safe to switch so that's the property in
+
+00:21:40,720 --> 00:21:45,120
+the next line
+
+00:21:42,080 --> 00:21:48,640
+all cpus have uh
+
+00:21:45,120 --> 00:21:49,039
+have executed this barrier and no active
+
+00:21:48,640 --> 00:21:52,240
+lock
+
+00:21:49,039 --> 00:21:55,360
+pops in the system um
+
+00:21:52,240 --> 00:21:56,720
+so if the first line is uh the first
+
+00:21:55,360 --> 00:22:00,640
+clause is untrue
+
+00:21:56,720 --> 00:22:03,760
+uh barrier cpus is less than uh
+
+00:22:00,640 --> 00:22:06,799
+num online cpus
+
+00:22:03,760 --> 00:22:10,080
+then you could have active lock-ups
+
+00:22:06,799 --> 00:22:10,080
+on you know uh
+
+00:22:10,880 --> 00:22:17,200
+on some on on a bunch of cpus
+
+00:22:14,080 --> 00:22:18,000
+but some of them are actually counting
+
+00:22:17,200 --> 00:22:21,360
+these
+
+00:22:18,000 --> 00:22:24,240
+active lock ups some are not
+
+00:22:21,360 --> 00:22:24,720
+but once this condition is true you know
+
+00:22:24,240 --> 00:22:27,760
+that
+
+00:22:24,720 --> 00:22:30,880
+all active lock-ups in the system are
+
+00:22:27,760 --> 00:22:30,880
+actually getting counted
+
+00:22:31,360 --> 00:22:34,720
+and and then you know there are there
+
+00:22:34,159 --> 00:22:37,120
+are
+
+00:22:34,720 --> 00:22:39,200
+issues here you know spinlock is a
+
+00:22:37,120 --> 00:22:43,039
+really hot path
+
+00:22:39,200 --> 00:22:44,880
+and uh and and so you might have to wait
+
+00:22:43,039 --> 00:22:48,080
+for a long time for this condition to be
+
+00:22:44,880 --> 00:22:49,760
+to be true um and until then you know
+
+00:22:48,080 --> 00:22:52,159
+you would kind of slow down the system
+
+00:22:49,760 --> 00:22:54,559
+but if the load is too high you can just
+
+00:22:52,159 --> 00:22:57,760
+abort and you can do things like that
+
+00:22:54,559 --> 00:23:00,880
+but um but but this condition is
+
+00:22:57,760 --> 00:23:03,679
+is uh sufficient to
+
+00:23:00,880 --> 00:23:05,039
+transition to this new stage a little
+
+00:23:03,679 --> 00:23:06,840
+more on
+
+00:23:05,039 --> 00:23:09,840
+what we are counting and how we are
+
+00:23:06,840 --> 00:23:09,840
+counting
+
+00:23:10,480 --> 00:23:14,720
+so first of all notice what we cannot
+
+00:23:12,720 --> 00:23:18,880
+count we cannot count
+
+00:23:14,720 --> 00:23:23,039
+the fast path the
+
+00:23:18,880 --> 00:23:24,720
+we have no control over cued spin lock
+
+00:23:23,039 --> 00:23:26,640
+uh that does not go through the
+
+00:23:24,720 --> 00:23:28,640
+breakpoint handler
+
+00:23:26,640 --> 00:23:30,480
+so we cannot count invocations of the
+
+00:23:28,640 --> 00:23:32,880
+fast path so there can be spin locks
+
+00:23:30,480 --> 00:23:36,080
+executing in the system
+
+00:23:32,880 --> 00:23:41,440
+uh you know you would only see
+
+00:23:36,080 --> 00:23:45,279
+them when uh they call cued spin unlock
+
+00:23:41,440 --> 00:23:48,559
+what you can count is the slow path
+
+00:23:45,279 --> 00:23:51,360
+and the great thing is that
+
+00:23:48,559 --> 00:23:52,080
+the slow path also protects the data
+
+00:23:51,360 --> 00:23:54,400
+structure
+
+00:23:52,080 --> 00:23:55,440
+because the data structure only gets
+
+00:23:54,400 --> 00:23:58,320
+accessed
+
+00:23:55,440 --> 00:23:58,320
+in the slow path
+
+00:23:58,960 --> 00:24:06,000
+or it might get accessed in the
+
+00:24:02,240 --> 00:24:09,600
+unlock if a different cpu has
+
+00:24:06,000 --> 00:24:13,039
+gone through the slow path for the same
+
+00:24:09,600 --> 00:24:14,880
+spin lock you only really need
+
+00:24:13,039 --> 00:24:16,640
+to be able to tell the difference
+
+00:24:14,880 --> 00:24:20,320
+between the two bar cue
+
+00:24:16,640 --> 00:24:23,520
+spin unlocks because you know one got
+
+00:24:20,320 --> 00:24:26,320
+one gets executed in the fast path
+
+00:24:23,520 --> 00:24:28,960
+um so you know you should not be
+
+00:24:26,320 --> 00:24:32,159
+dropping a reference there
+
+00:24:28,960 --> 00:24:33,440
+but you you take a reference in qt spin
+
+00:24:32,159 --> 00:24:34,720
+lock slow path
+
+00:24:33,440 --> 00:24:37,440
+which you should be dropping in the
+
+00:24:34,720 --> 00:24:40,480
+corresponding queued spin unlock
+
+00:24:37,440 --> 00:24:41,679
+um the the one part of data structure
+
+00:24:40,480 --> 00:24:43,760
+that gets
+
+00:24:41,679 --> 00:24:45,600
+accessed is the bit representations uh
+
+00:24:43,760 --> 00:24:46,559
+which marks whether this lock is taken
+
+00:24:45,600 --> 00:24:49,279
+or not
+
+00:24:46,559 --> 00:24:49,919
+and that is constrained to be compatible
+
+00:24:49,279 --> 00:24:52,880
+for
+
+00:24:49,919 --> 00:24:54,000
+both of the spin lock types because
+
+00:24:52,880 --> 00:24:57,120
+keyword spin lock
+
+00:24:54,000 --> 00:24:58,400
+is com is the same for you know both of
+
+00:24:57,120 --> 00:25:01,360
+the spin lock types
+
+00:24:58,400 --> 00:25:04,240
+so cued spin unlock has no choice but to
+
+00:25:01,360 --> 00:25:07,760
+use the same bridge representation
+
+00:25:04,240 --> 00:25:10,559
+and so the only remaining problem
+
+00:25:07,760 --> 00:25:11,279
+is uh being able to tell the cued spin
+
+00:25:10,559 --> 00:25:13,679
+unlocks
+
+00:25:11,279 --> 00:25:15,360
+part in in you know both of these cases
+
+00:25:13,679 --> 00:25:18,080
+and that you do by just keeping you know
+
+00:25:15,360 --> 00:25:21,120
+some sort of a perceived map
+
+00:25:18,080 --> 00:25:22,480
+and and that's all there should be to to
+
+00:25:21,120 --> 00:25:25,760
+v2
+
+00:25:22,480 --> 00:25:29,840
+you can find the code here on github
+
+00:25:25,760 --> 00:25:33,200
+v2 is mostly design documents
+
+00:25:29,840 --> 00:25:37,200
+v1 you you can get the code on github
+
+00:25:33,200 --> 00:25:42,080
+and the patches on lkml
+
+00:25:37,200 --> 00:25:44,320
+and thanks for tuning the talk
+
+00:25:42,080 --> 00:25:46,480
+if you have any questions i'll take them
+
+00:25:44,320 --> 00:25:49,520
+if not
+
+00:25:46,480 --> 00:25:51,760
+i'm happy to receive them on email or
+
+00:25:49,520 --> 00:25:53,039
+if you want to collaborate just drop me
+
+00:25:51,760 --> 00:25:57,840
+an email
+
+00:25:53,039 --> 00:25:57,840
+
+YouTube URL: https://www.youtube.com/watch?v=TBtdF0GPO0I
+
+

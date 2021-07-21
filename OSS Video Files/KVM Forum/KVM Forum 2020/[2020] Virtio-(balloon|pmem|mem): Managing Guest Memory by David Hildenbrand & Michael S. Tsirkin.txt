@@ -1,0 +1,2378 @@
+Title: [2020] Virtio-(balloon|pmem|mem): Managing Guest Memory by David Hildenbrand & Michael S. Tsirkin
+Publication date: 2020-12-09
+Playlist: KVM Forum 2020
+Description: 
+	How to resize guest memory? Can we reduce host swapping? Can we shrink the guest page cache? Traditional ballooning has been the answer to these questions for more than a decade - with advantages but also well-known issues. There is ongoing work to answer these questions in a better way, slowly but steadily obsoleting the original basis of virtio-balloon: the balloon. In addition to recent virtio-balloon extensions (e.g., free page hinting), new approaches, like virtio-pmem and virtio-mem, can substitute or replace ballooning. However, supporting technologies that mess with guest memory in the hypervisor (e.g., vfio, encrypted VMs), and closed-source guest operating systems become more challenging. In this talk, we give an overview of the current state of virtio-balloon, virtio-pmem and virtio-mem, discussing advantages, issues, and open items of each, and draw a picture of the future.
+
+---
+
+David Hildenbrand
+Red Hat, Senior Software Engineer
+
+David has been working on QEMU/KVM for almost 6 years now. His current projects are mostly centered around memory hot(un)plug and memory overcommit in the context of virtual machines. While he's involved with QEMU/KVM on s390x and Linux memory management in general, his main projects include virtio-balloon and virtio-mem. David joined Red Hat in 2016 and already presented at the KVM Forum in Seattle (2015), Toronto (2016), and Edinburgh (2018).
+
+Michael S. Tsirkin
+Red Hat Inc, Distinguished Engineer
+
+Michael has been with Red Hat for more than 10 years. In his role as a Distinguished Engineer he acts as a chair of the Virtio Technical Committee, overseeing the development of the virtio specification for virtual devices. He also maintains several subsystems in QEMU and Linux and has over the years made multiple contributions to QEMU, Linux and KVM.
+Captions: 
+	00:00:08,880 --> 00:00:12,160
+hi everybody
+
+00:00:09,920 --> 00:00:13,360
+welcome to this kvm forum 2020
+
+00:00:12,160 --> 00:00:16,160
+presentation
+
+00:00:13,360 --> 00:00:18,080
+about managing guest memory using rudio
+
+00:00:16,160 --> 00:00:19,920
+my name is david hillenbrand and today
+
+00:00:18,080 --> 00:00:21,920
+with me i'm giving this talk with my
+
+00:00:19,920 --> 00:00:23,039
+good surgeon
+
+00:00:21,920 --> 00:00:26,800
+hi i'm michael turkey and i'm
+
+00:00:23,039 --> 00:00:26,800
+distinguished engineer at redhat
+
+00:00:27,279 --> 00:00:30,320
+okay so let's get started what do we
+
+00:00:29,840 --> 00:00:32,880
+actually
+
+00:00:30,320 --> 00:00:34,160
+mean when we talk about managing guest
+
+00:00:32,880 --> 00:00:37,200
+memory
+
+00:00:34,160 --> 00:00:40,000
+so uh usually there are uh
+
+00:00:37,200 --> 00:00:41,360
+four different things we want to achieve
+
+00:00:40,000 --> 00:00:44,800
+with our virtual
+
+00:00:41,360 --> 00:00:47,360
+uh memory of our guests first of all
+
+00:00:44,800 --> 00:00:48,879
+we often want to speed up migration so
+
+00:00:47,360 --> 00:00:50,640
+if you take a look at the virtual
+
+00:00:48,879 --> 00:00:51,360
+machine from the hypervisor point of
+
+00:00:50,640 --> 00:00:54,879
+view
+
+00:00:51,360 --> 00:00:57,199
+any memory is possibly worth migrating
+
+00:00:54,879 --> 00:00:58,480
+because it might contain important data
+
+00:00:57,199 --> 00:01:00,719
+but in reality
+
+00:00:58,480 --> 00:01:02,320
+there is often quite some memory sitting
+
+00:01:00,719 --> 00:01:04,479
+inside virtual machines
+
+00:01:02,320 --> 00:01:05,760
+that is actually not worth migrating for
+
+00:01:04,479 --> 00:01:08,960
+example if
+
+00:01:05,760 --> 00:01:10,479
+it's simply free memory of course it's
+
+00:01:08,960 --> 00:01:13,439
+not that easy to
+
+00:01:10,479 --> 00:01:14,320
+identify that memory from the hypervisor
+
+00:01:13,439 --> 00:01:15,920
+and
+
+00:01:14,320 --> 00:01:17,759
+be sure that you don't lose any
+
+00:01:15,920 --> 00:01:19,439
+important data when migrating so you
+
+00:01:17,759 --> 00:01:22,640
+need some kind of
+
+00:01:19,439 --> 00:01:25,600
+handshake with your guest
+
+00:01:22,640 --> 00:01:26,960
+the second item is that we often have
+
+00:01:25,600 --> 00:01:30,320
+over commitment
+
+00:01:26,960 --> 00:01:32,799
+of memory and we want to avoid
+
+00:01:30,320 --> 00:01:34,960
+host swapping by any means that means
+
+00:01:32,799 --> 00:01:37,200
+whenever our hypervisor is running out
+
+00:01:34,960 --> 00:01:40,400
+of memory instead of going to swap
+
+00:01:37,200 --> 00:01:42,640
+we much rather want to temporarily steal
+
+00:01:40,400 --> 00:01:43,920
+unused memory from virtual machines
+
+00:01:42,640 --> 00:01:45,759
+because in practice
+
+00:01:43,920 --> 00:01:47,920
+it happens quite often that some virtual
+
+00:01:45,759 --> 00:01:49,280
+machines have quite some unused or free
+
+00:01:47,920 --> 00:01:52,880
+memory lying around
+
+00:01:49,280 --> 00:01:56,000
+that we can use instead of swapping
+
+00:01:52,880 --> 00:01:58,240
+the third item is that we often want to
+
+00:01:56,000 --> 00:01:59,119
+control or shrink the page cache in the
+
+00:01:58,240 --> 00:02:02,960
+virtual machine
+
+00:01:59,119 --> 00:02:05,200
+and also sometimes other caches
+
+00:02:02,960 --> 00:02:06,079
+the nature of a modern operating system
+
+00:02:05,200 --> 00:02:08,560
+is that
+
+00:02:06,079 --> 00:02:09,920
+it will try to make best use of all
+
+00:02:08,560 --> 00:02:13,360
+available memory
+
+00:02:09,920 --> 00:02:15,599
+um and that implies using it for caches
+
+00:02:13,360 --> 00:02:17,760
+in linux this is for example done by the
+
+00:02:15,599 --> 00:02:18,480
+page cache which will essentially over
+
+00:02:17,760 --> 00:02:21,120
+time
+
+00:02:18,480 --> 00:02:21,760
+consume most of your main memory but of
+
+00:02:21,120 --> 00:02:23,520
+course
+
+00:02:21,760 --> 00:02:25,920
+some data and caches can be dropped
+
+00:02:23,520 --> 00:02:27,920
+without affecting any workload
+
+00:02:25,920 --> 00:02:30,000
+uh but from a hypervisor point of view
+
+00:02:27,920 --> 00:02:33,120
+it's absolutely not clear
+
+00:02:30,000 --> 00:02:35,440
+which memory that might be
+
+00:02:33,120 --> 00:02:36,400
+used for cache inside a virtual machine
+
+00:02:35,440 --> 00:02:38,800
+can actually be
+
+00:02:36,400 --> 00:02:39,599
+dropped and there's also like no real
+
+00:02:38,800 --> 00:02:43,920
+interface
+
+00:02:39,599 --> 00:02:44,640
+to drop these caches and last uh but not
+
+00:02:43,920 --> 00:02:46,640
+least
+
+00:02:44,640 --> 00:02:48,160
+we often want to dynamically resize
+
+00:02:46,640 --> 00:02:50,959
+virtual machine memory
+
+00:02:48,160 --> 00:02:53,120
+that means we want to hot plug or hot
+
+00:02:50,959 --> 00:02:55,760
+unplug memory from virtual machines
+
+00:02:53,120 --> 00:02:56,800
+either automatically um for example if
+
+00:02:55,760 --> 00:02:59,519
+our virtual machine
+
+00:02:56,800 --> 00:03:00,319
+runs out of memory or manually by user
+
+00:02:59,519 --> 00:03:01,840
+request
+
+00:03:00,319 --> 00:03:03,840
+and this also needs some kind of
+
+00:03:01,840 --> 00:03:08,159
+collaboration with the guest
+
+00:03:03,840 --> 00:03:08,159
+corporation to make it work
+
+00:03:10,000 --> 00:03:16,480
+now the traditional mechanism to
+
+00:03:13,360 --> 00:03:17,680
+do all of these things is memory
+
+00:03:16,480 --> 00:03:21,760
+ballooning
+
+00:03:17,680 --> 00:03:23,599
+and just to give you a recap of what
+
+00:03:21,760 --> 00:03:25,760
+memory ballooning actually is
+
+00:03:23,599 --> 00:03:27,360
+it can be summarized as relocating
+
+00:03:25,760 --> 00:03:29,280
+physical memory between a virtual
+
+00:03:27,360 --> 00:03:31,599
+machine and its hypervisor
+
+00:03:29,280 --> 00:03:33,519
+and the idea is actually pretty simple
+
+00:03:31,599 --> 00:03:35,840
+inside your virtual machine memory
+
+00:03:33,519 --> 00:03:38,799
+you have something called the balloon
+
+00:03:35,840 --> 00:03:41,200
+and the balloon can inflate or deflate
+
+00:03:38,799 --> 00:03:43,519
+and all memory that's currently inflated
+
+00:03:41,200 --> 00:03:45,599
+inside of the balloon is not actually
+
+00:03:43,519 --> 00:03:47,200
+usable by the virtual machine but by the
+
+00:03:45,599 --> 00:03:49,680
+hypervisor instead
+
+00:03:47,200 --> 00:03:50,480
+that means when we inflate the balloon
+
+00:03:49,680 --> 00:03:52,480
+we give
+
+00:03:50,480 --> 00:03:54,560
+more memory back to the hypervisor and
+
+00:03:52,480 --> 00:03:56,400
+take it from the virtual machine
+
+00:03:54,560 --> 00:03:58,480
+and implement implementation in our
+
+00:03:56,400 --> 00:03:59,200
+operating system is actually also pretty
+
+00:03:58,480 --> 00:04:01,360
+simple
+
+00:03:59,200 --> 00:04:02,959
+so uh there is a driver running in the
+
+00:04:01,360 --> 00:04:05,599
+virtual machine and the guest operating
+
+00:04:02,959 --> 00:04:08,319
+system which simply allocates memory
+
+00:04:05,599 --> 00:04:10,080
+uh coordinates with the hypervisor and
+
+00:04:08,319 --> 00:04:13,439
+when it wants to
+
+00:04:10,080 --> 00:04:16,239
+get some memory back for uh deflation it
+
+00:04:13,439 --> 00:04:18,799
+simply frees previously allocated memory
+
+00:04:16,239 --> 00:04:20,479
+after coordinating with the hypervisor
+
+00:04:18,799 --> 00:04:22,320
+and the whole mechanism so the size of
+
+00:04:20,479 --> 00:04:23,919
+the balloon is controlled by a so-called
+
+00:04:22,320 --> 00:04:26,560
+target balloon size
+
+00:04:23,919 --> 00:04:28,960
+which corresponds to a request from the
+
+00:04:26,560 --> 00:04:31,440
+hypervisor towards the virtual machine
+
+00:04:28,960 --> 00:04:33,600
+to change the size of the balloon now
+
+00:04:31,440 --> 00:04:36,960
+this idea is pretty neat and
+
+00:04:33,600 --> 00:04:39,360
+it has been used for decades already and
+
+00:04:36,960 --> 00:04:43,840
+this is also why it has been used for
+
+00:04:39,360 --> 00:04:43,840
+all of the use cases we just saw
+
+00:04:44,080 --> 00:04:49,280
+so for example when you want to
+
+00:04:47,440 --> 00:04:51,520
+dynamically resize the virtual machine
+
+00:04:49,280 --> 00:04:53,440
+memory you could dynamically inflate or
+
+00:04:51,520 --> 00:04:56,960
+deflate the balloon
+
+00:04:53,440 --> 00:04:57,759
+and also for all of the other um items i
+
+00:04:56,960 --> 00:04:59,759
+mentioned you
+
+00:04:57,759 --> 00:05:00,800
+you you might be able to use it to some
+
+00:04:59,759 --> 00:05:03,680
+extent
+
+00:05:00,800 --> 00:05:04,160
+uh i'm not going to go into detail here
+
+00:05:03,680 --> 00:05:06,240
+because
+
+00:05:04,160 --> 00:05:08,080
+uh there isn't a sufficient time to
+
+00:05:06,240 --> 00:05:09,199
+cover all of the details but there are a
+
+00:05:08,080 --> 00:05:12,160
+lot of issues
+
+00:05:09,199 --> 00:05:12,639
+and michael will talk about at least one
+
+00:05:12,160 --> 00:05:15,759
+issue
+
+00:05:12,639 --> 00:05:15,759
+regarding migration
+
+00:05:17,759 --> 00:05:23,680
+so what do we want to do instead
+
+00:05:20,880 --> 00:05:24,080
+of course this is not optimal so what we
+
+00:05:23,680 --> 00:05:26,960
+see
+
+00:05:24,080 --> 00:05:28,080
+are uh plenty of extensions or new
+
+00:05:26,960 --> 00:05:32,400
+mechanisms to
+
+00:05:28,080 --> 00:05:35,600
+make the whole thing work and uh
+
+00:05:32,400 --> 00:05:37,600
+one one part is
+
+00:05:35,600 --> 00:05:39,440
+extensions to existing water balloon
+
+00:05:37,600 --> 00:05:41,440
+giving it more interfaces or better
+
+00:05:39,440 --> 00:05:43,680
+suited interfaces to get the job done
+
+00:05:41,440 --> 00:05:47,199
+and michael will talk about these
+
+00:05:43,680 --> 00:05:49,919
+the other part is um new
+
+00:05:47,199 --> 00:05:52,000
+mechanisms neo4j devices and one-handed
+
+00:05:49,919 --> 00:05:54,400
+pmem on the other hand would
+
+00:05:52,000 --> 00:06:07,840
+which i will talk about after michael
+
+00:05:54,400 --> 00:06:07,840
+discussed widow balloon extensions
+
+00:06:08,720 --> 00:06:16,080
+so let's try to migrate a guest
+
+00:06:13,199 --> 00:06:16,960
+consider an example on this slide we
+
+00:06:16,080 --> 00:06:19,199
+start with an
+
+00:06:16,960 --> 00:06:21,360
+eight gigabyte virtual machine and when
+
+00:06:19,199 --> 00:06:24,479
+migrating it to inflate a balloon
+
+00:06:21,360 --> 00:06:27,199
+to four gigabytes and as a result only
+
+00:06:24,479 --> 00:06:31,360
+four gigabytes need to be migrated
+
+00:06:27,199 --> 00:06:31,360
+now after migration balloon is deflated
+
+00:06:31,680 --> 00:06:36,400
+here we immediately encounter problems
+
+00:06:33,600 --> 00:06:38,080
+how is the balloon size determined
+
+00:06:36,400 --> 00:06:40,080
+if you inflate it too much guest will
+
+00:06:38,080 --> 00:06:42,160
+slow down or have
+
+00:06:40,080 --> 00:06:45,680
+and if we inflate it too little then
+
+00:06:42,160 --> 00:06:45,680
+migration will take longer
+
+00:06:47,120 --> 00:06:50,240
+to address this issue we can give guests
+
+00:06:49,360 --> 00:06:52,960
+more control
+
+00:06:50,240 --> 00:06:54,240
+over the balloon and several ideas have
+
+00:06:52,960 --> 00:06:57,440
+to come together
+
+00:06:54,240 --> 00:07:00,880
+to result in our current solution
+
+00:06:57,440 --> 00:07:04,240
+first to inflate balloon
+
+00:07:00,880 --> 00:07:06,960
+we can make it as big as possible
+
+00:07:04,240 --> 00:07:10,160
+to fill up all of free memory naturally
+
+00:07:06,960 --> 00:07:12,319
+guest needs to change so
+
+00:07:10,160 --> 00:07:16,240
+a second idea is to let gas deflate at
+
+00:07:12,319 --> 00:07:18,000
+any time if that happens
+
+00:07:16,240 --> 00:07:19,840
+third idea is that the first thing guest
+
+00:07:18,000 --> 00:07:21,599
+does with the free page is to write some
+
+00:07:19,840 --> 00:07:23,280
+data into it
+
+00:07:21,599 --> 00:07:24,960
+because it's free so it has nothing in
+
+00:07:23,280 --> 00:07:26,639
+it so far
+
+00:07:24,960 --> 00:07:28,479
+and this is actually easy for the host
+
+00:07:26,639 --> 00:07:31,599
+to detect so we can do away with an
+
+00:07:28,479 --> 00:07:33,520
+explicit deflate operation
+
+00:07:31,599 --> 00:07:34,639
+the last idea is that we do not care
+
+00:07:33,520 --> 00:07:37,039
+about reporting
+
+00:07:34,639 --> 00:07:38,560
+small 4 kilobyte chunks of free ram
+
+00:07:37,039 --> 00:07:39,440
+which has spread all over the guest
+
+00:07:38,560 --> 00:07:41,840
+memory
+
+00:07:39,440 --> 00:07:43,280
+modern guests have compaction mechanisms
+
+00:07:41,840 --> 00:07:46,400
+which can with time
+
+00:07:43,280 --> 00:07:48,479
+help create large free pages
+
+00:07:46,400 --> 00:07:49,840
+on order of multiple megabytes let's
+
+00:07:48,479 --> 00:07:51,199
+only inflate
+
+00:07:49,840 --> 00:07:53,039
+with the largest possible chunk of
+
+00:07:51,199 --> 00:07:57,120
+memory that is still tracked by the
+
+00:07:53,039 --> 00:08:00,080
+guest memory management now combining
+
+00:07:57,120 --> 00:08:00,960
+these ideas we get a couple of features
+
+00:08:00,080 --> 00:08:02,720
+which are called
+
+00:08:00,960 --> 00:08:04,560
+free page hinting and three page
+
+00:08:02,720 --> 00:08:08,160
+reporting
+
+00:08:04,560 --> 00:08:08,160
+let's look at them in a bit more detail
+
+00:08:10,080 --> 00:08:13,919
+preparation is an older one of the
+
+00:08:11,840 --> 00:08:15,599
+features it was contributed by intel
+
+00:08:13,919 --> 00:08:17,520
+several years ago
+
+00:08:15,599 --> 00:08:20,319
+it was designed specifically to speed up
+
+00:08:17,520 --> 00:08:22,080
+migration here's how it works
+
+00:08:20,319 --> 00:08:23,759
+well it all starts by host right
+
+00:08:22,080 --> 00:08:27,520
+protecting all of its memory
+
+00:08:23,759 --> 00:08:29,199
+that's normal for migration host then
+
+00:08:27,520 --> 00:08:31,520
+sends a request to start three page
+
+00:08:29,199 --> 00:08:33,360
+hinting to the guest
+
+00:08:31,520 --> 00:08:37,360
+at this point guests will take all three
+
+00:08:33,360 --> 00:08:39,279
+pages and add them all to the balloon
+
+00:08:37,360 --> 00:08:40,640
+and host will start processing the pages
+
+00:08:39,279 --> 00:08:42,159
+sent to it i can
+
+00:08:40,640 --> 00:08:43,680
+marking them up so they won't be
+
+00:08:42,159 --> 00:08:45,680
+migrated
+
+00:08:43,680 --> 00:08:47,839
+and also write protecting them if not
+
+00:08:45,680 --> 00:08:49,440
+already protected
+
+00:08:47,839 --> 00:08:51,920
+meanwhile should guests need some free
+
+00:08:49,440 --> 00:08:54,000
+pages this simply starts using them
+
+00:08:51,920 --> 00:08:56,080
+even as host processing them at the same
+
+00:08:54,000 --> 00:08:57,760
+time
+
+00:08:56,080 --> 00:09:00,000
+now since the first thing that guest
+
+00:08:57,760 --> 00:09:00,720
+does when using a page is right into the
+
+00:09:00,000 --> 00:09:02,800
+page
+
+00:09:00,720 --> 00:09:04,800
+and this page is right protected this
+
+00:09:02,800 --> 00:09:06,839
+will cause a fault
+
+00:09:04,800 --> 00:09:09,839
+and host will mark page for migration
+
+00:09:06,839 --> 00:09:09,839
+again
+
+00:09:10,959 --> 00:09:15,279
+now unsurprisingly this feature is a
+
+00:09:13,600 --> 00:09:17,760
+good fit for migration
+
+00:09:15,279 --> 00:09:18,640
+it has no overhead unless requested
+
+00:09:17,760 --> 00:09:20,959
+hypervisor
+
+00:09:18,640 --> 00:09:22,959
+tracking is used for migration anyway so
+
+00:09:20,959 --> 00:09:24,640
+it's easy to reuse
+
+00:09:22,959 --> 00:09:26,160
+the loan can shrink without waiting for
+
+00:09:24,640 --> 00:09:28,959
+hosts to make progress
+
+00:09:26,160 --> 00:09:30,560
+so guest is not slowing down on the
+
+00:09:28,959 --> 00:09:32,640
+other hand this lesson ideal is a
+
+00:09:30,560 --> 00:09:34,959
+solution for memory over commit
+
+00:09:32,640 --> 00:09:36,560
+hostnet needs to request it and it's not
+
+00:09:34,959 --> 00:09:38,720
+clear when is a good time to do it
+
+00:09:36,560 --> 00:09:40,399
+outside migration
+
+00:09:38,720 --> 00:09:43,519
+inflating all free memory can get
+
+00:09:40,399 --> 00:09:45,200
+expensive should we do it often
+
+00:09:43,519 --> 00:09:51,200
+right tracking adds overhead to all
+
+00:09:45,200 --> 00:09:53,360
+guest rights even to non-free memory
+
+00:09:51,200 --> 00:09:55,200
+to solve some of these issues you have
+
+00:09:53,360 --> 00:09:55,680
+free page reporting which is a newer
+
+00:09:55,200 --> 00:09:58,640
+feature
+
+00:09:55,680 --> 00:10:00,160
+also from intel it's designed to solve
+
+00:09:58,640 --> 00:10:03,360
+the
+
+00:10:00,160 --> 00:10:05,120
+disadvantages of the hinting
+
+00:10:03,360 --> 00:10:06,720
+free page reporting is initiated by
+
+00:10:05,120 --> 00:10:08,399
+guest which takes action when a
+
+00:10:06,720 --> 00:10:10,560
+significant number of new free pages
+
+00:10:08,399 --> 00:10:12,800
+accumulates at this point
+
+00:10:10,560 --> 00:10:14,880
+just take some of these pages by default
+
+00:10:12,800 --> 00:10:18,320
+about 1 16 of the three pages
+
+00:10:14,880 --> 00:10:20,079
+and add them to the balloon processes
+
+00:10:18,320 --> 00:10:21,519
+the pages by marking them as free
+
+00:10:20,079 --> 00:10:23,440
+and then reports that page has been
+
+00:10:21,519 --> 00:10:25,680
+processed to the guest
+
+00:10:23,440 --> 00:10:27,600
+now unlike with hinting guess then waits
+
+00:10:25,680 --> 00:10:30,160
+for host to process the reported pages
+
+00:10:27,600 --> 00:10:33,600
+before taking them out of the balloon
+
+00:10:30,160 --> 00:10:35,440
+and again when page is reused it
+
+00:10:33,600 --> 00:10:37,279
+is first of all written to and this
+
+00:10:35,440 --> 00:10:39,680
+causes a fault and memory allocation on
+
+00:10:37,279 --> 00:10:39,680
+the host
+
+00:10:40,800 --> 00:10:44,320
+now this reporting is a good feast for
+
+00:10:43,040 --> 00:10:46,640
+our commit
+
+00:10:44,320 --> 00:10:48,880
+because guest activates it the memory
+
+00:10:46,640 --> 00:10:50,959
+becomes free
+
+00:10:48,880 --> 00:10:52,399
+host implementation is also simple
+
+00:10:50,959 --> 00:10:55,519
+there's no need to play with right
+
+00:10:52,399 --> 00:10:59,279
+tracking which is easy to get wrong
+
+00:10:55,519 --> 00:11:01,360
+and we also do not need to track guest
+
+00:10:59,279 --> 00:11:03,600
+rights to use pages which is often most
+
+00:11:01,360 --> 00:11:05,120
+of guest memory rights
+
+00:11:03,600 --> 00:11:06,800
+on the other hand this feature has
+
+00:11:05,120 --> 00:11:09,440
+overhead to memory intensive workloads
+
+00:11:06,800 --> 00:11:12,160
+at all times not just during migration
+
+00:11:09,440 --> 00:11:13,680
+and also shrinking must wait for the
+
+00:11:12,160 --> 00:11:15,839
+host which can be blocked by host
+
+00:11:13,680 --> 00:11:18,399
+scheduler so it's less of a good fit for
+
+00:11:15,839 --> 00:11:18,399
+migration
+
+00:11:19,360 --> 00:11:23,200
+so these are the two hinting features
+
+00:11:21,440 --> 00:11:25,279
+that we have
+
+00:11:23,200 --> 00:11:27,600
+before we move on i just wanted to
+
+00:11:25,279 --> 00:11:30,079
+mention a sundry list of
+
+00:11:27,600 --> 00:11:30,959
+all the balloons related to the items
+
+00:11:30,079 --> 00:11:34,720
+that we have
+
+00:11:30,959 --> 00:11:37,040
+and some of them we have had for years
+
+00:11:34,720 --> 00:11:39,519
+first of all guest repage solutions do
+
+00:11:37,040 --> 00:11:43,440
+not have a way to shrink guest caches
+
+00:11:39,519 --> 00:11:45,600
+like regular inflate does
+
+00:11:43,440 --> 00:11:47,600
+so we can just bypass the page cache and
+
+00:11:45,600 --> 00:11:50,639
+this is with io premium which david is
+
+00:11:47,600 --> 00:11:52,560
+going to talk about a little bit later
+
+00:11:50,639 --> 00:11:54,839
+that's one solution but what exactly
+
+00:11:52,560 --> 00:11:56,959
+about for example application page
+
+00:11:54,839 --> 00:12:00,160
+caches
+
+00:11:56,959 --> 00:12:01,839
+also balloon still doesn't really
+
+00:12:00,160 --> 00:12:04,639
+support
+
+00:12:01,839 --> 00:12:05,760
+a device passthrough with vfio
+
+00:12:04,639 --> 00:12:07,680
+supporting that is not
+
+00:12:05,760 --> 00:12:09,120
+easy it needs some someone who's ready
+
+00:12:07,680 --> 00:12:13,120
+to hack host side the memory
+
+00:12:09,120 --> 00:12:14,480
+maybe drivers there's also a slew of old
+
+00:12:13,120 --> 00:12:17,200
+balloon interface bugs
+
+00:12:14,480 --> 00:12:18,160
+that no one seems to want to fix for
+
+00:12:17,200 --> 00:12:21,279
+example
+
+00:12:18,160 --> 00:12:22,720
+virtual machine memory size with inflate
+
+00:12:21,279 --> 00:12:25,760
+and deflate
+
+00:12:22,720 --> 00:12:28,079
+is very limited cast and host page sizes
+
+00:12:25,760 --> 00:12:30,639
+assume to always be a four kilobyte
+
+00:12:28,079 --> 00:12:32,000
+which is not always the case out of
+
+00:12:30,639 --> 00:12:34,240
+memory handling
+
+00:12:32,000 --> 00:12:35,120
+is presented linux but is under
+
+00:12:34,240 --> 00:12:37,680
+specified
+
+00:12:35,120 --> 00:12:40,079
+and contributions would be most boringly
+
+00:12:37,680 --> 00:12:40,079
+welcome
+
+00:12:41,200 --> 00:12:47,040
+okay let's talk about video piano next
+
+00:12:44,720 --> 00:12:48,560
+so the basic idea of virtual pmem is
+
+00:12:47,040 --> 00:12:51,600
+actually pretty simple
+
+00:12:48,560 --> 00:12:53,519
+instead of exposing your disk image via
+
+00:12:51,600 --> 00:12:54,639
+brutal blocker similar towards your
+
+00:12:53,519 --> 00:12:57,760
+virtual machine
+
+00:12:54,639 --> 00:12:59,760
+instead you map the file directly into a
+
+00:12:57,760 --> 00:13:02,480
+guest physical address space
+
+00:12:59,760 --> 00:13:04,720
+and make the guest access that disk
+
+00:13:02,480 --> 00:13:07,360
+image similar to an nvdimm
+
+00:13:04,720 --> 00:13:08,240
+so a persistent memory or also sometimes
+
+00:13:07,360 --> 00:13:11,760
+referred as
+
+00:13:08,240 --> 00:13:12,639
+decks like direct access um however in
+
+00:13:11,760 --> 00:13:15,680
+contrast to
+
+00:13:12,639 --> 00:13:19,040
+uh real emulated and medium we
+
+00:13:15,680 --> 00:13:20,000
+get the benefit of flushes or flushing
+
+00:13:19,040 --> 00:13:21,920
+rights to this
+
+00:13:20,000 --> 00:13:25,519
+to actually work properly and we're
+
+00:13:21,920 --> 00:13:25,519
+gonna talk about that in a second
+
+00:13:27,120 --> 00:13:31,600
+so if we take a look at our um guest
+
+00:13:30,160 --> 00:13:34,160
+physical address space
+
+00:13:31,600 --> 00:13:36,399
+then uh with virtual pmem we would have
+
+00:13:34,160 --> 00:13:39,279
+our text device meaning our
+
+00:13:36,399 --> 00:13:40,160
+file directly mapped into this address
+
+00:13:39,279 --> 00:13:42,800
+space
+
+00:13:40,160 --> 00:13:43,920
+and if we compare that to an nvdim it's
+
+00:13:42,800 --> 00:13:46,240
+actually
+
+00:13:43,920 --> 00:13:47,199
+pretty sim is similar so the main
+
+00:13:46,240 --> 00:13:50,480
+difference here
+
+00:13:47,199 --> 00:13:53,519
+is that whenever we emulate an
+
+00:13:50,480 --> 00:13:55,279
+nvdimm using a real nvidim there is
+
+00:13:53,519 --> 00:13:57,839
+absolutely no issue
+
+00:13:55,279 --> 00:14:00,639
+but at the point where we would start to
+
+00:13:57,839 --> 00:14:01,360
+emulate an nvidium for our guest using a
+
+00:14:00,639 --> 00:14:03,680
+file
+
+00:14:01,360 --> 00:14:05,440
+we would run into issues when wanting to
+
+00:14:03,680 --> 00:14:09,440
+flush
+
+00:14:05,440 --> 00:14:11,760
+rights to disk the nature of nvidia's
+
+00:14:09,440 --> 00:14:13,680
+work by using only memory flush
+
+00:14:11,760 --> 00:14:15,279
+instructions so to for example flash
+
+00:14:13,680 --> 00:14:16,399
+cache lines and memory fence
+
+00:14:15,279 --> 00:14:18,000
+instructions
+
+00:14:16,399 --> 00:14:20,320
+and once these instructions were
+
+00:14:18,000 --> 00:14:23,760
+executed the guests can be sure that
+
+00:14:20,320 --> 00:14:26,560
+everything is persistent but if we map
+
+00:14:23,760 --> 00:14:28,399
+a file into our vm physical address base
+
+00:14:26,560 --> 00:14:30,639
+this is no longer the case
+
+00:14:28,399 --> 00:14:32,399
+so instead we really have to intercept
+
+00:14:30,639 --> 00:14:35,680
+any kinds of flushes
+
+00:14:32,399 --> 00:14:36,480
+um to cream gmu and in qmu we have then
+
+00:14:35,680 --> 00:14:39,600
+go ahead
+
+00:14:36,480 --> 00:14:41,279
+and do an f-sync and only after the
+
+00:14:39,600 --> 00:14:43,279
+f-string happens we can be sure that
+
+00:14:41,279 --> 00:14:45,600
+it's actually persistent
+
+00:14:43,279 --> 00:14:47,199
+and this is very important in case our
+
+00:14:45,600 --> 00:14:49,600
+virtual machine would crash
+
+00:14:47,199 --> 00:14:51,040
+because if stuff would not be persistent
+
+00:14:49,600 --> 00:14:54,560
+on something that's supposed to be
+
+00:14:51,040 --> 00:14:57,680
+persistent memory then we're in trouble
+
+00:14:54,560 --> 00:15:00,240
+so um the big idea is to have a power
+
+00:14:57,680 --> 00:15:02,320
+virtualized mechanism to perform flushes
+
+00:15:00,240 --> 00:15:03,279
+and this is exactly what rodeo payment
+
+00:15:02,320 --> 00:15:05,600
+does
+
+00:15:03,279 --> 00:15:07,199
+and we get on by doing that we get a
+
+00:15:05,600 --> 00:15:10,000
+benefit of
+
+00:15:07,199 --> 00:15:11,360
+dex devices meaning we can bypass the
+
+00:15:10,000 --> 00:15:14,639
+page cache in our
+
+00:15:11,360 --> 00:15:16,720
+guest completely and instead let the
+
+00:15:14,639 --> 00:15:20,160
+page cache for that file be completely
+
+00:15:16,720 --> 00:15:20,160
+managed in the hypervisor
+
+00:15:20,560 --> 00:15:24,800
+so what are the advantages of rudolph of
+
+00:15:23,680 --> 00:15:26,720
+course
+
+00:15:24,800 --> 00:15:29,040
+we move this page cache handling from
+
+00:15:26,720 --> 00:15:30,880
+the guest to the hypervisor
+
+00:15:29,040 --> 00:15:33,279
+we free up the guest page cache so the
+
+00:15:30,880 --> 00:15:34,560
+hypervisor can make decisions of when to
+
+00:15:33,279 --> 00:15:36,320
+shrink the page cache
+
+00:15:34,560 --> 00:15:38,720
+just easily for example when it's about
+
+00:15:36,320 --> 00:15:41,360
+to run out of memory
+
+00:15:38,720 --> 00:15:42,079
+also it's a safe fireback emulated in
+
+00:15:41,360 --> 00:15:44,639
+vdim
+
+00:15:42,079 --> 00:15:45,360
+because rights work properly in contrast
+
+00:15:44,639 --> 00:15:48,720
+to
+
+00:15:45,360 --> 00:15:49,920
+using unreal emulated and vdim uh backed
+
+00:15:48,720 --> 00:15:53,519
+by a file as i
+
+00:15:49,920 --> 00:15:55,680
+mentioned also uh interestingly as it's
+
+00:15:53,519 --> 00:15:58,079
+a rodeo device it's actually an
+
+00:15:55,680 --> 00:16:00,000
+nvidia like mechanism a dex mechanism
+
+00:15:58,079 --> 00:16:01,920
+even for architectures that don't even
+
+00:16:00,000 --> 00:16:05,040
+have hardware ambidems
+
+00:16:01,920 --> 00:16:08,320
+or architectures that don't even have
+
+00:16:05,040 --> 00:16:10,720
+acpi so for example s390x might be
+
+00:16:08,320 --> 00:16:13,600
+feasible in the future
+
+00:16:10,720 --> 00:16:14,240
+but also there are some disadvantages uh
+
+00:16:13,600 --> 00:16:16,480
+because we
+
+00:16:14,240 --> 00:16:18,480
+mapped this disk image directly into our
+
+00:16:16,480 --> 00:16:20,880
+vm physical address base
+
+00:16:18,480 --> 00:16:23,839
+um we really only support raw disks for
+
+00:16:20,880 --> 00:16:26,079
+now so no qco2 or similar
+
+00:16:23,839 --> 00:16:28,560
+also because we are using the hypervisor
+
+00:16:26,079 --> 00:16:29,360
+page cache now um with multiple virtual
+
+00:16:28,560 --> 00:16:31,279
+machines
+
+00:16:29,360 --> 00:16:32,560
+there are quite some security but also
+
+00:16:31,279 --> 00:16:36,959
+fairness concerns
+
+00:16:32,560 --> 00:16:40,240
+that at least users have to be aware of
+
+00:16:36,959 --> 00:16:41,759
+similar to real nv dimms booting is not
+
+00:16:40,240 --> 00:16:44,560
+supported and requires an
+
+00:16:41,759 --> 00:16:45,839
+external coroner or another disk image
+
+00:16:44,560 --> 00:16:48,959
+which could for example
+
+00:16:45,839 --> 00:16:51,040
+be read-only or similar
+
+00:16:48,959 --> 00:16:53,120
+also it's worthwhile to mention that
+
+00:16:51,040 --> 00:16:54,320
+virtual pmem is not applicable in all
+
+00:16:53,120 --> 00:16:56,720
+setups
+
+00:16:54,320 --> 00:16:58,639
+so for example there are environments
+
+00:16:56,720 --> 00:16:59,920
+where the hypervisor page cache is not
+
+00:16:58,639 --> 00:17:02,720
+involved at all
+
+00:16:59,920 --> 00:17:04,559
+imagine passing through a disk directly
+
+00:17:02,720 --> 00:17:07,520
+from your hypervisor to your guest
+
+00:17:04,559 --> 00:17:08,319
+or accessing the disk using some other
+
+00:17:07,520 --> 00:17:11,679
+mediated
+
+00:17:08,319 --> 00:17:12,480
+devices also as soon as we have fairly
+
+00:17:11,679 --> 00:17:15,679
+big disks
+
+00:17:12,480 --> 00:17:15,679
+this could become an issue
+
+00:17:16,480 --> 00:17:20,480
+also there are still some open items to
+
+00:17:18,640 --> 00:17:23,039
+be sorted out
+
+00:17:20,480 --> 00:17:23,679
+on the one hand uh we want to eventually
+
+00:17:23,039 --> 00:17:26,480
+support
+
+00:17:23,679 --> 00:17:27,760
+other architectures but also other guest
+
+00:17:26,480 --> 00:17:29,760
+operating systems
+
+00:17:27,760 --> 00:17:32,240
+as far as i know currently there is only
+
+00:17:29,760 --> 00:17:34,320
+really linux support for it
+
+00:17:32,240 --> 00:17:36,080
+also in the long term we want to support
+
+00:17:34,320 --> 00:17:37,840
+other disk image types
+
+00:17:36,080 --> 00:17:40,240
+and we could actually uh support
+
+00:17:37,840 --> 00:17:43,200
+something like uco 2 or similar by using
+
+00:17:40,240 --> 00:17:44,960
+some neat use of old fd triggery
+
+00:17:43,200 --> 00:17:47,360
+but of course this is stuff for the
+
+00:17:44,960 --> 00:17:49,200
+future and might require more work to
+
+00:17:47,360 --> 00:17:50,960
+figure out how exactly it's gonna be
+
+00:17:49,200 --> 00:17:53,039
+done
+
+00:17:50,960 --> 00:17:54,799
+there's still uh one remaining bug
+
+00:17:53,039 --> 00:17:57,520
+that's to be solved um
+
+00:17:54,799 --> 00:17:58,400
+which involves pre-flashing asynchronics
+
+00:17:57,520 --> 00:18:01,440
+flashes in
+
+00:17:58,400 --> 00:18:03,600
+linux stuff like that long story short
+
+00:18:01,440 --> 00:18:05,600
+it's work in progress but
+
+00:18:03,600 --> 00:18:07,840
+as long as that's not upstream there is
+
+00:18:05,600 --> 00:18:11,120
+some cases where
+
+00:18:07,840 --> 00:18:13,120
+flashes might not actually be persistent
+
+00:18:11,120 --> 00:18:15,520
+yet
+
+00:18:13,120 --> 00:18:16,880
+also uh we want to see in the future
+
+00:18:15,520 --> 00:18:19,360
+liberty integration
+
+00:18:16,880 --> 00:18:20,000
+live migration support hot unblock
+
+00:18:19,360 --> 00:18:22,799
+support
+
+00:18:20,000 --> 00:18:24,640
+and a bunch of optimizations but until
+
+00:18:22,799 --> 00:18:27,520
+then rudolph pmem can be
+
+00:18:24,640 --> 00:18:30,720
+used um just fine keeping in mind a
+
+00:18:27,520 --> 00:18:30,720
+couple of things i mentioned
+
+00:18:31,200 --> 00:18:37,440
+now let's talk about voodoo map
+
+00:18:34,720 --> 00:18:38,559
+the veteran can be summarized as a fine
+
+00:18:37,440 --> 00:18:40,320
+grain umavera
+
+00:18:38,559 --> 00:18:43,039
+memory hot unblock mechanism to
+
+00:18:40,320 --> 00:18:45,039
+dynamically resize virtual machines
+
+00:18:43,039 --> 00:18:46,160
+and the idea is actually pretty simple
+
+00:18:45,039 --> 00:18:48,799
+so if you take a
+
+00:18:46,160 --> 00:18:50,720
+look at your memory uh the memory your
+
+00:18:48,799 --> 00:18:52,480
+virtual machine has available
+
+00:18:50,720 --> 00:18:54,240
+then you usually have some kind of
+
+00:18:52,480 --> 00:18:56,480
+initial or boot memory
+
+00:18:54,240 --> 00:18:58,080
+and you can extend that memory using
+
+00:18:56,480 --> 00:19:00,640
+various measurements
+
+00:18:58,080 --> 00:19:01,600
+so for example you could you could use
+
+00:19:00,640 --> 00:19:03,919
+dims to
+
+00:19:01,600 --> 00:19:04,640
+add more memory to your virtual machine
+
+00:19:03,919 --> 00:19:08,000
+um
+
+00:19:04,640 --> 00:19:09,120
+or remove dimms again by hot unplugging
+
+00:19:08,000 --> 00:19:11,039
+them
+
+00:19:09,120 --> 00:19:12,400
+but dims have their own set of issues
+
+00:19:11,039 --> 00:19:15,440
+that i'm not gonna
+
+00:19:12,400 --> 00:19:17,120
+uh go into detail here um buddha mmm is
+
+00:19:15,440 --> 00:19:20,799
+similar so viral mem can
+
+00:19:17,120 --> 00:19:24,320
+extend then your initial vm size
+
+00:19:20,799 --> 00:19:26,240
+uh on a per node level and it works by
+
+00:19:24,320 --> 00:19:28,160
+each word or main device providing a
+
+00:19:26,240 --> 00:19:30,400
+flexible amount of memory towards a
+
+00:19:28,160 --> 00:19:33,039
+virtual machine
+
+00:19:30,400 --> 00:19:33,840
+internally this is implemented by um a
+
+00:19:33,039 --> 00:19:36,880
+device
+
+00:19:33,840 --> 00:19:40,160
+managing a dedicated region and guest
+
+00:19:36,880 --> 00:19:42,400
+physical address space it can be thought
+
+00:19:40,160 --> 00:19:42,960
+of something like a resizable dim but
+
+00:19:42,400 --> 00:19:46,320
+it's
+
+00:19:42,960 --> 00:19:49,360
+more complicated than that
+
+00:19:46,320 --> 00:19:50,880
+one interesting fact is that root of man
+
+00:19:49,360 --> 00:19:52,960
+devices
+
+00:19:50,880 --> 00:19:54,880
+are not discovered if you're running an
+
+00:19:52,960 --> 00:19:56,720
+unmodified operating system meaning an
+
+00:19:54,880 --> 00:19:59,360
+operating system that
+
+00:19:56,720 --> 00:20:01,120
+is not aware of rudolph because that
+
+00:19:59,360 --> 00:20:03,919
+allows us to always
+
+00:20:01,120 --> 00:20:06,320
+know which memory uh a guest is allowed
+
+00:20:03,919 --> 00:20:08,159
+to touch and for example later detect
+
+00:20:06,320 --> 00:20:09,919
+malicious gas that might
+
+00:20:08,159 --> 00:20:12,799
+try to make use of more memory than they
+
+00:20:09,919 --> 00:20:14,559
+are actually allowed to
+
+00:20:12,799 --> 00:20:16,880
+internally voter membranes in a
+
+00:20:14,559 --> 00:20:18,320
+granularity of blocks for example two
+
+00:20:16,880 --> 00:20:20,159
+megabyte blocks but they can be
+
+00:20:18,320 --> 00:20:23,679
+significantly bigger
+
+00:20:20,159 --> 00:20:26,240
+and a worderman device itself has
+
+00:20:23,679 --> 00:20:28,720
+three main properties on one hand it has
+
+00:20:26,240 --> 00:20:30,720
+a size which corresponds to the amount
+
+00:20:28,720 --> 00:20:33,280
+of memory a ruderman device currently
+
+00:20:30,720 --> 00:20:36,080
+provides towards a virtual machine
+
+00:20:33,280 --> 00:20:38,000
+it has also has a maximum size and the
+
+00:20:36,080 --> 00:20:39,760
+maximum size corresponds to the maximum
+
+00:20:38,000 --> 00:20:42,000
+amount of memory uh
+
+00:20:39,760 --> 00:20:44,320
+that could be provided via a rudo mem
+
+00:20:42,000 --> 00:20:46,240
+device towards the virtual machine
+
+00:20:44,320 --> 00:20:48,559
+last but not least there is a requested
+
+00:20:46,240 --> 00:20:50,720
+size which corresponds to a crest
+
+00:20:48,559 --> 00:20:51,600
+request from the hypervisor towards the
+
+00:20:50,720 --> 00:20:54,480
+guest
+
+00:20:51,600 --> 00:20:57,120
+to uh change the amount of memory that
+
+00:20:54,480 --> 00:21:00,320
+is consumed for your roder memory device
+
+00:20:57,120 --> 00:21:03,360
+and this mechanism allows you to resize
+
+00:21:00,320 --> 00:21:06,480
+a guest in fairly fine crane steps
+
+00:21:03,360 --> 00:21:06,480
+uh numa there
+
+00:21:07,039 --> 00:21:11,200
+and using it is actually not too hard
+
+00:21:09,360 --> 00:21:12,159
+right now so first of all you have to
+
+00:21:11,200 --> 00:21:14,240
+prepare your
+
+00:21:12,159 --> 00:21:15,600
+uh virtual machine for memory devices
+
+00:21:14,240 --> 00:21:17,919
+just as you would have to
+
+00:21:15,600 --> 00:21:19,679
+for dims and vdins but also rudolph
+
+00:21:17,919 --> 00:21:22,400
+people
+
+00:21:19,679 --> 00:21:23,120
+after that you create a memory back end
+
+00:21:22,400 --> 00:21:26,559
+which
+
+00:21:23,120 --> 00:21:28,840
+is later used to
+
+00:21:26,559 --> 00:21:31,360
+host your router man device in your
+
+00:21:28,840 --> 00:21:35,039
+hypervisor and the size you specify
+
+00:21:31,360 --> 00:21:36,960
+actually corresponds to the maximum size
+
+00:21:35,039 --> 00:21:38,240
+then you create your actual ruler mem
+
+00:21:36,960 --> 00:21:39,840
+device
+
+00:21:38,240 --> 00:21:41,679
+you can assign it to a node and you
+
+00:21:39,840 --> 00:21:45,280
+connect the memory back end
+
+00:21:41,679 --> 00:21:46,080
+and as a default if you would start your
+
+00:21:45,280 --> 00:21:47,840
+vm your
+
+00:21:46,080 --> 00:21:52,159
+uh guest would not consume any
+
+00:21:47,840 --> 00:21:54,480
+additional memory via disrudable device
+
+00:21:52,159 --> 00:21:55,440
+it will start in consuming more memory
+
+00:21:54,480 --> 00:21:57,440
+as soon as you
+
+00:21:55,440 --> 00:21:59,120
+actually request it so you can request
+
+00:21:57,440 --> 00:22:02,240
+it for example via
+
+00:21:59,120 --> 00:22:04,880
+qmp or hmp in qmu using
+
+00:22:02,240 --> 00:22:06,559
+a chrome set and quantumcap mechanism so
+
+00:22:04,880 --> 00:22:08,720
+you could request to
+
+00:22:06,559 --> 00:22:10,559
+consume for example four gigabytes via
+
+00:22:08,720 --> 00:22:11,440
+that device and the guest would try to
+
+00:22:10,559 --> 00:22:14,480
+make
+
+00:22:11,440 --> 00:22:14,880
+make make it possible and you can always
+
+00:22:14,480 --> 00:22:17,600
+then
+
+00:22:14,880 --> 00:22:19,520
+also observe how much memory the guest
+
+00:22:17,600 --> 00:22:23,120
+is actually consuming via device by
+
+00:22:19,520 --> 00:22:23,120
+clearing its current size
+
+00:22:24,080 --> 00:22:28,960
+so what are advantages and disadvantages
+
+00:22:26,559 --> 00:22:31,360
+advantages are obviously that you can re
+
+00:22:28,960 --> 00:22:32,080
+resize a virtual machine in fairly small
+
+00:22:31,360 --> 00:22:36,159
+increments
+
+00:22:32,080 --> 00:22:37,760
+so right now with uh linux gas on x86 64
+
+00:22:36,159 --> 00:22:39,760
+you can resize in four megabyte
+
+00:22:37,760 --> 00:22:42,080
+criminality
+
+00:22:39,760 --> 00:22:44,159
+also it's significantly more flexible
+
+00:22:42,080 --> 00:22:45,840
+than dims and also significantly more
+
+00:22:44,159 --> 00:22:47,600
+flexible than memory ballooning
+
+00:22:45,840 --> 00:22:50,880
+for example memory ballooning does not
+
+00:22:47,600 --> 00:22:54,559
+support numa and with dimms you have
+
+00:22:50,880 --> 00:22:56,880
+quite some granularity restrictions
+
+00:22:54,559 --> 00:22:59,360
+also but the man is able to manage vm
+
+00:22:56,880 --> 00:23:01,280
+size changes completely insecure mu
+
+00:22:59,360 --> 00:23:02,960
+so you don't have to mess with any dimms
+
+00:23:01,280 --> 00:23:03,760
+or anything else all you do is you
+
+00:23:02,960 --> 00:23:05,760
+request
+
+00:23:03,760 --> 00:23:09,039
+changes to the size of a ruler mem
+
+00:23:05,760 --> 00:23:11,440
+device and see what happens
+
+00:23:09,039 --> 00:23:13,600
+interestingly where the mem being over
+
+00:23:11,440 --> 00:23:15,280
+the old device is also architectured
+
+00:23:13,600 --> 00:23:16,880
+independent so for example it does not
+
+00:23:15,280 --> 00:23:18,720
+require acpi
+
+00:23:16,880 --> 00:23:21,280
+as it's also applicable to other
+
+00:23:18,720 --> 00:23:24,000
+architectures
+
+00:23:21,280 --> 00:23:25,520
+disadvantage are um for example that
+
+00:23:24,000 --> 00:23:27,600
+it's not production ready yet
+
+00:23:25,520 --> 00:23:30,080
+so we have some basic versions upstream
+
+00:23:27,600 --> 00:23:32,240
+and linux jmu and cloud hypervisor
+
+00:23:30,080 --> 00:23:33,520
+but there are still some things that at
+
+00:23:32,240 --> 00:23:36,880
+least i want to see
+
+00:23:33,520 --> 00:23:38,880
+uh implemented and fix uh before we can
+
+00:23:36,880 --> 00:23:41,520
+consider this product already and i can
+
+00:23:38,880 --> 00:23:44,159
+sleep good at night
+
+00:23:41,520 --> 00:23:46,240
+also it's slower than memory ballooning
+
+00:23:44,159 --> 00:23:47,679
+and it cannot unplug as much memory as
+
+00:23:46,240 --> 00:23:49,279
+memory balloon
+
+00:23:47,679 --> 00:23:51,440
+the thing is that memory ballooning
+
+00:23:49,279 --> 00:23:52,320
+works on the whole virtual machine and
+
+00:23:51,440 --> 00:23:55,520
+not just on
+
+00:23:52,320 --> 00:23:57,039
+restricted uh physical memory regions
+
+00:23:55,520 --> 00:23:58,960
+inside your virtual machine
+
+00:23:57,039 --> 00:24:00,480
+and memory ballooning works on 4k
+
+00:23:58,960 --> 00:24:02,960
+granularity usually
+
+00:24:00,480 --> 00:24:05,200
+while rudolph mem works on 4 megabyte
+
+00:24:02,960 --> 00:24:07,360
+triangularity
+
+00:24:05,200 --> 00:24:09,120
+also currently it's incompatible with
+
+00:24:07,360 --> 00:24:10,880
+hibernation and suspension
+
+00:24:09,120 --> 00:24:12,880
+meaning as soon as you have roder m
+
+00:24:10,880 --> 00:24:14,640
+running with linux gas you won't be able
+
+00:24:12,880 --> 00:24:15,279
+to hibernate or suspend your guests
+
+00:24:14,640 --> 00:24:16,799
+anymore
+
+00:24:15,279 --> 00:24:20,320
+this might change in the future but
+
+00:24:16,799 --> 00:24:20,320
+might requires quite some work
+
+00:24:20,559 --> 00:24:24,400
+open items are just as with wood open
+
+00:24:23,120 --> 00:24:25,360
+for example support for other
+
+00:24:24,400 --> 00:24:29,440
+architectures
+
+00:24:25,360 --> 00:24:30,159
+um arm64 and s390x i have prototypes for
+
+00:24:29,440 --> 00:24:33,279
+but of course
+
+00:24:30,159 --> 00:24:37,440
+other ones might also be interesting
+
+00:24:33,279 --> 00:24:39,360
+guest operating support will also be
+
+00:24:37,440 --> 00:24:42,400
+challenging and interesting for example
+
+00:24:39,360 --> 00:24:44,159
+to get windows running with it
+
+00:24:42,400 --> 00:24:46,080
+there's still quite some open items in
+
+00:24:44,159 --> 00:24:48,240
+the linux driver for example
+
+00:24:46,080 --> 00:24:49,440
+um how much memory you can actually
+
+00:24:48,240 --> 00:24:52,400
+unplug later on
+
+00:24:49,440 --> 00:24:53,120
+um is not guaranteed yet but it is work
+
+00:24:52,400 --> 00:24:55,520
+uh
+
+00:24:53,120 --> 00:24:57,360
+work in progress in inquiry there are
+
+00:24:55,520 --> 00:24:59,760
+various things that have to be tackled
+
+00:24:57,360 --> 00:25:01,840
+for example vfo support just as for
+
+00:24:59,760 --> 00:25:05,440
+voter balloon meaning that you can
+
+00:25:01,840 --> 00:25:08,240
+pass through devices and still have this
+
+00:25:05,440 --> 00:25:10,000
+uh yeah mechanism to resize the virtual
+
+00:25:08,240 --> 00:25:13,120
+machines this way
+
+00:25:10,000 --> 00:25:16,799
+also other gmu future work would be
+
+00:25:13,120 --> 00:25:19,360
+protecting a guest memory from
+
+00:25:16,799 --> 00:25:20,480
+um being accessed again meaning that a
+
+00:25:19,360 --> 00:25:22,320
+malicious guest
+
+00:25:20,480 --> 00:25:25,360
+does not consume more memory than
+
+00:25:22,320 --> 00:25:27,919
+actually requested via a rudiment device
+
+00:25:25,360 --> 00:25:29,679
+uh also justice forwarder pmem library
+
+00:25:27,919 --> 00:25:30,799
+integration would be great to see in the
+
+00:25:29,679 --> 00:25:32,640
+future
+
+00:25:30,799 --> 00:25:35,520
+especially once it's officially
+
+00:25:32,640 --> 00:25:35,520
+production ready
+
+00:25:37,120 --> 00:25:43,520
+so to summarize what we see is we see
+
+00:25:40,880 --> 00:25:45,919
+more specialized mechanisms to manage
+
+00:25:43,520 --> 00:25:47,840
+memory so for example we talked about
+
+00:25:45,919 --> 00:25:50,000
+the router balloon extensions
+
+00:25:47,840 --> 00:25:52,320
+to speed up migration or to optimize
+
+00:25:50,000 --> 00:25:54,559
+memory over commit in the hypervisor
+
+00:25:52,320 --> 00:25:56,960
+we talked about virtual pmem to move the
+
+00:25:54,559 --> 00:25:59,440
+page cache handling to the hypervisor
+
+00:25:56,960 --> 00:26:00,400
+and we talked about voodoo mmm to resize
+
+00:25:59,440 --> 00:26:03,679
+your gas
+
+00:26:00,400 --> 00:26:05,919
+fine grained and mumma there
+
+00:26:03,679 --> 00:26:08,000
+but it's worth to note that traditional
+
+00:26:05,919 --> 00:26:11,039
+balloon inflation and deflation
+
+00:26:08,000 --> 00:26:13,039
+still remains important for example the
+
+00:26:11,039 --> 00:26:15,840
+new mechanisms we see still have to
+
+00:26:13,039 --> 00:26:17,679
+mature for example ruderman is still not
+
+00:26:15,840 --> 00:26:21,520
+production ready
+
+00:26:17,679 --> 00:26:26,640
+also um the the more
+
+00:26:21,520 --> 00:26:29,760
+um yeah memory management
+
+00:26:26,640 --> 00:26:31,679
+intensive things we develop the deeper
+
+00:26:29,760 --> 00:26:32,159
+the memory management integration in our
+
+00:26:31,679 --> 00:26:34,880
+guest
+
+00:26:32,159 --> 00:26:36,799
+actually is so for example riding a
+
+00:26:34,880 --> 00:26:38,559
+balloon driver is pretty simple all you
+
+00:26:36,799 --> 00:26:39,120
+have to do is allocate memory and free
+
+00:26:38,559 --> 00:26:42,159
+memory
+
+00:26:39,120 --> 00:26:43,760
+essentially but having winrar support
+
+00:26:42,159 --> 00:26:45,360
+for all of the other features we talked
+
+00:26:43,760 --> 00:26:48,240
+about today will be much more
+
+00:26:45,360 --> 00:26:50,400
+difficult and so it is with all um
+
+00:26:48,240 --> 00:26:52,640
+closed source operating systems where we
+
+00:26:50,400 --> 00:26:54,159
+as open source developer cannot really
+
+00:26:52,640 --> 00:26:57,200
+influence
+
+00:26:54,159 --> 00:26:59,520
+core memory management
+
+00:26:57,200 --> 00:27:01,279
+also in general there is still a lot to
+
+00:26:59,520 --> 00:27:04,080
+optimize
+
+00:27:01,279 --> 00:27:05,279
+as michael already mentioned the page
+
+00:27:04,080 --> 00:27:07,679
+guest page cache
+
+00:27:05,279 --> 00:27:10,080
+still remains challenging uh so are
+
+00:27:07,679 --> 00:27:10,400
+other caches like the application cache
+
+00:27:10,080 --> 00:27:13,200
+uh
+
+00:27:10,400 --> 00:27:14,720
+if if you imagine something like that um
+
+00:27:13,200 --> 00:27:17,360
+for example
+
+00:27:14,720 --> 00:27:19,200
+keymap isn't always applicable um and
+
+00:27:17,360 --> 00:27:20,720
+then you essentially are back to the
+
+00:27:19,200 --> 00:27:23,600
+same issue with
+
+00:27:20,720 --> 00:27:26,080
+the guest maybe consume all of its main
+
+00:27:23,600 --> 00:27:28,000
+memory just for the page cache
+
+00:27:26,080 --> 00:27:29,360
+also encrypted virtual machines remain
+
+00:27:28,000 --> 00:27:31,200
+challenging
+
+00:27:29,360 --> 00:27:33,200
+i think this item hasn't really been
+
+00:27:31,200 --> 00:27:34,159
+tackled yet but it's certainly stuff for
+
+00:27:33,200 --> 00:27:35,760
+the future
+
+00:27:34,159 --> 00:27:37,840
+because the hypervisor isn't really
+
+00:27:35,760 --> 00:27:40,720
+allowed to modify um
+
+00:27:37,840 --> 00:27:41,279
+content of your virtual machine um so
+
+00:27:40,720 --> 00:27:43,760
+what
+
+00:27:41,279 --> 00:27:45,679
+most of our mechanisms do is they
+
+00:27:43,760 --> 00:27:48,320
+discard for example memory
+
+00:27:45,679 --> 00:27:50,720
+um to optimize and that is not possible
+
+00:27:48,320 --> 00:27:52,480
+so it requires some kind of coordination
+
+00:27:50,720 --> 00:27:56,159
+with the guest or with the
+
+00:27:52,480 --> 00:27:57,919
+encrypted vm setup i think that rudolph
+
+00:27:56,159 --> 00:28:00,559
+balloon inflation and deflation should
+
+00:27:57,919 --> 00:28:02,960
+be feasible voter mem should be feasible
+
+00:28:00,559 --> 00:28:05,440
+i'm not so sure about voter pmem because
+
+00:28:02,960 --> 00:28:05,919
+um we're mapping some content into our
+
+00:28:05,440 --> 00:28:08,240
+guest
+
+00:28:05,919 --> 00:28:10,399
+which uh is unencrypted and that might
+
+00:28:08,240 --> 00:28:13,440
+be an issue
+
+00:28:10,399 --> 00:28:14,840
+also vfo and internal pci path through
+
+00:28:13,440 --> 00:28:17,200
+or other path through remains
+
+00:28:14,840 --> 00:28:19,120
+challenging because the issue with vfr
+
+00:28:17,200 --> 00:28:19,919
+is that it essentially pins all guest
+
+00:28:19,120 --> 00:28:22,000
+memory
+
+00:28:19,919 --> 00:28:23,120
+and forcing it to remain in hypervisor
+
+00:28:22,000 --> 00:28:25,840
+memory so
+
+00:28:23,120 --> 00:28:27,600
+um even if you would have rodel pmm this
+
+00:28:25,840 --> 00:28:29,360
+would mean that your whole wooden pmem
+
+00:28:27,600 --> 00:28:30,320
+device would be pinned in hypervisor
+
+00:28:29,360 --> 00:28:32,080
+memory
+
+00:28:30,320 --> 00:28:33,600
+which is not really an improvement to
+
+00:28:32,080 --> 00:28:35,919
+what we have right now
+
+00:28:33,600 --> 00:28:37,120
+and the same goes for all of the other
+
+00:28:35,919 --> 00:28:39,360
+items
+
+00:28:37,120 --> 00:28:40,960
+we do have a prototype for rudermen that
+
+00:28:39,360 --> 00:28:44,080
+makes it work
+
+00:28:40,960 --> 00:28:44,559
+but i guess a clean solution will still
+
+00:28:44,080 --> 00:28:47,520
+have to
+
+00:28:44,559 --> 00:28:47,919
+require some discussions in the future
+
+00:28:47,520 --> 00:28:50,399
+and
+
+00:28:47,919 --> 00:28:52,080
+that's basically it for this talk thank
+
+00:28:50,399 --> 00:28:54,559
+you a lot for attending
+
+00:28:52,080 --> 00:28:56,240
+if there are any questions feel free to
+
+00:28:54,559 --> 00:28:56,799
+ask them in the chat or reach out to
+
+00:28:56,240 --> 00:29:01,039
+either me
+
+00:28:56,799 --> 00:29:03,120
+or michael and i'll leave you with that
+
+00:29:01,039 --> 00:29:05,360
+here are some resources in case you want
+
+00:29:03,120 --> 00:29:09,600
+to learn more
+
+00:29:05,360 --> 00:29:12,080
+look up stuff and this is it
+
+00:29:09,600 --> 00:29:25,200
+i hope you'll have a great time enjoying
+
+00:29:12,080 --> 00:29:25,200
+
+YouTube URL: https://www.youtube.com/watch?v=Fq47WCCm-HM
+
+

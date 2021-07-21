@@ -1,0 +1,2271 @@
+Title: [2016] CPU Hotplug Support in QEMU by Bharata Rao & David Gibson
+Publication date: 2016-09-07
+Playlist: KVM Forum 2016
+Description: 
+	CPU hotplug allows virtual CPUs to be added to, or removed from a running KVM guest. This can be used to scale the guest's compute capacity on demand in cloud environments.
+
+CPU hotplug has been available for some time on x86 systems. However, the approach used there doesn't generalize well to other platforms. There has been an ongoing effort to design a general infrastructure for CPU hotplug in QEMU and, in particular, common management interface semantics usable on all platforms.
+
+This talk will cover the challenges of supporting CPU hotplug in qemu, and highlight which areas do and don't yet have consensus on design. In particular it will discuss the proposed scheme implemented on Power and x86 based on a combination of generic device_add/device_del based hotplug and a new QMP interface for use by management layers.
+
+David Gibson
+Senior Software Engineer, Red Hat
+
+David is a qemu and Linux kernel developer, currently working at Red Hat on KVM and qemu for IBM Power servers. Previously, while employed by IBM, he was the main author of qemu's 'pseries' machine type. He also wrote the Device Tree Compiler, and has worked on low-level memory management for Power machines, bringup for embedded PowerPC machines and the 'orinoco' wireless driver.
+
+Bharata B. Rao
+IBM Linux Technology Center
+
+Bharata B Rao works on KVM virtualization as part of IBM Linux Technology Center, India. Earlier he has worked in the area File Systems, Scheduler, Debuggers etc. He has graduated from the University of Mysore. He has spoken at linux.conf.au and Linux Plumbers earlier.
+
+Slides: http://www.linux-kvm.org/images/0/0c/03x07A-Bharata_Rao_and_David_Gibson-CPU_Hotplug_Support_in_QEMU.pdf
+Captions: 
+	00:00:09,920 --> 00:00:18,690
+good afternoon everybody today's topic
+
+00:00:14,429 --> 00:00:21,990
+is about doing CP hot plug in TMO my
+
+00:00:18,690 --> 00:00:23,930
+name is vertebra I work for IBM's linux
+
+00:00:21,990 --> 00:00:27,269
+Technology Center from Bangalore India
+
+00:00:23,930 --> 00:00:29,910
+there are other two co-authors for this
+
+00:00:27,269 --> 00:00:32,189
+work one of them is right here David
+
+00:00:29,910 --> 00:00:39,540
+Gibson do you want to introduce yourself
+
+00:00:32,189 --> 00:00:43,860
+for sure I work for red hat remotely
+
+00:00:39,540 --> 00:00:46,320
+from Australia and if we working on cure
+
+00:00:43,860 --> 00:00:49,200
+me for 40 I used to work for IBM or else
+
+00:00:46,320 --> 00:00:54,449
+over don't give me it sir take it yeah
+
+00:00:49,200 --> 00:00:57,210
+so our third co-author in this work is a
+
+00:00:54,449 --> 00:01:00,469
+girl mamedov who works for reddit in
+
+00:00:57,210 --> 00:01:03,149
+from Zachary public I got has been
+
+00:01:00,469 --> 00:01:04,949
+working extensively on the hot blood
+
+00:01:03,149 --> 00:01:09,689
+infrastructure memory and CPU hot luck
+
+00:01:04,949 --> 00:01:11,549
+on x86 so in today's presentation we
+
+00:01:09,689 --> 00:01:15,270
+will look at the new way to do cpu hot
+
+00:01:11,549 --> 00:01:19,520
+plug on in chemo mostly for couple of
+
+00:01:15,270 --> 00:01:22,200
+architectures x86 and power pc p series
+
+00:01:19,520 --> 00:01:25,409
+we look at some of the challenges we
+
+00:01:22,200 --> 00:01:27,270
+have had and some of the solutions we
+
+00:01:25,409 --> 00:01:31,829
+have worked out towards them towards
+
+00:01:27,270 --> 00:01:33,960
+solving them finally we will end the
+
+00:01:31,829 --> 00:01:36,060
+presentation by looking bits and pieces
+
+00:01:33,960 --> 00:01:38,159
+of future work that we have lined up in
+
+00:01:36,060 --> 00:01:43,770
+the area that is related to CP hot plug
+
+00:01:38,159 --> 00:01:46,610
+in K mu with that set let me get started
+
+00:01:43,770 --> 00:01:49,500
+with the actual presentation yeah so
+
+00:01:46,610 --> 00:01:51,329
+this is this is kind of mandatory
+
+00:01:49,500 --> 00:01:54,149
+introductions like the kind of written
+
+00:01:51,329 --> 00:01:56,310
+here just for offline reference but
+
+00:01:54,149 --> 00:01:59,399
+since it is here let me just go through
+
+00:01:56,310 --> 00:02:02,100
+it anyway so what is CP hot plug it's
+
+00:01:59,399 --> 00:02:04,079
+about adding or removing virtual CPUs
+
+00:02:02,100 --> 00:02:05,670
+from running guest dynamically which
+
+00:02:04,079 --> 00:02:08,640
+means that you will be able to add or
+
+00:02:05,670 --> 00:02:10,890
+remove CPUs from the guests without ever
+
+00:02:08,640 --> 00:02:12,870
+having to reboot the guests so that
+
+00:02:10,890 --> 00:02:16,140
+that's that's the key point here
+
+00:02:12,870 --> 00:02:20,099
+and as you all know so this feature is
+
+00:02:16,140 --> 00:02:22,709
+useful to scale the guests compute
+
+00:02:20,099 --> 00:02:24,540
+capacity on demand which is typically
+
+00:02:22,709 --> 00:02:27,180
+useful in implementing some sort of
+
+00:02:24,540 --> 00:02:31,470
+vertical scale out scale up solutions in
+
+00:02:27,180 --> 00:02:33,659
+the club that's about the use case part
+
+00:02:31,470 --> 00:02:36,450
+of it and the other point I want to
+
+00:02:33,659 --> 00:02:39,269
+touch upon here is the guests awareness
+
+00:02:36,450 --> 00:02:41,519
+part of it cpu hot-plug has been
+
+00:02:39,269 --> 00:02:43,260
+supported in linux kernel and hence in
+
+00:02:41,519 --> 00:02:45,660
+the guest kernels for a long time now so
+
+00:02:43,260 --> 00:02:47,609
+nothing new is needed on that front but
+
+00:02:45,660 --> 00:02:50,549
+there is a little bit of plumbing work
+
+00:02:47,609 --> 00:02:52,410
+that plumbing support I wouldn't say
+
+00:02:50,549 --> 00:02:54,750
+work because it's already done there is
+
+00:02:52,410 --> 00:02:56,819
+some plumbing support that is needed if
+
+00:02:54,750 --> 00:03:00,030
+you want to have cpu hot-plug running
+
+00:02:56,819 --> 00:03:02,940
+fully on architectures like PowerPC
+
+00:03:00,030 --> 00:03:04,769
+that's because in power we have this set
+
+00:03:02,940 --> 00:03:07,260
+of standards called papr Power
+
+00:03:04,769 --> 00:03:09,950
+Architecture platform reference which
+
+00:03:07,260 --> 00:03:12,930
+defines a set of standards for
+
+00:03:09,950 --> 00:03:15,209
+communication or it defines interfaces
+
+00:03:12,930 --> 00:03:17,069
+between the platform and the OS so it's
+
+00:03:15,209 --> 00:03:18,780
+a big set of standards one part of it
+
+00:03:17,069 --> 00:03:23,370
+talks about dynamic grief
+
+00:03:18,780 --> 00:03:24,780
+reconfiguration which defines the kind
+
+00:03:23,370 --> 00:03:26,430
+of communication that happens are
+
+00:03:24,780 --> 00:03:28,349
+supposed to happen between guest and the
+
+00:03:26,430 --> 00:03:30,629
+host when you are bringing up cpu
+
+00:03:28,349 --> 00:03:33,150
+dynamic resource like CPU or and
+
+00:03:30,629 --> 00:03:35,160
+assigning it to the guest so this part
+
+00:03:33,150 --> 00:03:39,120
+of the work is typically handled by a
+
+00:03:35,160 --> 00:03:41,040
+set of user space tools in the user
+
+00:03:39,120 --> 00:03:44,669
+space tools that we call rass tools in
+
+00:03:41,040 --> 00:03:46,260
+the NP series so the point I want to
+
+00:03:44,669 --> 00:03:49,500
+make here is if you want to have CP
+
+00:03:46,260 --> 00:03:51,299
+hot-plug working on power it is it's
+
+00:03:49,500 --> 00:03:53,669
+important to remember that these user
+
+00:03:51,299 --> 00:04:04,379
+space tools are running inside your
+
+00:03:53,669 --> 00:04:07,169
+power pc guest yeah so let's begin let's
+
+00:04:04,379 --> 00:04:10,949
+begin by looking at what we had prior to
+
+00:04:07,169 --> 00:04:14,010
+starting this work on CP hot-plug cpu
+
+00:04:10,949 --> 00:04:16,970
+hot-plug as i said is is not something
+
+00:04:14,010 --> 00:04:21,810
+very new to GMU also we have had this
+
+00:04:16,970 --> 00:04:23,909
+cpu add qm2 command since long and but
+
+00:04:21,810 --> 00:04:24,870
+this this command was supported on x86
+
+00:04:23,909 --> 00:04:27,600
+only
+
+00:04:24,870 --> 00:04:29,699
+and the other thing was it added it
+
+00:04:27,600 --> 00:04:31,350
+provided addition of CPUs but there was
+
+00:04:29,699 --> 00:04:34,530
+no way to remove the CPU so it was
+
+00:04:31,350 --> 00:04:36,419
+plugged only but no unplug and it was
+
+00:04:34,530 --> 00:04:40,160
+not a generic enough so that it could be
+
+00:04:36,419 --> 00:04:42,810
+used easily for different architectures
+
+00:04:40,160 --> 00:04:45,750
+the semantics of CPU is such that it
+
+00:04:42,810 --> 00:04:48,840
+adds one cpu thread at a time which made
+
+00:04:45,750 --> 00:04:50,490
+sense for x86 and work for x86 but for
+
+00:04:48,840 --> 00:04:53,340
+platforms like power the minimum
+
+00:04:50,490 --> 00:04:55,350
+granularity of adding a cpu is a cpu
+
+00:04:53,340 --> 00:04:57,960
+core it is a bunch of threads actually
+
+00:04:55,350 --> 00:05:00,210
+so that that wouldn't work the semantics
+
+00:04:57,960 --> 00:05:02,880
+wouldn't just work for other platforms
+
+00:05:00,210 --> 00:05:07,080
+like Power PC and the other thing that I
+
+00:05:02,880 --> 00:05:09,810
+have noted down here is out doing out of
+
+00:05:07,080 --> 00:05:13,229
+order CPU addition would break migration
+
+00:05:09,810 --> 00:05:16,830
+so that's that's that these were some of
+
+00:05:13,229 --> 00:05:18,870
+the limitations we had and cpu hot-plug
+
+00:05:16,830 --> 00:05:21,060
+has had a long history of development
+
+00:05:18,870 --> 00:05:22,740
+actually so when i first posted CP
+
+00:05:21,060 --> 00:05:26,310
+hot-plug patches way back in September
+
+00:05:22,740 --> 00:05:28,919
+2014 my implementation for CPU hot plug
+
+00:05:26,310 --> 00:05:32,099
+on p series was actually based on cpu
+
+00:05:28,919 --> 00:05:34,169
+add command itself where i used to add a
+
+00:05:32,099 --> 00:05:36,120
+bunch of CPU threats belonging to the
+
+00:05:34,169 --> 00:05:39,030
+core in response to one cpu add command
+
+00:05:36,120 --> 00:05:42,030
+so right then I was told very clearly
+
+00:05:39,030 --> 00:05:44,190
+that CPU add his kind of legacy and the
+
+00:05:42,030 --> 00:05:45,870
+right way to do things when you are
+
+00:05:44,190 --> 00:05:48,720
+looking at hot plug is to use device
+
+00:05:45,870 --> 00:05:51,090
+that so because a device ID is the
+
+00:05:48,720 --> 00:05:56,220
+standard way of adding devices these
+
+00:05:51,090 --> 00:05:59,669
+days in km oh and another thing was that
+
+00:05:56,220 --> 00:06:02,340
+CPU ad added CPUs but there was really
+
+00:05:59,669 --> 00:06:05,010
+not a good way for a user to figure out
+
+00:06:02,340 --> 00:06:08,340
+the list of possible CPUs that could be
+
+00:06:05,010 --> 00:06:10,500
+added to the guest and and also where
+
+00:06:08,340 --> 00:06:12,990
+these CPUs would end up on the board so
+
+00:06:10,500 --> 00:06:16,410
+these were some of the limitations that
+
+00:06:12,990 --> 00:06:21,000
+we have had with CP hot-plug sorry CPU
+
+00:06:16,410 --> 00:06:23,760
+add command so that CPU ad was what we
+
+00:06:21,000 --> 00:06:25,500
+had and we wanted something which was a
+
+00:06:23,760 --> 00:06:29,490
+bit more generic so that it could work
+
+00:06:25,500 --> 00:06:32,370
+for different architectures and so some
+
+00:06:29,490 --> 00:06:33,990
+of the requirements that some of the
+
+00:06:32,370 --> 00:06:36,960
+requirements were a pretty clear to us
+
+00:06:33,990 --> 00:06:38,460
+right front but many of the requirements
+
+00:06:36,960 --> 00:06:40,979
+started becoming clear as
+
+00:06:38,460 --> 00:06:44,669
+we went through as we iterated through
+
+00:06:40,979 --> 00:06:46,139
+different implementations yesterday in
+
+00:06:44,669 --> 00:06:48,569
+fact I was going through the mail
+
+00:06:46,139 --> 00:06:51,210
+archives and counting the number of RFC
+
+00:06:48,569 --> 00:06:53,970
+posts i did towards cpu hot-plug and it
+
+00:06:51,210 --> 00:06:57,000
+counted to 14 so it's not that I was
+
+00:06:53,970 --> 00:06:59,340
+posting the same patch sex series for 14
+
+00:06:57,000 --> 00:07:01,380
+times and then I figured out there were
+
+00:06:59,340 --> 00:07:05,490
+six different implementations in this 14
+
+00:07:01,380 --> 00:07:07,169
+pad set 14 versions I I did so it's been
+
+00:07:05,490 --> 00:07:08,789
+like trying out a lot of different
+
+00:07:07,169 --> 00:07:11,550
+things different semantics and trying to
+
+00:07:08,789 --> 00:07:13,620
+come up with model that could work for
+
+00:07:11,550 --> 00:07:19,949
+most of the architectures and machine
+
+00:07:13,620 --> 00:07:22,289
+types so again the one one thing we
+
+00:07:19,949 --> 00:07:25,199
+realized was that it's not possible to
+
+00:07:22,289 --> 00:07:27,389
+have a model which would fit in for all
+
+00:07:25,199 --> 00:07:30,030
+the architectures and machine type but
+
+00:07:27,389 --> 00:07:34,460
+at least what we wanted was a consistent
+
+00:07:30,030 --> 00:07:36,870
+comb q om calm model for CPUs if not
+
+00:07:34,460 --> 00:07:38,430
+such a model which is which kind of
+
+00:07:36,870 --> 00:07:40,949
+works similarly across other
+
+00:07:38,430 --> 00:07:43,560
+architectures if not same so that was
+
+00:07:40,949 --> 00:07:48,270
+one of the goals and of course it has to
+
+00:07:43,560 --> 00:07:51,599
+be based on device add and another
+
+00:07:48,270 --> 00:07:53,280
+requirement that was me and another
+
+00:07:51,599 --> 00:07:56,550
+thing that was really needed was a
+
+00:07:53,280 --> 00:08:01,349
+common way to introspect and introspect
+
+00:07:56,550 --> 00:08:03,930
+the or discover the CPUs and provide
+
+00:08:01,349 --> 00:08:06,900
+information about all possible hot-plug
+
+00:08:03,930 --> 00:08:08,460
+cpus and the properties to the user so
+
+00:08:06,900 --> 00:08:11,250
+that users are in a good position to
+
+00:08:08,460 --> 00:08:12,900
+figure out you by when I say users it
+
+00:08:11,250 --> 00:08:14,460
+includes management applications lately
+
+00:08:12,900 --> 00:08:17,009
+bird so they should be able to figure
+
+00:08:14,460 --> 00:08:18,780
+out what's the device type what's the
+
+00:08:17,009 --> 00:08:20,430
+CPU device that that I should that I
+
+00:08:18,780 --> 00:08:23,419
+should add and where the CP would
+
+00:08:20,430 --> 00:08:25,949
+actually go and fit into the board so
+
+00:08:23,419 --> 00:08:28,380
+these are some of the things we had in
+
+00:08:25,949 --> 00:08:35,459
+mind when we set out and as we
+
+00:08:28,380 --> 00:08:37,289
+progressed implementing CP hot-plug one
+
+00:08:35,459 --> 00:08:39,000
+of the first questions that we have we
+
+00:08:37,289 --> 00:08:42,060
+have had to answer is that at what
+
+00:08:39,000 --> 00:08:46,500
+granularity would you implement CP hot
+
+00:08:42,060 --> 00:08:48,270
+plug right there are this carbon
+
+00:08:46,500 --> 00:08:51,300
+granular it is that we are all familiar
+
+00:08:48,270 --> 00:08:52,230
+with should we do CPU edition or at
+
+00:08:51,300 --> 00:08:53,700
+thread grandly
+
+00:08:52,230 --> 00:08:55,740
+TR it should it should it be done at
+
+00:08:53,700 --> 00:08:59,310
+core granularity or socket granularity
+
+00:08:55,740 --> 00:09:02,550
+so let's look at each of these and see
+
+00:08:59,310 --> 00:09:06,960
+the tools and that advantages and
+
+00:09:02,550 --> 00:09:09,330
+disadvantages of each of these so thread
+
+00:09:06,960 --> 00:09:12,720
+granularity x86 already supported by the
+
+00:09:09,330 --> 00:09:15,150
+way of CPU add so if you are if you are
+
+00:09:12,720 --> 00:09:18,060
+implementing or if you're coming up the
+
+00:09:15,150 --> 00:09:19,290
+modern based on thread granularity most
+
+00:09:18,060 --> 00:09:21,840
+of the existing guess tools and
+
+00:09:19,290 --> 00:09:23,820
+management it would be easy on existing
+
+00:09:21,840 --> 00:09:27,450
+guess tools and management and of course
+
+00:09:23,820 --> 00:09:29,730
+it would work for x86 and as I said
+
+00:09:27,450 --> 00:09:33,150
+right for platforms like p series core
+
+00:09:29,730 --> 00:09:34,740
+is our granularity and this model of
+
+00:09:33,150 --> 00:09:36,560
+adding thread by thread simply doesn't
+
+00:09:34,740 --> 00:09:39,000
+work because we have no way to actually
+
+00:09:36,560 --> 00:09:41,940
+expose the hot plug given to the guest
+
+00:09:39,000 --> 00:09:43,980
+and at threat level basically the event
+
+00:09:41,940 --> 00:09:49,650
+hot-plug event is informed to the guest
+
+00:09:43,980 --> 00:09:54,090
+in terms of core so that was out of
+
+00:09:49,650 --> 00:09:56,310
+question for us and then what if the
+
+00:09:54,090 --> 00:09:59,340
+model implemented CPU hot-plug at
+
+00:09:56,310 --> 00:10:03,240
+corcoran larity of course it's perfect
+
+00:09:59,340 --> 00:10:05,130
+match for p series or SP a PR but there
+
+00:10:03,240 --> 00:10:06,750
+was no reason really to make this
+
+00:10:05,130 --> 00:10:10,950
+generate enough because it was not
+
+00:10:06,750 --> 00:10:13,440
+useful for other architectures then
+
+00:10:10,950 --> 00:10:16,200
+there is this interesting granularity
+
+00:10:13,440 --> 00:10:17,820
+called socket granularity which is kind
+
+00:10:16,200 --> 00:10:21,500
+of artificial because this construct
+
+00:10:17,820 --> 00:10:23,790
+socket itself is itself doesn't exist on
+
+00:10:21,500 --> 00:10:26,220
+powerpc and it kind of becomes
+
+00:10:23,790 --> 00:10:28,680
+artificial for us and there were in fact
+
+00:10:26,220 --> 00:10:33,300
+suggestions that we should closely model
+
+00:10:28,680 --> 00:10:36,830
+CPU hot plug on the in a way that it is
+
+00:10:33,300 --> 00:10:39,480
+done in physical basically so
+
+00:10:36,830 --> 00:10:42,120
+essentially in the physical world it is
+
+00:10:39,480 --> 00:10:43,200
+possible to do add or remove a socket at
+
+00:10:42,120 --> 00:10:45,750
+a time so there were suggestions that
+
+00:10:43,200 --> 00:10:49,380
+let us do that in the virtual world too
+
+00:10:45,750 --> 00:10:52,530
+but even that was problematic for
+
+00:10:49,380 --> 00:10:54,180
+problematic for x86 too because x86 was
+
+00:10:52,530 --> 00:10:57,720
+already doing CP hot plug at cred
+
+00:10:54,180 --> 00:10:59,640
+granularity acpi spec as well as guest
+
+00:10:57,720 --> 00:11:02,320
+Colonel kind of handled or dealt with
+
+00:10:59,640 --> 00:11:04,810
+cpu addition at red granite
+
+00:11:02,320 --> 00:11:06,580
+hilarity itself so it was even even for
+
+00:11:04,810 --> 00:11:15,940
+x86 I think it was really difficult to
+
+00:11:06,580 --> 00:11:18,730
+go with socket and granularity yeah so
+
+00:11:15,940 --> 00:11:22,390
+eventually what we kind of ended up with
+
+00:11:18,730 --> 00:11:24,040
+is that let's not try to have one model
+
+00:11:22,390 --> 00:11:25,390
+with one granularity and try to fit
+
+00:11:24,040 --> 00:11:28,540
+everybody into it that would be very
+
+00:11:25,390 --> 00:11:30,790
+artificial in fact I had couple of
+
+00:11:28,540 --> 00:11:34,270
+implementations where I was actually
+
+00:11:30,790 --> 00:11:36,790
+implementing CPOE hot-plug for p series
+
+00:11:34,270 --> 00:11:38,500
+in terms of sockets so we added the
+
+00:11:36,790 --> 00:11:40,990
+artificial construct constructed that
+
+00:11:38,500 --> 00:11:43,420
+would add course underneath so yeah we
+
+00:11:40,990 --> 00:11:45,340
+had all those things but eventually we
+
+00:11:43,420 --> 00:11:47,490
+decided that it's up to the machine type
+
+00:11:45,340 --> 00:11:50,380
+to figure out what is the granularity so
+
+00:11:47,490 --> 00:11:54,880
+x86 ended up going with thread
+
+00:11:50,380 --> 00:11:56,440
+granularity while PowerPC stuck with the
+
+00:11:54,880 --> 00:11:59,710
+core granularity which is much more
+
+00:11:56,440 --> 00:12:01,390
+natural for it this this choice made
+
+00:11:59,710 --> 00:12:04,060
+sense because in future we could have
+
+00:12:01,390 --> 00:12:05,680
+different configurations like multi chip
+
+00:12:04,060 --> 00:12:07,930
+board or hydrogen heterogeneous
+
+00:12:05,680 --> 00:12:10,060
+configurations and it makes sense to
+
+00:12:07,930 --> 00:12:12,190
+leave that flexibility or have the
+
+00:12:10,060 --> 00:12:16,810
+flexibility for them to do hot plug in
+
+00:12:12,190 --> 00:12:22,770
+whatever way they would like to do yeah
+
+00:12:16,810 --> 00:12:27,070
+so let's look briefly at cpu core model
+
+00:12:22,770 --> 00:12:30,930
+so the vcpu thread which eventually ends
+
+00:12:27,070 --> 00:12:33,910
+up doing kvm run ioctl this was already
+
+00:12:30,930 --> 00:12:35,110
+already represented as a calm object for
+
+00:12:33,910 --> 00:12:38,950
+most of the architectures I would
+
+00:12:35,110 --> 00:12:41,740
+believe what we wanted is this a
+
+00:12:38,950 --> 00:12:44,740
+different unit called hot pluggable CPU
+
+00:12:41,740 --> 00:12:47,050
+unit or hot pluggable CPU module and we
+
+00:12:44,740 --> 00:12:50,410
+wanted this to to be a comma object
+
+00:12:47,050 --> 00:12:53,260
+derived from device class so that it
+
+00:12:50,410 --> 00:12:56,590
+becomes possible to user instantiate
+
+00:12:53,260 --> 00:12:58,630
+this hot pluggable CPU object by means
+
+00:12:56,590 --> 00:13:01,600
+of dash device or dash device add
+
+00:12:58,630 --> 00:13:03,070
+command the vcpu thread as I said was a
+
+00:13:01,600 --> 00:13:05,020
+comma object but it was not user
+
+00:13:03,070 --> 00:13:06,940
+instantiate the actual hot pluggable
+
+00:13:05,020 --> 00:13:09,310
+unit that I am talking about in the
+
+00:13:06,940 --> 00:13:13,210
+second bullet point here we wanted it to
+
+00:13:09,310 --> 00:13:16,120
+be user instantiate in some cases like
+
+00:13:13,210 --> 00:13:18,520
+x86 where they do hot plug at red grand
+
+00:13:16,120 --> 00:13:21,040
+actually this hot pluggable CPU module
+
+00:13:18,520 --> 00:13:22,510
+is kind of same as the vcpu thread
+
+00:13:21,040 --> 00:13:25,270
+object so they are one and the same as
+
+00:13:22,510 --> 00:13:27,490
+shown in the graphics on the on that
+
+00:13:25,270 --> 00:13:30,730
+side where you can see that the thread
+
+00:13:27,490 --> 00:13:34,320
+CPU thread object EMU 64 x86 64
+
+00:13:30,730 --> 00:13:37,029
+underscore dash TPU that kind of is the
+
+00:13:34,320 --> 00:13:39,279
+CPU thread object is directly setting
+
+00:13:37,029 --> 00:13:41,830
+sitting on machine peripheral in the
+
+00:13:39,279 --> 00:13:44,650
+comm tree if you compare that with what
+
+00:13:41,830 --> 00:13:47,770
+we have in p series where the
+
+00:13:44,650 --> 00:13:49,990
+granularity is core we have this core
+
+00:13:47,770 --> 00:13:52,600
+object sitting on machine peripheral and
+
+00:13:49,990 --> 00:13:54,490
+then thread object sitting underneath it
+
+00:13:52,600 --> 00:13:56,680
+so what is directly user instance able
+
+00:13:54,490 --> 00:14:02,620
+here is score while thread is kind of
+
+00:13:56,680 --> 00:14:04,330
+indirectly instantiated so we talked
+
+00:14:02,620 --> 00:14:05,920
+about all these three different comma
+
+00:14:04,330 --> 00:14:08,260
+objects that hot pluggable object could
+
+00:14:05,920 --> 00:14:11,980
+be threads core socket of course it does
+
+00:14:08,260 --> 00:14:14,680
+not exist but not all machine types need
+
+00:14:11,980 --> 00:14:17,320
+to have all of these for example x86
+
+00:14:14,680 --> 00:14:20,470
+doesn't use the core object while p
+
+00:14:17,320 --> 00:14:23,290
+series uses it so there are these two
+
+00:14:20,470 --> 00:14:25,600
+common options on keuka medline dash SNP
+
+00:14:23,290 --> 00:14:28,380
+and dash cpu dashes simply specifies the
+
+00:14:25,600 --> 00:14:31,690
+number of CPUs that you would boot the
+
+00:14:28,380 --> 00:14:33,279
+guest with it also specifies the CPU
+
+00:14:31,690 --> 00:14:35,440
+topology as well as maximum hot
+
+00:14:33,279 --> 00:14:38,529
+pluggable CPUs that you could ever have
+
+00:14:35,440 --> 00:14:40,720
+with this case and dash CPU specifies
+
+00:14:38,529 --> 00:14:43,750
+the CPU model that the guests would have
+
+00:14:40,720 --> 00:14:46,360
+so in the model in the hot club model
+
+00:14:43,750 --> 00:14:48,610
+what we do is that the machine type code
+
+00:14:46,360 --> 00:14:50,920
+extract extract information from these
+
+00:14:48,610 --> 00:14:54,730
+two command-line options and comes up
+
+00:14:50,920 --> 00:14:57,010
+with hot pluggable CP right right number
+
+00:14:54,730 --> 00:15:00,700
+of hot club hot pluggable CPU objects of
+
+00:14:57,010 --> 00:15:03,760
+the given cpu type currently we derive
+
+00:15:00,700 --> 00:15:06,880
+the cpu type from dash cpu command-line
+
+00:15:03,760 --> 00:15:08,500
+switch but nothing prevents from having
+
+00:15:06,880 --> 00:15:14,320
+some heterogeneous configurations here
+
+00:15:08,500 --> 00:15:16,420
+too yeah so x86 did not need any
+
+00:15:14,320 --> 00:15:19,029
+different or special construct as far as
+
+00:15:16,420 --> 00:15:22,330
+calm objects are concerned but since we
+
+00:15:19,029 --> 00:15:26,110
+were doing at adding CPUs at core
+
+00:15:22,330 --> 00:15:28,600
+granularity we needed this cpu core type
+
+00:15:26,110 --> 00:15:33,250
+as a generic type that we had to
+
+00:15:28,600 --> 00:15:36,100
+so that we could we could inherit our
+
+00:15:33,250 --> 00:15:39,670
+model specific four types from this
+
+00:15:36,100 --> 00:15:42,670
+generic cpu core type yeah right now is
+
+00:15:39,670 --> 00:15:44,980
+PPS papr pcs is the only user of this
+
+00:15:42,670 --> 00:15:47,649
+generic cpu core type but it could be
+
+00:15:44,980 --> 00:15:50,589
+used by others in future as well so this
+
+00:15:47,649 --> 00:15:53,290
+is the example comparison of the cpu
+
+00:15:50,589 --> 00:15:55,089
+type hierarchy in x86 as well as p
+
+00:15:53,290 --> 00:15:57,639
+series with this new cpu hot-plug model
+
+00:15:55,089 --> 00:16:01,329
+there you can see it's all threads here
+
+00:15:57,639 --> 00:16:02,829
+it's all course the bottom most part is
+
+00:16:01,329 --> 00:16:05,170
+the actual hot pluggable unit that is
+
+00:16:02,829 --> 00:16:08,560
+the model specific CPU which is kind of
+
+00:16:05,170 --> 00:16:13,149
+inherited from x86 64 cpu which is again
+
+00:16:08,560 --> 00:16:15,220
+inherited from the generic cpu type in
+
+00:16:13,149 --> 00:16:17,920
+case of power the example is about some
+
+00:16:15,220 --> 00:16:21,940
+version of power 8e where the coal type
+
+00:16:17,920 --> 00:16:26,380
+is based code type is poverty and it has
+
+00:16:21,940 --> 00:16:28,209
+inherited from generic spps papr core
+
+00:16:26,380 --> 00:16:30,399
+type which again is inherited from the
+
+00:16:28,209 --> 00:16:33,569
+generic core type so this is how the
+
+00:16:30,399 --> 00:16:36,279
+type hierarchy looks like in the model
+
+00:16:33,569 --> 00:16:38,740
+so finally this is where we ended up
+
+00:16:36,279 --> 00:16:42,430
+with this this is the semantics to do
+
+00:16:38,740 --> 00:16:45,250
+cpu hot plug in K mu and this is going
+
+00:16:42,430 --> 00:16:46,630
+to be present in the upcoming to dot
+
+00:16:45,250 --> 00:16:48,519
+some and release of Q mu that would
+
+00:16:46,630 --> 00:16:52,449
+that's that is supposed to happen next
+
+00:16:48,519 --> 00:16:55,480
+week so what we have is this cpu device
+
+00:16:52,449 --> 00:16:57,850
+types device type as well as some
+
+00:16:55,480 --> 00:17:00,579
+options socket ID / ID threadid
+
+00:16:57,850 --> 00:17:04,839
+specified along with the dash device
+
+00:17:00,579 --> 00:17:07,419
+command-line switch cpu device type is
+
+00:17:04,839 --> 00:17:09,010
+of course machine dependent it varies
+
+00:17:07,419 --> 00:17:10,240
+between machines for x86 it will be
+
+00:17:09,010 --> 00:17:12,750
+different and power it will be different
+
+00:17:10,240 --> 00:17:15,280
+and this combination of these three
+
+00:17:12,750 --> 00:17:17,770
+parameters are the properties determines
+
+00:17:15,280 --> 00:17:20,319
+where exactly you're hot plug CP would
+
+00:17:17,770 --> 00:17:22,419
+sit in the board and again some of these
+
+00:17:20,319 --> 00:17:26,470
+were optional as seen in the examples
+
+00:17:22,419 --> 00:17:28,320
+here for SP APR only core ID is enough
+
+00:17:26,470 --> 00:17:31,750
+to actually specify where exactly that
+
+00:17:28,320 --> 00:17:33,720
+CPU would be inserted for x86 I think
+
+00:17:31,750 --> 00:17:36,100
+all the three options would be needed
+
+00:17:33,720 --> 00:17:39,070
+yeah so these are the
+
+00:17:36,100 --> 00:17:45,960
+real examples of specifying or hot
+
+00:17:39,070 --> 00:17:49,210
+adding CPUs on x86 as well as SP APR
+
+00:17:45,960 --> 00:17:51,970
+yeah so we saw how to do CPU hot plug
+
+00:17:49,210 --> 00:17:54,010
+from the monitor but how do we know what
+
+00:17:51,970 --> 00:17:55,360
+kind of cpu objects to create what are
+
+00:17:54,010 --> 00:17:57,460
+the properties and what are the values
+
+00:17:55,360 --> 00:18:03,429
+for these properties that we that we
+
+00:17:57,460 --> 00:18:07,809
+should use yeah there has been yeah so
+
+00:18:03,429 --> 00:18:09,549
+what we ideally as I touched upon some
+
+00:18:07,809 --> 00:18:12,070
+time back is we i really need some sort
+
+00:18:09,549 --> 00:18:14,620
+of discovery and introspection to figure
+
+00:18:12,070 --> 00:18:18,070
+out what kind of cpu device to add this
+
+00:18:14,620 --> 00:18:20,830
+has been kind of i would how would I put
+
+00:18:18,070 --> 00:18:23,890
+it there has been a lot of discussion
+
+00:18:20,830 --> 00:18:28,030
+around how do we introspect or how do we
+
+00:18:23,890 --> 00:18:31,289
+discover discover the CPUs and export
+
+00:18:28,030 --> 00:18:34,450
+the information to apps like libvirt but
+
+00:18:31,289 --> 00:18:36,520
+there were even suggestions that the hot
+
+00:18:34,450 --> 00:18:41,799
+plug implementation itself should kind
+
+00:18:36,520 --> 00:18:44,100
+of have this introspection mechanism
+
+00:18:41,799 --> 00:18:47,320
+built in for CPU objects so that
+
+00:18:44,100 --> 00:18:49,630
+probably using qm q om link properties
+
+00:18:47,320 --> 00:18:51,490
+so that it becomes easier to just export
+
+00:18:49,630 --> 00:18:53,950
+them and provide the information to the
+
+00:18:51,490 --> 00:18:55,870
+management applications so while we were
+
+00:18:53,950 --> 00:18:58,900
+going round and round discussing about
+
+00:18:55,870 --> 00:19:01,510
+how to do this qm link-based
+
+00:18:58,900 --> 00:19:03,220
+introspection mechanism in fact even had
+
+00:19:01,510 --> 00:19:04,510
+a couple of implementations to figure
+
+00:19:03,220 --> 00:19:06,970
+out how exactly it would look like
+
+00:19:04,510 --> 00:19:10,929
+that's when I think I came up with this
+
+00:19:06,970 --> 00:19:12,280
+solution that let us disassociate the
+
+00:19:10,929 --> 00:19:13,900
+introspection part from the actual
+
+00:19:12,280 --> 00:19:16,450
+hot-plug implementation but let's
+
+00:19:13,900 --> 00:19:19,210
+implement hot-plug separately and let us
+
+00:19:16,450 --> 00:19:21,700
+have a hmp hmp based introspection or
+
+00:19:19,210 --> 00:19:23,799
+discovery mechanism that we will be able
+
+00:19:21,700 --> 00:19:27,940
+to export information in a uniform
+
+00:19:23,799 --> 00:19:29,830
+manner of which would work for most of
+
+00:19:27,940 --> 00:19:32,320
+the architectures so that is how this
+
+00:19:29,830 --> 00:19:34,419
+qmp command very hot pluggable cpus came
+
+00:19:32,320 --> 00:19:37,690
+about it kind of lists all the
+
+00:19:34,419 --> 00:19:40,140
+information about the existing cpus as
+
+00:19:37,690 --> 00:19:42,640
+well as possible hot pluggable cpus it
+
+00:19:40,140 --> 00:19:45,580
+lists the device type information that
+
+00:19:42,640 --> 00:19:47,770
+it goes that you need to use for adding
+
+00:19:45,580 --> 00:19:49,760
+the particular CPU device along with the
+
+00:19:47,770 --> 00:19:54,590
+properties circuit ID
+
+00:19:49,760 --> 00:20:00,020
+ready etc yeah and there is this hmp
+
+00:19:54,590 --> 00:20:05,060
+rapper too for this yeah I would quickly
+
+00:20:00,020 --> 00:20:08,270
+have a two-minute demonstration of I
+
+00:20:05,060 --> 00:20:10,840
+want to show how this really looks like
+
+00:20:08,270 --> 00:20:14,540
+on a p-series machine doing cpu hot-plug
+
+00:20:10,840 --> 00:20:16,130
+it's not kind of really exciting them or
+
+00:20:14,540 --> 00:20:17,570
+something but it's it just has that
+
+00:20:16,130 --> 00:20:26,960
+novelty part because this is the first
+
+00:20:17,570 --> 00:20:30,980
+time they are doing hot plug here yeah
+
+00:20:26,960 --> 00:20:33,620
+so here and I starting a 74 p series
+
+00:20:30,980 --> 00:20:35,860
+guest with poverty cpu model specified
+
+00:20:33,620 --> 00:20:38,570
+so the guest is supposed to come up with
+
+00:20:35,860 --> 00:20:40,850
+one core having for threats and it has
+
+00:20:38,570 --> 00:20:42,800
+it can grow up to Maxie pues that is
+
+00:20:40,850 --> 00:20:44,570
+eight it can grow up to eight CPUs which
+
+00:20:42,800 --> 00:20:53,810
+means that there is a there is room to
+
+00:20:44,570 --> 00:20:57,110
+add one more core here okay so I was
+
+00:20:53,810 --> 00:20:59,600
+kind of doing it recording this demo
+
+00:20:57,110 --> 00:21:05,260
+from the hotel network i think that was
+
+00:20:59,600 --> 00:21:05,260
+not the fastest of networks we have
+
+00:21:17,340 --> 00:21:22,539
+yeah so here we have the guest booted
+
+00:21:20,320 --> 00:21:26,500
+it's a fedora 20 for running latest
+
+00:21:22,539 --> 00:21:31,390
+kernel and it has booted with one core
+
+00:21:26,500 --> 00:21:34,720
+with 44 of its thread online let's
+
+00:21:31,390 --> 00:21:37,240
+connect to the monitor look at all the
+
+00:21:34,720 --> 00:21:40,270
+threats for threats one core and this is
+
+00:21:37,240 --> 00:21:43,690
+how the hot pluggable CPU hmp command
+
+00:21:40,270 --> 00:21:46,330
+looks like here we have this boot CPU
+
+00:21:43,690 --> 00:21:49,299
+listed at least the CPU device type that
+
+00:21:46,330 --> 00:21:51,820
+needs to be added if you want to have a
+
+00:21:49,299 --> 00:21:54,010
+hot plug get it lists what is called q
+
+00:21:51,820 --> 00:21:56,440
+om part there is a property called q om
+
+00:21:54,010 --> 00:21:59,350
+path which if populated indicates that
+
+00:21:56,440 --> 00:22:00,760
+this cpu core is already plugged in if
+
+00:21:59,350 --> 00:22:03,970
+it is not there which means that it's a
+
+00:22:00,760 --> 00:22:05,200
+candidate for hot plugging so this is
+
+00:22:03,970 --> 00:22:07,120
+the boot core which is already plugged
+
+00:22:05,200 --> 00:22:10,240
+in and the other one which does not have
+
+00:22:07,120 --> 00:22:16,240
+that qm part is the one which can be
+
+00:22:10,240 --> 00:22:19,330
+plugged in now just what additional step
+
+00:22:16,240 --> 00:22:21,640
+or check in power pc guess we need to
+
+00:22:19,330 --> 00:22:24,149
+ensure that the guest user space tools
+
+00:22:21,640 --> 00:22:30,490
+that i was talking about is running now
+
+00:22:24,149 --> 00:22:37,230
+yeah so that's how typically add cpu
+
+00:22:30,490 --> 00:22:40,480
+device specify an ID to the device and
+
+00:22:37,230 --> 00:22:48,880
+use the core ID that the KMP command
+
+00:22:40,480 --> 00:22:50,940
+showed there it is so your CPU came up
+
+00:22:48,880 --> 00:22:56,260
+online now we have eight CPUs to course
+
+00:22:50,940 --> 00:22:59,620
+for threats each and you can see all the
+
+00:22:56,260 --> 00:23:03,730
+threats and again if you run hot
+
+00:22:59,620 --> 00:23:07,480
+pluggable CPUs you would see the the
+
+00:23:03,730 --> 00:23:09,070
+first core now populated yeah of course
+
+00:23:07,480 --> 00:23:17,730
+what would you do after plugging in you
+
+00:23:09,070 --> 00:23:17,730
+just unplug and remove so yeah yeah so
+
+00:23:26,360 --> 00:23:37,100
+ok so the court is back in its original
+
+00:23:28,700 --> 00:23:41,470
+form right so yeah so these were some
+
+00:23:37,100 --> 00:23:45,440
+backup slides we had yeah or do you
+
+00:23:41,470 --> 00:23:46,490
+leave it right so I'm now going to talk
+
+00:23:45,440 --> 00:23:49,280
+about some of the problems we
+
+00:23:46,490 --> 00:23:52,580
+encountered as we tried implementing
+
+00:23:49,280 --> 00:23:53,990
+this start off with the easy ones and
+
+00:23:52,580 --> 00:23:57,710
+move on to the sum of the trickier ones
+
+00:23:53,990 --> 00:24:00,290
+we hit so one fairly simple problem was
+
+00:23:57,710 --> 00:24:04,490
+that kvm doesn't allow you to destroy v
+
+00:24:00,290 --> 00:24:09,350
+cpus once they're created and to extend
+
+00:24:04,490 --> 00:24:10,910
+kvm to let you do that would be nasty so
+
+00:24:09,350 --> 00:24:13,040
+the kayvyun people obviously didn't
+
+00:24:10,910 --> 00:24:15,980
+really want to do that so what we're
+
+00:24:13,040 --> 00:24:18,620
+doing instead is when we unplug a core
+
+00:24:15,980 --> 00:24:21,200
+from the qme side we destroy the Q mu
+
+00:24:18,620 --> 00:24:26,870
+representation but we keep what we think
+
+00:24:21,200 --> 00:24:29,720
+of as a parked kvm vcpu so the vcp you
+
+00:24:26,870 --> 00:24:31,580
+in kvm is disabled it's not running but
+
+00:24:29,720 --> 00:24:33,800
+it still exists an object it takes
+
+00:24:31,580 --> 00:24:36,830
+minimal resources a few little kernel
+
+00:24:33,800 --> 00:24:40,370
+structures if that courgettes replugged
+
+00:24:36,830 --> 00:24:45,710
+again in future will reuse and unpack it
+
+00:24:40,370 --> 00:24:48,070
+and connect it back to the q mu cpu so
+
+00:24:45,710 --> 00:24:52,370
+fairly straightforward fairly obvious
+
+00:24:48,070 --> 00:24:53,510
+solution for that little problem next
+
+00:24:52,370 --> 00:24:56,510
+problem is a little bit more complicated
+
+00:24:53,510 --> 00:24:58,280
+is how we deal with errors during the
+
+00:24:56,510 --> 00:25:02,210
+hot plug and there's several places that
+
+00:24:58,280 --> 00:25:04,310
+errors can occur or what we're also
+
+00:25:02,210 --> 00:25:06,110
+dealing with here is is where the errors
+
+00:25:04,310 --> 00:25:09,610
+are due to assertions I mean we've got
+
+00:25:06,110 --> 00:25:11,330
+as we said this scheme camon
+
+00:25:09,610 --> 00:25:13,310
+theoretically allow things like
+
+00:25:11,330 --> 00:25:15,470
+heterogeneous systems but obviously most
+
+00:25:13,310 --> 00:25:18,140
+current machine types won't allow that
+
+00:25:15,470 --> 00:25:19,850
+shouldn't allow you to try and plug in
+
+00:25:18,140 --> 00:25:23,660
+two different types of CPU to the same
+
+00:25:19,850 --> 00:25:26,090
+board so there's various problems that
+
+00:25:23,660 --> 00:25:28,400
+we want to check for now one place that
+
+00:25:26,090 --> 00:25:35,120
+things get checked is in CPU realize and
+
+00:25:28,400 --> 00:25:36,880
+that already uses the the Q error
+
+00:25:35,120 --> 00:25:40,570
+infrastructure to
+
+00:25:36,880 --> 00:25:42,880
+you report errors cleanly but it's
+
+00:25:40,570 --> 00:25:44,860
+specific only to the CPU and doesn't
+
+00:25:42,880 --> 00:25:46,540
+know about the machine type so it can't
+
+00:25:44,860 --> 00:25:49,180
+really check constraints that are
+
+00:25:46,540 --> 00:25:51,160
+imposed by the machine type the machine
+
+00:25:49,180 --> 00:25:53,590
+has a plug handler where we can check
+
+00:25:51,160 --> 00:25:55,930
+machine type things but by the time
+
+00:25:53,590 --> 00:25:58,120
+that's called the cpu object already
+
+00:25:55,930 --> 00:26:00,700
+exists and it's kind of too late to roll
+
+00:25:58,120 --> 00:26:02,920
+it back something's wrong so that's
+
+00:26:00,700 --> 00:26:06,400
+pretty awkward so this is another
+
+00:26:02,920 --> 00:26:08,860
+suggestion from Igor we have added a pre
+
+00:26:06,400 --> 00:26:11,620
+plug handler that is a bit similar to
+
+00:26:08,860 --> 00:26:15,910
+the plug handler any hot plug handler
+
+00:26:11,620 --> 00:26:18,430
+unit can register it and it gets called
+
+00:26:15,910 --> 00:26:20,740
+before the object is created so it can
+
+00:26:18,430 --> 00:26:22,990
+basically validate parameters the object
+
+00:26:20,740 --> 00:26:24,760
+make sure it actually fits you know this
+
+00:26:22,990 --> 00:26:27,190
+hot pluggable object fits in the place
+
+00:26:24,760 --> 00:26:31,180
+you're putting it and can fail
+
+00:26:27,190 --> 00:26:32,860
+gracefully if it doesn't so pre plug
+
+00:26:31,180 --> 00:26:34,570
+will be called then the object will be
+
+00:26:32,860 --> 00:26:37,000
+realized then the plug handle will be
+
+00:26:34,570 --> 00:26:41,530
+called which does the final work and so
+
+00:26:37,000 --> 00:26:43,330
+forth so that works fairly well the this
+
+00:26:41,530 --> 00:26:45,940
+cpu validation is the only thing we're
+
+00:26:43,330 --> 00:26:50,260
+using it for yet but it could be used
+
+00:26:45,940 --> 00:26:51,460
+for other things i'm actually going to
+
+00:26:50,260 --> 00:26:53,040
+skip this because the next one's more
+
+00:26:51,460 --> 00:26:58,660
+interesting and we don't have a lifetime
+
+00:26:53,040 --> 00:27:01,300
+the big problem was with cpu indexing
+
+00:26:58,660 --> 00:27:03,070
+and migration we hit on all four had
+
+00:27:01,300 --> 00:27:06,610
+problems here which we only kind of just
+
+00:27:03,070 --> 00:27:08,320
+finished entire fixed in time so the way
+
+00:27:06,610 --> 00:27:10,990
+things work to cpu index was used
+
+00:27:08,320 --> 00:27:13,750
+through lots of qm you to identify which
+
+00:27:10,990 --> 00:27:16,000
+cpu thread was which and that was
+
+00:27:13,750 --> 00:27:17,200
+allocated in cpu exec in it which is a
+
+00:27:16,000 --> 00:27:19,840
+function which has been around forever
+
+00:27:17,200 --> 00:27:22,420
+since before qm existed and all sorts of
+
+00:27:19,840 --> 00:27:25,660
+things because it was allocated there
+
+00:27:22,420 --> 00:27:27,580
+that meant the value depended on the
+
+00:27:25,660 --> 00:27:29,530
+order in which the cpus were
+
+00:27:27,580 --> 00:27:31,510
+instantiated now they didn't matter in
+
+00:27:29,530 --> 00:27:33,400
+the past because cpus were already ends
+
+00:27:31,510 --> 00:27:37,120
+always instantiated from the beginning
+
+00:27:33,400 --> 00:27:39,040
+up through to the last one but once you
+
+00:27:37,120 --> 00:27:43,060
+start adding hot-plug obviously that's
+
+00:27:39,040 --> 00:27:45,040
+not true anymore that was in particular
+
+00:27:43,060 --> 00:27:47,290
+that that cpu index is used as the
+
+00:27:45,040 --> 00:27:48,730
+migration ID and if the migration ID
+
+00:27:47,290 --> 00:27:50,000
+doesn't match on the source and the
+
+00:27:48,730 --> 00:27:54,380
+destination then
+
+00:27:50,000 --> 00:27:57,170
+nothing works obviously can't reasonably
+
+00:27:54,380 --> 00:27:59,660
+ensure that you unplug and unplug things
+
+00:27:57,170 --> 00:28:01,430
+in exactly the right same matching order
+
+00:27:59,660 --> 00:28:06,470
+on the source and destination so that's
+
+00:28:01,430 --> 00:28:09,380
+not really so the upshot of this is if
+
+00:28:06,470 --> 00:28:12,640
+you plug your safe using in any order
+
+00:28:09,380 --> 00:28:14,660
+other than zero then one then two then
+
+00:28:12,640 --> 00:28:16,070
+things will break if you migrate
+
+00:28:14,660 --> 00:28:18,440
+afterwards and in fact it's already
+
+00:28:16,070 --> 00:28:20,000
+broken on x86 with cpu add if you add
+
+00:28:18,440 --> 00:28:21,980
+things in another order people didn't
+
+00:28:20,000 --> 00:28:26,900
+notice because livered always plugs in 0
+
+00:28:21,980 --> 00:28:29,720
+1 2 3 and but any can't unplug but that
+
+00:28:26,900 --> 00:28:31,610
+was actually already broken and the
+
+00:28:29,720 --> 00:28:33,680
+problem was that we obviously wanted a
+
+00:28:31,610 --> 00:28:35,440
+way to devise a stable cpu index that
+
+00:28:33,680 --> 00:28:38,630
+was made complicated by the fact that
+
+00:28:35,440 --> 00:28:40,910
+different architectures are partially
+
+00:28:38,630 --> 00:28:43,400
+converted between different quan models
+
+00:28:40,910 --> 00:28:46,070
+and the time at which things were
+
+00:28:43,400 --> 00:28:47,660
+generated is very complicated so we had
+
+00:28:46,070 --> 00:28:49,700
+to come up this week leaders as the
+
+00:28:47,660 --> 00:28:51,530
+fairly late in the 27 cycle we had to
+
+00:28:49,700 --> 00:28:56,870
+come up with something that wasn't too
+
+00:28:51,530 --> 00:29:00,040
+invasive to determine these the way
+
+00:28:56,870 --> 00:29:04,070
+we've done that is that the machine type
+
+00:29:00,040 --> 00:29:07,040
+is allowed to allocate CPU index values
+
+00:29:04,070 --> 00:29:11,450
+in some machine dependent but stable way
+
+00:29:07,040 --> 00:29:13,400
+before the CPU is realized and that's a
+
+00:29:11,450 --> 00:29:15,200
+prerequisite for allowing CPU hot-plug
+
+00:29:13,400 --> 00:29:17,690
+if you want to allow CPU hot plug on
+
+00:29:15,200 --> 00:29:19,640
+your machine type you must allocate CPU
+
+00:29:17,690 --> 00:29:23,000
+index values stable rather than just
+
+00:29:19,640 --> 00:29:27,260
+using the default instantiation order
+
+00:29:23,000 --> 00:29:29,870
+based method but that does mean that
+
+00:29:27,260 --> 00:29:31,910
+machines that don't support CP hot plug
+
+00:29:29,870 --> 00:29:34,670
+or like the dozens of embedded systems
+
+00:29:31,910 --> 00:29:37,130
+we model don't need to change just yet
+
+00:29:34,670 --> 00:29:39,080
+and can keep the new code which means
+
+00:29:37,130 --> 00:29:41,420
+there's that changes a lot less invasive
+
+00:29:39,080 --> 00:29:46,300
+so that's what we needed to do to get
+
+00:29:41,420 --> 00:29:46,300
+migration working more or less sanely
+
+00:29:48,760 --> 00:29:58,100
+right so what do we still need to do
+
+00:29:51,550 --> 00:30:00,740
+probably the biggest thing is Numa so at
+
+00:29:58,100 --> 00:30:02,330
+the moment the management tools
+
+00:30:00,740 --> 00:30:08,210
+basically need to guess
+
+00:30:02,330 --> 00:30:11,330
+what Numa node CPUs they they add will
+
+00:30:08,210 --> 00:30:13,360
+end up in that's already a problem with
+
+00:30:11,330 --> 00:30:15,890
+cpu add it's not necessarily obvious
+
+00:30:13,360 --> 00:30:17,750
+they work it out by basically making
+
+00:30:15,890 --> 00:30:19,370
+assumptions about how the new monoids
+
+00:30:17,750 --> 00:30:21,010
+are distributed how the CP is a
+
+00:30:19,370 --> 00:30:24,529
+distribute amongst the nema nodes which
+
+00:30:21,010 --> 00:30:27,950
+work in practice but aren't really very
+
+00:30:24,529 --> 00:30:29,659
+well guaranteed the Numa command line in
+
+00:30:27,950 --> 00:30:32,570
+fact the entire interface in the noumic
+
+00:30:29,659 --> 00:30:35,269
+hand line is kind of broken because the
+
+00:30:32,570 --> 00:30:37,429
+CPU in its essentially by cpu index but
+
+00:30:35,269 --> 00:30:39,889
+cpu index isn't really supposed to be a
+
+00:30:37,429 --> 00:30:41,510
+something that's exposed outside qmu
+
+00:30:39,889 --> 00:30:50,240
+it's not really it's supposed to be in
+
+00:30:41,510 --> 00:30:51,830
+just an internal ID so and the other
+
+00:30:50,240 --> 00:30:53,539
+problem of course is you can't really
+
+00:30:51,830 --> 00:30:55,220
+know about what the what the possible
+
+00:30:53,539 --> 00:30:57,950
+topologies are until you do the query
+
+00:30:55,220 --> 00:30:59,510
+hot pluggable CPUs and by that time
+
+00:30:57,950 --> 00:31:02,480
+you've already issued the command line
+
+00:30:59,510 --> 00:31:05,000
+so it's too late to change your new
+
+00:31:02,480 --> 00:31:08,929
+Merope shins a possible solution
+
+00:31:05,000 --> 00:31:10,700
+suggestive a Gore is to basically as a
+
+00:31:08,929 --> 00:31:16,850
+replacement for the Numa command option
+
+00:31:10,700 --> 00:31:18,590
+instead you start up qmu without any new
+
+00:31:16,850 --> 00:31:22,370
+monoids assigned for the CPUs at least
+
+00:31:18,590 --> 00:31:25,970
+and then use new qmp commands to
+
+00:31:22,370 --> 00:31:29,059
+manually assign the the possible CPU so
+
+00:31:25,970 --> 00:31:31,720
+the CPU slots to the Numa nodes you want
+
+00:31:29,059 --> 00:31:34,100
+and then you actually start the thing
+
+00:31:31,720 --> 00:31:35,600
+there might still be problems with that
+
+00:31:34,100 --> 00:31:37,669
+it's something we're considering we're
+
+00:31:35,600 --> 00:31:39,889
+still actively working on on how to do
+
+00:31:37,669 --> 00:31:44,539
+that we've got some ideas but nothing's
+
+00:31:39,889 --> 00:31:47,380
+really settled yet and looks like we're
+
+00:31:44,539 --> 00:31:47,380
+out of time so
+
+00:31:47,559 --> 00:31:56,659
+okay uh obviously we're on a sport more
+
+00:31:53,539 --> 00:31:58,369
+machine types s390 actually implemented
+
+00:31:56,659 --> 00:32:01,519
+see if you add because it what did work
+
+00:31:58,369 --> 00:32:04,070
+for them but at some point we'll want to
+
+00:32:01,519 --> 00:32:06,229
+move them to the new model / is almost
+
+00:32:04,070 --> 00:32:09,769
+certain to one cpu hot-plug made the
+
+00:32:06,229 --> 00:32:11,599
+other arm platforms this model should
+
+00:32:09,769 --> 00:32:16,339
+allow i'm not sure that the details will
+
+00:32:11,599 --> 00:32:19,369
+be we've got in the works a model that
+
+00:32:16,339 --> 00:32:21,829
+that because the the p-series model is
+
+00:32:19,369 --> 00:32:25,159
+specifically a guest on power it's a
+
+00:32:21,829 --> 00:32:27,129
+para virtualized machine type but
+
+00:32:25,159 --> 00:32:29,509
+they're introducing a model for that
+
+00:32:27,129 --> 00:32:31,639
+implements the hall of power hardware
+
+00:32:29,509 --> 00:32:34,849
+including the hypervisor facilities
+
+00:32:31,639 --> 00:32:37,099
+that's more for experimentation and
+
+00:32:34,849 --> 00:32:40,099
+bring up than for production years but
+
+00:32:37,099 --> 00:32:41,899
+that may well want to support cpu hot
+
+00:32:40,099 --> 00:32:44,059
+plug and there it really will be a model
+
+00:32:41,899 --> 00:32:46,820
+of what the hardware physically is
+
+00:32:44,059 --> 00:32:48,379
+capable of that's going to get
+
+00:32:46,820 --> 00:32:51,129
+complicated because they're the unit of
+
+00:32:48,379 --> 00:32:54,440
+hot plug is going to be a whole chip
+
+00:32:51,129 --> 00:32:57,889
+which includes both cpus and host
+
+00:32:54,440 --> 00:33:00,200
+bridges and memory controllers and other
+
+00:32:57,889 --> 00:33:05,959
+stuff so not clear quite how that'll do
+
+00:33:00,200 --> 00:33:07,369
+but as i mentioned that we stable cpu
+
+00:33:05,959 --> 00:33:10,329
+indexes are a prerequisite for
+
+00:33:07,369 --> 00:33:13,099
+implementing hot plug on our platform
+
+00:33:10,329 --> 00:33:15,829
+they also need to make sure that the cpu
+
+00:33:13,099 --> 00:33:17,539
+xik init and exit exit functions are
+
+00:33:15,829 --> 00:33:20,299
+called realize and unreal eyes a lot of
+
+00:33:17,539 --> 00:33:22,789
+platforms other than x86 and power call
+
+00:33:20,299 --> 00:33:24,679
+them at in it and finalized time which
+
+00:33:22,789 --> 00:33:26,239
+has various problems so there's
+
+00:33:24,679 --> 00:33:27,829
+basically a bunch of prayer because it
+
+00:33:26,239 --> 00:33:29,450
+clean up that machine types need to do
+
+00:33:27,829 --> 00:33:34,129
+before they can implement the new hot
+
+00:33:29,450 --> 00:33:39,829
+plug model we've got some power specific
+
+00:33:34,129 --> 00:33:41,779
+stuff we want to do cleaning up how we
+
+00:33:39,829 --> 00:33:43,999
+create the device tree there this isn't
+
+00:33:41,779 --> 00:33:46,159
+device tree in the qm you sense this is
+
+00:33:43,999 --> 00:33:47,839
+the device tree that's gets passed to
+
+00:33:46,159 --> 00:33:49,279
+the guest firmware and then through to
+
+00:33:47,839 --> 00:33:51,979
+the actual guest operating system to
+
+00:33:49,279 --> 00:33:54,499
+advertise what things are available we
+
+00:33:51,979 --> 00:33:57,259
+want to that represents cause but at the
+
+00:33:54,499 --> 00:33:59,269
+moment it's generated on a thread by
+
+00:33:57,259 --> 00:34:00,090
+thread basis but we turn it off for
+
+00:33:59,269 --> 00:34:02,309
+everything
+
+00:34:00,090 --> 00:34:06,179
+thread 0 of each core it's a bit messy
+
+00:34:02,309 --> 00:34:08,700
+we want to clean that up DST sea state
+
+00:34:06,179 --> 00:34:15,929
+this dynamic reconfiguration is a fancy
+
+00:34:08,700 --> 00:34:18,030
+IBM word for hot plug it's a firmware
+
+00:34:15,929 --> 00:34:19,530
+abstraction that's used to communicate
+
+00:34:18,030 --> 00:34:22,409
+between the guest and the hypervisor
+
+00:34:19,530 --> 00:34:26,429
+about how to unplug and plug various
+
+00:34:22,409 --> 00:34:28,020
+things at the moment if you're in the
+
+00:34:26,429 --> 00:34:31,260
+middle of a hot plug operation and you
+
+00:34:28,020 --> 00:34:34,770
+try to make great summer state might be
+
+00:34:31,260 --> 00:34:36,330
+lost and things will go wrong you're
+
+00:34:34,770 --> 00:34:38,339
+okay to migrate before your hot plug
+
+00:34:36,330 --> 00:34:40,619
+Europe okay to migrate after the hot
+
+00:34:38,339 --> 00:34:41,970
+plug is fully completed but somewhere in
+
+00:34:40,619 --> 00:34:45,000
+the middle there there are some problems
+
+00:34:41,970 --> 00:34:54,510
+and we need to clean up how to how to do
+
+00:34:45,000 --> 00:34:56,339
+that obviously we want libvirt to
+
+00:34:54,510 --> 00:34:59,040
+support the new interface what we're
+
+00:34:56,339 --> 00:35:01,260
+doing in the short term is implementing
+
+00:34:59,040 --> 00:35:03,270
+the existing libvirt CP hot-plug
+
+00:35:01,260 --> 00:35:05,930
+interface in terms of the new api that
+
+00:35:03,270 --> 00:35:07,980
+should be available reasonably soon
+
+00:35:05,930 --> 00:35:12,950
+peter crimpers the person to talk to
+
+00:35:07,980 --> 00:35:16,290
+about that it's already pushed excellent
+
+00:35:12,950 --> 00:35:18,570
+but that's a bit limited in what it can
+
+00:35:16,290 --> 00:35:21,570
+express so in the longer term we're
+
+00:35:18,570 --> 00:35:25,740
+looking at a new API and libvirt that
+
+00:35:21,570 --> 00:35:29,130
+allows us to fully exploit the Q mu
+
+00:35:25,740 --> 00:35:33,420
+interface there's an SMP rework in the
+
+00:35:29,130 --> 00:35:35,190
+in in progress which just cleans up how
+
+00:35:33,420 --> 00:35:37,609
+we're parsing our SMP options and
+
+00:35:35,190 --> 00:35:40,980
+connecting with that and at the moment
+
+00:35:37,609 --> 00:35:46,170
+you can't unplug CPU 0 because that's a
+
+00:35:40,980 --> 00:35:48,510
+problem there's both various places in
+
+00:35:46,170 --> 00:35:50,930
+qmu that assume if you have any cpus
+
+00:35:48,510 --> 00:35:54,089
+then you have a CPU 0 which is no longer
+
+00:35:50,930 --> 00:35:55,380
+potentially true with hot blog so it's
+
+00:35:54,089 --> 00:35:58,700
+not terribly hard to get rid of that
+
+00:35:55,380 --> 00:36:02,079
+it's just a matter of dealing with it
+
+00:35:58,700 --> 00:36:04,280
+and then there's borrowing legal stuff
+
+00:36:02,079 --> 00:36:08,119
+right that's all sorry we rented that
+
+00:36:04,280 --> 00:36:09,619
+over time probably come to us
+
+00:36:08,119 --> 00:36:12,520
+individually for questions because we
+
+00:36:09,619 --> 00:36:12,520
+
+YouTube URL: https://www.youtube.com/watch?v=WuTPq8XgEbY
+
+

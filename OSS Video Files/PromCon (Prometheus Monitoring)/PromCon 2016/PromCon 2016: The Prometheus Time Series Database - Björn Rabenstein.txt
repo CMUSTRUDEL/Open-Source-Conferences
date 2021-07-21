@@ -1,0 +1,3217 @@
+Title: PromCon 2016: The Prometheus Time Series Database - Björn Rabenstein
+Publication date: 2016-09-04
+Playlist: PromCon 2016
+Description: 
+	* Abstract:
+
+Various time series databases (TSDBs) have been implemented on top of key-value stores with BigTable semantics. The TSDB that sits at the core of the Prometheus monitoring system started with a similar approach and was built on top of LevelDB. The Prometheus server as we know it today, however, uses a highly optimized custom storage layer for bulk sample data, enabling a single server to sustain an ingestion rate of 500,000 samples per second belonging to millions of time series. Very recent improvements of the in-memory representation of sample data resulted in an outstanding compression level of 1.3 bytes per sample in a typical production setup. A journey from fundamental challenges of TSDB design to details of the Prometheus storage layer.
+
+* Speaker biography:
+
+Björn is a production engineer at SoundCloud and one of the main Prometheus developers. Previously, he was a Site Reliability Engineer at Google and a number cruncher for science.
+
+* Slides:
+
+https://docs.google.com/presentation/d/1TMvzwdaS8Vw9MtscI9ehDyiMngII8iB_Z5D4QW4U4ho/edit?usp=sharing
+
+* PromCon website:
+
+https://promcon.io/
+Captions: 
+	00:00:00,960 --> 00:00:08,670
+Oh welcome come back everyone from lunch
+
+00:00:06,049 --> 00:00:13,560
+so we'll be continuing on now with the
+
+00:00:08,670 --> 00:00:17,030
+afternoon session Ritchie we're
+
+00:00:13,560 --> 00:00:17,030
+continuing on with the afternoon session
+
+00:00:17,480 --> 00:00:23,640
+so when lots of people come to Matias
+
+00:00:20,730 --> 00:00:25,380
+they ask about the clustering and
+
+00:00:23,640 --> 00:00:28,320
+they're shocked that we don't have it
+
+00:00:25,380 --> 00:00:30,600
+and it turns out normally that they're
+
+00:00:28,320 --> 00:00:33,270
+used to systems which you know can
+
+00:00:30,600 --> 00:00:35,550
+handle a thousand machines with like two
+
+00:00:33,270 --> 00:00:37,470
+metrics each I remember actually once an
+
+00:00:35,550 --> 00:00:39,540
+IRC we had someone with a graphite setup
+
+00:00:37,470 --> 00:00:42,360
+and they were worried for me just
+
+00:00:39,540 --> 00:00:43,800
+couldn't handle their 6000 metrics and
+
+00:00:42,360 --> 00:00:45,780
+that's not per second that's what 6000
+
+00:00:43,800 --> 00:00:47,309
+metrics and so the thing is though the
+
+00:00:45,780 --> 00:00:50,910
+Prometheus is so efficient that you
+
+00:00:47,309 --> 00:00:52,649
+don't need a stringer most of the time
+
+00:00:50,910 --> 00:00:55,500
+and a lot of that is due to Bjorn and
+
+00:00:52,649 --> 00:00:57,540
+his optimizations of the storage system
+
+00:00:55,500 --> 00:00:59,489
+so we can get up to 800,000 samples per
+
+00:00:57,540 --> 00:01:03,530
+second so outdoors I got to tell us
+
+00:00:59,489 --> 00:01:05,670
+about it how it all works okay thank you
+
+00:01:03,530 --> 00:01:09,229
+actually so only some parts of the
+
+00:01:05,670 --> 00:01:12,990
+storage system or than optimized for me
+
+00:01:09,229 --> 00:01:14,909
+so many people ask me how's the storage
+
+00:01:12,990 --> 00:01:17,640
+layer and the Prometheus the committee
+
+00:01:14,909 --> 00:01:19,500
+server working and this is finally the
+
+00:01:17,640 --> 00:01:21,299
+talk I always wanted to give to explain
+
+00:01:19,500 --> 00:01:24,409
+everybody how that works and it's
+
+00:01:21,299 --> 00:01:28,409
+recorded for posterity and everything
+
+00:01:24,409 --> 00:01:30,840
+the Prometheus is not a time series
+
+00:01:28,409 --> 00:01:33,000
+database Prometheus happens to use an
+
+00:01:30,840 --> 00:01:35,490
+embedded time series database somewhere
+
+00:01:33,000 --> 00:01:37,439
+at its core and that's a source of
+
+00:01:35,490 --> 00:01:39,840
+confusion because many like high profile
+
+00:01:37,439 --> 00:01:42,180
+monitoring projects are sometimes just a
+
+00:01:39,840 --> 00:01:45,360
+time series database like open TSP for
+
+00:01:42,180 --> 00:01:47,490
+example so Prometheus can't really
+
+00:01:45,360 --> 00:01:50,159
+compare or compete with that so much
+
+00:01:47,490 --> 00:01:52,170
+because it's why more in a way because
+
+00:01:50,159 --> 00:01:54,090
+it deals with all aspects of monitoring
+
+00:01:52,170 --> 00:01:56,790
+and alerting but on the other hand the
+
+00:01:54,090 --> 00:01:58,950
+TsUP functionality is actually way less
+
+00:01:56,790 --> 00:02:01,170
+but it's still pretty neat and optimized
+
+00:01:58,950 --> 00:02:03,060
+and so totally worth the talk so this is
+
+00:02:01,170 --> 00:02:05,579
+just about a tiny tiny fraction of the
+
+00:02:03,060 --> 00:02:09,789
+Prometheus ecosystem and it will still
+
+00:02:05,579 --> 00:02:12,200
+be quite a ride I even have two
+
+00:02:09,789 --> 00:02:14,390
+narrow this down even more this is just
+
+00:02:12,200 --> 00:02:17,150
+about a raw sample storage this is
+
+00:02:14,390 --> 00:02:19,640
+totally not about indexing so basically
+
+00:02:17,150 --> 00:02:21,920
+a 80s TV or DTS really used for
+
+00:02:19,640 --> 00:02:23,629
+Prometheus has two sides the one is a
+
+00:02:21,920 --> 00:02:25,250
+four prong cue Alex version I want to
+
+00:02:23,629 --> 00:02:27,769
+find out which time series am I actually
+
+00:02:25,250 --> 00:02:29,930
+dealing with and that is an indexing
+
+00:02:27,769 --> 00:02:31,549
+problem and then once I know which time
+
+00:02:29,930 --> 00:02:33,730
+series I'm dealing with please give me
+
+00:02:31,549 --> 00:02:36,980
+those time series with all their simples
+
+00:02:33,730 --> 00:02:38,840
+the indexing we had planned to give to
+
+00:02:36,980 --> 00:02:40,970
+talk about indexing but then there were
+
+00:02:38,840 --> 00:02:43,160
+too many interesting topics to talk
+
+00:02:40,970 --> 00:02:45,920
+about so I guess next year at comic-con
+
+00:02:43,160 --> 00:02:48,650
+we will have an indexing talk indexing
+
+00:02:45,920 --> 00:02:51,019
+might also be the like not quite as
+
+00:02:48,650 --> 00:02:54,549
+Mutual parts so like it was already
+
+00:02:51,019 --> 00:02:56,660
+mentioned I just did I just did a
+
+00:02:54,549 --> 00:02:58,760
+improvement with the indexing which
+
+00:02:56,660 --> 00:03:00,049
+under circumstances that are not too
+
+00:02:58,760 --> 00:03:02,269
+rare gives you like two orders of
+
+00:03:00,049 --> 00:03:04,610
+magnitude speed-up but that's still
+
+00:03:02,269 --> 00:03:07,220
+pretty immature and the real solution is
+
+00:03:04,610 --> 00:03:09,440
+in the works by Fabian but yeah
+
+00:03:07,220 --> 00:03:11,450
+that will happen a bit like that so this
+
+00:03:09,440 --> 00:03:13,730
+is just about raw simple storage so I
+
+00:03:11,450 --> 00:03:16,100
+have samples samples means I have a
+
+00:03:13,730 --> 00:03:18,260
+64-bit time step in milliseconds and I
+
+00:03:16,100 --> 00:03:20,090
+have a 64-bit floating-point value
+
+00:03:18,260 --> 00:03:23,180
+that's the Prometheus view of a sample
+
+00:03:20,090 --> 00:03:25,670
+so that's 16 bytes altogether and then
+
+00:03:23,180 --> 00:03:28,579
+I'll save them all together like for one
+
+00:03:25,670 --> 00:03:31,819
+metric in time that's the time serious
+
+00:03:28,579 --> 00:03:34,099
+and then I have many times there's the
+
+00:03:31,819 --> 00:03:36,319
+fundamental problem of TSD B's that's
+
+00:03:34,099 --> 00:03:38,419
+what I'm calling it is orthogonal write
+
+00:03:36,319 --> 00:03:41,060
+and read patterns what does that mean we
+
+00:03:38,419 --> 00:03:42,829
+have this is here right millions
+
+00:03:41,060 --> 00:03:44,780
+possibly millions of time series I
+
+00:03:42,829 --> 00:03:47,569
+didn't put a million here but that won't
+
+00:03:44,780 --> 00:03:49,430
+be too much but I put like some here
+
+00:03:47,569 --> 00:03:52,519
+like some go all the time some just
+
+00:03:49,430 --> 00:03:55,010
+start some end some have gaps but what
+
+00:03:52,519 --> 00:03:56,780
+you have usually within a scrape in the
+
+00:03:55,010 --> 00:03:58,730
+world you're right to every single one
+
+00:03:56,780 --> 00:04:00,620
+of your active time series not with the
+
+00:03:58,730 --> 00:04:03,709
+old ones but like everything that is
+
+00:04:00,620 --> 00:04:05,239
+current when you read you usually don't
+
+00:04:03,709 --> 00:04:07,099
+read from every single time series
+
+00:04:05,239 --> 00:04:08,900
+you're half you read from a few time
+
+00:04:07,099 --> 00:04:11,060
+series even if you read from a thousand
+
+00:04:08,900 --> 00:04:13,549
+times is that's still a renewed fraction
+
+00:04:11,060 --> 00:04:15,470
+of those millions and then sometimes you
+
+00:04:13,549 --> 00:04:18,290
+just read a single point in time fond
+
+00:04:15,470 --> 00:04:20,090
+alert for recording rule
+
+00:04:18,290 --> 00:04:22,760
+that's just a single point in time if it
+
+00:04:20,090 --> 00:04:25,850
+does include any ranges but most often
+
+00:04:22,760 --> 00:04:27,800
+you won't recognize - Bob graph and that
+
+00:04:25,850 --> 00:04:30,110
+looks more like that that's a horizontal
+
+00:04:27,800 --> 00:04:32,360
+read while the writes are like vertical
+
+00:04:30,110 --> 00:04:33,860
+if you want if everything is memory
+
+00:04:32,360 --> 00:04:36,650
+that's not a big problem you need to
+
+00:04:33,860 --> 00:04:38,630
+same data organization within memory and
+
+00:04:36,650 --> 00:04:40,580
+it's called RAM for a reason it's
+
+00:04:38,630 --> 00:04:43,580
+randomly accessible so you just get all
+
+00:04:40,580 --> 00:04:45,680
+your data quickly if that it's not all
+
+00:04:43,580 --> 00:04:48,710
+in RAM it gets more interesting 2d
+
+00:04:45,680 --> 00:04:50,750
+multiplex those vertical writes into
+
+00:04:48,710 --> 00:04:52,580
+horizontal reads so demultiplexing I
+
+00:04:50,750 --> 00:04:53,990
+think I made that up but it might also
+
+00:04:52,580 --> 00:04:58,310
+be a technical term I'm not so sure
+
+00:04:53,990 --> 00:04:59,960
+anymore so if it's all a memory there
+
+00:04:58,310 --> 00:05:02,240
+are all in memory
+
+00:04:59,960 --> 00:05:04,460
+TSC B's like Facebook's gorilla we're
+
+00:05:02,240 --> 00:05:07,670
+going to talk about that then it's good
+
+00:05:04,460 --> 00:05:09,380
+if you want any kind of like you want to
+
+00:05:07,670 --> 00:05:11,450
+store more than you can fit into memory
+
+00:05:09,380 --> 00:05:14,330
+then you need to write this to something
+
+00:05:11,450 --> 00:05:18,920
+some permanent storage and then it gets
+
+00:05:14,330 --> 00:05:21,770
+interesting one kind of obvious choice
+
+00:05:18,920 --> 00:05:24,020
+for that everybody uses key value stores
+
+00:05:21,770 --> 00:05:25,850
+with BigTable semantics these days so
+
+00:05:24,020 --> 00:05:28,040
+use the key value store with BigTable
+
+00:05:25,850 --> 00:05:29,660
+semantics and there's actually a schema
+
+00:05:28,040 --> 00:05:32,060
+you could use for time series so you
+
+00:05:29,660 --> 00:05:34,280
+have your this is already Prometheus
+
+00:05:32,060 --> 00:05:36,890
+semantics here your a few metric your
+
+00:05:34,280 --> 00:05:38,960
+labels you put it all into a string and
+
+00:05:36,890 --> 00:05:41,090
+then you add the timestamp and that's
+
+00:05:38,960 --> 00:05:42,650
+your BigTable key that's naturally
+
+00:05:41,090 --> 00:05:45,140
+sorted in the way you want it because
+
+00:05:42,650 --> 00:05:47,750
+the time sum is the last thing so every
+
+00:05:45,140 --> 00:05:50,630
+time series like samples of one metric
+
+00:05:47,750 --> 00:05:52,850
+are sorted by time that's easy to read
+
+00:05:50,630 --> 00:05:54,920
+in the big tail key space and here your
+
+00:05:52,850 --> 00:05:58,370
+simple values as the only value in your
+
+00:05:54,920 --> 00:06:00,770
+big table entry so this is kind of nice
+
+00:05:58,370 --> 00:06:02,960
+big table semantics also implies you can
+
+00:06:00,770 --> 00:06:04,970
+insert wherever you want it's efficient
+
+00:06:02,960 --> 00:06:07,820
+there so I cannot actually attack like
+
+00:06:04,970 --> 00:06:09,190
+in a short time frame append symbols to
+
+00:06:07,820 --> 00:06:12,740
+every single time series
+
+00:06:09,190 --> 00:06:14,800
+cool right so this you looks really
+
+00:06:12,740 --> 00:06:17,210
+wasteful because it's very repetitive
+
+00:06:14,800 --> 00:06:19,550
+usually not a problem in the BigTable
+
+00:06:17,210 --> 00:06:21,830
+world because before you hit the disk
+
+00:06:19,550 --> 00:06:23,990
+you have some expression some
+
+00:06:21,830 --> 00:06:26,090
+compression layer that would compress
+
+00:06:23,990 --> 00:06:27,710
+all the redundancy why so kind of you
+
+00:06:26,090 --> 00:06:29,660
+could say I don't care I do that and
+
+00:06:27,710 --> 00:06:32,150
+people are actually doing that you can
+
+00:06:29,660 --> 00:06:34,070
+look this up Google cloud platform
+
+00:06:32,150 --> 00:06:36,320
+this white paper out there how do you do
+
+00:06:34,070 --> 00:06:38,660
+time series with BigTable so that's a
+
+00:06:36,320 --> 00:06:41,480
+real thing you can do that so well what
+
+00:06:38,660 --> 00:06:43,010
+do we do for prometheus first of all we
+
+00:06:41,480 --> 00:06:45,200
+didn't want to have a clustered solution
+
+00:06:43,010 --> 00:06:47,210
+like some people do clustered solutions
+
+00:06:45,200 --> 00:06:49,130
+now as we've learned but the original
+
+00:06:47,210 --> 00:06:50,900
+idea is you want a super solid
+
+00:06:49,130 --> 00:06:53,690
+self-sustaining monitoring server that
+
+00:06:50,900 --> 00:06:55,040
+even works if your network is on fire so
+
+00:06:53,690 --> 00:06:56,600
+I don't want to write everything I mean
+
+00:06:55,040 --> 00:06:59,450
+I could write everything into BigTable
+
+00:06:56,600 --> 00:07:01,550
+but I still want some local buffer so in
+
+00:06:59,450 --> 00:07:04,010
+our approach at some time we didn't even
+
+00:07:01,550 --> 00:07:06,470
+have awesome clustered infrastructure we
+
+00:07:04,010 --> 00:07:09,200
+just wanted a single self-sustained
+
+00:07:06,470 --> 00:07:11,510
+host so we need to save it on the local
+
+00:07:09,200 --> 00:07:13,160
+disk so now we still could go with the
+
+00:07:11,510 --> 00:07:15,020
+BigTable approach because there are
+
+00:07:13,160 --> 00:07:17,420
+plenty of key value stores for local
+
+00:07:15,020 --> 00:07:18,650
+disks that have BigTable semantics for
+
+00:07:17,420 --> 00:07:21,080
+example leveldb
+
+00:07:18,650 --> 00:07:24,320
+and guess what Prometheus uses leveldb
+
+00:07:21,080 --> 00:07:27,470
+but we are using it only for indices and
+
+00:07:24,320 --> 00:07:31,070
+I promise I won't talk about anything we
+
+00:07:27,470 --> 00:07:34,580
+used to use leveldb for sample storage -
+
+00:07:31,070 --> 00:07:36,830
+in the prototype like long before we had
+
+00:07:34,580 --> 00:07:39,970
+the public announcement we did that we
+
+00:07:36,830 --> 00:07:42,650
+didn't do exactly this we did something
+
+00:07:39,970 --> 00:07:46,370
+we applied some tweaks to make this a
+
+00:07:42,650 --> 00:07:48,610
+bit more efficient but we ended up with
+
+00:07:46,370 --> 00:07:50,720
+the kind of reluctant decisions that
+
+00:07:48,610 --> 00:07:51,830
+this is not going to work we need
+
+00:07:50,720 --> 00:07:54,200
+something else
+
+00:07:51,830 --> 00:07:56,750
+so Julius in particular did a lot of
+
+00:07:54,200 --> 00:07:57,740
+research many different ways of store
+
+00:07:56,750 --> 00:08:00,170
+simple data
+
+00:07:57,740 --> 00:08:02,870
+nothing would suffice our requirements
+
+00:08:00,170 --> 00:08:06,200
+were just too different so we came up
+
+00:08:02,870 --> 00:08:13,460
+with writing our own layer for
+
+00:08:06,200 --> 00:08:16,760
+persisting raw simple data so then later
+
+00:08:13,460 --> 00:08:18,950
+after we wrote all that Prometheus on
+
+00:08:16,760 --> 00:08:20,540
+the right we had this picture it's from
+
+00:08:18,950 --> 00:08:23,030
+Wikipedia so it's kind of nice because
+
+00:08:20,540 --> 00:08:24,980
+it's orange and has a torch that's
+
+00:08:23,030 --> 00:08:28,040
+Prometheus and then we have a gorilla
+
+00:08:24,980 --> 00:08:29,660
+here I didn't put I mean this is not
+
+00:08:28,040 --> 00:08:32,060
+from the real gorilla thing I just put a
+
+00:08:29,660 --> 00:08:34,280
+gorilla from Wikipedia here and so
+
+00:08:32,060 --> 00:08:36,590
+gorilla is a in-memory time-series
+
+00:08:34,280 --> 00:08:38,890
+database built by Facebook it's not open
+
+00:08:36,590 --> 00:08:42,440
+source but they published a paper in
+
+00:08:38,890 --> 00:08:44,480
+August 2015 so for me it was already out
+
+00:08:42,440 --> 00:08:44,860
+Prometheus was any very developed in the
+
+00:08:44,480 --> 00:08:46,420
+open
+
+00:08:44,860 --> 00:08:48,340
+so the Facebook people could have
+
+00:08:46,420 --> 00:08:50,830
+totally known about it but quite
+
+00:08:48,340 --> 00:08:52,270
+obviously they didn't and we quite
+
+00:08:50,830 --> 00:08:54,760
+obviously didn't know about what was
+
+00:08:52,270 --> 00:08:57,280
+Facebook cooking up internally we have
+
+00:08:54,760 --> 00:09:00,070
+no ex Facebookers in the development
+
+00:08:57,280 --> 00:09:02,590
+team as far as I'm aware of so this was
+
+00:09:00,070 --> 00:09:06,880
+truly independent development and the
+
+00:09:02,590 --> 00:09:08,440
+fun thing is it was it has a lot of
+
+00:09:06,880 --> 00:09:10,840
+intriguing similarities when the paper
+
+00:09:08,440 --> 00:09:13,180
+came out and I read it was like wow I
+
+00:09:10,840 --> 00:09:14,980
+think it is - Wow like it's science
+
+00:09:13,180 --> 00:09:17,620
+alright people come up independently
+
+00:09:14,980 --> 00:09:20,290
+with similar solution pretty neat
+
+00:09:17,620 --> 00:09:22,950
+that's especially neat because the kind
+
+00:09:20,290 --> 00:09:25,870
+of requirements were pretty different
+
+00:09:22,950 --> 00:09:27,880
+gorilla is a complete in-memory time
+
+00:09:25,870 --> 00:09:30,220
+series data base that makes a kind of
+
+00:09:27,880 --> 00:09:32,080
+obvious that they don't want compression
+
+00:09:30,220 --> 00:09:34,180
+on the disk layer because they have no
+
+00:09:32,080 --> 00:09:36,310
+disclaimer right they want compression
+
+00:09:34,180 --> 00:09:38,620
+in memory otherwise the memory would be
+
+00:09:36,310 --> 00:09:41,080
+full of all those sixteen byte symbols
+
+00:09:38,620 --> 00:09:42,580
+very quickly they want something that is
+
+00:09:41,080 --> 00:09:45,400
+represented in memory in their
+
+00:09:42,580 --> 00:09:47,800
+compressed form and now just gzipping it
+
+00:09:45,400 --> 00:09:50,800
+in memory you could kind of do that but
+
+00:09:47,800 --> 00:09:52,660
+that makes it really like ok I have part
+
+00:09:50,800 --> 00:09:55,960
+of my memory gzipped and then I want to
+
+00:09:52,660 --> 00:09:58,540
+unzip it but I need like in kind of
+
+00:09:55,960 --> 00:10:00,580
+arena where I unzip it and then I have
+
+00:09:58,540 --> 00:10:02,290
+to know where to unzip it so this is all
+
+00:10:00,580 --> 00:10:05,110
+kind of bad you want some kind of more
+
+00:10:02,290 --> 00:10:07,600
+direct accessible representation of your
+
+00:10:05,110 --> 00:10:09,880
+data that is still compressed and that
+
+00:10:07,600 --> 00:10:11,920
+was the same idea in the Prometheus
+
+00:10:09,880 --> 00:10:13,930
+universe just for different reasons I
+
+00:10:11,920 --> 00:10:15,880
+mean we wrote we have local this we
+
+00:10:13,930 --> 00:10:17,830
+write to local this so we are not so
+
+00:10:15,880 --> 00:10:19,960
+super concerned about keeping more on
+
+00:10:17,830 --> 00:10:20,920
+memory it's still good obviously because
+
+00:10:19,960 --> 00:10:23,170
+memory is fast
+
+00:10:20,920 --> 00:10:24,790
+there's another reason why you want to
+
+00:10:23,170 --> 00:10:27,040
+be concerned and that's again the
+
+00:10:24,790 --> 00:10:29,200
+demultiplexing thing you have to write
+
+00:10:27,040 --> 00:10:31,630
+the data to individual time series to
+
+00:10:29,200 --> 00:10:34,030
+have the nice sleek variable along the
+
+00:10:31,630 --> 00:10:36,460
+time series time engine and you get them
+
+00:10:34,030 --> 00:10:39,010
+in like one sample a time for each time
+
+00:10:36,460 --> 00:10:42,370
+series so you can't just write a single
+
+00:10:39,010 --> 00:10:44,770
+sample to disk because obviously would
+
+00:10:42,370 --> 00:10:46,510
+have that time series and some space on
+
+00:10:44,770 --> 00:10:50,140
+this in the Prometheus case we have at
+
+00:10:46,510 --> 00:10:51,850
+in a file you can just seek to every
+
+00:10:50,140 --> 00:10:53,380
+single time series and write a single
+
+00:10:51,850 --> 00:10:54,910
+central I mean you could do that but
+
+00:10:53,380 --> 00:10:56,320
+then you can write hundred samples per
+
+00:10:54,910 --> 00:10:57,010
+seconds because the spinning this has
+
+00:10:56,320 --> 00:11:00,880
+like 10 min
+
+00:10:57,010 --> 00:11:02,440
+second seek time right then SSD great as
+
+00:11:00,880 --> 00:11:04,860
+these are super fast so we write a
+
+00:11:02,440 --> 00:11:08,140
+single sample to each time series and
+
+00:11:04,860 --> 00:11:10,180
+SSDs can do that decently fast but they
+
+00:11:08,140 --> 00:11:13,180
+can also kill themselves decently fast
+
+00:11:10,180 --> 00:11:15,910
+because small writes are actually very
+
+00:11:13,180 --> 00:11:18,250
+very deadly to SSDs SSDs lifetime is
+
+00:11:15,910 --> 00:11:21,250
+fried operations and if you write to the
+
+00:11:18,250 --> 00:11:23,590
+same block on the SSD tiny updates like
+
+00:11:21,250 --> 00:11:25,840
+just 16 bytes or whatever you compress
+
+00:11:23,590 --> 00:11:30,160
+the - they will die pretty quickly
+
+00:11:25,840 --> 00:11:32,110
+we tried that believers okay so no
+
+00:11:30,160 --> 00:11:34,480
+matter what we have spinning this SSD we
+
+00:11:32,110 --> 00:11:36,400
+want to batch up right and to patch up
+
+00:11:34,480 --> 00:11:38,950
+as much as possible with millions of
+
+00:11:36,400 --> 00:11:41,020
+time-series you need again as much as
+
+00:11:38,950 --> 00:11:43,120
+possible a memory and there's what we
+
+00:11:41,020 --> 00:11:45,100
+get the memory compression again so
+
+00:11:43,120 --> 00:11:48,000
+different reasons but same result we
+
+00:11:45,100 --> 00:11:50,710
+want in memory compression now other
+
+00:11:48,000 --> 00:11:52,810
+circumstances I mean I can't spoil this
+
+00:11:50,710 --> 00:11:55,270
+year it's already written there gorilla
+
+00:11:52,810 --> 00:11:57,910
+gets from those 16 bytes they compress
+
+00:11:55,270 --> 00:12:00,370
+down to 1.3 7 bytes per sample that's
+
+00:11:57,910 --> 00:12:01,750
+pretty good we compress down to three
+
+00:12:00,370 --> 00:12:03,940
+point three bytes persimmon which is
+
+00:12:01,750 --> 00:12:06,030
+still pretty good but why are we so much
+
+00:12:03,940 --> 00:12:08,770
+worse when we're using similar methods
+
+00:12:06,030 --> 00:12:10,660
+so first of all it's not the most
+
+00:12:08,770 --> 00:12:12,310
+important one but still they have 1
+
+00:12:10,660 --> 00:12:15,480
+second resolution we have more
+
+00:12:12,310 --> 00:12:18,520
+millisecond resolution one more noise
+
+00:12:15,480 --> 00:12:20,400
+harder to compress since then this is
+
+00:12:18,520 --> 00:12:24,700
+also pretty intriguing we both use some
+
+00:12:20,400 --> 00:12:27,760
+fixed block or chunk but promises uses
+
+00:12:24,700 --> 00:12:31,660
+chunks fixed in the data dimension 1
+
+00:12:27,760 --> 00:12:33,310
+kilobyte and gorilla uses blocks fixed
+
+00:12:31,660 --> 00:12:36,250
+in the time dimension every block has
+
+00:12:33,310 --> 00:12:38,800
+exactly 2 hours of metadata funny enough
+
+00:12:36,250 --> 00:12:41,200
+every two hour block in gorilla is about
+
+00:12:38,800 --> 00:12:43,630
+a kilowatt and every 1 kilobyte chunk
+
+00:12:41,200 --> 00:12:45,880
+and Prometheus is about 2 hours so even
+
+00:12:43,630 --> 00:12:47,890
+the sizing kind of came up with the same
+
+00:12:45,880 --> 00:12:51,880
+thing so there is really some kind of
+
+00:12:47,890 --> 00:12:54,550
+natural law here ok now let's look how
+
+00:12:51,880 --> 00:12:57,460
+this actually works so the general idea
+
+00:12:54,550 --> 00:13:00,790
+in both is double Delta I put just two
+
+00:12:57,460 --> 00:13:02,800
+Delta's here magic Simo double the other
+
+00:13:00,790 --> 00:13:04,810
+compression or encoding will look into
+
+00:13:02,800 --> 00:13:07,090
+this on the next slide in more detail
+
+00:13:04,810 --> 00:13:08,770
+so both gorilla and Prometheus chunked
+
+00:13:07,090 --> 00:13:10,100
+encoding version 1 that has nothing to
+
+00:13:08,770 --> 00:13:12,500
+do with Prometheus
+
+00:13:10,100 --> 00:13:15,350
+but every version one they both use
+
+00:13:12,500 --> 00:13:17,389
+double Delta encoding in slightly
+
+00:13:15,350 --> 00:13:19,910
+different ways and when the paper came
+
+00:13:17,389 --> 00:13:21,860
+out I thought you could actually do
+
+00:13:19,910 --> 00:13:23,810
+something and get some inspiration from
+
+00:13:21,860 --> 00:13:26,000
+gorilla and build it into Prometheus
+
+00:13:23,810 --> 00:13:27,800
+course we designed the storage back and
+
+00:13:26,000 --> 00:13:30,500
+in a way that you can actually change
+
+00:13:27,800 --> 00:13:32,360
+the encoding a drill you can every chunk
+
+00:13:30,500 --> 00:13:35,600
+in the prometheus data layer can be
+
+00:13:32,360 --> 00:13:37,490
+encoded differently if you want to so
+
+00:13:35,600 --> 00:13:39,170
+it's super easy to implement new and
+
+00:13:37,490 --> 00:13:42,769
+codings and play with them and I did
+
+00:13:39,170 --> 00:13:44,930
+this year on a free weekend and I felt
+
+00:13:42,769 --> 00:13:48,230
+like a teenager again coding from dusk
+
+00:13:44,930 --> 00:13:51,380
+to dawn or something but then we had a
+
+00:13:48,230 --> 00:13:53,720
+prototype of those v2 chunk encoding and
+
+00:13:51,380 --> 00:13:56,420
+that compresses much better but also has
+
+00:13:53,720 --> 00:13:59,089
+some problems that also gorilla has and
+
+00:13:56,420 --> 00:14:01,220
+I put that here right the one thing is
+
+00:13:59,089 --> 00:14:04,130
+gorilla is not concerned with decoding
+
+00:14:01,220 --> 00:14:06,680
+that kind of was below the fold here you
+
+00:14:04,130 --> 00:14:08,449
+can see it there so gorilla does another
+
+00:14:06,680 --> 00:14:11,089
+cheap trick or mean it's totally
+
+00:14:08,449 --> 00:14:13,399
+legitimate obviously they never hand out
+
+00:14:11,089 --> 00:14:15,079
+direct samples to their clients they
+
+00:14:13,399 --> 00:14:18,019
+just hand out this block of to our
+
+00:14:15,079 --> 00:14:19,339
+simulator so as a user of gorilla you go
+
+00:14:18,019 --> 00:14:21,529
+to the database and tell them I want
+
+00:14:19,339 --> 00:14:23,540
+this time series and I want the time
+
+00:14:21,529 --> 00:14:25,100
+rate from X to Y and then you get a
+
+00:14:23,540 --> 00:14:27,170
+number of blocks and you have to decode
+
+00:14:25,100 --> 00:14:28,939
+it yourself that delegates all the
+
+00:14:27,170 --> 00:14:31,100
+decoding to their clients and it's like
+
+00:14:28,939 --> 00:14:33,529
+naturally distributed and if it takes a
+
+00:14:31,100 --> 00:14:35,569
+lot of time it doesn't matter well in
+
+00:14:33,529 --> 00:14:37,819
+the prometheus world we want to do the
+
+00:14:35,569 --> 00:14:39,230
+decoding on our own first of all because
+
+00:14:37,819 --> 00:14:41,449
+the Prometheus server does the rural
+
+00:14:39,230 --> 00:14:43,699
+evaluation we want to have a nice stable
+
+00:14:41,449 --> 00:14:46,220
+interface where you can query time so
+
+00:14:43,699 --> 00:14:48,319
+your state of are an HTTP API like
+
+00:14:46,220 --> 00:14:50,810
+Ravana for example and we couldn't ask
+
+00:14:48,319 --> 00:14:53,060
+Ravana to now decode Prometheus chunks
+
+00:14:50,810 --> 00:14:54,800
+or something like I mean now with all
+
+00:14:53,060 --> 00:14:56,660
+this thing you will you have already
+
+00:14:54,800 --> 00:14:59,060
+seen and you will see even more later
+
+00:14:56,660 --> 00:15:01,189
+talks people start to dissect prometheus
+
+00:14:59,060 --> 00:15:03,350
+so you kind of get a similar thing that
+
+00:15:01,189 --> 00:15:04,370
+you have parts of with you step to the
+
+00:15:03,350 --> 00:15:06,380
+decoding separably
+
+00:15:04,370 --> 00:15:08,300
+but in the Prometheus arrests you know
+
+00:15:06,380 --> 00:15:09,980
+it it's all in one box batteries
+
+00:15:08,300 --> 00:15:12,230
+included and we are very much concerned
+
+00:15:09,980 --> 00:15:14,089
+with decoding and that also means we
+
+00:15:12,230 --> 00:15:16,670
+need to random accessibility in this
+
+00:15:14,089 --> 00:15:19,189
+compressed amount of data we want to
+
+00:15:16,670 --> 00:15:21,290
+pick a single sample from a chunk
+
+00:15:19,189 --> 00:15:22,770
+somewhere right so keep that in mind
+
+00:15:21,290 --> 00:15:27,089
+we'll look at that later
+
+00:15:22,770 --> 00:15:29,670
+now let's see how that I also explained
+
+00:15:27,089 --> 00:15:31,320
+all the mysterious flags in this dog
+
+00:15:29,670 --> 00:15:32,940
+storage local chunk encoding version
+
+00:15:31,320 --> 00:15:35,010
+that's the one where you pick weave on
+
+00:15:32,940 --> 00:15:37,080
+are we - so that means all the newly
+
+00:15:35,010 --> 00:15:39,630
+created chunks if you said this the one
+
+00:15:37,080 --> 00:15:41,029
+will be v1 if you set this to - all the
+
+00:15:39,630 --> 00:15:43,980
+newly created chunks will be v2
+
+00:15:41,029 --> 00:15:46,140
+compresses more but has some trade-offs
+
+00:15:43,980 --> 00:15:48,120
+so this is how the chunks George looks
+
+00:15:46,140 --> 00:15:49,980
+like we have those one kilobyte chunks
+
+00:15:48,120 --> 00:15:52,589
+at the bottom and then we have chunk
+
+00:15:49,980 --> 00:15:54,570
+iterators they abstract away the whole
+
+00:15:52,589 --> 00:15:56,730
+encoding and then there's a series
+
+00:15:54,570 --> 00:16:00,600
+iterator who abstracts away that it's
+
+00:15:56,730 --> 00:16:02,580
+chunked so if you use the interface on
+
+00:16:00,600 --> 00:16:04,170
+the series iterator level it's super
+
+00:16:02,580 --> 00:16:06,510
+easy you just don't care that the
+
+00:16:04,170 --> 00:16:08,730
+storage is chant and chunk Internet has
+
+00:16:06,510 --> 00:16:11,160
+to do that for you and then the CIO's
+
+00:16:08,730 --> 00:16:13,380
+iterator selects the chunks and the
+
+00:16:11,160 --> 00:16:15,450
+charged iterator knows how to decode
+
+00:16:13,380 --> 00:16:17,250
+chunks of different encoding there you
+
+00:16:15,450 --> 00:16:19,500
+are that makes it really flexible for
+
+00:16:17,250 --> 00:16:21,089
+new encoding schemes so now let's look
+
+00:16:19,500 --> 00:16:23,459
+at double delta encoding water studies
+
+00:16:21,089 --> 00:16:24,930
+me let's first look at time stamps
+
+00:16:23,459 --> 00:16:27,440
+they're easy first of all there are
+
+00:16:24,930 --> 00:16:30,149
+integers and they are also usually
+
+00:16:27,440 --> 00:16:32,220
+prometheus as well as in the Facebook
+
+00:16:30,149 --> 00:16:35,760
+universe they are increasing quite
+
+00:16:32,220 --> 00:16:38,040
+regularly so you're a sample 0 1 2 3 4
+
+00:16:35,760 --> 00:16:40,620
+just as an example I don't do
+
+00:16:38,040 --> 00:16:42,750
+milliseconds here for simplicity so
+
+00:16:40,620 --> 00:16:45,570
+usually if you scrape every 15 seconds
+
+00:16:42,750 --> 00:16:47,430
+this should go up super regularly but
+
+00:16:45,570 --> 00:16:49,170
+not always right let's assume this
+
+00:16:47,430 --> 00:16:51,300
+scrape is slightly early this is
+
+00:16:49,170 --> 00:16:54,899
+slightly late and then this is on time
+
+00:16:51,300 --> 00:16:57,120
+again so these are our scripts saying
+
+00:16:54,899 --> 00:16:59,070
+here it's just scraping time how do we
+
+00:16:57,120 --> 00:17:00,660
+save the timestamps we could just save
+
+00:16:59,070 --> 00:17:03,690
+them directly it would be supervised
+
+00:17:00,660 --> 00:17:05,880
+fool what we also can do we can take the
+
+00:17:03,690 --> 00:17:07,800
+Delta and the prometheus world takes the
+
+00:17:05,880 --> 00:17:11,339
+Delta always to the first symbol in a
+
+00:17:07,800 --> 00:17:13,709
+chunk so this goes up same right it's
+
+00:17:11,339 --> 00:17:16,920
+just smaller numbers that is already a
+
+00:17:13,709 --> 00:17:19,050
+win but then we can take we can draw a
+
+00:17:16,920 --> 00:17:21,240
+straight line through all those symbols
+
+00:17:19,050 --> 00:17:24,000
+beginning with the first two and then
+
+00:17:21,240 --> 00:17:26,880
+just recall the deviations and then you
+
+00:17:24,000 --> 00:17:28,530
+get super small numbers like - one
+
+00:17:26,880 --> 00:17:30,720
+second +4 and second 0 same or
+
+00:17:28,530 --> 00:17:33,240
+millisecond or whatever so then we store
+
+00:17:30,720 --> 00:17:35,400
+that with a fixed width so if it's just
+
+00:17:33,240 --> 00:17:37,590
+minus 1 plus 1 plus 2
+
+00:17:35,400 --> 00:17:40,530
+whatever we just need one bite to save
+
+00:17:37,590 --> 00:17:43,920
+that so this is what we do and we do it
+
+00:17:40,530 --> 00:17:45,390
+fix with throughout the whole chunk so
+
+00:17:43,920 --> 00:17:47,880
+we take whatever we require for the
+
+00:17:45,390 --> 00:17:50,460
+whole chunk problem is if there's one
+
+00:17:47,880 --> 00:17:52,530
+value that a super big we need like 32
+
+00:17:50,460 --> 00:17:55,680
+bits after all and then use it for the
+
+00:17:52,530 --> 00:17:57,900
+whole chunk but the advantage is we can
+
+00:17:55,680 --> 00:17:59,730
+jump to any value on the chunk what we
+
+00:17:57,900 --> 00:18:01,830
+need we need the first value we need the
+
+00:17:59,730 --> 00:18:03,900
+first Delta and then with this
+
+00:18:01,830 --> 00:18:06,480
+calculator double Delta we can just jump
+
+00:18:03,900 --> 00:18:10,290
+randomly to any symbol give me sample
+
+00:18:06,480 --> 00:18:11,730
+number 112 there you are right so now
+
+00:18:10,290 --> 00:18:12,600
+gorilla is in your voice more
+
+00:18:11,730 --> 00:18:15,210
+straightforward
+
+00:18:12,600 --> 00:18:17,280
+they take the deltas from 0 to 1 then
+
+00:18:15,210 --> 00:18:20,370
+from 1 to 2 2 to 3 2 to 4 which is
+
+00:18:17,280 --> 00:18:22,260
+always approximately 15 seconds and then
+
+00:18:20,370 --> 00:18:24,600
+they take the deltas of the deltas so
+
+00:18:22,260 --> 00:18:27,390
+these are their doubled elders which is
+
+00:18:24,600 --> 00:18:30,270
+in this case even larger than here but
+
+00:18:27,390 --> 00:18:33,950
+yeah kind of boils down to similarly
+
+00:18:30,270 --> 00:18:37,350
+sized numbers just that it's not so
+
+00:18:33,950 --> 00:18:39,480
+sensitive to like if the first two are
+
+00:18:37,350 --> 00:18:42,050
+not regular then this whole straight
+
+00:18:39,480 --> 00:18:45,120
+line is wrong and our encoding just now
+
+00:18:42,050 --> 00:18:47,810
+doesn't work but they just do the double
+
+00:18:45,120 --> 00:18:50,460
+Delta so it's more local works better
+
+00:18:47,810 --> 00:18:53,070
+problem is you have to iterate through
+
+00:18:50,460 --> 00:18:55,470
+all those symbols to get to a number you
+
+00:18:53,070 --> 00:18:58,920
+cannot just jump somewhere right because
+
+00:18:55,470 --> 00:19:00,900
+it always adds up so if now you want
+
+00:18:58,920 --> 00:19:02,220
+symbol number 1 or 12 from a chunk you
+
+00:19:00,900 --> 00:19:06,300
+have to go through the whole chunk to
+
+00:19:02,220 --> 00:19:08,730
+get it that's not a problem for for
+
+00:19:06,300 --> 00:19:12,120
+gorilla because gorilla says client you
+
+00:19:08,730 --> 00:19:15,060
+have to decode I don't care ok also they
+
+00:19:12,120 --> 00:19:17,190
+have very little bit rich so it's 1 9 12
+
+00:19:15,060 --> 00:19:20,070
+16 you're 36 bit and the encode is
+
+00:19:17,190 --> 00:19:22,290
+similar to like VAR int and coding they
+
+00:19:20,070 --> 00:19:23,730
+encode this with a little prefix so they
+
+00:19:22,290 --> 00:19:27,320
+can have every symbol with the different
+
+00:19:23,730 --> 00:19:30,390
+methods and that's way more efficient
+
+00:19:27,320 --> 00:19:32,970
+okay now how do we do Prometheus time
+
+00:19:30,390 --> 00:19:36,360
+stem encoding in v2 that's almost like a
+
+00:19:32,970 --> 00:19:38,580
+ruler just be different so we also do
+
+00:19:36,360 --> 00:19:40,980
+the same thing if the double delta is in
+
+00:19:38,580 --> 00:19:43,140
+a certain range we use this prefix 1.0
+
+00:19:40,980 --> 00:19:45,660
+and then six speed if it's a larger
+
+00:19:43,140 --> 00:19:48,000
+range we use 1 1 0 then 17 bit so it's
+
+00:19:45,660 --> 00:19:48,640
+exactly the same as gorilla just that we
+
+00:19:48,000 --> 00:19:50,350
+need a
+
+00:19:48,640 --> 00:19:51,880
+big pockets that's mostly because we
+
+00:19:50,350 --> 00:19:54,130
+have milliseconds not seconds so other
+
+00:19:51,880 --> 00:19:56,260
+big pockets make more sense also we
+
+00:19:54,130 --> 00:19:58,330
+don't ever need more than this because
+
+00:19:56,260 --> 00:20:00,130
+if a chunk doesn't get a simple in an
+
+00:19:58,330 --> 00:20:04,320
+hour we close it and don't use it
+
+00:20:00,130 --> 00:20:06,220
+anymore so we don't need more than that
+
+00:20:04,320 --> 00:20:09,520
+yeah that's the thing
+
+00:20:06,220 --> 00:20:11,740
+but now the completely irregular case
+
+00:20:09,520 --> 00:20:14,800
+where the double Delta is zero all the
+
+00:20:11,740 --> 00:20:16,930
+time gelila saves a single zero bit for
+
+00:20:14,800 --> 00:20:19,690
+that so in the ideal case they use one
+
+00:20:16,930 --> 00:20:22,660
+bit per time step so we do something
+
+00:20:19,690 --> 00:20:24,910
+assuming if we are double Delta zero
+
+00:20:22,660 --> 00:20:28,120
+that's a regular thing this will happen
+
+00:20:24,910 --> 00:20:30,460
+probably more than just once we use a 7
+
+00:20:28,120 --> 00:20:33,400
+vu 0 bit and then 7 bit to count the
+
+00:20:30,460 --> 00:20:34,840
+repetitions which usually happen more
+
+00:20:33,400 --> 00:20:37,390
+than just once if it happens only once
+
+00:20:34,840 --> 00:20:39,640
+we have lost because we needed 8 by 8
+
+00:20:37,390 --> 00:20:42,610
+bits for something that would have fit
+
+00:20:39,640 --> 00:20:45,490
+into one bit but usually there are many
+
+00:20:42,610 --> 00:20:51,070
+repetitions and we can count up to 128
+
+00:20:45,490 --> 00:20:53,890
+repetitions with that so that's time
+
+00:20:51,070 --> 00:20:55,900
+stem compression now let's look at the
+
+00:20:53,890 --> 00:21:00,060
+audio compression that's why more tricky
+
+00:20:55,900 --> 00:21:03,790
+because it's 64 bit floating point we're
+
+00:21:00,060 --> 00:21:06,850
+complicated and also most of them are
+
+00:21:03,790 --> 00:21:09,250
+actually not very interesting let's say
+
+00:21:06,850 --> 00:21:13,510
+the infamous uptime series is all the
+
+00:21:09,250 --> 00:21:18,420
+time 1 and sometimes is 0 so we use 64
+
+00:21:13,510 --> 00:21:21,490
+bit float to encode a boolean not good
+
+00:21:18,420 --> 00:21:22,540
+also most of the time it's 1 so let's
+
+00:21:21,490 --> 00:21:24,130
+say it's constant
+
+00:21:22,540 --> 00:21:27,040
+there are many time series let's say you
+
+00:21:24,130 --> 00:21:29,680
+have some brine just set this on this
+
+00:21:27,040 --> 00:21:32,140
+block about like the the built version
+
+00:21:29,680 --> 00:21:33,850
+as a metric and the value will always be
+
+00:21:32,140 --> 00:21:36,040
+1 so they're actually a fair amount of
+
+00:21:33,850 --> 00:21:39,220
+times to use that have x times and then
+
+00:21:36,040 --> 00:21:41,320
+they're always one or some value so what
+
+00:21:39,220 --> 00:21:43,180
+we do in prometheus both dragon coding
+
+00:21:41,320 --> 00:21:46,600
+version we just saw that constant value
+
+00:21:43,180 --> 00:21:49,090
+ones then we remember this is a constant
+
+00:21:46,600 --> 00:21:51,490
+value chunk and then we store nothing
+
+00:21:49,090 --> 00:21:53,290
+like we store timestamps obviously but
+
+00:21:51,490 --> 00:21:55,260
+we don't need the value again so it's
+
+00:21:53,290 --> 00:21:57,580
+zero bit per sample after the header
+
+00:21:55,260 --> 00:21:59,350
+goriller that's a bit different they
+
+00:21:57,580 --> 00:22:01,700
+store the first value as well obviously
+
+00:21:59,350 --> 00:22:04,850
+and then they have some
+
+00:22:01,700 --> 00:22:06,230
+or procedure the XOR all the current of
+
+00:22:04,850 --> 00:22:08,450
+the previous value which gives you zero
+
+00:22:06,230 --> 00:22:10,340
+if it's constant and in that case they
+
+00:22:08,450 --> 00:22:12,950
+store a single zero bit similar to time
+
+00:22:10,340 --> 00:22:14,840
+steps so they need in the simplest case
+
+00:22:12,950 --> 00:22:16,940
+one bit for the times that one bit for
+
+00:22:14,840 --> 00:22:19,460
+the sample which is pretty good we need
+
+00:22:16,940 --> 00:22:22,130
+all point something bit for the time
+
+00:22:19,460 --> 00:22:24,410
+step and zero bit for the sample which
+
+00:22:22,130 --> 00:22:26,270
+is even better in that case but now
+
+00:22:24,410 --> 00:22:29,120
+somebody asked me already that in the
+
+00:22:26,270 --> 00:22:31,280
+hallway best case for previous v2 chunk
+
+00:22:29,120 --> 00:22:34,790
+con symmetrical your perfectly regular
+
+00:22:31,280 --> 00:22:35,870
+scraping price one or twenty four
+
+00:22:34,790 --> 00:22:39,110
+thousand five hundred forty seven
+
+00:22:35,870 --> 00:22:41,770
+samples in a single chunk so that's
+
+00:22:39,110 --> 00:22:46,730
+three weeks with a 15 second scraping or
+
+00:22:41,770 --> 00:22:49,100
+0.06 six bits per sample not bytes so
+
+00:22:46,730 --> 00:22:52,010
+that's pretty neat but of course in that
+
+00:22:49,100 --> 00:22:54,740
+case I mean that's not a super rare case
+
+00:22:52,010 --> 00:22:58,460
+it happens with like up time series but
+
+00:22:54,740 --> 00:23:00,500
+in that case basically the memory
+
+00:22:58,460 --> 00:23:04,370
+footprint of having a time series at all
+
+00:23:00,500 --> 00:23:06,950
+and the index entry you need for that
+
+00:23:04,370 --> 00:23:09,230
+they still totally dominate your usage
+
+00:23:06,950 --> 00:23:11,810
+like you have more than that but you can
+
+00:23:09,230 --> 00:23:13,610
+basically like know to self if you're
+
+00:23:11,810 --> 00:23:15,650
+for constant time series it essentially
+
+00:23:13,610 --> 00:23:18,100
+takes no storage for the samples it only
+
+00:23:15,650 --> 00:23:22,280
+takes storage for its bare existence
+
+00:23:18,100 --> 00:23:22,700
+okay now this is not the ideal case all
+
+00:23:22,280 --> 00:23:28,300
+the time
+
+00:23:22,700 --> 00:23:31,640
+often in Prometheus we have counters so
+
+00:23:28,300 --> 00:23:33,500
+counters go up all the time often pretty
+
+00:23:31,640 --> 00:23:35,750
+regularly like let's say you have pretty
+
+00:23:33,500 --> 00:23:37,760
+regular HTTP traffic your counter just
+
+00:23:35,750 --> 00:23:39,380
+goes up in a straight line sometimes is
+
+00:23:37,760 --> 00:23:40,760
+a bit steeper than that you have more
+
+00:23:39,380 --> 00:23:43,280
+traffic and if you take the right
+
+00:23:40,760 --> 00:23:45,620
+function you see your nice QBs going up
+
+00:23:43,280 --> 00:23:47,780
+and down but that's the counter it's
+
+00:23:45,620 --> 00:23:51,620
+also most of the time integers right if
+
+00:23:47,780 --> 00:23:53,420
+I count requests 1 2 3 4 all integers so
+
+00:23:51,620 --> 00:23:55,130
+it's still no reason to use floats all
+
+00:23:53,420 --> 00:23:57,310
+that and this is I think you'll just
+
+00:23:55,130 --> 00:24:00,230
+mention that even if you use floats
+
+00:23:57,310 --> 00:24:01,670
+normally internally we just realize how
+
+00:24:00,230 --> 00:24:03,920
+well this is an integer we can actually
+
+00:24:01,670 --> 00:24:05,650
+save this more efficiently and if it
+
+00:24:03,920 --> 00:24:07,940
+goes up in a regular fashion this
+
+00:24:05,650 --> 00:24:10,910
+totally smells like a time stem and you
+
+00:24:07,940 --> 00:24:13,640
+can do double data encoding so this is
+
+00:24:10,910 --> 00:24:15,150
+what we do even in prometheus version 1
+
+00:24:13,640 --> 00:24:17,160
+charge encoding so we
+
+00:24:15,150 --> 00:24:19,200
+why exactly the same Delta Delta Tahoe
+
+00:24:17,160 --> 00:24:21,059
+Delta encoding asks for time stands we
+
+00:24:19,200 --> 00:24:24,120
+use fixed width from the old chunks
+
+00:24:21,059 --> 00:24:26,280
+eight 16 or 32-bit as it fits
+
+00:24:24,120 --> 00:24:28,680
+otherwise if that doesn't work we use a
+
+00:24:26,280 --> 00:24:30,240
+float 32 to check if that's precise
+
+00:24:28,680 --> 00:24:32,790
+enough and if it's not precise enough
+
+00:24:30,240 --> 00:24:36,210
+why we fall back to have 8 bytes per
+
+00:24:32,790 --> 00:24:37,680
+sample but it doesn't get worse so again
+
+00:24:36,210 --> 00:24:40,170
+if you have values increasing with
+
+00:24:37,680 --> 00:24:44,780
+precisely the same slope you get 0 bit
+
+00:24:40,170 --> 00:24:48,059
+per sample and again this is all fixed
+
+00:24:44,780 --> 00:24:49,980
+width and it all to calculate from
+
+00:24:48,059 --> 00:24:51,960
+essentially the header values plus
+
+00:24:49,980 --> 00:24:54,270
+whatever you need so it's kind of a one
+
+00:24:51,960 --> 00:24:56,850
+step procedure to jump to any symbol in
+
+00:24:54,270 --> 00:24:59,309
+the chunk so now what is gorilla doing
+
+00:24:56,850 --> 00:25:02,010
+they start the first state value first
+
+00:24:59,309 --> 00:25:05,040
+value directly and then they do the XOR
+
+00:25:02,010 --> 00:25:07,710
+I already explained and now if you go on
+
+00:25:05,040 --> 00:25:09,270
+they do something weird which is I mean
+
+00:25:07,710 --> 00:25:11,610
+it's not their invention this exon
+
+00:25:09,270 --> 00:25:14,040
+coding has been happened before in the
+
+00:25:11,610 --> 00:25:15,960
+literature so they do some kind of
+
+00:25:14,040 --> 00:25:17,970
+double Delta with floats where the one
+
+00:25:15,960 --> 00:25:20,550
+the answer is X on the other one is
+
+00:25:17,970 --> 00:25:22,440
+complicated I put just complicated here
+
+00:25:20,550 --> 00:25:24,120
+it would take me like 10 or 50 minutes
+
+00:25:22,440 --> 00:25:26,340
+to explain that you can read it in the
+
+00:25:24,120 --> 00:25:28,500
+paper it's a bit weird but it's like
+
+00:25:26,340 --> 00:25:30,450
+well-established and it works nicely for
+
+00:25:28,500 --> 00:25:32,280
+floating-point numbers like leverages
+
+00:25:30,450 --> 00:25:34,290
+the fact how a floating phenomena is
+
+00:25:32,280 --> 00:25:37,500
+laid out in I Triple E format and stuff
+
+00:25:34,290 --> 00:25:39,450
+like that so again this requires you to
+
+00:25:37,500 --> 00:25:42,510
+iterate through the whole chunk to jump
+
+00:25:39,450 --> 00:25:45,630
+to a certain value so for like our use
+
+00:25:42,510 --> 00:25:48,510
+case that's a bit problematic but let's
+
+00:25:45,630 --> 00:25:50,910
+do it let's just use it in v2 as well
+
+00:25:48,510 --> 00:25:52,920
+oh no let's first check how like more
+
+00:25:50,910 --> 00:25:54,540
+random numbers work so this is the
+
+00:25:52,920 --> 00:25:56,370
+number of goroutines and a go program
+
+00:25:54,540 --> 00:25:58,290
+that's pretty random but it's still
+
+00:25:56,370 --> 00:26:00,690
+integer and it's still confined like
+
+00:25:58,290 --> 00:26:02,970
+it's not infinite right it's between 200
+
+00:26:00,690 --> 00:26:06,330
+and 300 something could be temperature
+
+00:26:02,970 --> 00:26:09,330
+readings then you have real floats for
+
+00:26:06,330 --> 00:26:11,280
+one and still temperature is confined to
+
+00:26:09,330 --> 00:26:13,650
+certain ranges but you could also have
+
+00:26:11,280 --> 00:26:16,080
+completely random numbers for some weird
+
+00:26:13,650 --> 00:26:19,679
+use case so how do we do that
+
+00:26:16,080 --> 00:26:24,480
+of course in Prometheus v1 we said we
+
+00:26:19,679 --> 00:26:26,280
+just do float64 man gorilla uses that
+
+00:26:24,480 --> 00:26:28,220
+EXO encoding and that's actually pretty
+
+00:26:26,280 --> 00:26:30,200
+good for floating-point numbers that are
+
+00:26:28,220 --> 00:26:34,000
+I'm fine to a certain range that works
+
+00:26:30,200 --> 00:26:36,950
+quite well so gives you some compression
+
+00:26:34,000 --> 00:26:38,659
+but it can actually if it's too random
+
+00:26:36,950 --> 00:26:38,990
+it could result in more than sixty
+
+00:26:38,659 --> 00:26:41,030
+four-bit
+
+00:26:38,990 --> 00:26:43,190
+you just have encoding overhead like you
+
+00:26:41,030 --> 00:26:43,730
+can gzip a file that's then bigger than
+
+00:26:43,190 --> 00:26:46,400
+before
+
+00:26:43,730 --> 00:26:48,440
+so that's rare but they could have that
+
+00:26:46,400 --> 00:26:51,980
+in theory for a truly random data there
+
+00:26:48,440 --> 00:26:54,950
+are it's worse than doing it directly
+
+00:26:51,980 --> 00:26:57,080
+so now Prometheus VQ so since we can
+
+00:26:54,950 --> 00:26:58,940
+change the encoding in every chunk we
+
+00:26:57,080 --> 00:27:01,159
+are super flexible and it's also kind of
+
+00:26:58,940 --> 00:27:03,020
+an advantage that we don't delegate it
+
+00:27:01,159 --> 00:27:04,850
+to the client because we have full
+
+00:27:03,020 --> 00:27:07,190
+control of the code we always hang out
+
+00:27:04,850 --> 00:27:09,559
+decoded samples so we can do whatever
+
+00:27:07,190 --> 00:27:12,590
+crazy things we want to so this is what
+
+00:27:09,559 --> 00:27:14,600
+we do the first thing we try is the zero
+
+00:27:12,590 --> 00:27:17,059
+encoding I described right that also
+
+00:27:14,600 --> 00:27:19,190
+worked in v1 works also with v2 if
+
+00:27:17,059 --> 00:27:22,880
+nothing changes we need zero bit per
+
+00:27:19,190 --> 00:27:24,919
+sample if that doesn't work we check is
+
+00:27:22,880 --> 00:27:27,440
+it an integer and then we use the double
+
+00:27:24,919 --> 00:27:29,630
+Delta encoding v2 so this is kind of
+
+00:27:27,440 --> 00:27:31,730
+taking from gorillas like they do time
+
+00:27:29,630 --> 00:27:33,620
+stamps what we again have like big
+
+00:27:31,730 --> 00:27:35,330
+pockets of various size because that
+
+00:27:33,620 --> 00:27:36,559
+works way better when it's actually an
+
+00:27:35,330 --> 00:27:38,480
+integer not a float
+
+00:27:36,559 --> 00:27:40,940
+well gorillas always treats everything
+
+00:27:38,480 --> 00:27:43,130
+as floats right so if that doesn't work
+
+00:27:40,940 --> 00:27:45,380
+we do with the X or float encoding like
+
+00:27:43,130 --> 00:27:47,179
+gorilla with a few tweaks they are
+
+00:27:45,380 --> 00:27:48,890
+really minor and I needed to explain
+
+00:27:47,179 --> 00:27:51,110
+your whole works to explain the tweaks
+
+00:27:48,890 --> 00:27:53,330
+that might have a big impact but I think
+
+00:27:51,110 --> 00:27:56,750
+we are slightly smarter than you and
+
+00:27:53,330 --> 00:27:59,330
+then if that results in 64 bit or more
+
+00:27:56,750 --> 00:28:00,830
+per sample we encompass the gorilla but
+
+00:27:59,330 --> 00:28:02,860
+I don't think that has a lot of impact
+
+00:28:00,830 --> 00:28:05,900
+we can just fall back to dart encoding
+
+00:28:02,860 --> 00:28:08,150
+this is also faster to encode and decode
+
+00:28:05,900 --> 00:28:11,870
+so it might have an impact I don't know
+
+00:28:08,150 --> 00:28:13,760
+okay so these can all be locked up in
+
+00:28:11,870 --> 00:28:16,100
+storage local favorite or go
+
+00:28:13,760 --> 00:28:20,600
+pretty fancy code if you want to look at
+
+00:28:16,100 --> 00:28:22,220
+it and it results with a typical data
+
+00:28:20,600 --> 00:28:23,690
+set on the south of production server
+
+00:28:22,220 --> 00:28:26,809
+one point two eight bytes presenter
+
+00:28:23,690 --> 00:28:28,490
+better than gorilla but of course take
+
+00:28:26,809 --> 00:28:31,580
+this with more than one grain of salt
+
+00:28:28,490 --> 00:28:35,120
+because our data send it's not our data
+
+00:28:31,580 --> 00:28:37,340
+set is not gorillas Prometheus no again
+
+00:28:35,120 --> 00:28:39,460
+the Prometheus data set used here is not
+
+00:28:37,340 --> 00:28:41,549
+the data that they used for gorillas
+
+00:28:39,460 --> 00:28:42,899
+they also have just
+
+00:28:41,549 --> 00:28:46,499
+second resolutions of there might
+
+00:28:42,899 --> 00:28:48,389
+actually be it might actually be easier
+
+00:28:46,499 --> 00:28:50,700
+to compress I don't know might be more
+
+00:28:48,389 --> 00:28:52,980
+difficult we can't really know and this
+
+00:28:50,700 --> 00:28:55,139
+also depends on a lot of ifs and dots
+
+00:28:52,980 --> 00:28:56,610
+let's say you have a lot of serious
+
+00:28:55,139 --> 00:29:00,600
+German because you have deployed
+
+00:28:56,610 --> 00:29:02,309
+something then you get time series that
+
+00:29:00,600 --> 00:29:04,580
+have like half filled chunks that's
+
+00:29:02,309 --> 00:29:07,619
+pretty wasteful that will let your
+
+00:29:04,580 --> 00:29:09,360
+compression ratio drop but if you don't
+
+00:29:07,619 --> 00:29:11,190
+deploy a lot and just let it run your
+
+00:29:09,360 --> 00:29:13,739
+your end up with something like that if
+
+00:29:11,190 --> 00:29:15,330
+you try to be zip or something your time
+
+00:29:13,739 --> 00:29:17,159
+series data you will never get to
+
+00:29:15,330 --> 00:29:19,049
+something much better than that so I
+
+00:29:17,159 --> 00:29:20,519
+guess we are close to the Shannon limit
+
+00:29:19,049 --> 00:29:24,450
+this is actually the real information
+
+00:29:20,519 --> 00:29:27,029
+content in our time series data okay
+
+00:29:24,450 --> 00:29:29,940
+that was the old encoding thing now
+
+00:29:27,029 --> 00:29:32,519
+second part of the talk not as long and
+
+00:29:29,940 --> 00:29:34,289
+a bit easier to digest what is this
+
+00:29:32,519 --> 00:29:39,029
+whole constant size chunks thing right
+
+00:29:34,289 --> 00:29:41,489
+one kilobyte chunks those chunks are
+
+00:29:39,029 --> 00:29:44,549
+memory once they are complete they are
+
+00:29:41,489 --> 00:29:47,009
+immutable so all the simple ingestion
+
+00:29:44,549 --> 00:29:48,299
+happens to this so-called head chunk you
+
+00:29:47,009 --> 00:29:49,980
+might have seen that on the mailing list
+
+00:29:48,299 --> 00:29:51,210
+people asked for back filling and we
+
+00:29:49,980 --> 00:29:53,279
+always tell them yeah and that doesn't
+
+00:29:51,210 --> 00:29:57,600
+really work because you really have it's
+
+00:29:53,279 --> 00:29:59,279
+append-only essentially so you write
+
+00:29:57,600 --> 00:30:01,169
+this to disk and since we are not
+
+00:29:59,279 --> 00:30:03,179
+storage designers in the prometheus
+
+00:30:01,169 --> 00:30:05,759
+world we decided we are not going to
+
+00:30:03,179 --> 00:30:07,470
+create a gigantic block file and then
+
+00:30:05,759 --> 00:30:09,899
+manage all the data and the fowl with
+
+00:30:07,470 --> 00:30:11,669
+our own wisdom we decided we let the
+
+00:30:09,899 --> 00:30:13,619
+file system solve that out and we have
+
+00:30:11,669 --> 00:30:16,200
+just one file per file system for better
+
+00:30:13,619 --> 00:30:18,090
+or worse but I think we fared quite well
+
+00:30:16,200 --> 00:30:20,669
+with that if you like look into influx
+
+00:30:18,090 --> 00:30:22,559
+TV papers they did so many stuff with
+
+00:30:20,669 --> 00:30:24,419
+emerge trees or something which is
+
+00:30:22,559 --> 00:30:26,249
+essentially implementing a file system
+
+00:30:24,419 --> 00:30:28,169
+if you're really good at that you will
+
+00:30:26,249 --> 00:30:29,639
+probably be better than a file system
+
+00:30:28,169 --> 00:30:32,309
+that is not optimized for your use case
+
+00:30:29,639 --> 00:30:34,169
+but we are humble enough to admit that
+
+00:30:32,309 --> 00:30:36,509
+we are probably not better than those
+
+00:30:34,169 --> 00:30:38,519
+decades of file system optimization so
+
+00:30:36,509 --> 00:30:40,769
+this works quite well you have one file
+
+00:30:38,519 --> 00:30:43,649
+per time series there you can mirror it
+
+00:30:40,769 --> 00:30:45,659
+directly so that's an advantage of
+
+00:30:43,649 --> 00:30:47,879
+constant size chunks it's really easy to
+
+00:30:45,659 --> 00:30:50,309
+know where the file is your chunk
+
+00:30:47,879 --> 00:30:52,590
+because they all have the same size it's
+
+00:30:50,309 --> 00:30:54,990
+also very nice for the garbage collector
+
+00:30:52,590 --> 00:30:57,120
+so originally Prometheus had a lot of
+
+00:30:54,990 --> 00:30:59,190
+with heat fragmentation and then we got
+
+00:30:57,120 --> 00:31:01,980
+really paranoid with free list and sink
+
+00:30:59,190 --> 00:31:03,900
+pools nowadays the garbage collector is
+
+00:31:01,980 --> 00:31:05,820
+much better but also really realized
+
+00:31:03,900 --> 00:31:07,140
+when you use constant sized chunks as
+
+00:31:05,820 --> 00:31:10,020
+your allocation unit the garbage
+
+00:31:07,140 --> 00:31:11,880
+collector loves you so we don't even
+
+00:31:10,020 --> 00:31:13,620
+need to do any free list for that the
+
+00:31:11,880 --> 00:31:17,730
+garbage collector managed to start all
+
+00:31:13,620 --> 00:31:20,429
+of that just fine okay now this is
+
+00:31:17,730 --> 00:31:23,040
+prompt URI engine only ever acts on in
+
+00:31:20,429 --> 00:31:24,800
+memory chance so sometimes the chunk is
+
+00:31:23,040 --> 00:31:29,490
+not a memory we will look at that later
+
+00:31:24,800 --> 00:31:32,070
+and now flags explained storage local
+
+00:31:29,490 --> 00:31:33,630
+max chunks to persist that's the number
+
+00:31:32,070 --> 00:31:36,150
+of chunks that are on this state there
+
+00:31:33,630 --> 00:31:37,800
+are there in memory but not yet
+
+00:31:36,150 --> 00:31:40,620
+persisted but they want to be persisted
+
+00:31:37,800 --> 00:31:42,210
+so if this you can set this to value
+
+00:31:40,620 --> 00:31:45,150
+because promises will pay more attention
+
+00:31:42,210 --> 00:31:47,760
+to persisting the closer you get to that
+
+00:31:45,150 --> 00:31:49,410
+value and if you're heated from it it'll
+
+00:31:47,760 --> 00:31:51,360
+just stop ingestion we might have seen
+
+00:31:49,410 --> 00:31:52,890
+that in your nose so this is just to
+
+00:31:51,360 --> 00:31:54,540
+protect the other strategy would be to
+
+00:31:52,890 --> 00:31:56,490
+just throw away data but we are not
+
+00:31:54,540 --> 00:32:00,090
+doing that we are just stop creating new
+
+00:31:56,490 --> 00:32:02,820
+data which is sometimes worse or almost
+
+00:32:00,090 --> 00:32:04,110
+as bad but you have to do something so
+
+00:32:02,820 --> 00:32:05,910
+the other one storage local memory
+
+00:32:04,110 --> 00:32:07,350
+chance this is how many chunks you keep
+
+00:32:05,910 --> 00:32:09,240
+in memory before you start to evict
+
+00:32:07,350 --> 00:32:11,460
+chunks that are evicted or least
+
+00:32:09,240 --> 00:32:13,260
+recently used basis right so you have to
+
+00:32:11,460 --> 00:32:14,820
+tell that Prometheus I mean you could
+
+00:32:13,260 --> 00:32:17,309
+try to find out how much memory there
+
+00:32:14,820 --> 00:32:19,770
+actually it's on your system but we are
+
+00:32:17,309 --> 00:32:21,559
+leaving this to the user you can decide
+
+00:32:19,770 --> 00:32:24,780
+how much you want and this is what what
+
+00:32:21,559 --> 00:32:27,179
+Matt said you really need to tweak those
+
+00:32:24,780 --> 00:32:29,510
+flags because you have to tell from each
+
+00:32:27,179 --> 00:32:33,150
+is how much memory it's allowed to use
+
+00:32:29,510 --> 00:32:35,010
+okay so now this batching up this is
+
+00:32:33,150 --> 00:32:37,410
+called series maintenance in Prometheus
+
+00:32:35,010 --> 00:32:39,120
+lingo so you just go through all the
+
+00:32:37,410 --> 00:32:40,559
+time series you have on your Prometheus
+
+00:32:39,120 --> 00:32:43,410
+server and maintain them one after
+
+00:32:40,559 --> 00:32:45,510
+another and this works like that like
+
+00:32:43,410 --> 00:32:47,940
+you have this state you have a few
+
+00:32:45,510 --> 00:32:51,030
+chunks that are already expired they are
+
+00:32:47,940 --> 00:32:53,130
+being beyond a retention time and you
+
+00:32:51,030 --> 00:32:56,309
+have some chunks here that are not yet
+
+00:32:53,130 --> 00:32:59,010
+persistent so if that chunk here is more
+
+00:32:56,309 --> 00:33:00,900
+than 10% of the whole series length you
+
+00:32:59,010 --> 00:33:03,929
+are deleting it some file systems could
+
+00:33:00,900 --> 00:33:06,659
+do that front truncation but not all so
+
+00:33:03,929 --> 00:33:08,279
+what we usually do is we don't really
+
+00:33:06,659 --> 00:33:10,529
+the truncated just rewrite the whole
+
+00:33:08,279 --> 00:33:12,509
+file and while we are doing this we are
+
+00:33:10,529 --> 00:33:15,570
+also writing all the chunks that are not
+
+00:33:12,509 --> 00:33:17,099
+persisted yet if that's less than 10% we
+
+00:33:15,570 --> 00:33:19,379
+don't bother with rewriting we just
+
+00:33:17,099 --> 00:33:21,210
+append the unresisting chunks and that
+
+00:33:19,379 --> 00:33:23,129
+goes on and on and on it's like nicely
+
+00:33:21,210 --> 00:33:25,529
+throttle do not kill you this guy all
+
+00:33:23,129 --> 00:33:28,409
+but like if you persist chunks to
+
+00:33:25,529 --> 00:33:31,529
+persist go up to that limit then we
+
+00:33:28,409 --> 00:33:32,309
+speed that up and destroy the sse or
+
+00:33:31,529 --> 00:33:36,539
+something right
+
+00:33:32,309 --> 00:33:37,919
+okay so flags explained storage local
+
+00:33:36,539 --> 00:33:40,799
+retention obviously that's your
+
+00:33:37,919 --> 00:33:43,859
+retention time serious file shrink ratio
+
+00:33:40,799 --> 00:33:45,690
+that's the 10% there 0.1 actually so you
+
+00:33:43,859 --> 00:33:48,960
+can set this to higher values you would
+
+00:33:45,690 --> 00:33:50,759
+trade this storage for this guy all
+
+00:33:48,960 --> 00:33:52,889
+essentially if you want fewer this guy
+
+00:33:50,759 --> 00:33:54,149
+also have plenty of storage just put
+
+00:33:52,889 --> 00:33:56,009
+this to a higher value at some time
+
+00:33:54,149 --> 00:33:59,940
+reported always to 0.3 because we like
+
+00:33:56,009 --> 00:34:02,429
+our SSDs and the serious thing strategy
+
+00:33:59,940 --> 00:34:04,200
+tells Prometheus if it should sink the
+
+00:34:02,429 --> 00:34:06,809
+foul after that serious maintenance or
+
+00:34:04,200 --> 00:34:08,399
+not if you don't think it it's faster it
+
+00:34:06,809 --> 00:34:10,679
+beeped because you can still leverage
+
+00:34:08,399 --> 00:34:13,069
+the page cache but you are probably
+
+00:34:10,679 --> 00:34:16,020
+leveraging all your memory anyway so
+
+00:34:13,069 --> 00:34:18,149
+what we do by default is it's an adapter
+
+00:34:16,020 --> 00:34:20,909
+strategy we sync if we don't have
+
+00:34:18,149 --> 00:34:22,770
+persistence pressure meaning your chance
+
+00:34:20,909 --> 00:34:24,750
+to persist are not close to that number
+
+00:34:22,770 --> 00:34:26,279
+you were set in the other flag and if
+
+00:34:24,750 --> 00:34:27,599
+you get closer to that number of II just
+
+00:34:26,279 --> 00:34:29,579
+don't think anymore
+
+00:34:27,599 --> 00:34:31,399
+it's called rushed mode which you might
+
+00:34:29,579 --> 00:34:33,899
+also have seen in your loss
+
+00:34:31,399 --> 00:34:35,849
+okay now this question is interesting
+
+00:34:33,899 --> 00:34:37,169
+what happens if you're prompted I'll
+
+00:34:35,849 --> 00:34:40,529
+clearly wants a chunk that it's not a
+
+00:34:37,169 --> 00:34:42,389
+memory easy we just load it into memory
+
+00:34:40,529 --> 00:34:45,179
+from this which is easy because it's an
+
+00:34:42,389 --> 00:34:47,609
+one to one mirror this is essentially
+
+00:34:45,179 --> 00:34:49,139
+and mapping the far right and all those
+
+00:34:47,609 --> 00:34:50,730
+small people come along say what are you
+
+00:34:49,139 --> 00:34:53,639
+not just a mapping all your serious
+
+00:34:50,730 --> 00:34:56,789
+files answer how many serious do we have
+
+00:34:53,639 --> 00:34:58,589
+a million right or 10 so if you're a map
+
+00:34:56,789 --> 00:35:02,220
+a million files your kernel will not
+
+00:34:58,589 --> 00:35:06,210
+like you anymore so this is the last
+
+00:35:02,220 --> 00:35:08,279
+slide I think checkpointing so we go
+
+00:35:06,210 --> 00:35:09,900
+slowly through all those series and
+
+00:35:08,279 --> 00:35:12,750
+maintain them that means we always have
+
+00:35:09,900 --> 00:35:14,039
+a head of chunks data is not persistent
+
+00:35:12,750 --> 00:35:16,500
+if you just switch off the Prometheus
+
+00:35:14,039 --> 00:35:18,299
+server it's all lost so what we do
+
+00:35:16,500 --> 00:35:19,720
+during shutdown we could do in shutdown
+
+00:35:18,299 --> 00:35:21,970
+just wait until we have
+
+00:35:19,720 --> 00:35:23,890
+everything on the spinning this that
+
+00:35:21,970 --> 00:35:25,599
+takes like a day so we don't want to
+
+00:35:23,890 --> 00:35:27,700
+wait for day until our server shuts down
+
+00:35:25,599 --> 00:35:30,369
+and we also don't want to lose a lot of
+
+00:35:27,700 --> 00:35:33,220
+data if you crash so what we do we check
+
+00:35:30,369 --> 00:35:36,369
+point chunks that are just the memory
+
+00:35:33,220 --> 00:35:38,140
+and this is just a single farm we write
+
+00:35:36,369 --> 00:35:40,240
+them just to sing a file here you see
+
+00:35:38,140 --> 00:35:41,859
+this time series hasn't even seen a
+
+00:35:40,240 --> 00:35:43,599
+maintenance yet so it's nothing on this
+
+00:35:41,859 --> 00:35:46,569
+but we can just write it all into a
+
+00:35:43,599 --> 00:35:48,490
+single file this is what spinning is do
+
+00:35:46,569 --> 00:35:51,220
+really well they are faster than SSDs
+
+00:35:48,490 --> 00:35:53,050
+often right so you do this and this is
+
+00:35:51,220 --> 00:35:54,640
+although you do this for millions of
+
+00:35:53,050 --> 00:35:57,310
+times ears that takes like a couple of
+
+00:35:54,640 --> 00:35:59,890
+minutes usually and then you are good
+
+00:35:57,310 --> 00:36:01,839
+right so check one interval tells you
+
+00:35:59,890 --> 00:36:03,280
+how often to do this you also do it on
+
+00:36:01,839 --> 00:36:06,310
+chat alone and then there's the
+
+00:36:03,280 --> 00:36:09,400
+mysterious dirty series limit so if you
+
+00:36:06,310 --> 00:36:10,540
+maintain serious they get inconsistent
+
+00:36:09,400 --> 00:36:13,240
+with your check point like you have
+
+00:36:10,540 --> 00:36:15,430
+double chunks or gaps or something and
+
+00:36:13,240 --> 00:36:17,260
+if you really crash in the crash we
+
+00:36:15,430 --> 00:36:19,480
+carry those serious have to be treated
+
+00:36:17,260 --> 00:36:21,280
+specially you need to dis see and if you
+
+00:36:19,480 --> 00:36:23,260
+have a lot of dirty serious like
+
+00:36:21,280 --> 00:36:25,930
+thousands and you're miss meaning this
+
+00:36:23,260 --> 00:36:28,240
+you crash recovery will again take hours
+
+00:36:25,930 --> 00:36:29,800
+so this is what protects you against
+
+00:36:28,240 --> 00:36:31,390
+that so if you have a certain number of
+
+00:36:29,800 --> 00:36:33,670
+dirty series you do checkpoint no matter
+
+00:36:31,390 --> 00:36:37,150
+what even if it's not yet the checkpoint
+
+00:36:33,670 --> 00:36:39,790
+at all and this is kind of what is that
+
+00:36:37,150 --> 00:36:41,950
+conflict of interest on an SSD the chunk
+
+00:36:39,790 --> 00:36:43,569
+recovery is fast and the checkpointing
+
+00:36:41,950 --> 00:36:45,880
+is slow so you actually don't want that
+
+00:36:43,569 --> 00:36:48,339
+right on the spinning list you want this
+
+00:36:45,880 --> 00:36:51,190
+to happen often because checkpointing is
+
+00:36:48,339 --> 00:36:58,270
+fast but chug recovery crash recovery is
+
+00:36:51,190 --> 00:37:00,940
+not fast this is the this is just a
+
+00:36:58,270 --> 00:37:02,890
+limit if you have a series that after it
+
+00:37:00,940 --> 00:37:05,200
+got checkpoint and got maintained then
+
+00:37:02,890 --> 00:37:07,750
+it's dirty because the state on disk is
+
+00:37:05,200 --> 00:37:09,940
+not consistent with you checkpoint so
+
+00:37:07,750 --> 00:37:13,060
+what you do if you're on SSD you put
+
+00:37:09,940 --> 00:37:14,710
+this value high and this low no this you
+
+00:37:13,060 --> 00:37:18,430
+put ball sorry whatever you increase the
+
+00:37:14,710 --> 00:37:19,630
+dirty series limit and if you are on
+
+00:37:18,430 --> 00:37:21,760
+spinning this you leave it at the
+
+00:37:19,630 --> 00:37:24,849
+default value but again we can't detect
+
+00:37:21,760 --> 00:37:26,710
+that so you have to pick it yourself I
+
+00:37:24,849 --> 00:37:29,170
+don't know if there's a way to detect if
+
+00:37:26,710 --> 00:37:30,520
+you're on spinning disk or not okay but
+
+00:37:29,170 --> 00:37:32,380
+that was it I hope I explained all the
+
+00:37:30,520 --> 00:37:35,040
+flats and there might be questions we
+
+00:37:32,380 --> 00:37:35,040
+have like five minutes
+
+00:37:43,319 --> 00:37:49,420
+so Thank You Bjorn you've a question why
+
+00:37:48,069 --> 00:37:51,549
+can't we detect it if you're on a
+
+00:37:49,420 --> 00:37:54,130
+spinning disk or not don't like put the
+
+00:37:51,549 --> 00:37:55,930
+white default didn't there yeah we I
+
+00:37:54,130 --> 00:37:58,390
+mean if that's why just let me know
+
+00:37:55,930 --> 00:38:00,219
+then you do that but so everything I've
+
+00:37:58,390 --> 00:38:02,769
+tried I mean I guess there's a way I'm
+
+00:38:00,219 --> 00:38:04,690
+just too stupid to know what feedback
+
+00:38:02,769 --> 00:38:06,640
+welcome but whenever even if I try it
+
+00:38:04,690 --> 00:38:08,799
+like sitting on the disc and going into
+
+00:38:06,640 --> 00:38:09,579
+the prompts now what is this files is
+
+00:38:08,799 --> 00:38:12,009
+just a flourish
+
+00:38:09,579 --> 00:38:14,619
+read it out but then sometimes it's like
+
+00:38:12,009 --> 00:38:16,809
+your devices actually device map to
+
+00:38:14,619 --> 00:38:21,969
+another one and then this is on an AWS
+
+00:38:16,809 --> 00:38:25,299
+device and then it's like yeah right
+
+00:38:21,969 --> 00:38:27,579
+yeah you could do that right so in at
+
+00:38:25,299 --> 00:38:30,509
+the moment like explicit respect of an
+
+00:38:27,579 --> 00:38:32,950
+implicit the user just has to pick but
+
+00:38:30,509 --> 00:38:35,950
+probably should know that like even and
+
+00:38:32,950 --> 00:38:38,109
+sometimes we basically manually to put
+
+00:38:35,950 --> 00:38:39,519
+into the config if this is on spinning
+
+00:38:38,109 --> 00:38:42,839
+this one off because it's super hard to
+
+00:38:39,519 --> 00:38:50,319
+find out like they should fetch up in
+
+00:38:42,839 --> 00:38:52,119
+it's easy okay opening he came just easy
+
+00:38:50,319 --> 00:39:00,700
+to figure out how many I ops are
+
+00:38:52,119 --> 00:39:03,729
+assigned to a abs now also like like you
+
+00:39:00,700 --> 00:39:06,549
+you you if you know I'm I'm my file
+
+00:39:03,729 --> 00:39:09,819
+system is mapped on dev global and then
+
+00:39:06,549 --> 00:39:11,559
+this is the Linux device mapper that
+
+00:39:09,819 --> 00:39:14,259
+goes to another device which is
+
+00:39:11,559 --> 00:39:16,420
+encrypted this which is then perhaps an
+
+00:39:14,259 --> 00:39:19,390
+Amazon volume or perhaps it's a spinning
+
+00:39:16,420 --> 00:39:21,460
+this it's really difficult to say in the
+
+00:39:19,390 --> 00:39:24,519
+general case right first that's right
+
+00:39:21,460 --> 00:39:27,029
+they should be like some I sis call that
+
+00:39:24,519 --> 00:39:30,029
+helps you kind of tease I have no clue
+
+00:39:27,029 --> 00:39:30,029
+yeah
+
+00:39:36,700 --> 00:39:40,420
+you said that you leave some of the work
+
+00:39:39,610 --> 00:39:43,690
+to the file system
+
+00:39:40,420 --> 00:39:45,910
+have you tried different file systems in
+
+00:39:43,690 --> 00:39:48,640
+that regard and can say which ones work
+
+00:39:45,910 --> 00:39:50,470
+better than others for this purpose so
+
+00:39:48,640 --> 00:39:52,900
+originally we did a lot of tests on
+
+00:39:50,470 --> 00:39:55,630
+exercise and that worked quite well and
+
+00:39:52,900 --> 00:39:56,740
+then the company migrated to x4 and had
+
+00:39:55,630 --> 00:39:59,619
+some issues
+
+00:39:56,740 --> 00:40:01,720
+they were mostly because exercise never
+
+00:39:59,619 --> 00:40:05,619
+runs off a tie notes doesn't really have
+
+00:40:01,720 --> 00:40:09,280
+them in the way and exporters but yeah I
+
+00:40:05,619 --> 00:40:10,900
+mean I think we are actually as as weird
+
+00:40:09,280 --> 00:40:12,790
+as it sounds we are pretty friendly to
+
+00:40:10,900 --> 00:40:14,980
+the file system also rewriting files
+
+00:40:12,790 --> 00:40:17,860
+gives the file system child a chance to
+
+00:40:14,980 --> 00:40:20,770
+like re a locate reorganize everything
+
+00:40:17,860 --> 00:40:22,450
+so far the only real problem was really
+
+00:40:20,770 --> 00:40:24,850
+running out of I know it's if you have
+
+00:40:22,450 --> 00:40:27,970
+like weird corner cases with loads of
+
+00:40:24,850 --> 00:40:30,160
+small time series so yeah I don't know X
+
+00:40:27,970 --> 00:40:32,950
+of s is just very advanced and I like it
+
+00:40:30,160 --> 00:40:35,080
+but that's just my tradition was I
+
+00:40:32,950 --> 00:40:40,240
+worked on SD is when I was a boy
+
+00:40:35,080 --> 00:40:43,180
+something okay do we have time for
+
+00:40:40,240 --> 00:40:46,540
+another question or we don't have
+
+00:40:43,180 --> 00:40:48,900
+another question there's multiple
+
+00:40:46,540 --> 00:40:48,900
+questions
+
+00:40:50,450 --> 00:40:56,059
+how emitted is the notion of the
+
+00:40:52,880 --> 00:40:57,710
+millisecond precision on time stamps I'm
+
+00:40:56,059 --> 00:41:02,230
+wondering because of the the double
+
+00:40:57,710 --> 00:41:04,519
+deltas and the zero the the constant
+
+00:41:02,230 --> 00:41:07,069
+sorry I'm having trouble phrasing it I'm
+
+00:41:04,519 --> 00:41:08,869
+thinking that it may be more noticeable
+
+00:41:07,069 --> 00:41:13,220
+the millisecond difference and getting
+
+00:41:08,869 --> 00:41:14,750
+the 0 a.length deltas and I'm wondering
+
+00:41:13,220 --> 00:41:17,720
+how hard it would be to change as an
+
+00:41:14,750 --> 00:41:22,160
+experiment so I did some research when I
+
+00:41:17,720 --> 00:41:24,049
+came up with the v2 encoding this was
+
+00:41:22,160 --> 00:41:25,579
+the kind of surprising result
+
+00:41:24,049 --> 00:41:27,079
+even with millisecond encodings if
+
+00:41:25,579 --> 00:41:29,660
+you're Prometheus server is not
+
+00:41:27,079 --> 00:41:32,329
+overloaded this grading is almost
+
+00:41:29,660 --> 00:41:34,430
+perfect like you get about let's say a
+
+00:41:32,329 --> 00:41:36,799
+hundred samples usually in a row that
+
+00:41:34,430 --> 00:41:38,240
+are all double Delta zero and this is
+
+00:41:36,799 --> 00:41:40,220
+where I came up with this seven bit
+
+00:41:38,240 --> 00:41:42,200
+thing it's also bite alignment in the
+
+00:41:40,220 --> 00:41:43,640
+end which sometimes simplifies things
+
+00:41:42,200 --> 00:41:45,920
+because you don't have to be chipped so
+
+00:41:43,640 --> 00:41:47,539
+much to get to your value and I just
+
+00:41:45,920 --> 00:41:50,089
+thought yeah like a hundred sounds like
+
+00:41:47,539 --> 00:41:52,910
+good and if you count higher it's
+
+00:41:50,089 --> 00:41:54,740
+diminishing returns and that's probably
+
+00:41:52,910 --> 00:41:57,079
+something you often hit like a farmload
+
+00:41:54,740 --> 00:41:58,789
+values without any deviation if you
+
+00:41:57,079 --> 00:42:00,799
+promise the server is overloaded then
+
+00:41:58,789 --> 00:42:05,710
+things got weird right but that's not
+
+00:42:00,799 --> 00:42:05,710
+the regular case one quick one
+
+00:42:07,059 --> 00:42:12,259
+now that I understand how the files are
+
+00:42:09,589 --> 00:42:16,819
+encoded can we expect someday to have a
+
+00:42:12,259 --> 00:42:18,740
+way to ingest historical data I mean
+
+00:42:16,819 --> 00:42:21,799
+there many ways of doing that and we
+
+00:42:18,740 --> 00:42:23,809
+have a issue for backfilling right or
+
+00:42:21,799 --> 00:42:25,670
+bulk import that could even be front
+
+00:42:23,809 --> 00:42:28,880
+filling which is also worth as I learned
+
+00:42:25,670 --> 00:42:31,700
+from Brian so that will happen
+
+00:42:28,880 --> 00:42:33,920
+eventually but then also those
+
+00:42:31,700 --> 00:42:36,380
+interesting parallel developments of
+
+00:42:33,920 --> 00:42:38,809
+having some other storage layer we'll
+
+00:42:36,380 --> 00:42:40,970
+see right I mean but but like front
+
+00:42:38,809 --> 00:42:43,279
+filling is easier but back filling is
+
+00:42:40,970 --> 00:42:45,500
+also possible if you don't overdo it so
+
+00:42:43,279 --> 00:42:47,420
+something will happen at some point
+
+00:42:45,500 --> 00:42:49,500
+thanks very much all right so we're out
+
+00:42:47,420 --> 00:42:51,560
+of time next one
+
+00:42:49,500 --> 00:42:51,560
+
+YouTube URL: https://www.youtube.com/watch?v=HbnGSNEjhUc
+
+

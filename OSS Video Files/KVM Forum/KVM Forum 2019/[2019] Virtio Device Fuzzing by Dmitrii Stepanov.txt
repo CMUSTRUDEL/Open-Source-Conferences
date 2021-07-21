@@ -1,0 +1,1322 @@
+Title: [2019] Virtio Device Fuzzing by Dmitrii Stepanov
+Publication date: 2019-11-09
+Playlist: KVM Forum 2019
+Description: 
+	For the cloud providers it is important to keep private user data secure. One way to achieve it is to fuzz the interfaces available to the guest, to find new vulnerabilities and ways of exploitation. One of such surface is the emulated devices used by the guest machines.
+
+We present the approach to fuzz virtio devices based on AFL to find a bugs. We evaluate this approach by
+fuzzing the virtio devices in SPDK and QEMU. Find several crashes, hangs and filed new CVE (CVE-2019-9547). Also to make the approach useful for our Cloud production case, we integrate it with the CI for each release.
+
+---
+
+Dmitrii Stepanov
+Yandex
+Software Engineer
+
+10+ years of system-level development: gdb, gcc, linux, rtos. Right now i'm working on the Yandex Cloud project (https://cloud.yandex.com/), as part of the Kernel-Hypervisor team.
+My ongoing projects are:
+- virtio-blk device optimization, stability and security
+- host security (from the guest)
+- core scheduling possibilities (for the running VMs)
+Captions: 
+	00:00:00,390 --> 00:00:02,750
+[Music]
+
+00:00:07,890 --> 00:00:14,429
+so let's start just a small introduction
+
+00:00:10,980 --> 00:00:17,609
+and a little bit motivation for the
+
+00:00:14,429 --> 00:00:20,100
+project I am presenting right now my
+
+00:00:17,609 --> 00:00:25,590
+name is Tim Stepanov I am working at
+
+00:00:20,100 --> 00:00:28,380
+Yandex Yandex is one of major company IT
+
+00:00:25,590 --> 00:00:31,340
+company in Russia which is running lots
+
+00:00:28,380 --> 00:00:35,489
+of services and one year ago we launched
+
+00:00:31,340 --> 00:00:40,040
+public Yandex platform and I am working
+
+00:00:35,489 --> 00:00:44,160
+whereas as part of hypervisor team and
+
+00:00:40,040 --> 00:00:48,120
+one because of this public prefix one of
+
+00:00:44,160 --> 00:00:51,210
+our main goal is security and in the
+
+00:00:48,120 --> 00:00:54,480
+context of hypervisor it's very hot
+
+00:00:51,210 --> 00:00:56,879
+security from virtual machines from some
+
+00:00:54,480 --> 00:01:00,449
+kind of incorrect users activity which
+
+00:00:56,879 --> 00:01:03,120
+can lead to memory leak maybe dos attack
+
+00:01:00,449 --> 00:01:05,369
+maybe even VM escape and a good way to
+
+00:01:03,120 --> 00:01:07,350
+improve security is fuzzum fuzzum for
+
+00:01:05,369 --> 00:01:10,680
+interfaces which are available for the
+
+00:01:07,350 --> 00:01:13,200
+user and for virtual machines such
+
+00:01:10,680 --> 00:01:15,630
+interfaces are emulated devices and
+
+00:01:13,200 --> 00:01:18,570
+today I will speak about Victor device
+
+00:01:15,630 --> 00:01:21,450
+buzzing first of all I will tell what
+
+00:01:18,570 --> 00:01:24,540
+fuzzing is and what we are going to fuss
+
+00:01:21,450 --> 00:01:27,570
+when I will tell how we implement Victor
+
+00:01:24,540 --> 00:01:30,119
+device fuzzing and what issues did we
+
+00:01:27,570 --> 00:01:34,560
+find during it when I will tell a little
+
+00:01:30,119 --> 00:01:38,340
+bit about our future plans so what is
+
+00:01:34,560 --> 00:01:40,880
+fasiq in general fuzzing is the process
+
+00:01:38,340 --> 00:01:43,799
+of what box testing where the father
+
+00:01:40,880 --> 00:01:45,990
+generates some input and send it to a
+
+00:01:43,799 --> 00:01:49,380
+test application and monitors each state
+
+00:01:45,990 --> 00:01:52,710
+if it Hanks crashed maybe handle the
+
+00:01:49,380 --> 00:01:55,979
+input without any error all this is
+
+00:01:52,710 --> 00:01:58,619
+pretty important and what else is
+
+00:01:55,979 --> 00:02:01,350
+important how input is generated on each
+
+00:01:58,619 --> 00:02:06,000
+iteration it can be randomized on each
+
+00:02:01,350 --> 00:02:09,179
+iteration or it can be mutated like
+
+00:02:06,000 --> 00:02:12,569
+using some algorithms like bit byte flip
+
+00:02:09,179 --> 00:02:15,209
+or bite edge remove so the good
+
+00:02:12,569 --> 00:02:18,750
+idea is just to combine several
+
+00:02:15,209 --> 00:02:20,220
+approaches and use them all just to
+
+00:02:18,750 --> 00:02:23,750
+increase the source coverage which is
+
+00:02:20,220 --> 00:02:29,310
+tasted by fighting process
+
+00:02:23,750 --> 00:02:31,980
+nowadays physics which are the most
+
+00:02:29,310 --> 00:02:35,610
+popular fuzzums have a guided coverage
+
+00:02:31,980 --> 00:02:37,640
+fathers these fathers not only monitors
+
+00:02:35,610 --> 00:02:41,370
+the state of application but also
+
+00:02:37,640 --> 00:02:43,709
+monitors record paths which are used to
+
+00:02:41,370 --> 00:02:47,489
+handle the input and this additional
+
+00:02:43,709 --> 00:02:49,440
+information really helps to prepare the
+
+00:02:47,489 --> 00:02:51,000
+data for the next iteration and again
+
+00:02:49,440 --> 00:02:55,049
+increase with soft coverage which is
+
+00:02:51,000 --> 00:02:58,200
+tested and in our case we also use such
+
+00:02:55,049 --> 00:03:03,720
+father it's a fail I will tell more
+
+00:02:58,200 --> 00:03:07,139
+about it later and what we are going to
+
+00:03:03,720 --> 00:03:10,139
+fast so in cloud infrastructure where is
+
+00:03:07,139 --> 00:03:12,329
+a host and where are different virtual
+
+00:03:10,139 --> 00:03:16,290
+machines running on this host there are
+
+00:03:12,329 --> 00:03:19,829
+emulated devices and there is a
+
+00:03:16,290 --> 00:03:23,220
+transport channel between virtual pot in
+
+00:03:19,829 --> 00:03:27,690
+guest and emulated pot on the host and
+
+00:03:23,220 --> 00:03:31,049
+in case of filter devices such transport
+
+00:03:27,690 --> 00:03:33,720
+channel is via to a queue it is fully
+
+00:03:31,049 --> 00:03:37,980
+available for a user and so it becomes
+
+00:03:33,720 --> 00:03:41,419
+the attack surface and the error in on
+
+00:03:37,980 --> 00:03:44,220
+the host site in view to request handler
+
+00:03:41,419 --> 00:03:47,940
+can lead to very bad consequences as I
+
+00:03:44,220 --> 00:03:51,269
+said before it can be even VM escape so
+
+00:03:47,940 --> 00:03:54,870
+we want to secure this let's see from
+
+00:03:51,269 --> 00:03:58,349
+the high level of view what we are how
+
+00:03:54,870 --> 00:04:01,379
+we are going to implement fuzzing well
+
+00:03:58,349 --> 00:04:04,290
+we need a father engine which will
+
+00:04:01,379 --> 00:04:06,870
+generate input and send it to the test
+
+00:04:04,290 --> 00:04:10,709
+application eunuch vir to accuse in our
+
+00:04:06,870 --> 00:04:13,290
+real case of a father engine is FL which
+
+00:04:10,709 --> 00:04:16,139
+makes the fork and run the test
+
+00:04:13,290 --> 00:04:21,389
+application just to monitor it state and
+
+00:04:16,139 --> 00:04:25,710
+code paths and also a failure generates
+
+00:04:21,389 --> 00:04:27,810
+input but we
+
+00:04:25,710 --> 00:04:30,180
+doesn't want to send it directly to the
+
+00:04:27,810 --> 00:04:32,580
+test application instead of lease we are
+
+00:04:30,180 --> 00:04:34,949
+using UNIX circuit to redirect to a
+
+00:04:32,580 --> 00:04:37,259
+proxy application and proxy application
+
+00:04:34,949 --> 00:04:40,199
+simulates the user activity a user
+
+00:04:37,259 --> 00:04:43,020
+workload by resending this input to a
+
+00:04:40,199 --> 00:04:46,500
+test application and test application
+
+00:04:43,020 --> 00:04:49,080
+reports back with status to FL our test
+
+00:04:46,500 --> 00:04:53,180
+application we use both view to a blog
+
+00:04:49,080 --> 00:04:56,280
+device implementation for SPD k and k mu
+
+00:04:53,180 --> 00:04:59,370
+but on the next slide I will talk mostly
+
+00:04:56,280 --> 00:05:01,889
+about Quinn Hume just because it was
+
+00:04:59,370 --> 00:05:04,710
+more complicated to implement a mu
+
+00:05:01,889 --> 00:05:07,740
+facing because of virtual machine
+
+00:05:04,710 --> 00:05:11,160
+initialization device initialization but
+
+00:05:07,740 --> 00:05:13,919
+in fact for SPD K we used absolutely the
+
+00:05:11,160 --> 00:05:15,810
+same approach for fighting so again just
+
+00:05:13,919 --> 00:05:17,820
+to summarize what we implemented we
+
+00:05:15,810 --> 00:05:20,460
+implemented the full data cycle for the
+
+00:05:17,820 --> 00:05:22,530
+filing from I fell to proxy from proxy
+
+00:05:20,460 --> 00:05:26,789
+to test application and from test
+
+00:05:22,530 --> 00:05:29,639
+application back to FL let's see in more
+
+00:05:26,789 --> 00:05:33,169
+details on each communication step the
+
+00:05:29,639 --> 00:05:37,860
+first step is a FL proxy communication
+
+00:05:33,169 --> 00:05:41,130
+the problem here is that by default FA
+
+00:05:37,860 --> 00:05:45,449
+Liam is using esterday in and some kind
+
+00:05:41,130 --> 00:05:49,380
+of test set file as input and if we use
+
+00:05:45,449 --> 00:05:52,949
+such approach then we need either
+
+00:05:49,380 --> 00:05:55,380
+enhance FL itself to support filter view
+
+00:05:52,949 --> 00:05:59,240
+communication but it will complicate the
+
+00:05:55,380 --> 00:06:02,580
+fuzzy logic or either we need to enhance
+
+00:05:59,240 --> 00:06:05,010
+qmu itself just to support a study in as
+
+00:06:02,580 --> 00:06:06,780
+the input but it will make the
+
+00:06:05,010 --> 00:06:10,260
+difference between production case and
+
+00:06:06,780 --> 00:06:16,680
+the test case we also don't want it so
+
+00:06:10,260 --> 00:06:19,860
+we had another idea we use proxy which I
+
+00:06:16,680 --> 00:06:22,139
+fail sends data to a proxy application
+
+00:06:19,860 --> 00:06:24,560
+and proxy application knows what will be
+
+00:06:22,139 --> 00:06:28,710
+web back-end for a thousand it can be
+
+00:06:24,560 --> 00:06:30,780
+speedy key it can be claimed you in fact
+
+00:06:28,710 --> 00:06:34,440
+it can be even some kind of tcp/ip
+
+00:06:30,780 --> 00:06:37,669
+server so the good idea here is that I
+
+00:06:34,440 --> 00:06:41,030
+fail father is independent from
+
+00:06:37,669 --> 00:06:42,919
+transport beckoned channel when data is
+
+00:06:41,030 --> 00:06:45,110
+received by proxy application
+
+00:06:42,919 --> 00:06:48,259
+it was sends it to a test application
+
+00:06:45,110 --> 00:06:53,509
+for Who am you we used to test framework
+
+00:06:48,259 --> 00:06:57,620
+to initialize devices to readwrite
+
+00:06:53,509 --> 00:07:00,830
+memory from visual cues so it's really
+
+00:06:57,620 --> 00:07:03,050
+good and when data is received by the
+
+00:07:00,830 --> 00:07:06,680
+test application we need to do two
+
+00:07:03,050 --> 00:07:09,409
+things first of all is we need to
+
+00:07:06,680 --> 00:07:11,509
+monitor the code paths which is used for
+
+00:07:09,409 --> 00:07:15,199
+handling and the second one report back
+
+00:07:11,509 --> 00:07:19,550
+by status as for the code paths we used
+
+00:07:15,199 --> 00:07:22,849
+a face length compiler to instrument the
+
+00:07:19,550 --> 00:07:25,520
+source code but we really did not want
+
+00:07:22,849 --> 00:07:28,819
+to implement all the qmu source code
+
+00:07:25,520 --> 00:07:31,719
+because it will complicate revising so
+
+00:07:28,819 --> 00:07:34,729
+we instrument on the part of cui mu its
+
+00:07:31,719 --> 00:07:39,800
+Victor your blog device implementation
+
+00:07:34,729 --> 00:07:43,909
+and also filter descriptor handling then
+
+00:07:39,800 --> 00:07:46,610
+we need to report status back to FL from
+
+00:07:43,909 --> 00:07:49,789
+test application the easy way to do it
+
+00:07:46,610 --> 00:07:54,319
+is just to call exit on each error and
+
+00:07:49,789 --> 00:07:57,139
+success path well it will work but will
+
+00:07:54,319 --> 00:08:01,339
+work really really slow because on each
+
+00:07:57,139 --> 00:08:03,889
+iteration we will require to initialize
+
+00:08:01,339 --> 00:08:06,860
+a full virtual machine we initialize
+
+00:08:03,889 --> 00:08:11,960
+device and it will just slow down the
+
+00:08:06,860 --> 00:08:14,659
+whole process so instead of with we used
+
+00:08:11,960 --> 00:08:18,229
+I failed persistent mode in this mode we
+
+00:08:14,659 --> 00:08:22,339
+used six stop signal to report the
+
+00:08:18,229 --> 00:08:24,860
+status back to FL and in this case FL
+
+00:08:22,339 --> 00:08:27,919
+can use the same test in turns for the
+
+00:08:24,860 --> 00:08:32,479
+next iteration and it's very fast
+
+00:08:27,919 --> 00:08:35,060
+the only drawback here is that on each
+
+00:08:32,479 --> 00:08:38,419
+iteration device changes its state and
+
+00:08:35,060 --> 00:08:41,060
+we should be ready to reset its state to
+
+00:08:38,419 --> 00:08:43,760
+back to the very default state that's
+
+00:08:41,060 --> 00:08:48,560
+what we implemented also in claim you
+
+00:08:43,760 --> 00:08:51,140
+for filing so just to summarize what we
+
+00:08:48,560 --> 00:08:51,620
+implemented again it's a full data cycle
+
+00:08:51,140 --> 00:08:53,990
+from
+
+00:08:51,620 --> 00:08:56,090
+I fail to proxy from proxy to test
+
+00:08:53,990 --> 00:09:00,500
+application and from test application
+
+00:08:56,090 --> 00:09:04,310
+back to FN what is also important form
+
+00:09:00,500 --> 00:09:08,300
+for a zinc is what data we used for
+
+00:09:04,310 --> 00:09:11,960
+phasing we tried different approaches
+
+00:09:08,300 --> 00:09:15,290
+one of them approach is just use part of
+
+00:09:11,960 --> 00:09:18,820
+just memory which is available for via
+
+00:09:15,290 --> 00:09:22,520
+to a block device and just randomize and
+
+00:09:18,820 --> 00:09:25,610
+further filter block device using it
+
+00:09:22,520 --> 00:09:28,520
+this approach work but was pretty slow
+
+00:09:25,610 --> 00:09:32,060
+because again on each iteration we need
+
+00:09:28,520 --> 00:09:34,760
+to initialize the whole guest memory
+
+00:09:32,060 --> 00:09:39,020
+region even it's only the part it can be
+
+00:09:34,760 --> 00:09:40,490
+like several hundred megabytes so it's
+
+00:09:39,020 --> 00:09:46,130
+not good
+
+00:09:40,490 --> 00:09:49,370
+we used to now approach we used existing
+
+00:09:46,130 --> 00:09:51,440
+API to craft Victor descriptive table
+
+00:09:49,370 --> 00:09:54,740
+and randomize on the victor block
+
+00:09:51,440 --> 00:09:58,070
+requests well this is a pretty fast
+
+00:09:54,740 --> 00:10:01,790
+approach but the only problem here is
+
+00:09:58,070 --> 00:10:04,400
+that by using existing API to craft
+
+00:10:01,790 --> 00:10:08,090
+virtual descriptive tables we really did
+
+00:10:04,400 --> 00:10:11,180
+not hit the error paths so the source
+
+00:10:08,090 --> 00:10:16,250
+coverage which is tested really not so
+
+00:10:11,180 --> 00:10:18,140
+good so we used the third approach we
+
+00:10:16,250 --> 00:10:20,990
+randomized not only with our block
+
+00:10:18,140 --> 00:10:23,780
+requests but also victor descriptor
+
+00:10:20,990 --> 00:10:26,390
+table itself and from the viewpoint of
+
+00:10:23,780 --> 00:10:29,390
+source coverage from a viewpoint of
+
+00:10:26,390 --> 00:10:33,500
+speed it shows just the best results so
+
+00:10:29,390 --> 00:10:36,050
+we use it for fuzzing what is also
+
+00:10:33,500 --> 00:10:38,870
+important for fuzzing is crash
+
+00:10:36,050 --> 00:10:41,380
+management and by saying it I mean we
+
+00:10:38,870 --> 00:10:47,960
+need something to catch the crashes
+
+00:10:41,380 --> 00:10:50,210
+h-hand ism restored after crashes catch
+
+00:10:47,960 --> 00:10:52,730
+inputs which lead to the crashes maybe
+
+00:10:50,210 --> 00:10:56,300
+reports on statistics and all of these
+
+00:10:52,730 --> 00:10:59,450
+in fact implemented by fail so it's
+
+00:10:56,300 --> 00:11:03,140
+great just use it what I want to say
+
+00:10:59,450 --> 00:11:05,700
+that some of the issues we found we
+
+00:11:03,140 --> 00:11:08,220
+found it like in several hours some
+
+00:11:05,700 --> 00:11:11,280
+all the issues were found in several
+
+00:11:08,220 --> 00:11:13,140
+days or even weeks so to get the most
+
+00:11:11,280 --> 00:11:16,260
+from fuzzing it should be like the
+
+00:11:13,140 --> 00:11:20,280
+endless process which is integrated in
+
+00:11:16,260 --> 00:11:24,510
+your CI because you never know when and
+
+00:11:20,280 --> 00:11:27,810
+where new issue will be found so let's
+
+00:11:24,510 --> 00:11:32,190
+see what issues did we find first of all
+
+00:11:27,810 --> 00:11:34,800
+we hit several assert Arabs in cui mu
+
+00:11:32,190 --> 00:11:38,760
+one of such error is shown right now on
+
+00:11:34,800 --> 00:11:41,910
+the slide if the size of indirect really
+
+00:11:38,760 --> 00:11:45,540
+descriptive table is set to know when it
+
+00:11:41,910 --> 00:11:48,090
+will hit where error and virtual machine
+
+00:11:45,540 --> 00:11:50,790
+will crash it's not really a critical
+
+00:11:48,090 --> 00:11:54,530
+issue because by doing this the user can
+
+00:11:50,790 --> 00:12:00,420
+crash only its own virtual machine but
+
+00:11:54,530 --> 00:12:04,460
+anyway next issue we found his man was
+
+00:12:00,420 --> 00:12:07,980
+memory access violation in SPD key if
+
+00:12:04,460 --> 00:12:10,320
+the memory region which is available for
+
+00:12:07,980 --> 00:12:13,700
+Victor block device is not aligned to
+
+00:12:10,320 --> 00:12:16,770
+huge page size then there will be a
+
+00:12:13,700 --> 00:12:18,990
+small possibility to read or even write
+
+00:12:16,770 --> 00:12:22,980
+to the memory of our view to a block
+
+00:12:18,990 --> 00:12:26,460
+device well it sounds really bad but in
+
+00:12:22,980 --> 00:12:29,640
+fact it was not so critical because this
+
+00:12:26,460 --> 00:12:32,520
+is not aligned case is very rare custom
+
+00:12:29,640 --> 00:12:34,860
+case and documented like unsupported in
+
+00:12:32,520 --> 00:12:37,500
+official documentation but still it's
+
+00:12:34,860 --> 00:12:41,850
+pretty interesting what can be found by
+
+00:12:37,500 --> 00:12:44,220
+fuzzing process another issue in a
+
+00:12:41,850 --> 00:12:49,050
+speedy key which was found by filing
+
+00:12:44,220 --> 00:12:53,010
+process was the endless loop and in fact
+
+00:12:49,050 --> 00:12:55,380
+it was a vulnerability the user can
+
+00:12:53,010 --> 00:12:58,710
+craft such virtual descriptor table
+
+00:12:55,380 --> 00:13:01,290
+where first entry points to the second
+
+00:12:58,710 --> 00:13:03,660
+one the second entry points back to the
+
+00:13:01,290 --> 00:13:07,890
+first one and it will be like the
+
+00:13:03,660 --> 00:13:10,140
+endless loop and in this case the
+
+00:13:07,890 --> 00:13:14,370
+handler on the host will run this loop
+
+00:13:10,140 --> 00:13:17,120
+like forever and if there are several
+
+00:13:14,370 --> 00:13:18,279
+Vita blog devices attached to his
+
+00:13:17,120 --> 00:13:21,370
+handler
+
+00:13:18,279 --> 00:13:26,019
+the host when all of them will Hank so
+
+00:13:21,370 --> 00:13:30,189
+it will be like DOS attack on block host
+
+00:13:26,019 --> 00:13:32,259
+subsystem so in fact it's a good point
+
+00:13:30,189 --> 00:13:39,970
+to update SPD key on your host if you
+
+00:13:32,259 --> 00:13:43,240
+are using it the scheme phasing scheme
+
+00:13:39,970 --> 00:13:46,029
+I've just described is running right now
+
+00:13:43,240 --> 00:13:50,110
+on our horse so we're trying to find new
+
+00:13:46,029 --> 00:13:52,449
+issues but we want to improve it first
+
+00:13:50,110 --> 00:13:54,939
+of all we want to improve a number of
+
+00:13:52,449 --> 00:13:56,649
+the devices we are fighting for now it's
+
+00:13:54,939 --> 00:13:58,629
+on the viateur block device but we also
+
+00:13:56,649 --> 00:14:02,170
+want to fast with the net device which
+
+00:13:58,629 --> 00:14:06,370
+are subdivides and so on when we want to
+
+00:14:02,170 --> 00:14:08,470
+increase the surface which is used for
+
+00:14:06,370 --> 00:14:11,410
+fastening so for now it's only after
+
+00:14:08,470 --> 00:14:15,160
+queues but we also want to add PCI at
+
+00:14:11,410 --> 00:14:20,470
+least PCI we want to increase the
+
+00:14:15,160 --> 00:14:22,089
+quality of a start input so just to
+
+00:14:20,470 --> 00:14:25,180
+increase the source coverage which is
+
+00:14:22,089 --> 00:14:28,360
+tested by fuzzing for the cout test
+
+00:14:25,180 --> 00:14:31,660
+framework the nice enhancement will be
+
+00:14:28,360 --> 00:14:35,470
+direct memory access so to increase the
+
+00:14:31,660 --> 00:14:38,889
+phasing process so we will not use wimpy
+
+00:14:35,470 --> 00:14:41,589
+comments to eat right memory and the
+
+00:14:38,889 --> 00:14:45,430
+test case verification will be also nice
+
+00:14:41,589 --> 00:14:49,350
+feature to have all the changes for
+
+00:14:45,430 --> 00:14:56,399
+claim you for FL are published right now
+
+00:14:49,350 --> 00:15:00,279
+in our github Yandex repository you can
+
+00:14:56,399 --> 00:15:05,079
+use it you can check out it review maybe
+
+00:15:00,279 --> 00:15:06,939
+have some fun so first the code for fun
+
+00:15:05,079 --> 00:15:09,699
+and profit thank you very much for
+
+00:15:06,939 --> 00:15:12,059
+listening hope you enjoy the talk any
+
+00:15:09,699 --> 00:15:12,059
+questions
+
+00:15:15,300 --> 00:15:23,710
+hi hi great work Thanks I didn't quite
+
+00:15:20,980 --> 00:15:29,560
+understand if you restart parts of the
+
+00:15:23,710 --> 00:15:31,720
+emulator between every test yes leave it
+
+00:15:29,560 --> 00:15:33,070
+running do you just run one test and
+
+00:15:31,720 --> 00:15:38,710
+then you restarted and go again every
+
+00:15:33,070 --> 00:15:41,460
+time you mean why we need to reset the
+
+00:15:38,710 --> 00:15:46,510
+device data yeah how are you doing it
+
+00:15:41,460 --> 00:15:49,900
+it's so we we have a very visual queues
+
+00:15:46,510 --> 00:15:54,820
+which have different fields in visual
+
+00:15:49,900 --> 00:15:56,980
+ring like available and so on IDs so we
+
+00:15:54,820 --> 00:16:01,540
+needed to reset back to its default
+
+00:15:56,980 --> 00:16:04,330
+state we just right in memory of in the
+
+00:16:01,540 --> 00:16:07,600
+guest memory right and on the emulator
+
+00:16:04,330 --> 00:16:11,200
+side are you restarting anything between
+
+00:16:07,600 --> 00:16:14,740
+each test of AFL no now it's just the
+
+00:16:11,200 --> 00:16:16,320
+same test in turns yeah yeah we found we
+
+00:16:14,740 --> 00:16:19,420
+did something very similar for our
+
+00:16:16,320 --> 00:16:21,700
+vhosts classy back-end and what we did
+
+00:16:19,420 --> 00:16:24,580
+is we stubbed out everything around the
+
+00:16:21,700 --> 00:16:26,830
+the q handling code and we brought a
+
+00:16:24,580 --> 00:16:29,290
+very quick thing to start with the fake
+
+00:16:26,830 --> 00:16:33,340
+very small gas memory just the first
+
+00:16:29,290 --> 00:16:35,590
+data and we found it valuable to restart
+
+00:16:33,340 --> 00:16:37,360
+emulator every time because a lot of the
+
+00:16:35,590 --> 00:16:40,870
+invalid input that you throw would then
+
+00:16:37,360 --> 00:16:42,820
+a lot of time to stop the device from
+
+00:16:40,870 --> 00:16:46,300
+picking up a new request yeah that's
+
+00:16:42,820 --> 00:16:48,130
+what code you need to debugger in fact
+
+00:16:46,300 --> 00:16:49,360
+there are all while implemented yeah I
+
+00:16:48,130 --> 00:16:51,730
+was wondering if there are plans to do
+
+00:16:49,360 --> 00:16:55,320
+something more like if you have do the
+
+00:16:51,730 --> 00:16:55,320
+back and restarting between each test
+
+00:16:58,450 --> 00:17:07,059
+I noticed the slide you have of the FL
+
+00:17:05,169 --> 00:17:10,419
+screenshot that the earth stability is
+
+00:17:07,059 --> 00:17:12,270
+really long like 25% can you expand on
+
+00:17:10,419 --> 00:17:20,679
+that
+
+00:17:12,270 --> 00:17:24,520
+it's 27,000 yeah in fact it is just some
+
+00:17:20,679 --> 00:17:30,400
+kind of run it so mostly about a full
+
+00:17:24,520 --> 00:17:36,490
+usage about FL Statistics and in fact
+
+00:17:30,400 --> 00:17:40,720
+now I can say you have a correct meaning
+
+00:17:36,490 --> 00:17:43,510
+of I think you know it means that when
+
+00:17:40,720 --> 00:17:47,380
+you rerun samples that already had a
+
+00:17:43,510 --> 00:17:48,910
+result you only get the same result 27%
+
+00:17:47,380 --> 00:17:51,429
+over time which means your father is not
+
+00:17:48,910 --> 00:17:53,650
+deterministic so usually you want to get
+
+00:17:51,429 --> 00:17:57,750
+that app so I just wondering if you know
+
+00:17:53,650 --> 00:17:57,750
+which part of that non-deterministic
+
+00:18:09,950 --> 00:18:17,970
+hi I'm it seems that several several
+
+00:18:13,820 --> 00:18:21,270
+organizations are all doing fuzzing and
+
+00:18:17,970 --> 00:18:24,180
+and yeah everyone is doing it downstream
+
+00:18:21,270 --> 00:18:27,390
+so it would be great to fuzz upstream -
+
+00:18:24,180 --> 00:18:32,700
+do you have any plans - to upstream your
+
+00:18:27,390 --> 00:18:37,260
+work yeah we first of all I believe we
+
+00:18:32,700 --> 00:18:42,140
+want to pass the changes in FL because
+
+00:18:37,260 --> 00:18:45,600
+in fact FL was not published in official
+
+00:18:42,140 --> 00:18:48,360
+repository I think till July with this
+
+00:18:45,600 --> 00:18:53,640
+summer so I believe we will start with
+
+00:18:48,360 --> 00:18:56,750
+this and for quim you part I want to
+
+00:18:53,640 --> 00:19:00,510
+implement via telnet fuzzing also just
+
+00:18:56,750 --> 00:19:03,450
+to see how this proxy scheme I've just
+
+00:19:00,510 --> 00:19:06,510
+described walk so it's not only for one
+
+00:19:03,450 --> 00:19:09,660
+device so it's for two device and it
+
+00:19:06,510 --> 00:19:13,050
+will be like understandable how to add
+
+00:19:09,660 --> 00:19:15,510
+new devices for phasing after it yeah I
+
+00:19:13,050 --> 00:19:18,930
+think it will be nice idea to upstream
+
+00:19:15,510 --> 00:19:24,080
+or at least to talk with a community
+
+00:19:18,930 --> 00:19:27,930
+about these changes thanks for your talk
+
+00:19:24,080 --> 00:19:33,270
+first question which suite icers do you
+
+00:19:27,930 --> 00:19:38,990
+enable for queer mode well in fact we
+
+00:19:33,270 --> 00:19:42,870
+use some hardening stack hardening so
+
+00:19:38,990 --> 00:19:50,420
+not really very much because FL itself
+
+00:19:42,870 --> 00:19:54,720
+has some issues we've using Assam on x64
+
+00:19:50,420 --> 00:19:56,250
+platform like it requires lots of memory
+
+00:19:54,720 --> 00:19:59,850
+like 20 terabytes
+
+00:19:56,250 --> 00:20:03,140
+it's not like it's required right now
+
+00:19:59,850 --> 00:20:06,810
+but during fasting byte by byte
+
+00:20:03,140 --> 00:20:13,890
+it commits with memory and you're out of
+
+00:20:06,810 --> 00:20:17,280
+memory so for now we do not use asan but
+
+00:20:13,890 --> 00:20:21,620
+we are going to use it didn't understand
+
+00:20:17,280 --> 00:20:25,970
+you mean that you enable a son
+
+00:20:21,620 --> 00:20:28,309
+if you will it is really easy to build
+
+00:20:25,970 --> 00:20:32,920
+cuomo with sanitizers and it works fine
+
+00:20:28,309 --> 00:20:32,920
+yes yes but if you are running to eat
+
+00:20:33,700 --> 00:20:43,670
+using Assam so if you build such binary
+
+00:20:38,929 --> 00:20:47,210
+qmo binary which is was built using
+
+00:20:43,670 --> 00:20:50,240
+sanitizers when you are running it under
+
+00:20:47,210 --> 00:20:55,070
+I fail you will need lots of memory for
+
+00:20:50,240 --> 00:20:58,460
+64 platform not 32 for 52 it's okay but
+
+00:20:55,070 --> 00:21:02,210
+for 64 you will have this big memory
+
+00:20:58,460 --> 00:21:06,200
+issue and you should think how you will
+
+00:21:02,210 --> 00:21:09,260
+resolve it of course if you fighting
+
+00:21:06,200 --> 00:21:12,559
+like for one hour maybe one night it
+
+00:21:09,260 --> 00:21:15,170
+will be okay but if you like fuzzing for
+
+00:21:12,559 --> 00:21:17,090
+several days or even weeks it will be a
+
+00:21:15,170 --> 00:21:21,080
+problem oke thinks I didn't know that
+
+00:21:17,090 --> 00:21:25,700
+and second question how how your process
+
+00:21:21,080 --> 00:21:33,520
+of phasing has so how do you reproduce
+
+00:21:25,700 --> 00:21:37,460
+the box which you found so so in fact
+
+00:21:33,520 --> 00:21:41,570
+all these slides shows the input which
+
+00:21:37,460 --> 00:21:46,540
+we used it's just binary files like 64
+
+00:21:41,570 --> 00:21:50,120
+bytes which we used as start input if FL
+
+00:21:46,540 --> 00:21:53,690
+catch some crashed it stores the crash
+
+00:21:50,120 --> 00:21:57,710
+and it's a similar file and we use this
+
+00:21:53,690 --> 00:22:00,700
+file to put it like input to the proxy
+
+00:21:57,710 --> 00:22:03,650
+application and proxy application
+
+00:22:00,700 --> 00:22:06,650
+redirects it to cui Emma again or a
+
+00:22:03,650 --> 00:22:09,530
+speedy key and in fact in this case we
+
+00:22:06,650 --> 00:22:11,990
+use the production case of qu y mo and
+
+00:22:09,530 --> 00:22:15,559
+SP DK without any changes just to be
+
+00:22:11,990 --> 00:22:17,450
+sure that it's a real crash so when koe
+
+00:22:15,559 --> 00:22:22,190
+mo reports about the fault
+
+00:22:17,450 --> 00:22:24,320
+it gives it points you to the we have
+
+00:22:22,190 --> 00:22:27,470
+another file we have such in filter
+
+00:22:24,320 --> 00:22:31,510
+descriptor table which we will send it
+
+00:22:27,470 --> 00:22:31,510
+to qui em okay thank you
+
+00:22:33,300 --> 00:22:39,130
+hi so I had a very similar question to
+
+00:22:36,460 --> 00:22:41,020
+what Stefan asked so did you get a
+
+00:22:39,130 --> 00:22:46,060
+chance to did you happen to take a look
+
+00:22:41,020 --> 00:22:48,040
+at if your work how difficult it is to
+
+00:22:46,060 --> 00:22:49,960
+integrate your work with Lib fuzzer
+
+00:22:48,040 --> 00:22:53,080
+because from the documentation it looks
+
+00:22:49,960 --> 00:22:55,240
+like there is a way to make a fair yeah
+
+00:22:53,080 --> 00:22:57,550
+work with Lavazza because that way we
+
+00:22:55,240 --> 00:23:03,090
+can probably submit these gesture SS
+
+00:22:57,550 --> 00:23:06,040
+yeah I took a look into it and in fact
+
+00:23:03,090 --> 00:23:09,010
+my personal opinion it will be nice to
+
+00:23:06,040 --> 00:23:10,330
+have both a file phasing and leaper
+
+00:23:09,010 --> 00:23:12,580
+fatherfather
+
+00:23:10,330 --> 00:23:14,830
+it's not like why we're going to
+
+00:23:12,580 --> 00:23:18,700
+integrate into one each other just from
+
+00:23:14,830 --> 00:23:23,680
+my point of view the good point here is
+
+00:23:18,700 --> 00:23:27,400
+that as I see it Lavazza is like unit
+
+00:23:23,680 --> 00:23:30,850
+testing father which runs unit testing
+
+00:23:27,400 --> 00:23:34,510
+and I felt at least in our case is more
+
+00:23:30,850 --> 00:23:38,080
+like fuzzing where for the whole
+
+00:23:34,510 --> 00:23:42,940
+production case of cou llamo so you will
+
+00:23:38,080 --> 00:23:48,400
+run the whole stack so that's the point
+
+00:23:42,940 --> 00:23:53,310
+I want to see both implementation and
+
+00:23:48,400 --> 00:23:53,310
+run them both simultaneously yeah
+
+00:23:59,320 --> 00:24:03,640
+we use fuzzing but we only do it on one
+
+00:24:01,840 --> 00:24:05,380
+machine and it takes weeks to find
+
+00:24:03,640 --> 00:24:08,170
+anything I mean how many machines do you
+
+00:24:05,380 --> 00:24:12,130
+do the fuzzing across how many cause
+
+00:24:08,170 --> 00:24:15,030
+that kind of thing so now with just one
+
+00:24:12,130 --> 00:24:23,100
+machine which is running into several
+
+00:24:15,030 --> 00:24:27,340
+processes and that's all so II in fact
+
+00:24:23,100 --> 00:24:31,390
+we're stay we're start input is very
+
+00:24:27,340 --> 00:24:36,210
+important to father to find something so
+
+00:24:31,390 --> 00:24:39,370
+it's like very small details which can
+
+00:24:36,210 --> 00:24:43,470
+which can show the issue or not show so
+
+00:24:39,370 --> 00:24:43,470
+yeah maybe this is a problem
+
+00:24:49,760 --> 00:24:55,630
+okay thank you thank you very much
+
+00:24:52,610 --> 00:25:02,489
+[Applause]
+
+00:24:55,630 --> 00:25:02,489
+
+YouTube URL: https://www.youtube.com/watch?v=dk6SUD8ovXw
+
+

@@ -1,0 +1,1128 @@
+Title: Empty Promise: Zero-Copy Receive for vhost by Mike Rapoport
+Publication date: 2018-11-17
+Playlist: KVM Forum 2018
+Description: 
+	Tweet Share
+In para-virtual networking with virtio-net/vhost, the copying of packet between the hypervisor and the guest is one of the major sources of the overhead, especially for the large packets. And, although, zero-copy transmit was merged into the Linux kernel a few years ago, the "receive side zero copy" item is still in the KVM NetworkingTodo, and probably will remain there for some more time.
+
+Our attempted approach to implementation of zero-copy receive for virtio-net and vhost that leveraged receive-side steering abilities of the modern high speed network cards didn't improve anything and just moved the bottleneck to another place.
+
+The talk presents what we've tried, why we thought there will be an improvement and what were the reasons for their absence .
+
+---
+
+Mike Rapoport
+Researcher
+IBM
+
+Mike has lots of programming experience in different areas ranging from medical equipment to visual simulation, but most of all he likes hacking on Linux kernel and low level stuff. Throughout his career Mike promoted use of free and open source software and made quite a few contributions to the Linux kernel. Now Mike works at IBM Research - Haifa focusing on containers and virtualization.
+Captions: 
+	00:00:01,040 --> 00:00:07,049
+[Music]
+
+00:00:05,509 --> 00:00:12,929
+hello everybody
+
+00:00:07,049 --> 00:00:15,630
+eh I'm Mike I'm going to present our
+
+00:00:12,929 --> 00:00:18,330
+attempt to implement zero copy receive
+
+00:00:15,630 --> 00:00:21,390
+for virtual host which didn't succeed
+
+00:00:18,330 --> 00:00:23,850
+much most of the work was done by common
+
+00:00:21,390 --> 00:00:25,650
+Nath a who's listed first here but he
+
+00:00:23,850 --> 00:00:29,189
+couldn't arrive so I volunteered to come
+
+00:00:25,650 --> 00:00:33,030
+to it and work to do a taste whiskey so
+
+00:00:29,189 --> 00:00:35,190
+here we are as all of you here probably
+
+00:00:33,030 --> 00:00:38,610
+know there is somewhere trade-off
+
+00:00:35,190 --> 00:00:42,360
+between flexibility or configurability
+
+00:00:38,610 --> 00:00:45,180
+and performance and when we go from bare
+
+00:00:42,360 --> 00:00:48,239
+metal to through sir I'll be to per a
+
+00:00:45,180 --> 00:00:51,660
+virtual device and finally a thousand
+
+00:00:48,239 --> 00:00:54,870
+isn't probably the most flexible but I
+
+00:00:51,660 --> 00:00:57,680
+believe nobody is using it anymore so
+
+00:00:54,870 --> 00:01:01,140
+what we hope to achieve with zero copy
+
+00:00:57,680 --> 00:01:04,170
+ARX is to make para virtual device a
+
+00:01:01,140 --> 00:01:06,689
+little bit closer from the performance
+
+00:01:04,170 --> 00:01:10,140
+point of view but still make it flexible
+
+00:01:06,689 --> 00:01:13,820
+and configurable and unfortunately what
+
+00:01:10,140 --> 00:01:16,560
+we got was yes something like that
+
+00:01:13,820 --> 00:01:20,159
+and the motivation behind the whole
+
+00:01:16,560 --> 00:01:23,850
+project was obviously if you copy
+
+00:01:20,159 --> 00:01:29,250
+something you can skip copying and it's
+
+00:01:23,850 --> 00:01:31,439
+better and then since sticks is already
+
+00:01:29,250 --> 00:01:33,890
+implemented probably we can do our X to
+
+00:01:31,439 --> 00:01:38,820
+make the picture symmetric and complete
+
+00:01:33,890 --> 00:01:41,670
+and to be more more serious when you run
+
+00:01:38,820 --> 00:01:46,560
+a powerful name because process you see
+
+00:01:41,670 --> 00:01:49,920
+that 46 percent of the time is a large
+
+00:01:46,560 --> 00:01:53,490
+packet traffic is coming from copied use
+
+00:01:49,920 --> 00:01:58,159
+of generic string which is quite a
+
+00:01:53,490 --> 00:02:01,320
+bottleneck and we hope to resolve it now
+
+00:01:58,159 --> 00:02:03,570
+TX was implemented quite a while ago and
+
+00:02:01,320 --> 00:02:06,060
+Eric's still not there because there are
+
+00:02:03,570 --> 00:02:08,819
+some differences it makes a McTeague
+
+00:02:06,060 --> 00:02:12,569
+received a little bit harder than the a
+
+00:02:08,819 --> 00:02:15,510
+transmit this transmit the data is
+
+00:02:12,569 --> 00:02:17,519
+attend and you can just say your
+
+00:02:15,510 --> 00:02:20,459
+hardware device driver here's my data
+
+00:02:17,519 --> 00:02:23,249
+please send it to the network and when
+
+00:02:20,459 --> 00:02:26,790
+you're done and pin the pages for the
+
+00:02:23,249 --> 00:02:30,450
+uruk's part the device has to know when
+
+00:02:26,790 --> 00:02:32,849
+in advance where to put the arriving
+
+00:02:30,450 --> 00:02:35,430
+data and so that it will be seen
+
+00:02:32,849 --> 00:02:37,969
+immediately by the guest without the
+
+00:02:35,430 --> 00:02:37,969
+need to copy
+
+00:02:38,510 --> 00:02:43,430
+we had several and solutions in our
+
+00:02:40,919 --> 00:02:47,400
+implementations first of all most modern
+
+00:02:43,430 --> 00:02:50,370
+all modern needs a multi cue so we can
+
+00:02:47,400 --> 00:02:57,030
+dedicate one or more physical cues to
+
+00:02:50,370 --> 00:02:59,609
+virtual cues and we check thing we check
+
+00:02:57,030 --> 00:03:01,980
+different alternatives for who will be
+
+00:02:59,609 --> 00:03:06,840
+responsible for actual memory allocation
+
+00:03:01,980 --> 00:03:08,790
+and one of the ways it's possible to
+
+00:03:06,840 --> 00:03:11,099
+allocate memory is the device driver and
+
+00:03:08,790 --> 00:03:13,290
+then a remapping back to the guest but
+
+00:03:11,099 --> 00:03:16,469
+if this option seems to be much more
+
+00:03:13,290 --> 00:03:20,329
+complex then make the guest allocate the
+
+00:03:16,469 --> 00:03:24,209
+memories and pass it down to the device
+
+00:03:20,329 --> 00:03:26,790
+it since zero copy RX requires a tight
+
+00:03:24,209 --> 00:03:30,599
+coupling between physical and virtual
+
+00:03:26,790 --> 00:03:34,799
+cues we decided to restrict our
+
+00:03:30,599 --> 00:03:39,409
+plantation to mark it up only and then
+
+00:03:34,799 --> 00:03:43,439
+as the last our goal was to minimize
+
+00:03:39,409 --> 00:03:45,959
+minimize changes to the guest and if it
+
+00:03:43,439 --> 00:03:50,639
+would be possible avoid them at all it
+
+00:03:45,959 --> 00:03:56,699
+didn't work out though I can point with
+
+00:03:50,639 --> 00:04:02,030
+it right somehow okay so the packet goes
+
+00:03:56,699 --> 00:04:04,729
+like that it passes same on the way a
+
+00:04:02,030 --> 00:04:09,090
+mikvah landmark it up and rear tire and
+
+00:04:04,729 --> 00:04:13,739
+ends up in the guest kernel buffers of
+
+00:04:09,090 --> 00:04:16,169
+your tile device driver what should have
+
+00:04:13,739 --> 00:04:18,030
+been nice feature is that Hardware
+
+00:04:16,169 --> 00:04:20,100
+directly in places in the
+
+00:04:18,030 --> 00:04:23,660
+that into the rings that is shared
+
+00:04:20,100 --> 00:04:26,010
+between the guests between the guests
+
+00:04:23,660 --> 00:04:32,610
+that is shared between the guests and
+
+00:04:26,010 --> 00:04:34,860
+the physical a adapter we did a couple
+
+00:04:32,610 --> 00:04:37,620
+of changes in our implementation first
+
+00:04:34,860 --> 00:04:41,430
+into the generic net destruct
+
+00:04:37,620 --> 00:04:45,150
+we have added two methods to support
+
+00:04:41,430 --> 00:04:48,450
+first of all a insulation of memory and
+
+00:04:45,150 --> 00:04:53,460
+say the device is going to be zero
+
+00:04:48,450 --> 00:04:55,980
+copying that it would move that directly
+
+00:04:53,460 --> 00:05:00,990
+to the guest and then we had admitted
+
+00:04:55,980 --> 00:05:03,240
+that allows our ex part of a device
+
+00:05:00,990 --> 00:05:05,160
+driver to notify upper layers in the
+
+00:05:03,240 --> 00:05:09,750
+stack that that is arrived at and should
+
+00:05:05,160 --> 00:05:14,640
+be taken care of at the Marquita app
+
+00:05:09,750 --> 00:05:16,919
+we've added also two messages that used
+
+00:05:14,640 --> 00:05:20,370
+in communications between B host and
+
+00:05:16,919 --> 00:05:22,500
+McVie tab one of the messages notifies
+
+00:05:20,370 --> 00:05:24,720
+mikvah tab there are new book drive
+
+00:05:22,500 --> 00:05:27,240
+buffers that gas has allocated and these
+
+00:05:24,720 --> 00:05:30,710
+buffers should go downstream to the
+
+00:05:27,240 --> 00:05:37,820
+device driver so it will use it in its
+
+00:05:30,710 --> 00:05:45,300
+receive ring and the second message
+
+00:05:37,820 --> 00:05:48,060
+indicates that that there are buffers
+
+00:05:45,300 --> 00:05:50,070
+that should propagate to user space and
+
+00:05:48,060 --> 00:05:54,270
+their pages can be free
+
+00:05:50,070 --> 00:05:59,850
+more or less we had to change their tire
+
+00:05:54,270 --> 00:06:05,520
+net a little bit we wanted to save
+
+00:05:59,850 --> 00:06:07,229
+effort and cycles on translating on
+
+00:06:05,520 --> 00:06:10,650
+translating we're tire descriptors to
+
+00:06:07,229 --> 00:06:13,890
+page in device versus solving edit a new
+
+00:06:10,650 --> 00:06:15,840
+allocation method that allocates an
+
+00:06:13,890 --> 00:06:22,890
+entire page for a single rear tire
+
+00:06:15,840 --> 00:06:26,039
+descriptor when the system is
+
+00:06:22,890 --> 00:06:28,590
+initialized we had only as an isolate a
+
+00:06:26,039 --> 00:06:30,840
+set of cues in physical link now
+
+00:06:28,590 --> 00:06:31,510
+particular implementation we used L to
+
+00:06:30,840 --> 00:06:36,130
+offload
+
+00:06:31,510 --> 00:06:40,690
+oh why is GB driver and at the same time
+
+00:06:36,130 --> 00:06:43,900
+there is a bonding between the physical
+
+00:06:40,690 --> 00:06:45,880
+or excuse with virtual or excuse and
+
+00:06:43,900 --> 00:06:49,360
+there are physical Eric's and the
+
+00:06:45,880 --> 00:06:51,490
+descriptor ink is cleared and the pages
+
+00:06:49,360 --> 00:06:56,280
+that were allocated by the device driver
+
+00:06:51,490 --> 00:07:01,390
+from the host memory are cleared as well
+
+00:06:56,280 --> 00:07:05,860
+whenever guest allocates memory for your
+
+00:07:01,390 --> 00:07:10,180
+tail net on behalf of your tail net
+
+00:07:05,860 --> 00:07:11,980
+we host is notified and in turn it
+
+00:07:10,180 --> 00:07:16,840
+notifies a Marquita
+
+00:07:11,980 --> 00:07:20,140
+and marquita allocates an esky B for the
+
+00:07:16,840 --> 00:07:21,940
+newly allocated memory and fills skb was
+
+00:07:20,140 --> 00:07:25,360
+appropriate for pointers to the fragment
+
+00:07:21,940 --> 00:07:27,730
+and using the new method we introduced
+
+00:07:25,360 --> 00:07:30,940
+in native it posts as a buffers
+
+00:07:27,730 --> 00:07:34,540
+downstream to the device driver which in
+
+00:07:30,940 --> 00:07:37,720
+turn and creates an appropriate hardware
+
+00:07:34,540 --> 00:07:41,560
+descriptors in its eric shrink it so
+
+00:07:37,720 --> 00:07:44,590
+that whenever there is the mating of the
+
+00:07:41,560 --> 00:07:48,520
+incoming data it will go directly to the
+
+00:07:44,590 --> 00:07:52,890
+memory visible by the guest then
+
+00:07:48,520 --> 00:07:52,890
+whenever and the reason i receive a
+
+00:07:53,010 --> 00:07:59,710
+packet that they made directly to
+
+00:07:55,120 --> 00:08:03,460
+buffers visible by the guest and B there
+
+00:07:59,710 --> 00:08:05,140
+is a new s key being as it is the S key
+
+00:08:03,460 --> 00:08:08,730
+visit was created previously in McCree
+
+00:08:05,140 --> 00:08:11,410
+top is adjusted properly point a we
+
+00:08:08,730 --> 00:08:15,190
+properly point to the right dot and its
+
+00:08:11,410 --> 00:08:18,340
+header updated and then the physical
+
+00:08:15,190 --> 00:08:22,270
+divide drivers driver calls a native RX
+
+00:08:18,340 --> 00:08:25,720
+and it transfers as a control to mikvah
+
+00:08:22,270 --> 00:08:28,060
+top ma quit up quiz accused escaped
+
+00:08:25,720 --> 00:08:31,380
+being as ready for user space and
+
+00:08:28,060 --> 00:08:34,960
+notifies the hostnet
+
+00:08:31,380 --> 00:08:38,440
+at v-- hostnet there's some manipulation
+
+00:08:34,960 --> 00:08:40,750
+between the page data and we're tired
+
+00:08:38,440 --> 00:08:44,620
+descriptors and some level of
+
+00:08:40,750 --> 00:08:47,350
+translation and after the translation is
+
+00:08:44,620 --> 00:08:52,390
+and we're descriptors already a mikvah
+
+00:08:47,350 --> 00:08:56,770
+top is notified again and it performs as
+
+00:08:52,390 --> 00:09:01,060
+a final cleaner because his escape is
+
+00:08:56,770 --> 00:09:06,160
+not needed anymore and guess all this is
+
+00:09:01,060 --> 00:09:08,380
+all the packet data as it arrived so
+
+00:09:06,160 --> 00:09:10,480
+we've reached to a point where the
+
+00:09:08,380 --> 00:09:16,750
+implementation was stable enough to run
+
+00:09:10,480 --> 00:09:18,880
+the network and it still was suboptimal
+
+00:09:16,750 --> 00:09:21,250
+from my perspective when there are some
+
+00:09:18,880 --> 00:09:25,870
+changes to implement but we find out
+
+00:09:21,250 --> 00:09:27,460
+that despite minor optimizations we
+
+00:09:25,870 --> 00:09:30,940
+could do there are some more major
+
+00:09:27,460 --> 00:09:33,720
+problems we are facing and at that point
+
+00:09:30,940 --> 00:09:38,290
+the European project that sponsored the
+
+00:09:33,720 --> 00:09:40,420
+whole the whole a project has ended we
+
+00:09:38,290 --> 00:09:44,890
+brown down to finding this and it's be a
+
+00:09:40,420 --> 00:09:48,760
+research you need to have well you know
+
+00:09:44,890 --> 00:09:52,080
+how it works so for anybody who is
+
+00:09:48,760 --> 00:09:55,570
+interested the prototype is available at
+
+00:09:52,080 --> 00:09:59,010
+these repositories and one is for
+
+00:09:55,570 --> 00:10:03,130
+colonel is based on four point eight and
+
+00:09:59,010 --> 00:10:05,200
+one is for qmu with minor mode changes
+
+00:10:03,130 --> 00:10:07,420
+to a long negotiation of zero copying
+
+00:10:05,200 --> 00:10:09,670
+our x feature available in v host on
+
+00:10:07,420 --> 00:10:14,500
+forum on site and for real-time on the
+
+00:10:09,670 --> 00:10:16,600
+other side now a little bit how what we
+
+00:10:14,500 --> 00:10:19,630
+tested and won't work what we were able
+
+00:10:16,600 --> 00:10:23,560
+to find out and why we think and we
+
+00:10:19,630 --> 00:10:28,930
+couldn't do improvements with what we
+
+00:10:23,560 --> 00:10:33,940
+proposed so we had to - server systems
+
+00:10:28,930 --> 00:10:39,250
+back to back connected with 10 gigabit
+
+00:10:33,940 --> 00:10:41,200
+into next and VMs each with vm was
+
+00:10:39,250 --> 00:10:45,400
+running with 4 v CPUs to
+
+00:10:41,200 --> 00:10:48,060
+jiggle-jiggle-jiggle by tram and one of
+
+00:10:45,400 --> 00:10:50,560
+the system we were running network
+
+00:10:48,060 --> 00:10:53,130
+server and the other one was networth
+
+00:10:50,560 --> 00:10:56,310
+client and a network client was run on
+
+00:10:53,130 --> 00:10:56,310
+environmental a
+
+00:10:56,540 --> 00:11:05,750
+which was talking directly to mark Reeth
+
+00:10:59,150 --> 00:11:08,390
+up connected to the VM so after we've
+
+00:11:05,750 --> 00:11:12,220
+run the benchmarks and they we've seen
+
+00:11:08,390 --> 00:11:15,380
+that we're getting lower rates but still
+
+00:11:12,220 --> 00:11:17,600
+high CPU utilization we checked what
+
+00:11:15,380 --> 00:11:19,580
+prayer is going to tell us and we've
+
+00:11:17,600 --> 00:11:24,770
+seen that copied to user actually has
+
+00:11:19,580 --> 00:11:27,800
+gone and there is no clear bottleneck as
+
+00:11:24,770 --> 00:11:32,890
+it was previously and apparently
+
+00:11:27,800 --> 00:11:39,350
+everything should be good but it wasn't
+
+00:11:32,890 --> 00:11:43,370
+so we've started to investigate where's
+
+00:11:39,350 --> 00:11:47,510
+is the CPU time spent and when we can
+
+00:11:43,370 --> 00:11:52,270
+process data is at least as as fast as
+
+00:11:47,510 --> 00:11:56,570
+baseline so first thing we tried is to
+
+00:11:52,270 --> 00:12:04,090
+create some CPU affinity between the big
+
+00:11:56,570 --> 00:12:07,520
+host and and interrupts of the device
+
+00:12:04,090 --> 00:12:10,670
+and what we've seen that this improves
+
+00:12:07,520 --> 00:12:14,450
+the situation as and we CP affinity when
+
+00:12:10,670 --> 00:12:17,180
+we were first in forcing the host to run
+
+00:12:14,450 --> 00:12:21,650
+on a different processor than on
+
+00:12:17,180 --> 00:12:23,150
+different cores then our eccentrics we
+
+00:12:21,650 --> 00:12:26,090
+got much better performance and
+
+00:12:23,150 --> 00:12:30,650
+previously we still used more CPU than
+
+00:12:26,090 --> 00:12:33,070
+the baseline and we were not too happy
+
+00:12:30,650 --> 00:12:33,070
+about that
+
+00:12:33,190 --> 00:12:46,310
+so perfect in what we were able to find
+
+00:12:37,520 --> 00:12:51,890
+that bottleneck now moved from copy data
+
+00:12:46,310 --> 00:12:57,160
+gram to in internet page what is
+
+00:12:51,890 --> 00:13:02,450
+happening in that in normal operation a
+
+00:12:57,160 --> 00:13:05,140
+NIC device driver maintains maintains
+
+00:13:02,450 --> 00:13:08,230
+the page pool and it recycles the pages
+
+00:13:05,140 --> 00:13:11,620
+whenever it runs out of memory
+
+00:13:08,230 --> 00:13:13,840
+and when it does the page recycling it
+
+00:13:11,620 --> 00:13:16,450
+also updates all the DMM I'm saying for
+
+00:13:13,840 --> 00:13:19,420
+every page it allocates it calls they
+
+00:13:16,450 --> 00:13:22,930
+may at the time when it allocates a page
+
+00:13:19,420 --> 00:13:25,630
+most of this processing is going in
+
+00:13:22,930 --> 00:13:29,340
+parallel with the actual rx
+
+00:13:25,630 --> 00:13:35,620
+and what we are having now with our
+
+00:13:29,340 --> 00:13:41,310
+implementation is that once once guest
+
+00:13:35,620 --> 00:13:44,530
+posts as in your buffer is sequentially
+
+00:13:41,310 --> 00:13:46,300
+it's sequentially called its it has
+
+00:13:44,530 --> 00:13:48,280
+sequentially today may map all the
+
+00:13:46,300 --> 00:13:52,330
+buffers and when the buffer is
+
+00:13:48,280 --> 00:13:55,030
+processing processed back and returned
+
+00:13:52,330 --> 00:13:56,920
+from the physical device we need to
+
+00:13:55,030 --> 00:13:59,320
+sequentially with sequentially with
+
+00:13:56,920 --> 00:14:04,900
+without processing and performs a and
+
+00:13:59,320 --> 00:14:06,790
+map of DMA buffers so in the end we've
+
+00:14:04,900 --> 00:14:11,440
+got to some really hockey in
+
+00:14:06,790 --> 00:14:15,490
+measurements we've added our DTC in B
+
+00:14:11,440 --> 00:14:18,580
+host tech and handle our X and it
+
+00:14:15,490 --> 00:14:23,410
+appears that copy works faster that what
+
+00:14:18,580 --> 00:14:29,850
+we were trying to achieve copy it takes
+
+00:14:23,410 --> 00:14:29,850
+about two cycles per byte and with the
+
+00:14:29,970 --> 00:14:35,800
+transportation of and the translation of
+
+00:14:32,590 --> 00:14:38,050
+the descriptors and the main map and map
+
+00:14:35,800 --> 00:14:48,400
+takes about three and five cycles per
+
+00:14:38,050 --> 00:14:51,640
+byte now is it possible to improve what
+
+00:14:48,400 --> 00:14:53,790
+we did or implement a zero copy Erik's
+
+00:14:51,640 --> 00:14:59,320
+in some other way
+
+00:14:53,790 --> 00:15:04,960
+maybe we don't know the first thing that
+
+00:14:59,320 --> 00:15:07,450
+is probably was trying to is to restore
+
+00:15:04,960 --> 00:15:11,140
+the parallelism between the mapping and
+
+00:15:07,450 --> 00:15:13,990
+we're tired processing it maybe it will
+
+00:15:11,140 --> 00:15:17,860
+help and say it allowed to save CPU
+
+00:15:13,990 --> 00:15:20,340
+cycles and other things that probably
+
+00:15:17,860 --> 00:15:23,340
+would improve the situation is a better
+
+00:15:20,340 --> 00:15:23,340
+matching
+
+00:15:23,949 --> 00:15:29,869
+memory allocations and edema mapping
+
+00:15:27,319 --> 00:15:31,910
+versus doing it
+
+00:15:29,869 --> 00:15:35,359
+there are several packets by several
+
+00:15:31,910 --> 00:15:39,049
+pages in each time another things it may
+
+00:15:35,359 --> 00:15:40,939
+be allow zero copy received his major
+
+00:15:39,049 --> 00:15:45,439
+redesigned to be retiring we don't know
+
+00:15:40,939 --> 00:15:48,499
+and the next is probably the most
+
+00:15:45,439 --> 00:15:53,419
+promising feature is a FX DP base retire
+
+00:15:48,499 --> 00:16:00,609
+back-end in userspace which sounds like
+
+00:15:53,419 --> 00:16:05,389
+the right way to go so that's all
+
+00:16:00,609 --> 00:16:07,749
+questions guys will help me with mics
+
+00:16:05,389 --> 00:16:07,749
+please
+
+00:16:15,440 --> 00:16:17,980
+so
+
+00:16:19,930 --> 00:16:25,430
+did you try disabling the Teague's
+
+00:16:22,190 --> 00:16:27,620
+mapping I mean maybe maybe the teks copy
+
+00:16:25,430 --> 00:16:32,140
+is also bad it wasn't also better than
+
+00:16:27,620 --> 00:16:34,850
+backing Matthias can you repeat your
+
+00:16:32,140 --> 00:16:36,470
+finding thought that the re it was
+
+00:16:34,850 --> 00:16:39,260
+better to copy the map what about
+
+00:16:36,470 --> 00:16:42,170
+Teague's we didn't actually try but I
+
+00:16:39,260 --> 00:16:44,720
+believe we people who did it exceeds a
+
+00:16:42,170 --> 00:16:48,710
+benchmark in back then it takes is a
+
+00:16:44,720 --> 00:16:50,750
+quite a long time upstream so they have
+
+00:16:48,710 --> 00:16:55,130
+they they had their own problems with a
+
+00:16:50,750 --> 00:16:59,060
+block of line they had block of had the
+
+00:16:55,130 --> 00:17:01,100
+head of line blocking but I think
+
+00:16:59,060 --> 00:17:03,830
+performance wise saying I looked back
+
+00:17:01,100 --> 00:17:28,780
+then at the mail saying it seemed to
+
+00:17:03,830 --> 00:17:36,110
+improve reading no no we did we didn't
+
+00:17:28,780 --> 00:17:38,510
+and probably we want yeah I have a
+
+00:17:36,110 --> 00:17:41,860
+question that I didn't quite get why the
+
+00:17:38,510 --> 00:17:47,720
+bottleneck or move to the DMA mapping
+
+00:17:41,860 --> 00:17:49,790
+excuse me I mean the bottleneck move to
+
+00:17:47,720 --> 00:17:51,680
+the T I'm a vacuum so it's not exactly
+
+00:17:49,790 --> 00:17:53,900
+the bottom look at the things that Tim a
+
+00:17:51,680 --> 00:17:56,120
+mapping now works in line with retire
+
+00:17:53,900 --> 00:18:00,890
+processing rather than it was more in
+
+00:17:56,120 --> 00:18:03,470
+parallel so for now if I ran pair faces
+
+00:18:00,890 --> 00:18:08,630
+it actually DMA mapping takes most of
+
+00:18:03,470 --> 00:18:11,060
+the percentage of the processing in
+
+00:18:08,630 --> 00:18:13,490
+since it slows down slows things down
+
+00:18:11,060 --> 00:18:15,950
+and increases latency and the throughput
+
+00:18:13,490 --> 00:18:19,070
+also goes down because it's a TCP
+
+00:18:15,950 --> 00:18:21,830
+networking right the problem is we
+
+00:18:19,070 --> 00:18:24,860
+didn't you can't you don't do dirty a
+
+00:18:21,830 --> 00:18:26,300
+memory in parallel parts sequential so
+
+00:18:24,860 --> 00:18:32,150
+the frequency
+
+00:18:26,300 --> 00:18:36,440
+much more than normal it's pretty much
+
+00:18:32,150 --> 00:18:39,740
+the theory we have at that moment but we
+
+00:18:36,440 --> 00:18:41,600
+didn't investigate it any further what
+
+00:18:39,740 --> 00:18:45,350
+we again what we've seen with parents is
+
+00:18:41,600 --> 00:18:52,190
+that now the major major bottleneck is a
+
+00:18:45,350 --> 00:18:54,380
+DMA map and map like like we were
+
+00:18:52,190 --> 00:18:57,620
+running previously per phone we host and
+
+00:18:54,380 --> 00:19:03,290
+we've seen that it spends like 40% of
+
+00:18:57,620 --> 00:19:09,130
+the time in the copy to user if I'll go
+
+00:19:03,290 --> 00:19:13,640
+back several slides so here like 35 of
+
+00:19:09,130 --> 00:19:18,560
+handle rx is spent into my page which
+
+00:19:13,640 --> 00:19:23,210
+maybe iommu is somebody said there but
+
+00:19:18,560 --> 00:19:32,330
+we clearly see that it's the most heavy
+
+00:19:23,210 --> 00:19:36,170
+part of the processing hi
+
+00:19:32,330 --> 00:19:37,820
+perhaps like as you said that most of
+
+00:19:36,170 --> 00:19:41,030
+the time is taking in the mapping and
+
+00:19:37,820 --> 00:19:43,580
+mapping of the DMA right so one way to I
+
+00:19:41,030 --> 00:19:45,770
+think overcome this and however much
+
+00:19:43,580 --> 00:19:49,790
+better results could be if you enable
+
+00:19:45,770 --> 00:19:51,500
+the hardware gr so in that case the size
+
+00:19:49,790 --> 00:19:54,830
+of the data which were popping would be
+
+00:19:51,500 --> 00:19:56,780
+much higher so maybe if the size of it
+
+00:19:54,830 --> 00:19:58,580
+might be just related to the size of the
+
+00:19:56,780 --> 00:20:01,460
+buffer you are trying to copy in if the
+
+00:19:58,580 --> 00:20:03,200
+size of the buffer is kind of on the
+
+00:20:01,460 --> 00:20:06,290
+smaller side then basically there would
+
+00:20:03,200 --> 00:20:08,660
+be more mapping in on mapping happening
+
+00:20:06,290 --> 00:20:12,440
+in so if you have a larger buffer then
+
+00:20:08,660 --> 00:20:14,030
+maybe the amount of time which is being
+
+00:20:12,440 --> 00:20:16,340
+taken over the mapping in the mapping of
+
+00:20:14,030 --> 00:20:19,580
+a DMA might be slightly less than what
+
+00:20:16,340 --> 00:20:21,920
+actually could see that's what we saw
+
+00:20:19,580 --> 00:20:25,280
+when I was talking about batching like
+
+00:20:21,920 --> 00:20:27,920
+having large chunks and the bus enzyme
+
+00:20:25,280 --> 00:20:29,510
+directly to the hardware to make it use
+
+00:20:27,920 --> 00:20:32,390
+large chunks at once
+
+00:20:29,510 --> 00:20:37,660
+but we never did it but we never get to
+
+00:20:32,390 --> 00:20:37,660
+it actually to try all right sure thanks
+
+00:20:38,800 --> 00:20:43,970
+I just wondered the list of file
+
+00:20:42,050 --> 00:20:49,250
+operations shouldn't this help this then
+
+00:20:43,970 --> 00:20:53,360
+you get more packets per thing normal
+
+00:20:49,250 --> 00:20:55,820
+normal Network packets are one per so it
+
+00:20:53,360 --> 00:20:57,380
+runs with one packet per thing and then
+
+00:20:55,820 --> 00:20:59,120
+we'll this defy you do you didn't just
+
+00:20:57,380 --> 00:21:00,620
+create a list of operations instead a
+
+00:20:59,120 --> 00:21:04,310
+list of packets instead of just passing
+
+00:21:00,620 --> 00:21:07,130
+them all along like putting two pockets
+
+00:21:04,310 --> 00:21:08,750
+in a page you no no no it does a list of
+
+00:21:07,130 --> 00:21:12,590
+all the packets of it pushes that along
+
+00:21:08,750 --> 00:21:14,120
+every Ben didn't try no I know it's an
+
+00:21:12,590 --> 00:21:22,280
+even newer kernel but I thought maybe
+
+00:21:14,120 --> 00:21:23,660
+that will help us you mentioned making
+
+00:21:22,280 --> 00:21:25,460
+massive changes to the weather or in
+
+00:21:23,660 --> 00:21:28,550
+layout on your last slide you already
+
+00:21:25,460 --> 00:21:31,490
+have an idea or suggestions what we
+
+00:21:28,550 --> 00:21:33,530
+agree dealer completely just maybe we
+
+00:21:31,490 --> 00:21:36,220
+should do something no more than that no
+
+00:21:33,530 --> 00:21:36,220
+not really
+
+00:21:42,760 --> 00:21:45,720
+do you think you
+
+00:21:46,060 --> 00:21:54,779
+[Applause]
+
+00:21:49,000 --> 00:21:54,779
+
+YouTube URL: https://www.youtube.com/watch?v=yGnqe4C0yqY
+
+

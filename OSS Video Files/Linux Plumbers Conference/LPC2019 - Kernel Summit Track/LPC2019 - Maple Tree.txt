@@ -1,0 +1,2453 @@
+Title: LPC2019 - Maple Tree
+Publication date: 2019-11-18
+Playlist: LPC2019 - Kernel Summit Track
+Description: 
+	Maple Tree
+
+Speaker
+Mr Liam Howlett (Oracle)
+
+Description
+The Red-Black tree and Radix tree are used in many places in the kernel to store ranges. Both of these trees have drawbacks when used for ranges. The Red-Black tree requires writing your own insertion & search code. It is also designed with the assumption that memory accesses are cheap, which is no longer true. The Radix tree performs acceptably well when ranges are aligned to a power of 2, but has awful worst-case performance.
+
+The Maple tree is a fast, cache efficient tree with a simple API. It supports contiguous ranges efficiently, while suffering only minor penalties for discontiguous ranges. Single entries are also supported as a range of length one.
+
+The Maple tree can optionally track free ranges to allow for more efficient allocation. In order to allow it to be used as the basis for the page cache, it will need support for search marks as well as handling reclamation of shadow entries. Other potential users of the Maple tree want more than the three search marks currently supported by the Radix tree.
+
+We want to discuss requirements with potential users of the Maple tree, and to present development since the last Plumbers conference where the broad outlines of the tree were first presented.
+Captions: 
+	00:00:00,580 --> 00:00:03,615
+- All right, it's about noon, so we should get started.
+
+00:00:03,615 --> 00:00:06,930
+And our first talk is Liam,
+
+00:00:06,930 --> 00:00:09,625
+who's going to talk about the Maple Tree.
+
+00:00:09,625 --> 00:00:11,590
+And I'll turn (muffled)
+
+00:00:18,981 --> 00:00:19,814
+- All right.
+
+00:00:19,814 --> 00:00:22,610
+So, this talk is about the Maple Tree.
+
+00:00:22,610 --> 00:00:23,443
+I'm Liam.
+
+00:00:25,320 --> 00:00:28,200
+It's a new data structure based on the B-tree.
+
+00:00:28,200 --> 00:00:31,200
+It was created to optimize for ranged storage,
+
+00:00:31,200 --> 00:00:32,613
+to be RCU-safe,
+
+00:00:32,613 --> 00:00:35,870
+used with many readers, few writers.
+
+00:00:35,870 --> 00:00:37,883
+The nodes are cache-aligned.
+
+00:00:42,058 --> 00:00:42,930
+To be cache-efficient,
+
+00:00:42,930 --> 00:00:45,433
+they're sized to be cache-efficient.
+
+00:00:46,810 --> 00:00:48,830
+So I'm gonna walk through the,
+
+00:00:48,830 --> 00:00:50,260
+introduce the problem space,
+
+00:00:50,260 --> 00:00:53,770
+and I'm gonna talk a little bit more about the Maple Tree.
+
+00:00:53,770 --> 00:00:57,050
+I'll run through the first use case we're gonna be doing,
+
+00:00:57,050 --> 00:01:00,130
+and maybe dive a bit deeper into the tree,
+
+00:01:00,130 --> 00:01:02,880
+and then discuss our path forward
+
+00:01:03,790 --> 00:01:05,723
+with people, hopefully in this room.
+
+00:01:08,499 --> 00:01:10,070
+So first, why another tree?
+
+00:01:10,070 --> 00:01:12,720
+Well, right now, there's essentially
+
+00:01:12,720 --> 00:01:13,670
+two trees in the kernel.
+
+00:01:13,670 --> 00:01:15,540
+There's the Radix tree, which is a trie,
+
+00:01:15,540 --> 00:01:17,335
+and there's the Rbtree.
+
+00:01:17,335 --> 00:01:20,750
+The Radix tree is extremely efficient when it's compact,
+
+00:01:20,750 --> 00:01:22,050
+but when you get sparse Radix tree,
+
+00:01:22,050 --> 00:01:25,163
+it becomes extremely poor to search for things.
+
+00:01:27,000 --> 00:01:29,667
+The Rbtree, on the other hand,
+
+00:01:29,667 --> 00:01:32,410
+it uses function pointers, which have become
+
+00:01:32,410 --> 00:01:36,050
+rather inefficient in recent security patches.
+
+00:01:36,050 --> 00:01:38,400
+The design of the Rbtree nodes
+
+00:01:38,400 --> 00:01:40,600
+is not aligned with cache size,
+
+00:01:40,600 --> 00:01:41,500
+so it will be hard
+
+00:01:43,162 --> 00:01:44,350
+to compete with something
+
+00:01:44,350 --> 00:01:46,350
+that was designed to be cache-efficient.
+
+00:01:52,075 --> 00:01:55,658
+The Rbtree also has lock contention issues.
+
+00:02:00,530 --> 00:02:03,510
+The Maple Tree is a bit different
+
+00:02:03,510 --> 00:02:05,123
+from the traditional B-tree.
+
+00:02:05,970 --> 00:02:07,870
+B-trees were used for dense data structures,
+
+00:02:07,870 --> 00:02:09,270
+so they're really large nodes.
+
+00:02:09,270 --> 00:02:11,050
+We use really small nodes,
+
+00:02:11,050 --> 00:02:13,180
+and the reason we use small nodes is because
+
+00:02:13,180 --> 00:02:17,083
+the linear searches of our nodes is rather quick and cheap,
+
+00:02:17,958 --> 00:02:20,570
+and allocating and copying the nodes is also cheap.
+
+00:02:20,570 --> 00:02:23,010
+Which is really good, because to be RCU-safe
+
+00:02:23,010 --> 00:02:26,678
+you actually have to allocate a lot of nodes.
+
+00:02:26,678 --> 00:02:29,600
+(laughter)
+
+00:02:29,600 --> 00:02:34,600
+So the node size right now is 128 bites, two cache lines,
+
+00:02:35,940 --> 00:02:37,950
+but we're looking at maybe going to three.
+
+00:02:37,950 --> 00:02:40,820
+We'll see how benchmarking looks.
+
+00:02:40,820 --> 00:02:45,533
+So here's an example of the rbtree and the Maple tree.
+
+00:02:46,986 --> 00:02:49,213
+Each have seven ranges.
+
+00:02:50,390 --> 00:02:54,700
+The Maple tree here shown is half size nodes,
+
+00:02:54,700 --> 00:02:58,400
+'cause we could actually fit all of this in one node,
+
+00:02:58,400 --> 00:03:00,923
+so it would be kind of a boring slide if it wasn't.
+
+00:03:02,250 --> 00:03:07,250
+If you look at the average d-reference of an rbtree,
+
+00:03:07,430 --> 00:03:12,133
+it goes either from one, if you have 35-44,
+
+00:03:13,359 --> 00:03:17,550
+or two if you go to the second level, or three.
+
+00:03:17,550 --> 00:03:20,983
+The Maple tree will always have two in this scenario.
+
+00:03:22,330 --> 00:03:27,233
+Basically, in the ideal rbtree
+
+00:03:30,270 --> 00:03:32,740
+you could have a better best case,
+
+00:03:32,740 --> 00:03:35,343
+but on average it's worse,
+
+00:03:36,422 --> 00:03:37,763
+and dereference counts.
+
+00:03:39,660 --> 00:03:42,690
+But if you look at a sub-optimal,
+
+00:03:42,690 --> 00:03:45,493
+these are worst case scenarios.
+
+00:03:47,990 --> 00:03:51,150
+It's the same ranges, but the trees aren't balanced.
+
+00:03:51,150 --> 00:03:55,703
+As you can see, the rbtree, you can get up to a number of,
+
+00:03:57,607 --> 00:04:00,460
+a higher number of d-references,
+
+00:04:00,460 --> 00:04:05,100
+where as the Maple tree still maintains two d-references
+
+00:04:05,100 --> 00:04:07,723
+to get to what you're looking for.
+
+00:04:11,470 --> 00:04:14,193
+So here's an example of a full size Maple tree node.
+
+00:04:15,370 --> 00:04:20,120
+This one holds 16 ranges.
+
+00:04:20,120 --> 00:04:23,183
+I've switched to hex here because of slide bloat.
+
+00:04:25,370 --> 00:04:30,370
+So these 13 ranges are stored in four nodes.
+
+00:04:32,210 --> 00:04:36,414
+Each one 28 bites, so 512 bites to get 13 ranges.
+
+00:04:36,414 --> 00:04:39,810
+Those 13 ranges in this scenario don't even touch,
+
+00:04:39,810 --> 00:04:44,810
+so you actually have to insert null entries
+
+00:04:44,810 --> 00:04:49,810
+in between the ranges for the tree to be valid.
+
+00:04:51,403 --> 00:04:54,643
+So even with that, we're still pretty densely packed.
+
+00:04:57,250 --> 00:04:59,253
+Here's an overview of the tree nodes.
+
+00:05:00,913 --> 00:05:03,440
+There are different uses for each tree type,
+
+00:05:03,440 --> 00:05:04,720
+but we believe the Maple tree
+
+00:05:04,720 --> 00:05:06,553
+can make the kernel more efficient.
+
+00:05:10,710 --> 00:05:11,653
+So if you notice,
+
+00:05:12,489 --> 00:05:14,243
+the rbtree is not RCU-safe.
+
+00:05:15,970 --> 00:05:17,530
+That's kind of a limitation...
+
+00:05:17,530 --> 00:05:18,607
+Yep?
+
+00:05:18,607 --> 00:05:21,209
+- [Audience Member] The rbtree is actually RCU-safe.
+
+00:05:21,209 --> 00:05:22,234
+- It's RCU-safe?
+
+00:05:22,234 --> 00:05:23,198
+- [Audience Member] Yes.
+
+00:05:23,198 --> 00:05:24,180
+- Okay.
+
+00:05:24,180 --> 00:05:25,690
+- [Audience Member] But if you really want to wrap
+
+00:05:26,992 --> 00:05:28,470
+(muffled)
+
+00:05:28,470 --> 00:05:30,223
+(coughing)
+
+00:05:30,223 --> 00:05:33,740
+The rbtree is actually RCU-safe,
+
+00:05:33,740 --> 00:05:38,051
+but you really want to wrap your RCU access to it,
+
+00:05:38,051 --> 00:05:40,740
+or else you walk in something like a seat clock,
+
+00:05:40,740 --> 00:05:43,760
+so that you can tell that it's changed,
+
+00:05:43,760 --> 00:05:46,265
+and that your log may become valid.
+
+00:05:46,265 --> 00:05:47,440
+- [Liam] So you have to restart your log?
+
+00:05:47,440 --> 00:05:48,700
+- Yes.
+
+00:05:48,700 --> 00:05:52,870
+- [Liam] Okay, and is that in the default implementation
+
+00:05:52,870 --> 00:05:53,800
+of the RCU?
+
+00:05:53,800 --> 00:05:54,633
+Yeah?
+
+00:05:54,633 --> 00:05:55,775
+Okay.
+
+00:05:55,775 --> 00:06:00,760
+Okay so, slightly outdated slide I guess.
+
+00:06:00,760 --> 00:06:02,590
+(laughter)
+
+00:06:02,590 --> 00:06:06,040
+To give an example of the height of the trees,
+
+00:06:06,040 --> 00:06:07,910
+if we had a million entries here,
+
+00:06:07,910 --> 00:06:12,880
+and the Radix tree was dense indices,
+
+00:06:12,880 --> 00:06:15,471
+then the Radix would be four high,
+
+00:06:15,471 --> 00:06:17,400
+the rbtree would be 18 high,
+
+00:06:17,400 --> 00:06:19,590
+and the Maple tree would be seven.
+
+00:06:19,590 --> 00:06:20,980
+It's cause we have a branching factor
+
+00:06:20,980 --> 00:06:23,173
+of eight on each level,
+
+00:06:25,590 --> 00:06:27,903
+well 8 right now anyways.
+
+00:06:34,010 --> 00:06:36,690
+We decided to tackle one concrete problem first,
+
+00:06:36,690 --> 00:06:37,823
+and it was the VMA.
+
+00:06:41,500 --> 00:06:44,390
+The VMA has a complicated number of things
+
+00:06:44,390 --> 00:06:46,350
+that it needs to be able to do.
+
+00:06:46,350 --> 00:06:48,100
+First, you need to have the ability
+
+00:06:48,100 --> 00:06:49,830
+to overwrite existing VMA's,
+
+00:06:49,830 --> 00:06:51,430
+you need to iterate over all
+
+00:06:51,430 --> 00:06:54,852
+the VMA entries for proc pid maps,
+
+00:06:54,852 --> 00:06:58,893
+VMA's need to grow on page faults, such as stacks,
+
+00:07:01,590 --> 00:07:04,370
+and you need an efficient way to find the gaps,
+
+00:07:04,370 --> 00:07:07,180
+and not only do you need an efficient way to find gaps,
+
+00:07:07,180 --> 00:07:10,130
+but the gaps you need to find are generally within a window,
+
+00:07:10,130 --> 00:07:13,418
+and you have to search either from the start of the window
+
+00:07:13,418 --> 00:07:17,590
+and work your way up, or at the end of the window
+
+00:07:17,590 --> 00:07:18,783
+and work your way back.
+
+00:07:19,710 --> 00:07:23,441
+Right now, this is done with rbtrees,
+
+00:07:23,441 --> 00:07:26,161
+but the rbtree has to be threaded,
+
+00:07:26,161 --> 00:07:30,663
+so there's something like six lengths to do that.
+
+00:07:34,270 --> 00:07:39,270
+So it causes mmap semaphore locking contention
+
+00:07:39,930 --> 00:07:41,233
+with larger tasks.
+
+00:07:42,100 --> 00:07:45,720
+So this is the general area where we're looking at
+
+00:07:45,720 --> 00:07:48,953
+making it more efficient for the mmap semaphore.
+
+00:07:51,190 --> 00:07:54,653
+Right now we have three node types.
+
+00:07:59,500 --> 00:08:02,063
+When you start using the Maple tree,
+
+00:08:03,590 --> 00:08:07,260
+first I'd like to point out, we use pivots instead of keys.
+
+00:08:07,260 --> 00:08:09,310
+The B-tree used the key terminology.
+
+00:08:09,310 --> 00:08:11,610
+We call it pivots because it's a range.
+
+00:08:11,610 --> 00:08:14,213
+It's just a nomenclature type thing.
+
+00:08:17,552 --> 00:08:22,552
+We have an entry range node,
+
+00:08:23,600 --> 00:08:26,240
+which just tracks ranges,
+
+00:08:26,240 --> 00:08:28,320
+there's eight ranges per node,
+
+00:08:28,320 --> 00:08:30,600
+and we have an allocation range, or an A-range,
+
+00:08:30,600 --> 00:08:33,450
+and the A-range has five and entries and five gaps,
+
+00:08:33,450 --> 00:08:38,450
+and the gaps indicate the largest space below
+
+00:08:38,780 --> 00:08:41,340
+in the sub-tree of that slot.
+
+00:08:41,340 --> 00:08:43,070
+This isn't done at the leaf nodes,
+
+00:08:43,070 --> 00:08:47,550
+because, well it's two cache lines,
+
+00:08:47,550 --> 00:08:49,904
+so it's really quick to calculate
+
+00:08:49,904 --> 00:08:53,860
+the gaps within a leaf node.
+
+00:08:53,860 --> 00:08:56,360
+We also have a second type of leaf node called a dense,
+
+00:08:56,360 --> 00:08:59,150
+and the dense is essentially, it's 15 entries
+
+00:08:59,150 --> 00:09:02,899
+with the implied location based on where we are.
+
+00:09:02,899 --> 00:09:05,930
+As I mentioned, we're debating going to 192
+
+00:09:07,650 --> 00:09:10,110
+as opposed to 128.
+
+00:09:10,110 --> 00:09:14,070
+That will give us more branching for the A-range,
+
+00:09:14,070 --> 00:09:16,760
+and that's kind of our motivation at looking there.
+
+00:09:16,760 --> 00:09:18,643
+We'll have to see how benchmarking goes.
+
+00:09:19,970 --> 00:09:21,840
+More data, better results, right?
+
+00:09:21,840 --> 00:09:26,840
+So this is the, a picture here of the nodes.
+
+00:09:27,910 --> 00:09:30,613
+This is how I view them logically.
+
+00:09:31,590 --> 00:09:35,650
+The min and the max come from the parent nodes.
+
+00:09:35,650 --> 00:09:38,113
+The root starts at zero, goes to ulong max.
+
+00:09:40,230 --> 00:09:42,870
+Anything that's greater than the previous pivot
+
+00:09:42,870 --> 00:09:44,770
+and equal to or less than the next pivot
+
+00:09:44,770 --> 00:09:46,333
+returns the entry of that slot.
+
+00:09:47,340 --> 00:09:49,810
+The gaps indicate, as I mentioned earlier,
+
+00:09:49,810 --> 00:09:52,110
+the largest space in the sub-tree of the slot,
+
+00:09:53,200 --> 00:09:56,150
+so depending on which type of node you're using,
+
+00:09:56,150 --> 00:09:58,560
+you get a gap or you don't.
+
+00:09:58,560 --> 00:10:02,290
+It's actually, we don't really mix these,
+
+00:10:02,290 --> 00:10:07,290
+but the range 64 can be used in the leaf nodes
+
+00:10:09,680 --> 00:10:13,960
+regardless of if you're using the allocation tree or not.
+
+00:10:13,960 --> 00:10:17,330
+It's worth noting that the allocation range node
+
+00:10:17,330 --> 00:10:20,213
+has one unused eight byte entry.
+
+00:10:23,310 --> 00:10:26,020
+And if you notice, every node, obviously,
+
+00:10:26,020 --> 00:10:27,720
+has a link to its parent in there.
+
+00:10:29,140 --> 00:10:32,820
+So, how do we get so much information in the tree?
+
+00:10:32,820 --> 00:10:35,070
+Well, to further reduce the storage space
+
+00:10:35,070 --> 00:10:38,307
+for cache efficiency, we align to 128 bites,
+
+00:10:38,307 --> 00:10:40,420
+and we use the...
+
+00:10:41,560 --> 00:10:45,050
+It allows us to encode information in the last seven bits.
+
+00:10:45,050 --> 00:10:46,700
+Its where we store our meta data.
+
+00:10:48,210 --> 00:10:52,276
+If we go to 192, we'll actually lose a bit economy,
+
+00:10:52,276 --> 00:10:53,889
+(laughter)
+
+00:10:53,889 --> 00:10:55,120
+but if we go to 256 we gain one,
+
+00:10:55,120 --> 00:10:59,125
+but then we're using four cache lines.
+
+00:10:59,125 --> 00:11:01,483
+So we'll see what benchmarking yields.
+
+00:11:07,034 --> 00:11:09,050
+If we move on to the projected performance,
+
+00:11:09,050 --> 00:11:11,550
+if we look at a perfectly balanced rbtree
+
+00:11:11,550 --> 00:11:15,953
+it will require more dereferences to find the desired VMA.
+
+00:11:17,350 --> 00:11:20,620
+This is achieved by the branching factor of the Maple tree.
+
+00:11:20,620 --> 00:11:23,760
+Again, it's five for allocation ranges
+
+00:11:23,760 --> 00:11:25,423
+and eight for regular right now.
+
+00:11:28,090 --> 00:11:29,300
+I had a benchmark,
+
+00:11:29,300 --> 00:11:31,390
+but it was against the Radix tree for comparison,
+
+00:11:31,390 --> 00:11:36,390
+so I need to write a new one to benchmark the rbtree.
+
+00:11:39,527 --> 00:11:44,527
+We're slightly better at dereferencing at our worst case,
+
+00:11:47,000 --> 00:11:52,000
+so it's promising to perform better than the rbtree.
+
+00:11:52,263 --> 00:11:53,230
+- [Audience Member] You're counting
+
+00:11:53,230 --> 00:11:56,690
+the number of cache lines accessed or the number of nodes?
+
+00:11:56,690 --> 00:11:57,523
+- Sorry, say again.
+
+00:11:57,523 --> 00:11:59,001
+- [Audience Member] You're counting the number
+
+00:11:59,001 --> 00:12:00,360
+of cache lines accessed?
+
+00:12:00,360 --> 00:12:03,665
+- Counting the number of cache lines accessed or the...
+
+00:12:03,665 --> 00:12:06,680
+- [Audience Member] When you count the dereferences.
+
+00:12:06,680 --> 00:12:09,700
+- It's the dereferences, the hop between each...
+
+00:12:09,700 --> 00:12:13,320
+It's not the cache line access, no, it's the node jumping.
+
+00:12:13,320 --> 00:12:14,943
+The cache line actually,
+
+00:12:17,480 --> 00:12:18,960
+you'd probably double it for hours,
+
+00:12:18,960 --> 00:12:20,410
+and I have no idea on the rbtree.
+
+00:12:20,410 --> 00:12:22,130
+It depends on what your data structure is
+
+00:12:22,130 --> 00:12:24,610
+with the rbtree head or what have you, right?
+
+00:12:24,610 --> 00:12:28,123
+So I'd have to look at what the VMA does there.
+
+00:12:29,800 --> 00:12:30,663
+- [Audience Member] Right.
+
+00:12:33,485 --> 00:12:38,100
+- Looking at the memory used, the rbtree uses 48 bytes,
+
+00:12:38,100 --> 00:12:42,520
+which is about 66 kilobytes for Firefox.
+
+00:12:42,520 --> 00:12:44,313
+This Firefox test 1,415 VMA's.
+
+00:12:47,840 --> 00:12:51,660
+We're adding extra entries in the Maple tree,
+
+00:12:51,660 --> 00:12:53,926
+about 20% more for the NULLs.
+
+00:12:53,926 --> 00:12:57,351
+It's just the way that the Maple tree works.
+
+00:12:57,351 --> 00:13:01,930
+Because it's ranges, if you have a gap that is empty,
+
+00:13:01,930 --> 00:13:06,930
+you need a NULL entry there.
+
+00:13:09,330 --> 00:13:13,040
+This allows us to be between 20% worse for space
+
+00:13:13,040 --> 00:13:16,030
+and 50% better, but in average
+
+00:13:16,030 --> 00:13:18,680
+we're about 20% better.
+
+00:13:18,680 --> 00:13:21,563
+So that's also a promising aspect of the tree.
+
+00:13:24,220 --> 00:13:26,253
+The current development status is
+
+00:13:26,253 --> 00:13:28,930
+the VMA API's nearing completion.
+
+00:13:28,930 --> 00:13:32,030
+I was hoping to have it done before the conference,
+
+00:13:32,030 --> 00:13:35,200
+and I was hoping to have benchmarking done as well,
+
+00:13:35,200 --> 00:13:38,000
+but it turns out when you have a B-tree,
+
+00:13:38,000 --> 00:13:40,860
+and you can completely destroy half of that B-tree,
+
+00:13:40,860 --> 00:13:42,777
+balancing is hard.
+
+00:13:42,777 --> 00:13:44,870
+(laughter)
+
+00:13:44,870 --> 00:13:49,310
+So if you store over half your nodes,
+
+00:13:49,310 --> 00:13:54,023
+you have to do some very interesting rebalancing acts.
+
+00:13:55,920 --> 00:13:59,400
+So that's still what I'm currently working on.
+
+00:13:59,400 --> 00:14:01,620
+Also, coalescing nodes is difficult
+
+00:14:01,620 --> 00:14:03,533
+when you're switching node types.
+
+00:14:07,146 --> 00:14:11,160
+We are able to change between dense and range nodes
+
+00:14:11,160 --> 00:14:14,580
+depending on the information stored,
+
+00:14:14,580 --> 00:14:19,490
+and when you delete something, and you're combing nodes,
+
+00:14:19,490 --> 00:14:21,653
+it gets a bit tricky.
+
+00:14:25,440 --> 00:14:27,280
+So there's future work
+
+00:14:27,280 --> 00:14:30,703
+that we want to look at solving with this after the VMA,
+
+00:14:31,618 --> 00:14:34,583
+and one of those is the PID allocation problem.
+
+00:14:35,630 --> 00:14:39,593
+Basically right now it's a Radix tree I believe.
+
+00:14:41,050 --> 00:14:42,043
+No one disagrees.
+
+00:14:45,422 --> 00:14:46,760
+The Radix tree is really good, like I said,
+
+00:14:46,760 --> 00:14:48,750
+for densely packed things,
+
+00:14:48,750 --> 00:14:52,330
+but if you have PID's or something like C-group ID
+
+00:14:52,330 --> 00:14:53,980
+that is being used up
+
+00:14:53,980 --> 00:14:58,980
+and then not removed in sequential order,
+
+00:14:59,440 --> 00:15:02,590
+then the Radix becomes sparse rather quickly,
+
+00:15:02,590 --> 00:15:05,680
+and when it becomes sparse, it becomes inefficient.
+
+00:15:05,680 --> 00:15:09,545
+Because we're able to change the node types in our tree,
+
+00:15:09,545 --> 00:15:13,370
+we're able to compact the areas that need compacting
+
+00:15:13,370 --> 00:15:16,970
+and reduce the height of the tree
+
+00:15:16,970 --> 00:15:18,633
+in the areas that are needed.
+
+00:15:20,568 --> 00:15:22,970
+So that's something that should help
+
+00:15:26,220 --> 00:15:30,830
+the performance in sparsely populated Radix trees.
+
+00:15:30,830 --> 00:15:32,560
+So on store if it's too dense,
+
+00:15:32,560 --> 00:15:35,070
+we replace the dense leaf node with a sparse leaf,
+
+00:15:35,070 --> 00:15:38,440
+and on store if the sparse leaf becomes too full,
+
+00:15:38,440 --> 00:15:39,790
+we replace it with a dense.
+
+00:15:44,740 --> 00:15:46,540
+As I mentioned earlier,
+
+00:15:46,540 --> 00:15:48,740
+the leaf nodes are never A-range nodes,
+
+00:15:48,740 --> 00:15:50,560
+so they're always range 64's,
+
+00:15:50,560 --> 00:15:52,760
+so you have at least eight entries in there.
+
+00:15:56,960 --> 00:15:59,880
+Another thing we are looking at is larger dense nodes.
+
+00:15:59,880 --> 00:16:02,220
+Right now, our dense nodes carry 15,
+
+00:16:02,220 --> 00:16:04,563
+but if we take a whole page, we can get 512.
+
+00:16:07,298 --> 00:16:09,253
+I'm not sure how many is enough here.
+
+00:16:10,100 --> 00:16:14,030
+Some companies use a lot of file descriptors,
+
+00:16:14,030 --> 00:16:15,440
+and I'd like those companies
+
+00:16:15,440 --> 00:16:16,273
+to come talk to me
+
+00:16:16,273 --> 00:16:18,543
+about how many file descriptors is enough.
+
+00:16:20,357 --> 00:16:22,607
+(laughter)
+
+00:16:24,940 --> 00:16:28,580
+So that we can design this into the algorithm
+
+00:16:28,580 --> 00:16:30,543
+and into the data structure.
+
+00:16:34,451 --> 00:16:37,880
+I think, hopefully someone can come up after,
+
+00:16:37,880 --> 00:16:41,410
+or even in the end, I have a slide with questions,
+
+00:16:41,410 --> 00:16:43,793
+and I'd like to talk about it then.
+
+00:16:44,773 --> 00:16:48,464
+We're also looking at possibly replacing hash tables
+
+00:16:48,464 --> 00:16:49,990
+with the data structure,
+
+00:16:49,990 --> 00:16:53,030
+and it's gonna be an up hill battle,
+
+00:16:53,030 --> 00:16:57,190
+but it's mostly where mis-sized hashes are used.
+
+00:16:57,190 --> 00:17:00,748
+If you pick something too big, you're wasting space,
+
+00:17:00,748 --> 00:17:03,370
+but if you pick something too small,
+
+00:17:03,370 --> 00:17:04,650
+you end up with a long chain,
+
+00:17:04,650 --> 00:17:06,770
+and then you're walking a chain of linked lists
+
+00:17:06,770 --> 00:17:08,700
+to find your entity.
+
+00:17:08,700 --> 00:17:11,210
+It actually might make more sense to use trees.
+
+00:17:11,210 --> 00:17:13,497
+Yeah, go ahead.
+
+00:17:13,497 --> 00:17:17,140
+- [Audience Member] Are we gonna be replacing xrays
+
+00:17:17,140 --> 00:17:20,708
+with Maple trees too, or what's the deal there?
+
+00:17:20,708 --> 00:17:22,550
+(laughter)
+
+00:17:22,550 --> 00:17:23,750
+- [Liam] Well, hold on now.
+
+00:17:23,750 --> 00:17:25,780
+We're not going to replace the xray.
+
+00:17:25,780 --> 00:17:28,060
+We're just going use the xray, but the back end
+
+00:17:28,060 --> 00:17:30,307
+just might be different. - Oh, okay.
+
+00:17:31,840 --> 00:17:34,730
+- We're aligning the interfaces to be extremely similar,
+
+00:17:34,730 --> 00:17:36,393
+and that's not by accident.
+
+00:17:39,020 --> 00:17:42,550
+We're debating maybe in the future,
+
+00:17:42,550 --> 00:17:44,500
+this might be the backing for the xray,
+
+00:17:45,727 --> 00:17:48,227
+so that would increase the uses of the Maple tree,
+
+00:17:52,290 --> 00:17:53,780
+so that would be good.
+
+00:17:53,780 --> 00:17:55,763
+Things would just get faster, right?
+
+00:18:01,240 --> 00:18:03,290
+That is something we're looking at doing.
+
+00:18:05,290 --> 00:18:07,290
+The hashes also lose locality,
+
+00:18:07,290 --> 00:18:12,290
+so if your hash has a lot of turn,
+
+00:18:13,210 --> 00:18:15,180
+you might end up in a better scenario
+
+00:18:15,180 --> 00:18:16,480
+if you use a tree as well.
+
+00:18:19,410 --> 00:18:20,440
+The short term plan.
+
+00:18:20,440 --> 00:18:21,970
+Well, the short term plan
+
+00:18:21,970 --> 00:18:24,453
+is to finish the VMA tree conversion.
+
+00:18:26,210 --> 00:18:28,940
+That includes coalescing, benchmarking,
+
+00:18:28,940 --> 00:18:31,620
+and ideally, a better store operation.
+
+00:18:31,620 --> 00:18:32,990
+The store right now, like I said,
+
+00:18:32,990 --> 00:18:34,650
+if you store something
+
+00:18:35,746 --> 00:18:39,489
+that overwrites a copious amount of the tree
+
+00:18:39,489 --> 00:18:41,953
+it's a pain.
+
+00:18:41,953 --> 00:18:43,885
+Don't do that.
+
+00:18:43,885 --> 00:18:45,653
+Well, I'll fix it.
+
+00:18:46,860 --> 00:18:50,410
+We're also looking for search marks.
+
+00:18:50,410 --> 00:18:52,910
+We need to know how many search marks people want.
+
+00:18:55,703 --> 00:18:56,536
+I'm hearing five.
+
+00:18:56,536 --> 00:18:59,120
+I'm not sure if that's the number.
+
+00:18:59,120 --> 00:19:02,023
+We have a design of a new node that supports up to 18.
+
+00:19:03,660 --> 00:19:05,440
+That might be too many.
+
+00:19:05,440 --> 00:19:07,890
+I don't know if that's possible to have too many.
+
+00:19:09,410 --> 00:19:12,520
+The other thing is the file system people
+
+00:19:12,520 --> 00:19:17,303
+tend to want 32-bit with 64-bit pointers,
+
+00:19:18,850 --> 00:19:21,603
+so that's yeah...
+
+00:19:21,603 --> 00:19:24,123
+That's gonna be tricky.
+
+00:19:25,110 --> 00:19:27,850
+And there's also people who use these tiny CPUs
+
+00:19:27,850 --> 00:19:29,100
+that are only 32-bits.
+
+00:19:29,100 --> 00:19:30,700
+I don't know what they're doing,
+
+00:19:32,239 --> 00:19:34,289
+but I guess that's embedded or something.
+
+00:19:40,536 --> 00:19:42,036
+We have to work on that after,
+
+00:19:43,595 --> 00:19:47,020
+and right now we don't have a plan for overlapping ranges,
+
+00:19:47,020 --> 00:19:49,268
+but it's something we're looking at,
+
+00:19:49,268 --> 00:19:51,720
+and if anyone, anybody out there
+
+00:19:51,720 --> 00:19:54,340
+wants to work on it with us,
+
+00:19:54,340 --> 00:19:55,570
+please come talk to me.
+
+00:19:55,570 --> 00:19:58,430
+I'd like to learn more about the problem space
+
+00:19:58,430 --> 00:19:59,430
+and tackle it.
+
+00:19:59,430 --> 00:20:03,380
+Overlapping ranges is something that is currently only done,
+
+00:20:03,380 --> 00:20:06,200
+I think, in the rbtree in kernel,
+
+00:20:06,200 --> 00:20:09,870
+and it would be good to have an alternative,
+
+00:20:09,870 --> 00:20:14,753
+or at least examine possible alternatives.
+
+00:20:15,749 --> 00:20:18,843
+We're also looking at different node types.
+
+00:20:20,830 --> 00:20:25,473
+Sparse 64, so basically just a range linked to...
+
+00:20:28,768 --> 00:20:33,768
+It's a bit different than our current node layout.
+
+00:20:34,450 --> 00:20:37,370
+Every time we get a new metadata bit,
+
+00:20:37,370 --> 00:20:39,370
+or we figure out how we don't need
+
+00:20:39,370 --> 00:20:41,370
+a particular metadata bit,
+
+00:20:41,370 --> 00:20:43,523
+Matthew wants to add another node type.
+
+00:20:44,598 --> 00:20:46,710
+(laughter)
+
+00:20:46,710 --> 00:20:49,640
+So we'll see how that goes.
+
+00:20:49,640 --> 00:20:52,270
+And like you pointed out, the xray API
+
+00:20:52,270 --> 00:20:54,800
+is very similar to the Maple tree
+
+00:20:54,800 --> 00:20:59,570
+for some unknown yet convenient reason.
+
+00:20:59,570 --> 00:21:01,580
+- [Audience Member] How does it compare to interval tree?
+
+00:21:01,580 --> 00:21:03,130
+- Say again?
+
+00:21:03,130 --> 00:21:05,040
+- [Audience Member] How does it compare to interval tree?
+
+00:21:05,040 --> 00:21:06,860
+- Interval tree?
+
+00:21:06,860 --> 00:21:08,680
+So, the interval tree,
+
+00:21:08,680 --> 00:21:10,460
+well it depends on your implementation.
+
+00:21:10,460 --> 00:21:12,540
+The interval tree we only use now is, I believe,
+
+00:21:12,540 --> 00:21:13,500
+the rbtree, right?
+
+00:21:13,500 --> 00:21:17,730
+And it's up to you to write interval trees using the rbtree.
+
+00:21:17,730 --> 00:21:21,250
+- I mean in liv, there's an interval tree API
+
+00:21:21,250 --> 00:21:23,363
+instead of interval tree E things.
+
+00:21:24,550 --> 00:21:26,630
+- [Man In Back] Yes, there all wrapped around...
+
+00:21:26,630 --> 00:21:28,340
+- Yeah, yeah, just a wrap around rbtree, right?
+
+00:21:28,340 --> 00:21:31,030
+Just API wise, can we take that
+
+00:21:31,030 --> 00:21:33,393
+and just put that in here and be done with that, or...
+
+00:21:35,610 --> 00:21:36,710
+- [Liam] I don't know.
+
+00:21:37,672 --> 00:21:41,080
+If we're looking at designing overlapping ranges,
+
+00:21:41,080 --> 00:21:44,410
+we could look at using the same interface,
+
+00:21:44,410 --> 00:21:46,810
+or at least a similar interface.
+
+00:21:46,810 --> 00:21:49,830
+Generally, well, what Matthew did with the xrays,
+
+00:21:49,830 --> 00:21:52,330
+he looked at the uses of the Radix tree
+
+00:21:52,330 --> 00:21:53,680
+and how people misused
+
+00:21:53,680 --> 00:21:57,070
+and perhaps conveniently fell into
+
+00:21:57,070 --> 00:21:59,810
+a working Radix tree implementation
+
+00:21:59,810 --> 00:22:02,550
+and tried to help them use the right thing.
+
+00:22:02,550 --> 00:22:05,440
+I think we would have to do something of that sort.
+
+00:22:05,440 --> 00:22:09,320
+We'd want to look at the users of the ranges
+
+00:22:09,320 --> 00:22:14,320
+and see if they're doing all the same thing,
+
+00:22:14,820 --> 00:22:15,820
+then maybe we just pull that
+
+00:22:15,820 --> 00:22:17,210
+right into the interface anyways
+
+00:22:17,210 --> 00:22:18,460
+if we're gonna change it.
+
+00:22:20,390 --> 00:22:21,920
+- I wrote interval tree,
+
+00:22:21,920 --> 00:22:25,720
+and it was specifically to deal with people
+
+00:22:25,720 --> 00:22:27,390
+who have overlapping intervals
+
+00:22:27,390 --> 00:22:31,012
+and want to find intersections and that sort of thing,
+
+00:22:31,012 --> 00:22:32,810
+and the vast majority of users
+
+00:22:32,810 --> 00:22:35,260
+actually don't have overlapping intervals,
+
+00:22:35,260 --> 00:22:38,750
+and they just want to not have to write
+
+00:22:38,750 --> 00:22:41,750
+the search function for the rbtree really.
+
+00:22:41,750 --> 00:22:43,742
+- [Liam] Right, so they could just go right to this.
+
+00:22:43,742 --> 00:22:44,960
+That would be great. - I think having something
+
+00:22:44,960 --> 00:22:47,720
+that has a nice API for people who don't have
+
+00:22:47,720 --> 00:22:50,099
+overlapping intervals would be great.
+
+00:22:50,099 --> 00:22:52,729
+- Yeah, so that's what we're trying to do.
+
+00:22:52,729 --> 00:22:55,996
+We really want a simple API.
+
+00:22:55,996 --> 00:22:59,152
+And a complex one.
+
+00:22:59,152 --> 00:23:00,970
+(laughter)
+
+00:23:00,970 --> 00:23:03,850
+'Cause some people want the complex uses,
+
+00:23:03,850 --> 00:23:05,800
+but we want the majority of the people,
+
+00:23:05,800 --> 00:23:07,360
+we want it...
+
+00:23:07,360 --> 00:23:09,686
+People just want to store data, right?
+
+00:23:09,686 --> 00:23:10,637
+And they look around and they say,
+
+00:23:10,637 --> 00:23:12,487
+"Oh my goodness, what do I have to do
+
+00:23:12,487 --> 00:23:14,120
+"to store data in this thing?"
+
+00:23:14,120 --> 00:23:15,773
+And then they say,
+
+00:23:15,773 --> 00:23:17,397
+"Well I'll just stuff it in a Radix tree,"
+
+00:23:17,397 --> 00:23:19,140
+And then the performance is terrible, but it works,
+
+00:23:19,140 --> 00:23:21,430
+so they just move on, and they'll go back to it later,
+
+00:23:21,430 --> 00:23:22,990
+but they never do, right?
+
+00:23:22,990 --> 00:23:25,170
+So if we can make their lives easier
+
+00:23:25,170 --> 00:23:27,390
+by giving them an easy interface to use,
+
+00:23:27,390 --> 00:23:31,000
+and ideally, something that performs decently
+
+00:23:31,000 --> 00:23:33,870
+in what the majority of people want, then great,
+
+00:23:33,870 --> 00:23:38,450
+but there's places like the VMA
+
+00:23:38,450 --> 00:23:43,170
+that will always need a complex use to get what it needs,
+
+00:23:43,170 --> 00:23:45,443
+and if we tackle the hard problems,
+
+00:23:46,700 --> 00:23:48,030
+if it works for the hard problems,
+
+00:23:48,030 --> 00:23:51,160
+then we should be able to solve the easier problems
+
+00:23:51,160 --> 00:23:53,800
+as long as we don't ignore them while we're designing,
+
+00:23:53,800 --> 00:23:57,090
+and that's kinda where we're going with this.
+
+00:23:57,090 --> 00:23:59,000
+- [Moderator] So just one quick note.
+
+00:23:59,000 --> 00:24:01,280
+There are only, I think a handful of users
+
+00:24:01,280 --> 00:24:02,930
+of the interval tree,
+
+00:24:02,930 --> 00:24:07,684
+there were a couple of DRM users and rmap last I checked.
+
+00:24:07,684 --> 00:24:10,350
+We were looking at it from the EXD4 angle
+
+00:24:10,350 --> 00:24:13,820
+before we rejected it as not being better
+
+00:24:13,820 --> 00:24:15,170
+than what we were currently using,
+
+00:24:15,170 --> 00:24:17,683
+so I've actually looked at that recently.
+
+00:24:18,565 --> 00:24:20,340
+- [Liam] Okay, so there's not that many to look at?
+
+00:24:20,340 --> 00:24:22,369
+- I think there'll be even less soon.
+
+00:24:22,369 --> 00:24:24,619
+(laughter)
+
+00:24:28,150 --> 00:24:30,750
+- So the big difference between Maple tree
+
+00:24:30,750 --> 00:24:32,820
+or basically Radix tree and rbtree
+
+00:24:32,820 --> 00:24:36,430
+is the embedded versus non-embedded type of notes,
+
+00:24:36,430 --> 00:24:37,590
+which basically translates to,
+
+00:24:37,590 --> 00:24:40,180
+needs to allocate memory on insertion
+
+00:24:40,180 --> 00:24:41,580
+versus you don't have to.
+
+00:24:41,580 --> 00:24:44,950
+So, currently, some of the interval tree users
+
+00:24:44,950 --> 00:24:46,770
+use the fact that they have some object
+
+00:24:46,770 --> 00:24:49,130
+which they have previously already allocated.
+
+00:24:49,130 --> 00:24:52,000
+Inside the object they have the embedded node,
+
+00:24:52,000 --> 00:24:54,430
+so the insertion never fails.
+
+00:24:54,430 --> 00:24:55,670
+Now with the Maple tree,
+
+00:24:55,670 --> 00:24:57,500
+in principle the insertion could fail
+
+00:24:57,500 --> 00:24:59,240
+because of the memory allocation failure
+
+00:24:59,240 --> 00:25:00,210
+and stuff like that.
+
+00:25:00,210 --> 00:25:02,633
+- [Liam] An allocation failure is your concern?
+
+00:25:03,500 --> 00:25:06,276
+- Well it's possible, certainly, right?
+
+00:25:06,276 --> 00:25:07,430
+- Yeah, so...
+
+00:25:07,430 --> 00:25:09,396
+- [Audience Member] It's just like that
+
+00:25:09,396 --> 00:25:12,380
+converting current users of rbtree or interval tree
+
+00:25:12,380 --> 00:25:16,380
+to Maple tree can lead to deal with
+
+00:25:16,380 --> 00:25:20,640
+memory allocation failures during node insertion, basically,
+
+00:25:20,640 --> 00:25:22,990
+or possibly even the removal of,
+
+00:25:22,990 --> 00:25:24,380
+I'm not sure about their code,
+
+00:25:24,380 --> 00:25:28,160
+but the node removal can lead to nodes placed,
+
+00:25:28,160 --> 00:25:30,710
+which then means basically need to allocate memory.
+
+00:25:32,173 --> 00:25:34,490
+That depends exactly... - Right, so on erase
+
+00:25:34,490 --> 00:25:36,860
+you can not allocate.
+
+00:25:36,860 --> 00:25:39,340
+Well, we're not allocating, right?
+
+00:25:39,340 --> 00:25:40,550
+- [Audience Member] That's good.
+
+00:25:40,550 --> 00:25:42,070
+- Yeah.
+
+00:25:42,070 --> 00:25:45,863
+And we're also, we're keeping in mind these scenarios,
+
+00:25:47,350 --> 00:25:51,310
+so our failure path is to drop the...
+
+00:25:51,310 --> 00:25:52,860
+There's a lock at the top of the tree,
+
+00:25:52,860 --> 00:25:55,503
+and we, on right you need to have a lock.
+
+00:25:57,310 --> 00:25:59,063
+We drop the lock and retry.
+
+00:26:00,800 --> 00:26:01,750
+But yeah, that's...
+
+00:26:03,520 --> 00:26:06,453
+The allocation is a tricky aspect of it.
+
+00:26:07,740 --> 00:26:09,130
+It's very much modeled
+
+00:26:09,130 --> 00:26:11,880
+around the way that the xray does it's allocations
+
+00:26:11,880 --> 00:26:15,190
+to try and avoid any of those issues
+
+00:26:15,190 --> 00:26:16,850
+as best as can be avoided.
+
+00:26:16,850 --> 00:26:19,740
+- Because there is, for example, none of the use cases,
+
+00:26:19,740 --> 00:26:21,780
+which currently is not extreme,
+
+00:26:21,780 --> 00:26:24,320
+but it is considered, and people are working on it,
+
+00:26:24,320 --> 00:26:27,118
+is to implement kind of fringe looking primitive,
+
+00:26:27,118 --> 00:26:29,860
+which then basically needs some kind of
+
+00:26:29,860 --> 00:26:31,510
+interval tree implementation.
+
+00:26:31,510 --> 00:26:33,100
+Now, I'm not speaking about specific
+
+00:26:33,100 --> 00:26:34,610
+interval tree implementation in Linux,
+
+00:26:34,610 --> 00:26:36,900
+but it needs some kind of data structure,
+
+00:26:36,900 --> 00:26:40,261
+like interval tree, and then using Maple tree
+
+00:26:40,261 --> 00:26:42,620
+could be useful, because it's kind of better
+
+00:26:42,620 --> 00:26:44,742
+than growing your rbtree stuff,
+
+00:26:44,742 --> 00:26:49,345
+but then again, having to allocate memory on lock
+
+00:26:49,345 --> 00:26:53,290
+is kind of strange,
+
+00:26:53,290 --> 00:26:57,060
+and if it fails, it is a problem,
+
+00:26:57,060 --> 00:26:58,650
+so that's one of the reasons, for example,
+
+00:26:58,650 --> 00:27:03,540
+why rbtree can be still useful in some of these cases.
+
+00:27:03,540 --> 00:27:06,300
+- Right, so the xray I believe
+
+00:27:06,300 --> 00:27:08,759
+has a way to do this by reserving.
+
+00:27:08,759 --> 00:27:13,759
+- Yes, basically, because xray transferred from Radix tree,
+
+00:27:14,290 --> 00:27:15,290
+which has the same problems,
+
+00:27:15,290 --> 00:27:17,820
+so they're the users actually they're prepared
+
+00:27:17,820 --> 00:27:22,820
+to reserve before insert, and then use the reservation add.
+
+00:27:23,600 --> 00:27:28,220
+- [Liam] Okay, so would the reservation help, or is this...
+
+00:27:28,220 --> 00:27:32,270
+- So, the reservation certainly helps, but it's kind of...
+
+00:27:32,270 --> 00:27:35,480
+But the conversion of the rbtree users is still difficult
+
+00:27:35,480 --> 00:27:36,950
+because you have to teach them to reserve
+
+00:27:36,950 --> 00:27:38,990
+and then use the reservation,
+
+00:27:38,990 --> 00:27:41,812
+so yeah, it's there, but I just wanted to point out
+
+00:27:41,812 --> 00:27:43,760
+that the conversion is not really straight forward
+
+00:27:43,760 --> 00:27:46,960
+in all the cases, because of the memory allocation issues
+
+00:27:46,960 --> 00:27:47,890
+and stuff like that.
+
+00:27:47,890 --> 00:27:50,850
+- Right, I don't think this will ever
+
+00:27:50,850 --> 00:27:52,870
+get rid of the rbtree entirely.
+
+00:27:52,870 --> 00:27:55,570
+It will reduce the usage substantially.
+
+00:27:55,570 --> 00:27:58,460
+For instance, the people who try and find and easy API
+
+00:27:58,460 --> 00:28:02,030
+and then end up in range trees
+
+00:28:02,030 --> 00:28:04,035
+that don't have ranges.
+
+00:28:04,035 --> 00:28:05,270
+(laughter)
+
+00:28:05,270 --> 00:28:07,320
+Or they're stuffing it into a Radix tree,
+
+00:28:08,436 --> 00:28:09,830
+and they have sparse data.
+
+00:28:09,830 --> 00:28:10,883
+That sort of thing.
+
+00:28:13,000 --> 00:28:13,960
+But yeah, that...
+
+00:28:17,080 --> 00:28:19,810
+We could look at embedding nodes within your structure,
+
+00:28:19,810 --> 00:28:21,670
+but then you would have alignment problems
+
+00:28:21,670 --> 00:28:23,703
+for the cache lines and stuff as well.
+
+00:28:25,620 --> 00:28:28,543
+It's definitely something to keep in mind though, thank you.
+
+00:28:32,647 --> 00:28:34,130
+Where was I on this slide?
+
+00:28:34,130 --> 00:28:34,963
+Probably done.
+
+00:28:36,100 --> 00:28:39,947
+Okay, so there's still some open questions.
+
+00:28:39,947 --> 00:28:43,973
+How do we handle old shadow entries from the page cache?
+
+00:28:44,991 --> 00:28:47,650
+What should a batch API look like?
+
+00:28:47,650 --> 00:28:51,530
+So some people want to do something for everything.
+
+00:28:51,530 --> 00:28:54,810
+I'm not really sure what it should look like yet.
+
+00:28:54,810 --> 00:28:56,808
+We have a fou reach.
+
+00:28:56,808 --> 00:28:57,641
+We have that sort of thing,
+
+00:28:57,641 --> 00:29:01,130
+but if you have a batch...
+
+00:29:04,340 --> 00:29:06,250
+And the large node size,
+
+00:29:06,250 --> 00:29:11,100
+again, those people who use giant file systems
+
+00:29:11,100 --> 00:29:13,997
+that span the globe, let me know how many file descriptors
+
+00:29:13,997 --> 00:29:15,780
+you would be happy with.
+
+00:29:15,780 --> 00:29:17,280
+That would really help me out.
+
+00:29:18,920 --> 00:29:20,610
+We're also, like I said before,
+
+00:29:20,610 --> 00:29:23,752
+we're looking at 192 byte nodes.
+
+00:29:23,752 --> 00:29:25,970
+What's really neat about that
+
+00:29:25,970 --> 00:29:28,700
+is then the gaps can be moved to its own cache line
+
+00:29:28,700 --> 00:29:30,870
+and the readers would only hit two cache lines
+
+00:29:30,870 --> 00:29:32,930
+and the writers would need all three.
+
+00:29:32,930 --> 00:29:36,193
+Although those would be prefetched anyways,
+
+00:29:37,720 --> 00:29:39,483
+may be prefetched anyways.
+
+00:29:42,228 --> 00:29:43,625
+It just seems very nice.
+
+00:29:43,625 --> 00:29:44,700
+(laughter)
+
+00:29:44,700 --> 00:29:45,613
+At least to me.
+
+00:29:47,540 --> 00:29:50,390
+And again, the rbtree overlapping range stuff,
+
+00:29:50,390 --> 00:29:51,970
+I guess there are some use cases
+
+00:29:51,970 --> 00:29:55,500
+that we would need to figure out the allocation issues,
+
+00:29:55,500 --> 00:29:58,123
+but it would be good if someone
+
+00:29:58,123 --> 00:30:03,092
+with the overlapping tree knowledge
+
+00:30:03,092 --> 00:30:05,943
+would like to collaborate with us on that.
+
+00:30:09,730 --> 00:30:12,720
+Yeah, there's also other things, like new node types
+
+00:30:13,861 --> 00:30:15,360
+that we're looking at.
+
+00:30:15,360 --> 00:30:17,510
+Again, every time we get a bit,
+
+00:30:17,510 --> 00:30:20,303
+he gets so excited about new node types,
+
+00:30:21,912 --> 00:30:23,362
+se there'll probably be more.
+
+00:30:26,054 --> 00:30:27,800
+And then the search marks,
+
+00:30:27,800 --> 00:30:32,717
+I'd like to talk to anyone with search mark requirements.
+
+00:30:34,200 --> 00:30:38,240
+Please talk now, or even after.
+
+00:30:38,240 --> 00:30:39,383
+I'm happy either.
+
+00:30:42,270 --> 00:30:44,850
+So that's all I have.
+
+00:30:44,850 --> 00:30:47,793
+So that's the talk.
+
+00:30:49,120 --> 00:30:53,830
+And one last thing, please sign my key.
+
+00:30:53,830 --> 00:30:58,240
+I'd like to move this work to kernel.org,
+
+00:30:58,240 --> 00:31:01,550
+so if anybody has a key for that,
+
+00:31:01,550 --> 00:31:03,503
+please sign my key.
+
+00:31:05,110 --> 00:31:05,943
+Yeah?
+
+00:31:06,780 --> 00:31:10,810
+- What's the key range on this Maple tree?
+
+00:31:10,810 --> 00:31:12,960
+Is it just 64 bit integer?
+
+00:31:12,960 --> 00:31:13,793
+- [Liam] Yes.
+
+00:31:13,793 --> 00:31:18,540
+- Because a number of rbtrees are used to cache
+
+00:31:18,540 --> 00:31:21,758
+or hold things that have keys
+
+00:31:21,758 --> 00:31:24,490
+or things like network addresses,
+
+00:31:24,490 --> 00:31:28,840
+or network name spaces and stuff.
+
+00:31:28,840 --> 00:31:31,463
+I presume you can't bottle nose in this?
+
+00:31:32,370 --> 00:31:33,890
+- [Liam] Yeah, so...
+
+00:31:33,890 --> 00:31:37,690
+Well, so, it's generally a 64 bit pointer gets stored,
+
+00:31:37,690 --> 00:31:40,051
+so you could point to whatever, or...
+
+00:31:40,051 --> 00:31:41,310
+- Well, yeah, the point is not something
+
+00:31:41,310 --> 00:31:43,440
+you can look up from external data,
+
+00:31:43,440 --> 00:31:44,910
+so you get a network packet in,
+
+00:31:44,910 --> 00:31:46,825
+you've got an address in it.
+
+00:31:46,825 --> 00:31:48,800
+If it's not a 64 bit pointer, you can't look it up.
+
+00:31:48,800 --> 00:31:51,341
+- [Liam] So you're looking it up by...
+
+00:31:51,341 --> 00:31:54,750
+- The rbtree, you can step through it,
+
+00:31:54,750 --> 00:31:58,220
+because you provide your own look-up routine effectively.
+
+00:31:58,220 --> 00:32:00,743
+You can do any comparison you like.
+
+00:32:01,640 --> 00:32:06,640
+- Right, so this tree stores integers to integer point-ups.
+
+00:32:07,090 --> 00:32:09,690
+- [Audience Member] So it's only that use case
+
+00:32:09,690 --> 00:32:11,240
+you need an integer as the key?
+
+00:32:12,150 --> 00:32:14,451
+- Well, yeah, that's the NDC.
+
+00:32:14,451 --> 00:32:16,220
+Could you do other?
+
+00:32:16,220 --> 00:32:17,230
+We could do other,
+
+00:32:17,230 --> 00:32:20,620
+but you would have to convert it into a sortable thing.
+
+00:32:20,620 --> 00:32:22,230
+It would be another node type.
+
+00:32:22,230 --> 00:32:26,421
+- They are sortable, but the key is basically very long.
+
+00:32:26,421 --> 00:32:28,644
+We're talking tens of bytes.
+
+00:32:28,644 --> 00:32:30,630
+- [Liam] Tens of bytes?
+
+00:32:30,630 --> 00:32:32,880
+- Yeah, we could probably find a way to do it.
+
+00:32:32,880 --> 00:32:34,060
+- Yeah, I mean, I think in theory
+
+00:32:34,060 --> 00:32:35,750
+what you might be able to do is
+
+00:32:35,750 --> 00:32:38,900
+the NDC could be a 64 bit effectively integer
+
+00:32:38,900 --> 00:32:42,550
+you cast into a pointer, and you provide a sort function
+
+00:32:42,550 --> 00:32:46,345
+where the pointer is actually a pointer to the object
+
+00:32:46,345 --> 00:32:48,830
+where you actually have the data, right?
+
+00:32:48,830 --> 00:32:50,640
+'Cause right now what you're doing
+
+00:32:50,640 --> 00:32:52,900
+is the rbtree comparison routine
+
+00:32:52,900 --> 00:32:56,310
+is actually looking at fields inside the object
+
+00:32:56,310 --> 00:32:57,870
+to do the compare, right?
+
+00:32:57,870 --> 00:33:00,670
+We just have to somehow find a way of emulating that
+
+00:33:00,670 --> 00:33:03,370
+in a design where you have interior nodes
+
+00:33:03,370 --> 00:33:06,000
+that have no leaf data in them.
+
+00:33:06,000 --> 00:33:07,070
+That's the problem.
+
+00:33:07,070 --> 00:33:08,500
+- So you're using the rbtree,
+
+00:33:08,500 --> 00:33:10,730
+you're searching a tree for something,
+
+00:33:10,730 --> 00:33:13,810
+but then you also have for some other reason, right?
+
+00:33:13,810 --> 00:33:15,540
+And then this then essentially,
+
+00:33:15,540 --> 00:33:18,973
+you're using an rbtree threaded to walk everything?
+
+00:33:20,070 --> 00:33:21,940
+- What do you mean by threaded?
+
+00:33:21,940 --> 00:33:24,338
+- [Liam] Well, previous next, right?
+
+00:33:24,338 --> 00:33:28,190
+- Yeah, but basically there's a comparison function
+
+00:33:28,190 --> 00:33:30,987
+built into whatever owns the rbtree.
+
+00:33:32,781 --> 00:33:35,080
+- [Liam] Right, so we have a pervious and next function,
+
+00:33:35,080 --> 00:33:40,030
+so you could in theory just use the same thing.
+
+00:33:40,030 --> 00:33:41,160
+You'd just have to, like you said,
+
+00:33:41,160 --> 00:33:42,550
+you'd have to do a conversion.
+
+00:33:42,550 --> 00:33:44,277
+- It's just in those you've got some nodes,
+
+00:33:44,277 --> 00:33:45,440
+and as far as I can tell,
+
+00:33:45,440 --> 00:33:48,800
+you're storing the value inside the nodes sometimes,
+
+00:33:48,800 --> 00:33:51,563
+but there is no value to store inside the nodes per se,
+
+00:33:52,490 --> 00:33:55,470
+or no small value you can store inside the nodes.
+
+00:33:55,470 --> 00:33:57,370
+- [Liam] No small value you can store inside the nodes?
+
+00:33:57,370 --> 00:33:59,160
+- 'Cause it looks like you've got a node type
+
+00:33:59,160 --> 00:34:02,303
+which is like seven pointers and seven values.
+
+00:34:03,663 --> 00:34:07,283
+- I don't know what this thing did.
+
+00:34:13,850 --> 00:34:16,560
+So here, this slide maybe would help.
+
+00:34:18,120 --> 00:34:20,800
+- I'm looking at not the dense one.
+
+00:34:20,800 --> 00:34:22,970
+The one with a leaf and a value,
+
+00:34:22,970 --> 00:34:24,880
+leaf, value, leaf, value.
+
+00:34:24,880 --> 00:34:26,729
+- [Man In Back] The range 64?
+
+00:34:26,729 --> 00:34:28,052
+- Yeah, the range 64.
+
+00:34:28,052 --> 00:34:31,570
+- Right, because there are no values you can stick
+
+00:34:36,264 --> 00:34:37,850
+actually in the node,
+
+00:34:37,850 --> 00:34:41,873
+'cause the values are too big to stick in there.
+
+00:34:41,873 --> 00:34:43,820
+I was wondering how you deal with that.
+
+00:34:43,820 --> 00:34:44,720
+- [Liam] We don't.
+
+00:34:45,810 --> 00:34:48,772
+You'd have to have a pointer of some type,
+
+00:34:48,772 --> 00:34:50,650
+and to look it up, like you'd say,
+
+00:34:50,650 --> 00:34:52,780
+you would have to have your own data structure
+
+00:34:52,780 --> 00:34:54,183
+to put in there.
+
+00:34:55,730 --> 00:34:56,563
+What's that?
+
+00:34:56,563 --> 00:34:57,930
+- Probably just makes sense
+
+00:34:57,930 --> 00:35:00,303
+to stick with rbtree for those for now.
+
+00:35:01,290 --> 00:35:03,160
+- [Liam] Well it depends why you're in an rbtree
+
+00:35:03,160 --> 00:35:05,310
+in the first place I guess.
+
+00:35:05,310 --> 00:35:07,580
+Why are you using an rbtree and not just a linked list
+
+00:35:07,580 --> 00:35:10,230
+if you're just using previous and next?
+
+00:35:10,230 --> 00:35:11,610
+- Because you may have a lot of them,
+
+00:35:11,610 --> 00:35:16,090
+and it's a lot faster to search in rbtree than a linklist.
+
+00:35:16,090 --> 00:35:18,960
+- But you're running through every single one.
+
+00:35:18,960 --> 00:35:20,476
+Why is it fast?
+
+00:35:20,476 --> 00:35:22,810
+- [Audience Member] Because you can compare these things.
+
+00:35:22,810 --> 00:35:25,280
+So you've got two network addresses,
+
+00:35:25,280 --> 00:35:26,113
+you can compare them.
+
+00:35:26,113 --> 00:35:27,360
+Say this one's a bit greater than that one
+
+00:35:27,360 --> 00:35:29,000
+or less than that one.
+
+00:35:29,000 --> 00:35:30,490
+So you can do it.
+
+00:35:30,490 --> 00:35:33,204
+- I see, you're going left or right every time.
+
+00:35:33,204 --> 00:35:34,330
+- [Audience Member] Yeah, so you can use a tree, not a...
+
+00:35:34,330 --> 00:35:36,080
+- So it's not previous or next then.
+
+00:35:36,080 --> 00:35:37,680
+You're actually going through.
+
+00:35:37,680 --> 00:35:39,063
+So what are you comparing?
+
+00:35:40,090 --> 00:35:41,520
+Your value?
+
+00:35:41,520 --> 00:35:46,520
+- Say IPv6 address or sort capture or something.
+
+00:35:46,850 --> 00:35:49,400
+- I don't think, we don't cope with that right now.
+
+00:35:49,400 --> 00:35:50,723
+- [Audience Member] That's fair enough.
+
+00:35:56,260 --> 00:35:57,383
+- Any other questions?
+
+00:36:11,180 --> 00:36:12,520
+- Without determining the detail,
+
+00:36:12,520 --> 00:36:16,010
+what is looking inside the Maple tree,
+
+00:36:16,010 --> 00:36:18,840
+what is the looking you are using to ensure
+
+00:36:18,840 --> 00:36:21,550
+the optimicity Of the operation.
+
+00:36:21,550 --> 00:36:26,120
+Is it possible to change multiple slots at one time?
+
+00:36:26,120 --> 00:36:27,360
+This kind of stuff.
+
+00:36:27,360 --> 00:36:29,430
+- Right, so...
+
+00:36:29,430 --> 00:36:32,470
+To be RCU safe, what we do is, we basically
+
+00:36:32,470 --> 00:36:35,558
+if you're pending to a node, it's fine.
+
+00:36:35,558 --> 00:36:39,464
+The way the search works, once it hits a pivot of zero,
+
+00:36:39,464 --> 00:36:41,410
+then it knows it's the end of the node,
+
+00:36:41,410 --> 00:36:44,532
+as long as it's not the first pivot
+
+00:36:44,532 --> 00:36:46,703
+of the first node, you're fine.
+
+00:36:49,112 --> 00:36:52,920
+So you write your slot first, and then your pivot,
+
+00:36:52,920 --> 00:36:54,890
+and your fine on depends.
+
+00:36:54,890 --> 00:36:57,310
+If you're inserting somewhere in the middle,
+
+00:36:57,310 --> 00:36:58,520
+you will need a new node,
+
+00:36:58,520 --> 00:37:00,480
+so that essentially means
+
+00:37:02,720 --> 00:37:04,570
+the data of the node is copied,
+
+00:37:04,570 --> 00:37:05,440
+you insert the new one,
+
+00:37:05,440 --> 00:37:07,750
+and the rest of the node is copied into it,
+
+00:37:07,750 --> 00:37:10,320
+and then it's put into the tree.
+
+00:37:10,320 --> 00:37:14,050
+And that put into the tree is RCU-safe,
+
+00:37:14,050 --> 00:37:18,260
+because of the RCU-safe stuff, right?
+
+00:37:18,260 --> 00:37:20,020
+The swapping of the...
+
+00:37:20,020 --> 00:37:23,170
+So it's either, you're guaranteed to get the old value,
+
+00:37:23,170 --> 00:37:26,430
+or the new value and not half of whatever, right?
+
+00:37:26,430 --> 00:37:29,673
+So that's kinda how that works internally.
+
+00:37:31,750 --> 00:37:33,000
+- [Audience Member] And changing multiple slots
+
+00:37:33,000 --> 00:37:35,387
+at the same time, if they are not in the same range.
+
+00:37:35,387 --> 00:37:38,680
+Changing multiple slots at the same time
+
+00:37:38,680 --> 00:37:42,460
+if they are not in the same range 64,
+
+00:37:42,460 --> 00:37:44,506
+allocation or range 64.
+
+00:37:44,506 --> 00:37:46,020
+- [Liam] I don't think I even have an API for that.
+
+00:37:46,020 --> 00:37:47,160
+I didn't think there was a use
+
+00:37:47,160 --> 00:37:49,483
+for changing multiple slots at the same time.
+
+00:37:53,002 --> 00:37:56,610
+You could do it in the same copy operation
+
+00:37:56,610 --> 00:37:58,310
+as long as you don't overrun your node,
+
+00:37:58,310 --> 00:38:00,620
+in which case you would just create a new sub-tree,
+
+00:38:00,620 --> 00:38:03,219
+and that new sub-tree would be swapped in
+
+00:38:03,219 --> 00:38:05,530
+the same sort of way.
+
+00:38:05,530 --> 00:38:07,420
+And that's kind of what I was looking at doing
+
+00:38:07,420 --> 00:38:09,890
+with the store operation of creating a new sub-tree
+
+00:38:09,890 --> 00:38:14,540
+and then just grafting that into the tree.
+
+00:38:14,540 --> 00:38:16,530
+Turns out you could potentially
+
+00:38:16,530 --> 00:38:18,780
+overwrite your entire tree though, so it's...
+
+00:38:19,614 --> 00:38:21,062
+- [Audience Member] Can something read pages
+
+00:38:21,062 --> 00:38:23,768
+get some use, for example, potentially?
+
+00:38:23,768 --> 00:38:24,922
+- Read pages?
+
+00:38:24,922 --> 00:38:26,380
+- [Audience Member] Where you use,
+
+00:38:26,380 --> 00:38:29,590
+here's a set of continuous pages, go read them.
+
+00:38:29,590 --> 00:38:31,220
+- Yeah, okay.
+
+00:38:31,220 --> 00:38:33,200
+- [Moderator] Yeah, the comment I was going to make
+
+00:38:33,200 --> 00:38:36,210
+from a file system perspective is,
+
+00:38:36,210 --> 00:38:39,120
+it's not necessarily a batch API per se,
+
+00:38:39,120 --> 00:38:41,610
+but some kind of range delete,
+
+00:38:41,610 --> 00:38:42,820
+where you're truncating,
+
+00:38:42,820 --> 00:38:44,890
+so you want to delete everything
+
+00:38:44,890 --> 00:38:47,720
+after a particular key value
+
+00:38:47,720 --> 00:38:52,720
+or from this key value to that key value,
+
+00:38:53,060 --> 00:38:55,460
+we want to remove everything in that range.
+
+00:38:55,460 --> 00:38:56,630
+- That's not a problem, actually.
+
+00:38:56,630 --> 00:38:58,610
+You can just store a node. - You have to rotate, right?
+
+00:38:58,610 --> 00:39:00,980
+This is the whole, you may have to rotate
+
+00:39:00,980 --> 00:39:04,090
+to actually maintain your tree semantics.
+
+00:39:04,090 --> 00:39:06,130
+- Yeah, you can store a null,
+
+00:39:06,130 --> 00:39:11,100
+and then it's gone, but it's not an efficient tree anymore,
+
+00:39:11,100 --> 00:39:14,812
+so then kinda either living with that,
+
+00:39:14,812 --> 00:39:16,583
+or currently, making a new one.
+
+00:39:18,060 --> 00:39:21,760
+- Or maybe you rotate and balance in a work queue,
+
+00:39:21,760 --> 00:39:23,930
+but maybe that's overkill.
+
+00:39:23,930 --> 00:39:27,003
+- Yeah, I was looking at the work queue idea for that.
+
+00:39:29,920 --> 00:39:31,503
+- [Moderator] Any other questions?
+
+00:39:32,480 --> 00:39:34,640
+- [Audience Member] Comment on that.
+
+00:39:34,640 --> 00:39:38,123
+One other thing is if you can come up with...
+
+00:39:38,123 --> 00:39:41,040
+One other thing is if you can come up with a metric
+
+00:39:43,240 --> 00:39:47,243
+or a heuristic for how unbalanced your tree is,
+
+00:39:47,243 --> 00:39:52,243
+you can defer your rebuild so that you don't end up with
+
+00:39:53,640 --> 00:39:56,010
+a bunch of ping pong behavior.
+
+00:39:56,010 --> 00:39:56,997
+- Yeah.
+
+00:39:56,997 --> 00:40:01,720
+- [Audience Member] Because, generally,
+
+00:40:01,720 --> 00:40:05,100
+working on a moderately unbalanced tree
+
+00:40:05,100 --> 00:40:09,330
+is going to be more efficient
+
+00:40:09,330 --> 00:40:14,330
+than spending a lot of effort at rebuilding too frequently.
+
+00:40:14,870 --> 00:40:16,700
+- Yeah, we came to the same conclusion,
+
+00:40:16,700 --> 00:40:18,120
+and at the beginning we thought,
+
+00:40:18,120 --> 00:40:20,090
+you know what, we're not going to rebalance ever,
+
+00:40:20,090 --> 00:40:22,370
+and then we came up with a few use cases
+
+00:40:22,370 --> 00:40:25,500
+in which you could theoretically wipe out half the tree,
+
+00:40:25,500 --> 00:40:29,560
+and then you're kinda stuck with this really bad performer.
+
+00:40:29,560 --> 00:40:32,850
+So you do have to figure out some strategy.
+
+00:40:32,850 --> 00:40:37,840
+Delaying would be probably a good strategy for some things,
+
+00:40:37,840 --> 00:40:39,720
+like if you're tearing down a task
+
+00:40:39,720 --> 00:40:41,978
+and things are getting erased,
+
+00:40:41,978 --> 00:40:44,710
+you don't want to continuously rebalance
+
+00:40:44,710 --> 00:40:46,053
+when that occurs.
+
+00:40:47,310 --> 00:40:49,660
+- [Audience Member] To maintain loss integrity,
+
+00:40:51,302 --> 00:40:52,510
+do you need do allocation?
+
+00:40:52,510 --> 00:40:57,330
+- Yeah, so on writes, you may need to do allocations
+
+00:40:57,330 --> 00:40:59,770
+to maintain RCU integrity.
+
+00:40:59,770 --> 00:41:01,180
+- [Audience Member] Copy and write.
+
+00:41:01,180 --> 00:41:02,496
+- Say again.
+
+00:41:02,496 --> 00:41:03,739
+- [Audience Member] Copy and write, basically.
+
+00:41:03,739 --> 00:41:04,950
+- Yes, copy and write, essentially,
+
+00:41:04,950 --> 00:41:05,993
+split on write,
+
+00:41:06,960 --> 00:41:08,520
+and it turns out to be...
+
+00:41:08,520 --> 00:41:09,353
+Yes.
+
+00:41:10,596 --> 00:41:11,560
+(laughter)
+
+00:41:11,560 --> 00:41:13,613
+- [Moderator] We have time for one more question.
+
+00:41:16,500 --> 00:41:18,974
+Okay, well let's thank the speaker.
+
+00:41:18,974 --> 00:41:19,807
+(applause)
+
+00:41:19,807 --> 00:41:20,640
+
+YouTube URL: https://www.youtube.com/watch?v=5VVUa7mYLUs
+
+

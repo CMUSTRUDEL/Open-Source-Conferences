@@ -1,0 +1,1532 @@
+Title: Not less, Not more. Exactly Once Large-Scale Stream Processing in Action.
+Publication date: 2018-03-06
+Playlist: FOSDEM 2017
+Description: 
+	by Paris Carbone
+
+At: FOSDEM 2017
+
+Large-scale data stream processing has come a long way to where it is today.It combines all the essential requirements of modern data analytics: subsecondlatency, high throughput and impressively, strong consistency. Apache Flink isa system that serves as a proof-of-concept of these characteristics and it ismainly well-known for its lightweight fault tolerance. Data engineers andanalysts can now let the system handle Terabytes of computational statewithout worrying about failures that can potentially occur.
+
+In this talk, I am going to explain all the fundamental challenges behindexactly-once processing guarantees in large-scale streaming in a simple andintuitive way. I will further guide you through the tricks and pitfalls thatwe faced in our effort to make state management easy to use, transparent andyet extraordinarily powerful. Finally, I will demonstrate how you can declarestate and the in-flight protocol that is running underneath your processingpipeline to guarantee that your computation will always run consistently anduninterrupted, until infinity.
+
+In more detail I am going to demonstrate the basic and extended versions ofABS (Asynchronous Barrier Snapshotting) , our state-of-the-art decentralized,in-flight snapshotting algorithm tailored to the needs of a dataflow graph.ABS needs no global synchronisation and works purely in a decentralisedmanner. It is considered today as one of the most lightweight mechanisms forcheckpointing application state and has been developed even further togetherwith the rest of the Flink community with additional optimisations. In fact,other open source systems such as Apache Storm have also recently incorporatedthe same mechanism due to its simplicity and effectiveness. One of suchoptimisations that is currently being merged in the system, is the adaptationof the algorithm in graphs that contain cycles which I am also going to coverin this talk in more detail. Furthermore, I will also briefly explain ourcurrent efforts to incrementalize state snapshots to further balance the loadtrade-off of state checkpointing and recovery time.
+
+
+Room: H.2213
+Scheduled start: 2017-02-04 17:00:00
+Captions: 
+	00:00:04,590 --> 00:00:10,559
+so yeah I'm part Scarponi I open it's
+
+00:00:07,529 --> 00:00:12,750
+right yeah I'm one of the core
+
+00:00:10,559 --> 00:00:15,000
+committers of Apache plink you know it
+
+00:00:12,750 --> 00:00:16,529
+it's a very cool processing system I'm
+
+00:00:15,000 --> 00:00:19,669
+also a PC but I don't know if it doesn't
+
+00:00:16,529 --> 00:00:23,060
+if it matters in this audience
+
+00:00:19,669 --> 00:00:27,210
+so hopefully many of you know the system
+
+00:00:23,060 --> 00:00:28,980
+truth is I know this recently that
+
+00:00:27,210 --> 00:00:30,929
+there's a lot of confusion when it comes
+
+00:00:28,980 --> 00:00:32,660
+to processing guarantees and guarantees
+
+00:00:30,929 --> 00:00:35,640
+in general you see all sorts of
+
+00:00:32,660 --> 00:00:37,830
+opinionated posts in forums not
+
+00:00:35,640 --> 00:00:39,900
+necessarily fling forums or discussions
+
+00:00:37,830 --> 00:00:43,040
+more like general open source
+
+00:00:39,900 --> 00:00:45,120
+discussions and hacking news in general
+
+00:00:43,040 --> 00:00:48,030
+that is why I created this talk and
+
+00:00:45,120 --> 00:00:50,910
+basically I want to hopefully help some
+
+00:00:48,030 --> 00:00:53,490
+some of you folks to understand what is
+
+00:00:50,910 --> 00:00:56,070
+really going on there in case you end up
+
+00:00:53,490 --> 00:00:59,820
+in this dev room by mistake or you're
+
+00:00:56,070 --> 00:01:01,410
+you were just feeling adventurous it
+
+00:00:59,820 --> 00:01:04,439
+doesn't matter because I don't assume
+
+00:01:01,410 --> 00:01:07,439
+that you know much I will just generally
+
+00:01:04,439 --> 00:01:09,179
+explain the whole idea and hopefully
+
+00:01:07,439 --> 00:01:12,479
+give a good mmm
+
+00:01:09,179 --> 00:01:13,619
+alright so I have only one introductory
+
+00:01:12,479 --> 00:01:15,630
+slide
+
+00:01:13,619 --> 00:01:18,570
+what do data stream processors do
+
+00:01:15,630 --> 00:01:21,060
+basically they get a recipe of a data
+
+00:01:18,570 --> 00:01:23,969
+processing pipeline and they compile
+
+00:01:21,060 --> 00:01:28,679
+this down to an execution of that
+
+00:01:23,969 --> 00:01:30,899
+pipeline basically this usually ends up
+
+00:01:28,679 --> 00:01:32,850
+in a disability a flow that covers
+
+00:01:30,899 --> 00:01:38,789
+iran's continuously uncovers your
+
+00:01:32,850 --> 00:01:40,200
+general data processing needs so if you
+
+00:01:38,789 --> 00:01:42,090
+are considering starting with data
+
+00:01:40,200 --> 00:01:45,170
+stream processing now i think there is
+
+00:01:42,090 --> 00:01:48,149
+no better timing because at the moment
+
+00:01:45,170 --> 00:01:50,009
+stream processors can offer you
+
+00:01:48,149 --> 00:01:51,810
+subsequent latency processing and high
+
+00:01:50,009 --> 00:01:54,329
+throughput at the same time
+
+00:01:51,810 --> 00:01:56,240
+lates data which means when your data is
+
+00:01:54,329 --> 00:01:58,530
+not sorted across your your
+
+00:01:56,240 --> 00:02:00,659
+infrastructure doesn't matter because
+
+00:01:58,530 --> 00:02:02,880
+your system the system can actually sort
+
+00:02:00,659 --> 00:02:05,429
+the data in proceed at the right event
+
+00:02:02,880 --> 00:02:08,940
+time there's a nice google paper about
+
+00:02:05,429 --> 00:02:13,019
+this and by the way there are some
+
+00:02:08,940 --> 00:02:17,790
+pipelines run 365 24/7 consistently
+
+00:02:13,019 --> 00:02:20,099
+without any issues in general our if you
+
+00:02:17,790 --> 00:02:23,340
+can understand this it's it's crazy
+
+00:02:20,099 --> 00:02:25,860
+right so if you are DevOps
+
+00:02:23,340 --> 00:02:28,019
+you're working with DevOps you probably
+
+00:02:25,860 --> 00:02:29,840
+know the pain of dealing with
+
+00:02:28,019 --> 00:02:32,730
+application updates handling failures
+
+00:02:29,840 --> 00:02:35,099
+installing adding more or less removing
+
+00:02:32,730 --> 00:02:36,780
+workers reconfiguring the system in
+
+00:02:35,099 --> 00:02:38,190
+general is a pain because there's an
+
+00:02:36,780 --> 00:02:39,720
+application or making applications
+
+00:02:38,190 --> 00:02:41,849
+running in the background and you need
+
+00:02:39,720 --> 00:02:43,590
+to make sure that everything we run
+
+00:02:41,849 --> 00:02:46,470
+correctly and you won't lose any
+
+00:02:43,590 --> 00:02:49,080
+pressing or any data that's very very
+
+00:02:46,470 --> 00:02:53,459
+very annoying and if you do any mistake
+
+00:02:49,080 --> 00:02:58,380
+this can cause heavy impact of course in
+
+00:02:53,459 --> 00:03:00,000
+your in your company so failures can
+
+00:02:58,380 --> 00:03:05,010
+happen we cannot really eliminate
+
+00:03:00,000 --> 00:03:08,870
+entropy but in general we can use a fail
+
+00:03:05,010 --> 00:03:11,940
+recovery model to turn back time and run
+
+00:03:08,870 --> 00:03:15,810
+run our computation again
+
+00:03:11,940 --> 00:03:18,180
+basically we we need to save our work
+
+00:03:15,810 --> 00:03:20,010
+today so that someone tomorrow can
+
+00:03:18,180 --> 00:03:22,260
+continue our work because we don't know
+
+00:03:20,010 --> 00:03:24,359
+if you will leave tomorrow from then
+
+00:03:22,260 --> 00:03:27,900
+some if but something bad happens you
+
+00:03:24,359 --> 00:03:29,760
+know yeah so in system theory this
+
+00:03:27,900 --> 00:03:31,650
+called fail recovery mode and most
+
+00:03:29,760 --> 00:03:34,440
+system actually systems employ this
+
+00:03:31,650 --> 00:03:37,380
+model and they also offer some
+
+00:03:34,440 --> 00:03:39,269
+guarantees with that here's a map of
+
+00:03:37,380 --> 00:03:43,889
+some guarantees you can see several
+
+00:03:39,269 --> 00:03:47,430
+discussion forums yeah it's a bit
+
+00:03:43,889 --> 00:03:50,220
+annoying so I would say most of them on
+
+00:03:47,430 --> 00:03:52,350
+their own say nothing if you see someone
+
+00:03:50,220 --> 00:03:54,299
+saying exactly once or at least once it
+
+00:03:52,350 --> 00:03:56,519
+says nothing is it exactly once
+
+00:03:54,299 --> 00:03:58,620
+processing is exactly once output is
+
+00:03:56,519 --> 00:04:01,920
+exactly once end-to-end it doesn't
+
+00:03:58,620 --> 00:04:04,970
+really you know work on its own so I'll
+
+00:04:01,920 --> 00:04:07,709
+try to resolve this ambiguity right away
+
+00:04:04,970 --> 00:04:10,590
+so when we talk about guarantees first
+
+00:04:07,709 --> 00:04:14,190
+of all we have a system so a system is
+
+00:04:10,590 --> 00:04:17,010
+this box it's closed even though it
+
+00:04:14,190 --> 00:04:19,470
+seems distributed property civil systems
+
+00:04:17,010 --> 00:04:22,860
+gives you give you an epoch Chur of a
+
+00:04:19,470 --> 00:04:24,539
+single thing so this is a single thing
+
+00:04:22,860 --> 00:04:26,280
+it's a system and then you have the
+
+00:04:24,539 --> 00:04:27,300
+outside world this can be a database can
+
+00:04:26,280 --> 00:04:30,710
+be a law
+
+00:04:27,300 --> 00:04:33,000
+it can be for example a filesystem and
+
+00:04:30,710 --> 00:04:34,889
+may be talking about guarantees we have
+
+00:04:33,000 --> 00:04:36,720
+first of all processing guarantees so
+
+00:04:34,889 --> 00:04:40,770
+always remember processing guarantees
+
+00:04:36,720 --> 00:04:44,220
+have to do with the system so it's about
+
+00:04:40,770 --> 00:04:45,990
+what the internal state of the system we
+
+00:04:44,220 --> 00:04:48,030
+were talking about output delivery or
+
+00:04:45,990 --> 00:04:50,550
+end-to-end guarantees we usually talk
+
+00:04:48,030 --> 00:04:51,990
+about the outside world so the effects
+
+00:04:50,550 --> 00:04:53,550
+of the system the side effects of the
+
+00:04:51,990 --> 00:04:57,180
+processing of the system in the outside
+
+00:04:53,550 --> 00:05:00,060
+world so let start with a procedure on
+
+00:04:57,180 --> 00:05:03,479
+this so why are they need in the first
+
+00:05:00,060 --> 00:05:05,370
+place the idea is that processing
+
+00:05:03,479 --> 00:05:07,190
+creates side effects inside the system
+
+00:05:05,370 --> 00:05:10,320
+it's where your application is running
+
+00:05:07,190 --> 00:05:13,289
+let's say you do workout that's I know
+
+00:05:10,320 --> 00:05:14,250
+it's it's very boring but that's the
+
+00:05:13,289 --> 00:05:17,849
+first thing that comes in mind
+
+00:05:14,250 --> 00:05:19,410
+unfortunately if you work out your
+
+00:05:17,849 --> 00:05:21,000
+account might not be correct so it might
+
+00:05:19,410 --> 00:05:23,849
+not reflect the actual state of the
+
+00:05:21,000 --> 00:05:25,710
+outside world inside the system this is
+
+00:05:23,849 --> 00:05:27,660
+this is why it's important right if you
+
+00:05:25,710 --> 00:05:30,690
+work in transactions and money this can
+
+00:05:27,660 --> 00:05:33,180
+make a huge difference right if you
+
+00:05:30,690 --> 00:05:35,099
+don't get the numbers right so less or
+
+00:05:33,180 --> 00:05:39,419
+more processing sometimes means
+
+00:05:35,099 --> 00:05:41,820
+incorrect in all states and guarantees
+
+00:05:39,419 --> 00:05:44,970
+come in three flavors usually pro
+
+00:05:41,820 --> 00:05:46,979
+security sorry at most once means the
+
+00:05:44,970 --> 00:05:49,139
+system might process less at least once
+
+00:05:46,979 --> 00:05:50,699
+means the system might process more and
+
+00:05:49,139 --> 00:05:53,940
+exactly once means that the system
+
+00:05:50,699 --> 00:05:55,880
+behaves as if data are processed exactly
+
+00:05:53,940 --> 00:06:00,300
+once right there's no other side effect
+
+00:05:55,880 --> 00:06:02,280
+I will not talk about most months
+
+00:06:00,300 --> 00:06:03,870
+because it's a bit boring you can just
+
+00:06:02,280 --> 00:06:07,169
+discard records that's all
+
+00:06:03,870 --> 00:06:09,710
+I'll talk about at least ones first so
+
+00:06:07,169 --> 00:06:12,949
+this this is also very simple actually
+
+00:06:09,710 --> 00:06:17,310
+and now all we usually need to have is a
+
+00:06:12,949 --> 00:06:19,860
+cutter for example any queue or message
+
+00:06:17,310 --> 00:06:22,740
+log that's durable and lets you go back
+
+00:06:19,860 --> 00:06:24,300
+in time and replay some input you can
+
+00:06:22,740 --> 00:06:27,599
+also do manual logging if you remember
+
+00:06:24,300 --> 00:06:31,949
+storm like the first version they were
+
+00:06:27,599 --> 00:06:33,750
+doing some manual logging this doesn't
+
+00:06:31,949 --> 00:06:35,820
+reflect any system it's just an
+
+00:06:33,750 --> 00:06:38,610
+illustration of what at least once means
+
+00:06:35,820 --> 00:06:41,070
+so we have three records a green blue
+
+00:06:38,610 --> 00:06:42,720
+and red when the record goes inside this
+
+00:06:41,070 --> 00:06:45,030
+them it leaves some side effect in this
+
+00:06:42,720 --> 00:06:46,770
+case it leaves account right the count
+
+00:06:45,030 --> 00:06:49,680
+is 1 because we processed one record
+
+00:06:46,770 --> 00:06:51,840
+it's correct if something goes wrong and
+
+00:06:49,680 --> 00:06:55,130
+let's say we reconfigured the system
+
+00:06:51,840 --> 00:06:58,550
+we're able to replay this record right
+
+00:06:55,130 --> 00:07:02,160
+so if we replace this record we get
+
+00:06:58,550 --> 00:07:06,180
+count of 2 as well but there is at least
+
+00:07:02,160 --> 00:07:10,730
+a count of 1 thus at least one no pun
+
+00:07:06,180 --> 00:07:10,730
+intended so that's how it works
+
+00:07:12,620 --> 00:07:17,340
+now let's go to the mysterious stuff
+
+00:07:14,730 --> 00:07:19,260
+exactly once processing all right
+
+00:07:17,340 --> 00:07:21,540
+this is a bit trickier we need to make
+
+00:07:19,260 --> 00:07:24,000
+sure that data lives side effects only
+
+00:07:21,540 --> 00:07:26,790
+once and any underlying mechanism that
+
+00:07:24,000 --> 00:07:28,470
+does fail recovery should not impact the
+
+00:07:26,790 --> 00:07:32,280
+actual execution of the system or the
+
+00:07:28,470 --> 00:07:33,870
+application right if we go a bit
+
+00:07:32,280 --> 00:07:36,030
+aggressively and say ok I can solve it
+
+00:07:33,870 --> 00:07:38,490
+it's very simple I will just run the
+
+00:07:36,030 --> 00:07:40,740
+transaction for every record the system
+
+00:07:38,490 --> 00:07:45,390
+processes right I can write I can just
+
+00:07:40,740 --> 00:07:47,400
+write in a key value store all the all
+
+00:07:45,390 --> 00:07:49,410
+the mutations of the state and all
+
+00:07:47,400 --> 00:07:52,620
+associated with the records that caused
+
+00:07:49,410 --> 00:07:55,050
+these mutations and then I'm able to do
+
+00:07:52,620 --> 00:07:59,370
+anything I wanna consist go back in time
+
+00:07:55,050 --> 00:08:02,820
+fetch up any state in the history of the
+
+00:07:59,370 --> 00:08:05,520
+system and so forth this is what Mill
+
+00:08:02,820 --> 00:08:07,320
+will actually did and it worked pretty
+
+00:08:05,520 --> 00:08:11,570
+well for Google because they had a very
+
+00:08:07,320 --> 00:08:17,040
+good key value store but apparently what
+
+00:08:11,570 --> 00:08:19,260
+can I go back yeah but apparently this
+
+00:08:17,040 --> 00:08:22,230
+doesn't work everywhere usually people
+
+00:08:19,260 --> 00:08:24,720
+don't have fine-tuned key value stores
+
+00:08:22,230 --> 00:08:27,210
+and perfect stores with that can you
+
+00:08:24,720 --> 00:08:29,220
+know deal with high congestion and write
+
+00:08:27,210 --> 00:08:30,780
+and append congestion so it's not always
+
+00:08:29,220 --> 00:08:33,979
+the best case it's very aggressive out
+
+00:08:30,780 --> 00:08:36,810
+saying perhaps we we can do better
+
+00:08:33,979 --> 00:08:37,770
+so the problem should be simpler than
+
+00:08:36,810 --> 00:08:40,560
+that
+
+00:08:37,770 --> 00:08:43,039
+so actually so first as I said earlier
+
+00:08:40,560 --> 00:08:45,720
+input can be visually rolled back right
+
+00:08:43,039 --> 00:08:48,570
+in fact this way logs make sure you can
+
+00:08:45,720 --> 00:08:50,550
+always achieve this and the process
+
+00:08:48,570 --> 00:08:51,870
+looks similar to cassettes right if you
+
+00:08:50,550 --> 00:08:53,520
+remember cassettes if you are in my
+
+00:08:51,870 --> 00:08:54,540
+generation you probably remember how
+
+00:08:53,520 --> 00:08:58,470
+they work
+
+00:08:54,540 --> 00:09:01,740
+a cassette is durable log actually it
+
+00:08:58,470 --> 00:09:04,620
+stores an input stream let's say sound
+
+00:09:01,740 --> 00:09:05,670
+or video and let's keep plates and at
+
+00:09:04,620 --> 00:09:09,470
+some point
+
+00:09:05,670 --> 00:09:13,470
+roll back to a specific song for example
+
+00:09:09,470 --> 00:09:16,260
+or offset durable logs actually today
+
+00:09:13,470 --> 00:09:20,010
+like Kafka do this for motto cassettes
+
+00:09:16,260 --> 00:09:22,200
+so they can actually play a lot of
+
+00:09:20,010 --> 00:09:25,560
+dissipates streams and then roll back a
+
+00:09:22,200 --> 00:09:28,230
+specific set of offsets this is very
+
+00:09:25,560 --> 00:09:30,120
+cool that means that we can reverse
+
+00:09:28,230 --> 00:09:32,190
+multiple streams but some partitions
+
+00:09:30,120 --> 00:09:36,690
+back in parallel in a very consistent
+
+00:09:32,190 --> 00:09:39,180
+way how can we use that so since we
+
+00:09:36,690 --> 00:09:41,220
+can't be currently reverse streams then
+
+00:09:39,180 --> 00:09:44,720
+maybe we can't do the following let's
+
+00:09:41,220 --> 00:09:47,990
+say we split the stream into parts
+
+00:09:44,720 --> 00:09:51,930
+coarse grained parts that's why I called
+
+00:09:47,990 --> 00:09:53,820
+coarse grain photons and this is what
+
+00:09:51,930 --> 00:09:55,410
+most modern data stream processing
+
+00:09:53,820 --> 00:09:58,170
+systems do actually in different
+
+00:09:55,410 --> 00:10:01,620
+different flavors so you see that we
+
+00:09:58,170 --> 00:10:03,480
+split the stream in two parts right the
+
+00:10:01,620 --> 00:10:07,020
+only thing we need to do now is to
+
+00:10:03,480 --> 00:10:09,690
+process these parts and whenever
+
+00:10:07,020 --> 00:10:12,210
+something goes wrong we revert back to
+
+00:10:09,690 --> 00:10:14,280
+where the previous part ended for that
+
+00:10:12,210 --> 00:10:15,960
+we we need to be able to reverse the
+
+00:10:14,280 --> 00:10:18,840
+input that we can do we have the logs
+
+00:10:15,960 --> 00:10:20,880
+but we also need to be able to capture
+
+00:10:18,840 --> 00:10:23,160
+the global states of the system after
+
+00:10:20,880 --> 00:10:25,050
+processing all these records and all
+
+00:10:23,160 --> 00:10:29,100
+these records right so we can reverse
+
+00:10:25,050 --> 00:10:32,250
+everything back and we can do this in
+
+00:10:29,100 --> 00:10:34,770
+different ways this might seem familiar
+
+00:10:32,250 --> 00:10:38,760
+so spark people you might feel a bit
+
+00:10:34,770 --> 00:10:41,520
+bitter vu this is the micro but it does
+
+00:10:38,760 --> 00:10:44,610
+the same thing in a discrete way so
+
+00:10:41,520 --> 00:10:48,390
+there is a planner that prepares part
+
+00:10:44,610 --> 00:10:49,760
+one it sends the records and then the
+
+00:10:48,390 --> 00:10:52,230
+records are being flushed to the system
+
+00:10:49,760 --> 00:10:54,330
+they're being processed they create some
+
+00:10:52,230 --> 00:10:56,520
+side effects the side effects are being
+
+00:10:54,330 --> 00:10:59,970
+stored as a state of system in a system
+
+00:10:56,520 --> 00:11:01,800
+store stay store and then you know you
+
+00:10:59,970 --> 00:11:03,690
+can reschedule you can schedule part two
+
+00:11:01,800 --> 00:11:06,030
+and then retrieve the old states
+
+00:11:03,690 --> 00:11:08,100
+continue from there you can flush all
+
+00:11:06,030 --> 00:11:10,709
+the inputs of part two
+
+00:11:08,100 --> 00:11:12,930
+create side-effects of Part two so this
+
+00:11:10,709 --> 00:11:14,970
+happens the very transactional way this
+
+00:11:12,930 --> 00:11:17,190
+is like RDD processing and then you the
+
+00:11:14,970 --> 00:11:18,660
+new structure streaming that's something
+
+00:11:17,190 --> 00:11:22,769
+similar there's a state store actually
+
+00:11:18,660 --> 00:11:24,680
+it's called say sorry this is a nice way
+
+00:11:22,769 --> 00:11:27,089
+I don't say this is bad actually
+
+00:11:24,680 --> 00:11:29,459
+this is a fine example of discreetly
+
+00:11:27,089 --> 00:11:32,329
+emulating continuous processing as a
+
+00:11:29,459 --> 00:11:35,250
+series of transactions it's very safe
+
+00:11:32,329 --> 00:11:37,860
+it's simple to understand actually but
+
+00:11:35,250 --> 00:11:39,540
+there are some side effects when you
+
+00:11:37,860 --> 00:11:43,050
+when you create the system like this you
+
+00:11:39,540 --> 00:11:45,630
+need to make sure that the user writes
+
+00:11:43,050 --> 00:11:49,079
+code that works in you know subsequent
+
+00:11:45,630 --> 00:11:51,720
+batches and that affects the API another
+
+00:11:49,079 --> 00:11:54,779
+side effect is that there's a very high
+
+00:11:51,720 --> 00:11:57,480
+periodic scheduling latency actually I
+
+00:11:54,779 --> 00:12:00,569
+know if some of you know drizzle drizzle
+
+00:11:57,480 --> 00:12:03,569
+is a research project at Berkeley they
+
+00:12:00,569 --> 00:12:05,339
+they made a study that says okay we can
+
+00:12:03,569 --> 00:12:07,829
+actually reduce the processing latency
+
+00:12:05,339 --> 00:12:09,839
+the scheduled latency by pre scheduling
+
+00:12:07,829 --> 00:12:13,290
+many batches and that then we amortize
+
+00:12:09,839 --> 00:12:15,380
+the scheduling cause this is true but
+
+00:12:13,290 --> 00:12:18,000
+that happens the cost of higher
+
+00:12:15,380 --> 00:12:21,689
+reconfiguration latency so there's a
+
+00:12:18,000 --> 00:12:23,610
+trade of there I would go with something
+
+00:12:21,689 --> 00:12:26,610
+like long-running I like long-running
+
+00:12:23,610 --> 00:12:28,709
+systems because there's notes there's no
+
+00:12:26,610 --> 00:12:30,389
+need to reconfigure right you can just
+
+00:12:28,709 --> 00:12:31,829
+let the thing run you scheduled it you
+
+00:12:30,389 --> 00:12:35,220
+just let it run if you need to
+
+00:12:31,829 --> 00:12:37,829
+reconfigure you just reconfigure and
+
+00:12:35,220 --> 00:12:40,860
+that's what happens with a solution for
+
+00:12:37,829 --> 00:12:42,449
+example let's say we want to take a
+
+00:12:40,860 --> 00:12:44,250
+snapshot while it's part is being
+
+00:12:42,449 --> 00:12:46,620
+processed so when all the green records
+
+00:12:44,250 --> 00:12:48,899
+are going in we have the execution we
+
+00:12:46,620 --> 00:12:51,380
+say stop everything stopped tunnels
+
+00:12:48,899 --> 00:12:53,850
+stop the the processing take a snapshot
+
+00:12:51,380 --> 00:12:56,639
+in this case the snapshot contains the
+
+00:12:53,850 --> 00:12:58,199
+states plus some in transient events
+
+00:12:56,639 --> 00:13:00,600
+because this part of the system state
+
+00:12:58,199 --> 00:13:02,339
+it's inside the box right if we recover
+
+00:13:00,600 --> 00:13:06,720
+from there we need to replay those
+
+00:13:02,339 --> 00:13:11,910
+events right and this is one ok approach
+
+00:13:06,720 --> 00:13:13,649
+but it has a problem the problem is that
+
+00:13:11,910 --> 00:13:17,760
+we stop execution and that's not
+
+00:13:13,649 --> 00:13:20,610
+continuous processing so I would say we
+
+00:13:17,760 --> 00:13:21,149
+could do something better we need to do
+
+00:13:20,610 --> 00:13:21,730
+two things
+
+00:13:21,149 --> 00:13:25,000
+when
+
+00:13:21,730 --> 00:13:27,070
+to not enforce discrete processing the
+
+00:13:25,000 --> 00:13:31,149
+API and not disrupt the execution with
+
+00:13:27,070 --> 00:13:32,620
+any underlying mechanism right and also
+
+00:13:31,149 --> 00:13:36,790
+I don't like this in transit events but
+
+00:13:32,620 --> 00:13:37,449
+we can deal with them later some of you
+
+00:13:36,790 --> 00:13:39,040
+might know
+
+00:13:37,449 --> 00:13:44,410
+let's Lombard he's the father of the
+
+00:13:39,040 --> 00:13:46,600
+Siebel systems or arguably owner so the
+
+00:13:44,410 --> 00:13:48,670
+thing is that Leslie Lamport wrote about
+
+00:13:46,600 --> 00:13:51,730
+distributed snapshots in case classic
+
+00:13:48,670 --> 00:13:53,620
+paper and he said that the global state
+
+00:13:51,730 --> 00:13:55,360
+detection algorithms not being super it
+
+00:13:53,620 --> 00:13:57,750
+should so be superimposed in the other
+
+00:13:55,360 --> 00:13:59,730
+line commutation and not after the
+
+00:13:57,750 --> 00:14:03,760
+execution of it right
+
+00:13:59,730 --> 00:14:06,850
+this really inspired us to come up with
+
+00:14:03,760 --> 00:14:09,310
+this technique on fling which basically
+
+00:14:06,850 --> 00:14:11,500
+stops the states just in time
+
+00:14:09,310 --> 00:14:14,610
+while the execution is running and this
+
+00:14:11,500 --> 00:14:17,500
+is why I call long-running pipelines
+
+00:14:14,610 --> 00:14:19,480
+state management so the idea is very
+
+00:14:17,500 --> 00:14:21,820
+simple we insert some markers the
+
+00:14:19,480 --> 00:14:24,490
+marketer signify is a promise actually
+
+00:14:21,820 --> 00:14:27,100
+that whatever comes after the markers
+
+00:14:24,490 --> 00:14:28,420
+belongs to the next part so basically we
+
+00:14:27,100 --> 00:14:31,029
+need to take a snapshot whenever we
+
+00:14:28,420 --> 00:14:33,010
+reach this part right and this goes
+
+00:14:31,029 --> 00:14:36,069
+along with the pipeline the normal data
+
+00:14:33,010 --> 00:14:37,899
+pipeline so if we flush records along
+
+00:14:36,069 --> 00:14:40,930
+with markers what happens is that the
+
+00:14:37,899 --> 00:14:42,819
+markers stop in some operators inside
+
+00:14:40,930 --> 00:14:45,010
+the system then the operators can
+
+00:14:42,819 --> 00:14:46,810
+actually take their partial snapshot
+
+00:14:45,010 --> 00:14:49,870
+this is not a complete snapshot it's
+
+00:14:46,810 --> 00:14:55,180
+like a you know a part of the global
+
+00:14:49,870 --> 00:14:58,480
+snapshot and then what happens is that
+
+00:14:55,180 --> 00:15:01,000
+operators with model inputs have to make
+
+00:14:58,480 --> 00:15:04,540
+sure that they process all records of
+
+00:15:01,000 --> 00:15:07,000
+part one right in this case what we do
+
+00:15:04,540 --> 00:15:08,949
+is that we prioritize the channels where
+
+00:15:07,000 --> 00:15:11,199
+we haven't received any barriers
+
+00:15:08,949 --> 00:15:12,459
+markers right so we need to make sure
+
+00:15:11,199 --> 00:15:17,440
+that we process all the green records
+
+00:15:12,459 --> 00:15:19,170
+first and then we take a snapshot so
+
+00:15:17,440 --> 00:15:21,430
+then we broadcast the barriers and
+
+00:15:19,170 --> 00:15:25,630
+eventually we have a complete snapshot
+
+00:15:21,430 --> 00:15:27,279
+that is pipe lines along the data and as
+
+00:15:25,630 --> 00:15:28,240
+you see there's no records in transit
+
+00:15:27,279 --> 00:15:30,930
+that's pretty cool
+
+00:15:28,240 --> 00:15:30,930
+it's like magic
+
+00:15:30,980 --> 00:15:36,019
+so some facts so this algorithm
+
+00:15:34,279 --> 00:15:38,269
+basically pipelines naturally with
+
+00:15:36,019 --> 00:15:41,029
+dataflow it's pretty cool it respects
+
+00:15:38,269 --> 00:15:42,139
+back pressure and all these things we
+
+00:15:41,029 --> 00:15:44,750
+can actually get at least once
+
+00:15:42,139 --> 00:15:46,160
+processing guarantees by dropping the
+
+00:15:44,750 --> 00:15:49,040
+alignment you know where we actually
+
+00:15:46,160 --> 00:15:52,730
+prioritize and if you want you can try
+
+00:15:49,040 --> 00:15:55,250
+it on paper it's homework the algorithm
+
+00:15:52,730 --> 00:15:58,699
+basically tailors the original Shannon
+
+00:15:55,250 --> 00:16:01,040
+Lumpur algorithm to to create a minimal
+
+00:15:58,699 --> 00:16:03,589
+snapshot States so we don't need events
+
+00:16:01,040 --> 00:16:07,070
+in transit basically and you can also
+
+00:16:03,589 --> 00:16:11,029
+work with cycles so with cycles we do
+
+00:16:07,070 --> 00:16:12,230
+the following this is still in a pull
+
+00:16:11,029 --> 00:16:16,310
+request States for a year
+
+00:16:12,230 --> 00:16:19,399
+sorry about that but it's correct so the
+
+00:16:16,310 --> 00:16:20,870
+idea is that we we flushed so there are
+
+00:16:19,399 --> 00:16:23,050
+there are loop records inside the loop
+
+00:16:20,870 --> 00:16:25,100
+right there just going around infinitely
+
+00:16:23,050 --> 00:16:26,930
+that means that we run the same
+
+00:16:25,100 --> 00:16:28,910
+algorithm similar never ends it will
+
+00:16:26,930 --> 00:16:32,019
+never terminate so what we actually do
+
+00:16:28,910 --> 00:16:34,040
+is that we create an upstream blog here
+
+00:16:32,019 --> 00:16:35,959
+to actually store everything that's
+
+00:16:34,040 --> 00:16:37,670
+inside the loop so that's part of the
+
+00:16:35,959 --> 00:16:39,410
+snapshot we just replayed after we
+
+00:16:37,670 --> 00:16:42,190
+recover and then we have a global State
+
+00:16:39,410 --> 00:16:42,190
+that's correct
+
+00:16:42,760 --> 00:16:53,899
+okay output guarantees this is a topic
+
+00:16:47,990 --> 00:16:55,610
+of very high debate so try not to piss
+
+00:16:53,899 --> 00:16:58,070
+off anyone
+
+00:16:55,610 --> 00:17:00,589
+that's why I recommend you always
+
+00:16:58,070 --> 00:17:03,920
+answering very diplomatic question
+
+00:17:00,589 --> 00:17:05,530
+answer so so these are three possible
+
+00:17:03,920 --> 00:17:10,819
+answers to that question
+
+00:17:05,530 --> 00:17:12,110
+which one would you pick can we have
+
+00:17:10,819 --> 00:17:15,470
+output guarantees can we guarantee
+
+00:17:12,110 --> 00:17:19,900
+exactly one's output in general all
+
+00:17:15,470 --> 00:17:19,900
+right anyone
+
+00:17:20,589 --> 00:17:37,580
+so sorry I don't have time I know I know
+
+00:17:31,659 --> 00:17:39,340
+it does the same console right so yeah
+
+00:17:37,580 --> 00:17:46,480
+the right house is depends I think
+
+00:17:39,340 --> 00:17:48,380
+everybody can agree yeah alright so
+
+00:17:46,480 --> 00:17:50,270
+there are many ways to deal with this
+
+00:17:48,380 --> 00:17:52,520
+problem actually we're talking about the
+
+00:17:50,270 --> 00:17:54,230
+outside world and the outside world can
+
+00:17:52,520 --> 00:17:57,230
+be anything can be a database can be a
+
+00:17:54,230 --> 00:17:58,970
+database that has versioning support can
+
+00:17:57,230 --> 00:18:00,679
+be a file system that can roll back can
+
+00:17:58,970 --> 00:18:03,140
+be five system that cannot roll back
+
+00:18:00,679 --> 00:18:05,510
+I don't know I mean it depends right so
+
+00:18:03,140 --> 00:18:08,570
+in the system like link we have special
+
+00:18:05,510 --> 00:18:12,230
+things that give you exactly one output
+
+00:18:08,570 --> 00:18:14,419
+guarantees and probably you know the
+
+00:18:12,230 --> 00:18:16,880
+concept of a dependency that's also how
+
+00:18:14,419 --> 00:18:19,070
+spark structure streaming it provides
+
+00:18:16,880 --> 00:18:20,570
+exactly once out guarantees it's very
+
+00:18:19,070 --> 00:18:24,440
+trivial that means it's a processing
+
+00:18:20,570 --> 00:18:25,580
+property that guarantees you that no
+
+00:18:24,440 --> 00:18:27,200
+matter how many times you run something
+
+00:18:25,580 --> 00:18:28,490
+you'll get the same output basically so
+
+00:18:27,200 --> 00:18:32,620
+that means it will write the same thing
+
+00:18:28,490 --> 00:18:34,940
+in their database and we have a fling
+
+00:18:32,620 --> 00:18:39,250
+thing that does this and also another
+
+00:18:34,940 --> 00:18:43,330
+another sink that uses the HDFS rolling
+
+00:18:39,250 --> 00:18:47,150
+files and truncate to actually
+
+00:18:43,330 --> 00:18:51,020
+transactionally so basically it was a
+
+00:18:47,150 --> 00:18:54,590
+heads are head files buckets and this
+
+00:18:51,020 --> 00:18:56,659
+respect the snapshotting parts maneuvers
+
+00:18:54,590 --> 00:18:58,900
+snapshot is complete it marks this part
+
+00:18:56,659 --> 00:19:02,120
+as committed that means it can be read
+
+00:18:58,900 --> 00:19:04,030
+otherwise it rolls back it's very simple
+
+00:19:02,120 --> 00:19:07,850
+actually
+
+00:19:04,030 --> 00:19:08,289
+so okay no design flows right we have
+
+00:19:07,850 --> 00:19:12,320
+everything
+
+00:19:08,289 --> 00:19:15,260
+I guess remember that was the job
+
+00:19:12,320 --> 00:19:19,159
+monitor there that means you can fail
+
+00:19:15,260 --> 00:19:21,950
+probably well not really because we
+
+00:19:19,159 --> 00:19:25,010
+support have an ability and that means
+
+00:19:21,950 --> 00:19:28,070
+that we you can have multiple instances
+
+00:19:25,010 --> 00:19:31,039
+of the job answer running in passive son
+
+00:19:28,070 --> 00:19:33,500
+by mode and retrieve the the the active
+
+00:19:31,039 --> 00:19:36,260
+site of the let's say failed German
+
+00:19:33,500 --> 00:19:38,620
+whenever this happens and of course
+
+00:19:36,260 --> 00:19:41,660
+zookeeper provides leader election
+
+00:19:38,620 --> 00:19:44,690
+atomic rights and so on so all the
+
+00:19:41,660 --> 00:19:46,160
+metadata associated with the reactive
+
+00:19:44,690 --> 00:19:51,950
+jobs that are running in your pipeline
+
+00:19:46,160 --> 00:19:54,740
+are out there so that's more or less it
+
+00:19:51,950 --> 00:19:58,070
+actually if you start using plink today
+
+00:19:54,740 --> 00:20:01,220
+where we have a 1.2 release coming up
+
+00:19:58,070 --> 00:20:04,010
+and there's some cool features like key
+
+00:20:01,220 --> 00:20:06,560
+space partitioning job rescaling from
+
+00:20:04,010 --> 00:20:08,810
+snapshots a sink state snapshots in
+
+00:20:06,560 --> 00:20:10,580
+rocks B that means that you the operator
+
+00:20:08,810 --> 00:20:12,740
+doesn't need to wait until the snapshot
+
+00:20:10,580 --> 00:20:15,290
+complete can just say you know create a
+
+00:20:12,740 --> 00:20:20,320
+snapshot and then wait until the data
+
+00:20:15,290 --> 00:20:20,320
+the the rocks B says snapshot complete
+
+00:20:21,430 --> 00:20:25,700
+monitor state structures these are
+
+00:20:23,630 --> 00:20:28,040
+pretty cool this append only state that
+
+00:20:25,700 --> 00:20:34,550
+actually serialize this data and writes
+
+00:20:28,040 --> 00:20:37,280
+it ahead in rocks B that speeds up a lot
+
+00:20:34,550 --> 00:20:38,720
+checkpointing also if you have mutable
+
+00:20:37,280 --> 00:20:40,940
+state you would use value state or
+
+00:20:38,720 --> 00:20:46,930
+reducing state and there's also mob
+
+00:20:40,940 --> 00:20:49,430
+state coming up yeah then we have
+
+00:20:46,930 --> 00:20:50,840
+externalize checkpoints there are two
+
+00:20:49,430 --> 00:20:52,460
+ways to do checkpoints you can do at
+
+00:20:50,840 --> 00:20:54,950
+work checkpoints on fling you can say
+
+00:20:52,460 --> 00:20:57,890
+create a global state of the system now
+
+00:20:54,950 --> 00:20:59,950
+I want to use it sometime later there's
+
+00:20:57,890 --> 00:21:04,420
+another way saying do it periodically
+
+00:20:59,950 --> 00:21:07,160
+but also let me cherry pick which
+
+00:21:04,420 --> 00:21:09,740
+checkpoint to revert room and that's
+
+00:21:07,160 --> 00:21:11,360
+externalized checkpoints there are both
+
+00:21:09,740 --> 00:21:14,210
+very useful features actually and they
+
+00:21:11,360 --> 00:21:17,420
+can run concurrently at the same time
+
+00:21:14,210 --> 00:21:19,550
+it's very very cool coming up next we
+
+00:21:17,420 --> 00:21:23,120
+have our scaling incremental snapshots
+
+00:21:19,550 --> 00:21:26,060
+and iterative processing this is work
+
+00:21:23,120 --> 00:21:29,330
+that we're doing it's in research right
+
+00:21:26,060 --> 00:21:31,970
+now but it will be very cool if you want
+
+00:21:29,330 --> 00:21:34,160
+to structure iterations on on streams
+
+00:21:31,970 --> 00:21:39,230
+you will be able to do it Mars is one of
+
+00:21:34,160 --> 00:21:42,200
+my colleagues working on that yeah and
+
+00:21:39,230 --> 00:21:46,610
+some acknowledgments these are some core
+
+00:21:42,200 --> 00:21:47,169
+people that worked a lot spent a lot of
+
+00:21:46,610 --> 00:21:50,629
+time
+
+00:21:47,169 --> 00:21:53,749
+fixing everything and creating all these
+
+00:21:50,629 --> 00:21:57,979
+backends the cool API is and also all
+
+00:21:53,749 --> 00:22:18,159
+sorts of things and yeah if you have any
+
+00:21:57,979 --> 00:22:18,159
+questions lots the time workout
+
+00:22:37,149 --> 00:22:53,979
+is that for output or for for output on
+
+00:22:41,469 --> 00:22:55,809
+the input side what does this for
+
+00:22:53,979 --> 00:23:02,849
+example I mean the Kafka sources do that
+
+00:22:55,809 --> 00:23:02,849
+do that contract how that works
+
+00:23:04,109 --> 00:23:19,960
+okay so so the question is a how they
+
+00:23:07,509 --> 00:23:22,629
+the the input processing handshake is so
+
+00:23:19,960 --> 00:23:25,570
+there is 5 for guarantee if you use one
+
+00:23:22,629 --> 00:23:27,879
+of these durable durable sources logs
+
+00:23:25,570 --> 00:23:30,099
+there is a 5-4 Persinger and guarantee
+
+00:23:27,879 --> 00:23:33,339
+this is simply meant already by people
+
+00:23:30,099 --> 00:23:35,080
+at Kafka and so on now if you use like a
+
+00:23:33,339 --> 00:23:36,369
+socket and you're trying to the same
+
+00:23:35,080 --> 00:23:37,749
+thing yeah you will have this problem
+
+00:23:36,369 --> 00:23:41,259
+you have to implement your own protocol
+
+00:23:37,749 --> 00:23:45,429
+to transfer like five four channels
+
+00:23:41,259 --> 00:23:48,450
+let's say so it's a yeah it's something
+
+00:23:45,429 --> 00:23:48,450
+
+YouTube URL: https://www.youtube.com/watch?v=ycSb6yWXiY4
+
+

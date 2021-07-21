@@ -1,0 +1,1426 @@
+Title: [2019] Efficient Performance Monitoring in the Cloud with Virtual PMUs by Sean Christopherson
+Publication date: 2019-11-12
+Playlist: KVM Forum 2019
+Description: 
+	Virtual Performance Monitor Units (vPMUs) are usually disabled in today’s KVM-based clouds though some runnable vPMU code has been in the upstream for several years. Consequently, profiling software inside virtual machines becomes a gap in the services that cloud vendors can provide. The main barriers are 1) the existing vPMU provides inaccurate profiling results in some cases; and 2) the advanced vPMU features, e.g. LBR and PEBS, have not been supported as they are not designed with virtualization in consideration.
+
+To tackle the above issues, the existing vPMU is optimized by avoiding some heavyweight host perf operations. Tests show that the optimization can greatly reduce the emulation overhead of guest PMU operations with ~3000x boost, and achieves near-native efficiency. In addition, for the first time the virtualized LBR and PEBS features are brought to the clouds.
+
+---
+
+Sean Christopherson
+Intel
+Software Engineer
+
+Sean is a recent convert to Linux and KVM, having spent the first 10+ years of his career developing Intel-internal software used to validate the functional behavior of Intel processors.
+
+Sean's current foci are enabling Intel features in KVM and the never-ending saga of upstreaming SGX support on Linux.
+
+Note: We apologize for lower video quality due to technical problems.
+Captions: 
+	00:00:00,390 --> 00:00:02,750
+[Music]
+
+00:00:07,040 --> 00:00:11,010
+hi I'm Shawn Kristofferson
+
+00:00:09,120 --> 00:00:15,269
+I'm from Intel I'm gonna be talking
+
+00:00:11,010 --> 00:00:18,570
+about virtualizing the PMU for the cloud
+
+00:00:15,269 --> 00:00:24,539
+but really this should read as making
+
+00:00:18,570 --> 00:00:25,949
+perfusing the kbm guest of note that
+
+00:00:24,539 --> 00:00:27,300
+contributes here are the people from
+
+00:00:25,949 --> 00:00:30,179
+Intel that are actually doing the work
+
+00:00:27,300 --> 00:00:37,290
+I'm just presenting so all the credit
+
+00:00:30,179 --> 00:00:40,379
+goes to those people so as mentioned the
+
+00:00:37,290 --> 00:00:42,350
+goal of the project is to get the
+
+00:00:40,379 --> 00:00:45,420
+virtual pmu actually usable in the cloud
+
+00:00:42,350 --> 00:00:47,550
+today if you go look at the vast
+
+00:00:45,420 --> 00:00:49,170
+majority probably all cloud instances
+
+00:00:47,550 --> 00:00:52,500
+you'll see that if you try and do
+
+00:00:49,170 --> 00:00:54,750
+anything remotely interesting with perf
+
+00:00:52,500 --> 00:00:56,820
+you're going to get some event not
+
+00:00:54,750 --> 00:01:00,750
+supported and this is because they don't
+
+00:00:56,820 --> 00:01:05,270
+expose the virtual pmu to their
+
+00:01:00,750 --> 00:01:08,369
+instances the reasons for that are that
+
+00:01:05,270 --> 00:01:10,950
+in a KVM guests you generally get
+
+00:01:08,369 --> 00:01:12,810
+inaccurate results and we also don't
+
+00:01:10,950 --> 00:01:16,320
+currently have support for advanced
+
+00:01:12,810 --> 00:01:21,409
+features in KDM so that's last branch
+
+00:01:16,320 --> 00:01:23,939
+records and event based sampling pads
+
+00:01:21,409 --> 00:01:27,420
+note today I'm just going to talk about
+
+00:01:23,939 --> 00:01:32,909
+optimizing the PMU and LDRs for time
+
+00:01:27,420 --> 00:01:34,619
+pads gets shoved off the end so even
+
+00:01:32,909 --> 00:01:37,500
+though things aren't actually exposed
+
+00:01:34,619 --> 00:01:40,409
+most vendors most cloud vendors do have
+
+00:01:37,500 --> 00:01:42,360
+a strong interest in making the PMU
+
+00:01:40,409 --> 00:01:43,890
+usable in their cloud because customers
+
+00:01:42,360 --> 00:01:47,280
+want to be able to run perf on their
+
+00:01:43,890 --> 00:01:49,110
+workloads in the cloud and also
+
+00:01:47,280 --> 00:01:51,270
+internally we've gotten complaints from
+
+00:01:49,110 --> 00:01:53,280
+people at Intel saying hey on hyper-v I
+
+00:01:51,270 --> 00:01:55,920
+can do all this perf testing and on KBM
+
+00:01:53,280 --> 00:02:00,299
+it's basically useless so strong
+
+00:01:55,920 --> 00:02:01,860
+incentive to make it actually usable so
+
+00:02:00,299 --> 00:02:03,840
+what we've been working on it Intel is
+
+00:02:01,860 --> 00:02:05,700
+to reduce the overhead so that you
+
+00:02:03,840 --> 00:02:08,130
+actually get some accurate results and
+
+00:02:05,700 --> 00:02:12,600
+then to also add lbr in peds
+
+00:02:08,130 --> 00:02:17,070
+zatia nin KVM it's a quick crash course
+
+00:02:12,600 --> 00:02:20,520
+on P mu each logical CPU has its own P
+
+00:02:17,070 --> 00:02:23,370
+mu block at the heart of the P mu is a
+
+00:02:20,520 --> 00:02:27,030
+set of general-purpose counters so they
+
+00:02:23,370 --> 00:02:29,520
+vary by marker by microarchitecture but
+
+00:02:27,030 --> 00:02:31,140
+you'll have eight plus general-purpose
+
+00:02:29,520 --> 00:02:35,250
+counters that can be configured to
+
+00:02:31,140 --> 00:02:37,200
+support any supported event on the on
+
+00:02:35,250 --> 00:02:39,960
+the target Hardware so this can be
+
+00:02:37,200 --> 00:02:41,070
+things like counting the number of core
+
+00:02:39,960 --> 00:02:44,130
+cycles that you've been running on
+
+00:02:41,070 --> 00:02:47,370
+halted instructions retired branches
+
+00:02:44,130 --> 00:02:49,200
+retired branches missed etc there are
+
+00:02:47,370 --> 00:02:50,700
+also a set of fixed function counters
+
+00:02:49,200 --> 00:02:53,220
+and these are fixed in the sense that
+
+00:02:50,700 --> 00:02:56,640
+the event that they count is hardwired
+
+00:02:53,220 --> 00:02:58,860
+into the counter itself the advantage of
+
+00:02:56,640 --> 00:03:01,710
+these is there's less work to do to get
+
+00:02:58,860 --> 00:03:03,990
+them programmed and running the counters
+
+00:03:01,710 --> 00:03:05,430
+themselves aren't all that useful simply
+
+00:03:03,990 --> 00:03:07,260
+counting events isn't going to provide
+
+00:03:05,430 --> 00:03:10,170
+you any information about where an event
+
+00:03:07,260 --> 00:03:11,880
+occurred so if you're tracking how many
+
+00:03:10,170 --> 00:03:13,560
+branches have I missed it's not very
+
+00:03:11,880 --> 00:03:15,000
+useful on its own to know that you
+
+00:03:13,560 --> 00:03:16,350
+missed n number of branches because you
+
+00:03:15,000 --> 00:03:18,930
+don't know where your branches are being
+
+00:03:16,350 --> 00:03:21,020
+missed so to that end you have
+
+00:03:18,930 --> 00:03:23,130
+interrupts that can be generated so
+
+00:03:21,020 --> 00:03:25,950
+performance monitoring interrupts or PM
+
+00:03:23,130 --> 00:03:28,280
+eyes can be generated after n number of
+
+00:03:25,950 --> 00:03:30,810
+events which is configurable by software
+
+00:03:28,280 --> 00:03:32,580
+the reason why you want to have a
+
+00:03:30,810 --> 00:03:34,770
+configurable number of events that you
+
+00:03:32,580 --> 00:03:38,100
+generate an interrupt after is so that
+
+00:03:34,770 --> 00:03:40,890
+you can balance between the overhead you
+
+00:03:38,100 --> 00:03:43,320
+incur on your workload and your accuracy
+
+00:03:40,890 --> 00:03:45,150
+of sampling so if you configure to
+
+00:03:43,320 --> 00:03:47,130
+generate events really frequently you'll
+
+00:03:45,150 --> 00:03:49,110
+get super high accuracy but your
+
+00:03:47,130 --> 00:03:50,460
+workload performance will tank probably
+
+00:03:49,110 --> 00:03:53,850
+to the point where you can't even make
+
+00:03:50,460 --> 00:03:57,150
+forward progress because of this
+
+00:03:53,850 --> 00:03:59,910
+trade-off sampling individual IPS isn't
+
+00:03:57,150 --> 00:04:01,950
+going to be a solution and so for some
+
+00:03:59,910 --> 00:04:03,930
+cases where you want to say get a stack
+
+00:04:01,950 --> 00:04:06,210
+trace without frame pointers or you want
+
+00:04:03,930 --> 00:04:09,360
+to analyze which branches are hot which
+
+00:04:06,210 --> 00:04:13,860
+branches are cold you need essentially
+
+00:04:09,360 --> 00:04:16,080
+better precision of your IP so that's
+
+00:04:13,860 --> 00:04:18,440
+where last branch or last branch records
+
+00:04:16,080 --> 00:04:18,440
+come in
+
+00:04:18,750 --> 00:04:24,190
+LDRs are essentially a stack of MSRs
+
+00:04:21,459 --> 00:04:27,250
+that capture the to and from addresses
+
+00:04:24,190 --> 00:04:31,419
+whenever you take a branch and so this
+
+00:04:27,250 --> 00:04:33,190
+way after you when you take your sample
+
+00:04:31,419 --> 00:04:36,310
+you can read out all the elbe ours and
+
+00:04:33,190 --> 00:04:37,690
+see your last 32 or whatever branches
+
+00:04:36,310 --> 00:04:39,910
+that you've taken and so you kind of
+
+00:04:37,690 --> 00:04:42,039
+batch them all together and take fewer
+
+00:04:39,910 --> 00:04:47,650
+interrupts but still get some very high
+
+00:04:42,039 --> 00:04:50,199
+accuracy so if we take a look at what
+
+00:04:47,650 --> 00:04:53,919
+this how this plays out in native Linux
+
+00:04:50,199 --> 00:04:57,580
+you run the perf utility to take a look
+
+00:04:53,919 --> 00:05:02,490
+at branch misses and sorry this is in
+
+00:04:57,580 --> 00:05:05,620
+the context of just general pmu usage
+
+00:05:02,490 --> 00:05:07,870
+that calls into the user space perf
+
+00:05:05,620 --> 00:05:10,330
+utility here make success call into the
+
+00:05:07,870 --> 00:05:13,360
+perf subsystem so we're associated with
+
+00:05:10,330 --> 00:05:16,080
+this test program thread at this point
+
+00:05:13,360 --> 00:05:19,360
+the per subsystem creates a perfectly
+
+00:05:16,080 --> 00:05:21,639
+the perfect is used to store config data
+
+00:05:19,360 --> 00:05:23,740
+and state data about that event it's
+
+00:05:21,639 --> 00:05:26,110
+usually associated with one or more of
+
+00:05:23,740 --> 00:05:27,820
+the EMU counters and I'll say why it's
+
+00:05:26,110 --> 00:05:30,460
+not directly tied to a PM you encounter
+
+00:05:27,820 --> 00:05:31,930
+in just a second and probably the most
+
+00:05:30,460 --> 00:05:35,080
+important part for this discussion is
+
+00:05:31,930 --> 00:05:41,020
+that a perfect nth is a schedulable
+
+00:05:35,080 --> 00:05:45,789
+entity and so this means that when
+
+00:05:41,020 --> 00:05:50,229
+you're scheduling that that tasks on to
+
+00:05:45,789 --> 00:05:53,020
+a physical logical CPU the per subsystem
+
+00:05:50,229 --> 00:05:56,349
+is also going to run its own scheduling
+
+00:05:53,020 --> 00:05:58,449
+and the reason for doing this is that
+
+00:05:56,349 --> 00:06:00,880
+there may be multiple sources of perfo
+
+00:05:58,449 --> 00:06:02,800
+bents in the system so not just this
+
+00:06:00,880 --> 00:06:04,060
+single performing the test program but
+
+00:06:02,800 --> 00:06:07,120
+you can have other things that attach
+
+00:06:04,060 --> 00:06:10,360
+perfo to this so scheduling means that
+
+00:06:07,120 --> 00:06:12,490
+when we schedule at that thread on to a
+
+00:06:10,360 --> 00:06:14,500
+logical CPU the PM you the perf
+
+00:06:12,490 --> 00:06:18,099
+subsystem also schedules the perfect on
+
+00:06:14,500 --> 00:06:19,360
+to the PM you and so this kind of lets
+
+00:06:18,099 --> 00:06:21,130
+you essentially over commit your
+
+00:06:19,360 --> 00:06:23,620
+perseverance you don't have to have a
+
+00:06:21,130 --> 00:06:25,270
+priority knowledge of how many PM you
+
+00:06:23,620 --> 00:06:27,460
+counters you have and which events need
+
+00:06:25,270 --> 00:06:29,349
+which counters etc you can do this all
+
+00:06:27,460 --> 00:06:29,780
+at scheduled time and the ones that are
+
+00:06:29,349 --> 00:06:32,060
+lower price
+
+00:06:29,780 --> 00:06:34,520
+already kind of get tossed away and this
+
+00:06:32,060 --> 00:06:36,920
+is also why it's very difficult for
+
+00:06:34,520 --> 00:06:39,139
+virtualization on Linux because how do
+
+00:06:36,920 --> 00:06:40,490
+you balance the priority between hosting
+
+00:06:39,139 --> 00:06:41,960
+KBM you can't just give all of your
+
+00:06:40,490 --> 00:06:46,790
+counters to kbm then you can't do
+
+00:06:41,960 --> 00:06:48,320
+anything in the host and these are all
+
+00:06:46,790 --> 00:06:50,210
+Imus ours so when you're programming up
+
+00:06:48,320 --> 00:06:53,389
+the PMU you're doing MSR reads and
+
+00:06:50,210 --> 00:06:55,850
+writes the interrupts that occur when
+
+00:06:53,389 --> 00:06:57,860
+you trigger and events or whatever come
+
+00:06:55,850 --> 00:07:00,440
+back into the first subsystem and that
+
+00:06:57,860 --> 00:07:04,220
+gets filtered back out to user space if
+
+00:07:00,440 --> 00:07:05,810
+we take this up to a KBM guess so Linux
+
+00:07:04,220 --> 00:07:09,350
+guys running on KB I'm doing the same
+
+00:07:05,810 --> 00:07:11,419
+test program same per vent gets created
+
+00:07:09,350 --> 00:07:13,400
+in the guest this time when we finally
+
+00:07:11,419 --> 00:07:18,020
+do that MSR right it gets intercepted by
+
+00:07:13,400 --> 00:07:19,970
+KVM so it's a virtual MSR access KBM
+
+00:07:18,020 --> 00:07:21,800
+then makes function calls into the per
+
+00:07:19,970 --> 00:07:23,780
+subsystem but we're going through the
+
+00:07:21,800 --> 00:07:28,040
+full per stack so this creates the
+
+00:07:23,780 --> 00:07:31,130
+perfect person then get scheduled gets
+
+00:07:28,040 --> 00:07:32,660
+loaded into the actual pmu and then we
+
+00:07:31,130 --> 00:07:35,270
+generate the pee-mis and we come back
+
+00:07:32,660 --> 00:07:39,470
+get call backs into KBM and inject the
+
+00:07:35,270 --> 00:07:41,000
+virtual okay PMI into the KPM guest but
+
+00:07:39,470 --> 00:07:43,729
+this is really slow because the per
+
+00:07:41,000 --> 00:07:45,289
+stack is heavy so going through the
+
+00:07:43,729 --> 00:07:48,080
+existing first act and this naive
+
+00:07:45,289 --> 00:07:50,690
+implementation not including the PMI
+
+00:07:48,080 --> 00:07:53,000
+just a program pmu counter from the
+
+00:07:50,690 --> 00:08:00,260
+guest takes us about a little over 2 and
+
+00:07:53,000 --> 00:08:02,300
+1/2 milliseconds so to improve the
+
+00:08:00,260 --> 00:08:04,700
+performance so 2 and 1/2 milliseconds is
+
+00:08:02,300 --> 00:08:07,729
+an eternity and it's why the results are
+
+00:08:04,700 --> 00:08:10,580
+very inaccurate we still have the same
+
+00:08:07,729 --> 00:08:13,810
+basic environment we still trap on the
+
+00:08:10,580 --> 00:08:16,039
+MSR accesses to the PMU
+
+00:08:13,810 --> 00:08:18,200
+we still have to do some function calls
+
+00:08:16,039 --> 00:08:20,270
+into the perf subsystem still create the
+
+00:08:18,200 --> 00:08:23,900
+perfect but we're not going through the
+
+00:08:20,270 --> 00:08:25,940
+full per stack and we don't rely on the
+
+00:08:23,900 --> 00:08:28,190
+perf scheduling instead we kind of steal
+
+00:08:25,940 --> 00:08:31,760
+the MSR and allow KBM to program it
+
+00:08:28,190 --> 00:08:36,020
+directly and so then KBM can program the
+
+00:08:31,760 --> 00:08:38,719
+PMU whenever the jump in had here we
+
+00:08:36,020 --> 00:08:42,720
+still do the PM is through everything
+
+00:08:38,719 --> 00:08:46,050
+else but by allowing the
+
+00:08:42,720 --> 00:08:48,210
+KVM to do its own programming the PMU we
+
+00:08:46,050 --> 00:08:49,770
+avoid all the overhead and then whenever
+
+00:08:48,210 --> 00:08:51,240
+the guest is updating it because it
+
+00:08:49,770 --> 00:08:54,090
+already essentially owns that hardware
+
+00:08:51,240 --> 00:08:56,670
+MSR we can drop that two and 1/2
+
+00:08:54,090 --> 00:08:59,310
+milliseconds down to little under 700
+
+00:08:56,670 --> 00:09:01,530
+nanoseconds the caveat to this approach
+
+00:08:59,310 --> 00:09:04,580
+is that the perf maintainer weren't
+
+00:09:01,530 --> 00:09:08,820
+exactly thrilled about KVM stealing
+
+00:09:04,580 --> 00:09:12,030
+counters away from the host subsystem so
+
+00:09:08,820 --> 00:09:14,430
+this got an act pretty quickly but it's
+
+00:09:12,030 --> 00:09:16,950
+a good way to show how much room for
+
+00:09:14,430 --> 00:09:20,310
+improvement we have so we're at 2 and
+
+00:09:16,950 --> 00:09:22,320
+1/2 milliseconds which is awful but you
+
+00:09:20,310 --> 00:09:27,830
+know kind of pie in the sky we can get
+
+00:09:22,320 --> 00:09:32,250
+down close to this sub microsecond range
+
+00:09:27,830 --> 00:09:34,260
+for lbr virtualization logically the lbr
+
+00:09:32,250 --> 00:09:36,450
+MSR is they're part of the PMU and so
+
+00:09:34,260 --> 00:09:40,890
+accordingly they're part of the virtual
+
+00:09:36,450 --> 00:09:44,700
+pmu and KVM when we start running the V
+
+00:09:40,890 --> 00:09:47,270
+CPU there's really no data attached to
+
+00:09:44,700 --> 00:09:50,820
+the be CPU for the LD ours at this point
+
+00:09:47,270 --> 00:09:52,830
+at some point in time the gas is going
+
+00:09:50,820 --> 00:09:55,140
+to create a test program with perfo been
+
+00:09:52,830 --> 00:09:59,300
+associated with it and at this point it
+
+00:09:55,140 --> 00:10:03,900
+does a MSR write to enable the LV ours
+
+00:09:59,300 --> 00:10:06,210
+we intercept that in KBM note that lb
+
+00:10:03,900 --> 00:10:08,670
+ours have been enabled we still create a
+
+00:10:06,210 --> 00:10:11,370
+perfect the reason we do this is to aid
+
+00:10:08,670 --> 00:10:13,620
+in the context switching because we have
+
+00:10:11,370 --> 00:10:15,570
+all these MSRs that have IP addresses in
+
+00:10:13,620 --> 00:10:17,190
+them we don't want to expose those to
+
+00:10:15,570 --> 00:10:18,660
+the guests so we need to contact switch
+
+00:10:17,190 --> 00:10:23,970
+when we're transitioning between guest
+
+00:10:18,660 --> 00:10:25,680
+and host when we enabled the lb ours
+
+00:10:23,970 --> 00:10:27,840
+when we context switch them we give
+
+00:10:25,680 --> 00:10:29,460
+passed through access into the gases so
+
+00:10:27,840 --> 00:10:32,220
+when the guest gets a perfe then
+
+00:10:29,460 --> 00:10:35,900
+associated with an LPR and gets that PMI
+
+00:10:32,220 --> 00:10:39,600
+it can go and read out the MSRs directly
+
+00:10:35,900 --> 00:10:41,250
+and then when we schedule out the V CPU
+
+00:10:39,600 --> 00:10:43,530
+you obviously remove access and we
+
+00:10:41,250 --> 00:10:46,550
+context switch back the host date and
+
+00:10:43,530 --> 00:10:49,680
+then rinse and repeat
+
+00:10:46,550 --> 00:10:53,370
+eventually the guest is going to tear
+
+00:10:49,680 --> 00:10:54,840
+down its pmu event for the LDR
+
+00:10:53,370 --> 00:10:56,220
+programming so it's like essentially
+
+00:10:54,840 --> 00:10:59,310
+that perf stops
+
+00:10:56,220 --> 00:11:01,200
+it comes through does the MSR access so
+
+00:10:59,310 --> 00:11:06,570
+this enable is still intercepted it's to
+
+00:11:01,200 --> 00:11:10,800
+the debug control on us are on the host
+
+00:11:06,570 --> 00:11:12,810
+side we disable the LDR pass through but
+
+00:11:10,800 --> 00:11:16,980
+we don't actually disable the perfect
+
+00:11:12,810 --> 00:11:21,510
+nth at this time so KVM waits until a
+
+00:11:16,980 --> 00:11:24,959
+full time slice goes through and there
+
+00:11:21,510 --> 00:11:26,279
+are no lbr accesses only after that so
+
+00:11:24,959 --> 00:11:28,140
+we go through a full time slice we
+
+00:11:26,279 --> 00:11:29,579
+haven't had any LDR accesses that trap
+
+00:11:28,140 --> 00:11:32,130
+out to KVM because we're no longer
+
+00:11:29,579 --> 00:11:33,839
+intercepting them and then at that point
+
+00:11:32,130 --> 00:11:36,690
+once we've gone through that full cycle
+
+00:11:33,839 --> 00:11:38,100
+we tear down the perfo then the reason
+
+00:11:36,690 --> 00:11:40,290
+for doing this is as mentioned before
+
+00:11:38,100 --> 00:11:43,649
+the per subsystem going through all that
+
+00:11:40,290 --> 00:11:46,890
+is pretty heavy and slow and it's not
+
+00:11:43,649 --> 00:11:51,060
+uncommon to temporarily disable lb ours
+
+00:11:46,890 --> 00:11:52,860
+in in the kernel so the gas temporarily
+
+00:11:51,060 --> 00:11:55,079
+disables lb ours and then re-enable z'
+
+00:11:52,860 --> 00:11:56,610
+them we don't want to have to go through
+
+00:11:55,079 --> 00:11:58,410
+that reprogramming we can just say oh
+
+00:11:56,610 --> 00:12:01,470
+yeah you already have a perfect you can
+
+00:11:58,410 --> 00:12:03,449
+just rename all the lb our pass through
+
+00:12:01,470 --> 00:12:05,070
+and give the guest access to the lv RS
+
+00:12:03,449 --> 00:12:09,899
+without having to go through the perf
+
+00:12:05,070 --> 00:12:12,209
+subsystem again so results
+
+00:12:09,899 --> 00:12:16,380
+just the test environment for reference
+
+00:12:12,209 --> 00:12:20,519
+if you want to play around with this so
+
+00:12:16,380 --> 00:12:23,760
+for the optimizations comparing the
+
+00:12:20,519 --> 00:12:25,890
+latency before and after just for the
+
+00:12:23,760 --> 00:12:29,399
+MSR update so programming the PMU
+
+00:12:25,890 --> 00:12:31,490
+counters got 3,500 again this is optimal
+
+00:12:29,399 --> 00:12:35,220
+absolute best case scenario essentially
+
+00:12:31,490 --> 00:12:41,760
+and then for the PMI latency we're also
+
+00:12:35,220 --> 00:12:43,470
+taking take it down by about 900 X so
+
+00:12:41,760 --> 00:12:45,839
+the effects of that reduction latency
+
+00:12:43,470 --> 00:12:50,399
+you can observe very easily with some
+
+00:12:45,839 --> 00:12:53,910
+basic analysis in the guest so running a
+
+00:12:50,399 --> 00:12:56,730
+perf two-track branch messes we take a
+
+00:12:53,910 --> 00:12:59,010
+look at the hosts to get a reference so
+
+00:12:56,730 --> 00:13:02,010
+in the host here you have the percentage
+
+00:12:59,010 --> 00:13:05,010
+of branches missed out of total in the
+
+00:13:02,010 --> 00:13:07,709
+process the from the binary and then
+
+00:13:05,010 --> 00:13:09,030
+which function so ideally when you run
+
+00:13:07,709 --> 00:13:10,730
+in the gas turn and get very sim
+
+00:13:09,030 --> 00:13:12,810
+results so that you can show that
+
+00:13:10,730 --> 00:13:15,620
+regardless of whether I'm running on the
+
+00:13:12,810 --> 00:13:17,670
+host or the guest I still get the same
+
+00:13:15,620 --> 00:13:20,250
+tracing information essentially in the
+
+00:13:17,670 --> 00:13:22,440
+same perf result running without
+
+00:13:20,250 --> 00:13:25,260
+optimization you can see that the
+
+00:13:22,440 --> 00:13:29,150
+results are effectively garbage the
+
+00:13:25,260 --> 00:13:31,560
+programming is so slow that all of the
+
+00:13:29,150 --> 00:13:35,010
+PM is and all of the events that were
+
+00:13:31,560 --> 00:13:36,450
+sampling end up in the kernel we don't
+
+00:13:35,010 --> 00:13:39,270
+actually get any useful information
+
+00:13:36,450 --> 00:13:42,210
+about our guest workload and it's
+
+00:13:39,270 --> 00:13:43,740
+actually so slow to the point that this
+
+00:13:42,210 --> 00:13:46,590
+run was gathered just by killing the
+
+00:13:43,740 --> 00:13:49,950
+process because it was just stalled
+
+00:13:46,590 --> 00:13:51,780
+indefinitely effectively with
+
+00:13:49,950 --> 00:13:54,120
+optimization we end up with results that
+
+00:13:51,780 --> 00:13:56,340
+are basically identical to what we see
+
+00:13:54,120 --> 00:13:57,900
+in hosts so showing that by reducing
+
+00:13:56,340 --> 00:14:01,680
+that latency you can actually make
+
+00:13:57,900 --> 00:14:03,900
+perfuse Abul in the guest similar
+
+00:14:01,680 --> 00:14:08,130
+example with lb ours run on the host to
+
+00:14:03,900 --> 00:14:10,590
+get a reference and then run the same
+
+00:14:08,130 --> 00:14:13,620
+workload and the guest and observe that
+
+00:14:10,590 --> 00:14:14,700
+they produce similar results don't worry
+
+00:14:13,620 --> 00:14:16,800
+about the absolute values and the
+
+00:14:14,700 --> 00:14:19,350
+columns here it's a somewhat suboptimal
+
+00:14:16,800 --> 00:14:23,870
+view of what the call graph would would
+
+00:14:19,350 --> 00:14:23,870
+look like but it's better for comparison
+
+00:14:24,320 --> 00:14:29,250
+so where we're at so I mentioned that
+
+00:14:26,520 --> 00:14:32,280
+the full optimization was shot down by
+
+00:14:29,250 --> 00:14:35,000
+the perf maintainer z-- we're working on
+
+00:14:32,280 --> 00:14:38,850
+intermediate steps right now to improve
+
+00:14:35,000 --> 00:14:40,680
+and reduce that overhead so there's lots
+
+00:14:38,850 --> 00:14:42,780
+of things to make the programming from
+
+00:14:40,680 --> 00:14:45,930
+KBM into the perf subsystem a lot less
+
+00:14:42,780 --> 00:14:49,020
+naive and we you know we don't need the
+
+00:14:45,930 --> 00:14:53,610
+full essentially sis call flow that
+
+00:14:49,020 --> 00:14:56,990
+exists today and then LDRs and peds have
+
+00:14:53,610 --> 00:15:00,960
+both also been posted upstream for
+
+00:14:56,990 --> 00:15:03,330
+inclusion into KVM so all three of those
+
+00:15:00,960 --> 00:15:05,550
+are still live they're under review
+
+00:15:03,330 --> 00:15:07,680
+right now we would love to get eyes on
+
+00:15:05,550 --> 00:15:10,940
+this and input from people that are
+
+00:15:07,680 --> 00:15:13,950
+actually planning on using it as well
+
+00:15:10,940 --> 00:15:14,970
+for the future work so obviously we're
+
+00:15:13,950 --> 00:15:18,930
+going to continue up streaming the
+
+00:15:14,970 --> 00:15:21,930
+patches and then continue working on
+
+00:15:18,930 --> 00:15:24,029
+Optus optimizing the EPM you
+
+00:15:21,930 --> 00:15:25,970
+and probably in parallel about parallel
+
+00:15:24,029 --> 00:15:29,520
+to that we'll start working on
+
+00:15:25,970 --> 00:15:32,970
+supporting additional versions of the
+
+00:15:29,520 --> 00:15:35,100
+PMU so intel has a forget about as a
+
+00:15:32,970 --> 00:15:37,170
+Nehalem or so what it calls an
+
+00:15:35,100 --> 00:15:40,260
+architectural TMU and so this is
+
+00:15:37,170 --> 00:15:42,089
+something where the core tenants of the
+
+00:15:40,260 --> 00:15:44,070
+PMU won't change from micro architecture
+
+00:15:42,089 --> 00:15:46,050
+to micro architecture but there are new
+
+00:15:44,070 --> 00:15:49,350
+versions of it so the most recent
+
+00:15:46,050 --> 00:15:53,970
+versions add new events so we can work
+
+00:15:49,350 --> 00:16:09,630
+on exposing more events to the KPMG
+
+00:15:53,970 --> 00:16:11,760
+assets thank you can you explain a bit
+
+00:16:09,630 --> 00:16:13,290
+more about how the partitioning of the
+
+00:16:11,760 --> 00:16:14,940
+PMU cantos between the host and the
+
+00:16:13,290 --> 00:16:17,190
+guest looks like like when do you decide
+
+00:16:14,940 --> 00:16:23,160
+to steal a PM you count how much do you
+
+00:16:17,190 --> 00:16:26,940
+take so that's not the odds of that ever
+
+00:16:23,160 --> 00:16:29,880
+actually getting upstream are minor very
+
+00:16:26,940 --> 00:16:32,070
+very small essentially my understanding
+
+00:16:29,880 --> 00:16:34,080
+what is being done is when the guest
+
+00:16:32,070 --> 00:16:37,500
+requests a counter we give it to them
+
+00:16:34,080 --> 00:16:39,510
+and but how much that doesn't depend on
+
+00:16:37,500 --> 00:16:42,209
+how much counsels you exposed by the CPU
+
+00:16:39,510 --> 00:16:44,550
+ideal if I don't know the details of how
+
+00:16:42,209 --> 00:16:49,260
+that particular implementation was going
+
+00:16:44,550 --> 00:16:50,970
+okay that's all things that I'm sure you
+
+00:16:49,260 --> 00:16:54,029
+can negotiate once we try an off stream
+
+00:16:50,970 --> 00:16:56,459
+of okay if we add if we get to the point
+
+00:16:54,029 --> 00:16:58,260
+where we've got 256 counters in Hardware
+
+00:16:56,459 --> 00:17:00,120
+which probably isn't gonna happen let's
+
+00:16:58,260 --> 00:17:01,589
+say we got there then at that point we
+
+00:17:00,120 --> 00:17:03,690
+can probably go to the perf subsystem
+
+00:17:01,589 --> 00:17:05,309
+people and like hey you only need two
+
+00:17:03,690 --> 00:17:06,780
+hundred and forty of those can we have
+
+00:17:05,309 --> 00:17:09,059
+sixteen to give to the guest something
+
+00:17:06,780 --> 00:17:10,890
+like that I'm wondering about whether if
+
+00:17:09,059 --> 00:17:12,720
+we use this approach it for example at
+
+00:17:10,890 --> 00:17:15,329
+the moment that the guests enables bmu
+
+00:17:12,720 --> 00:17:17,189
+you still the amount of exposed p.m. you
+
+00:17:15,329 --> 00:17:19,829
+can tell that was exposed to him in the
+
+00:17:17,189 --> 00:17:22,140
+city ID then you may be it was useful
+
+00:17:19,829 --> 00:17:23,819
+form user space to be able to control
+
+00:17:22,140 --> 00:17:25,650
+how many p.m. you counters you exposed
+
+00:17:23,819 --> 00:17:30,390
+to the again it's not just user space
+
+00:17:25,650 --> 00:17:31,679
+though because you can have perfect ends
+
+00:17:30,390 --> 00:17:32,559
+that are associated with things that
+
+00:17:31,679 --> 00:17:35,679
+don't come too
+
+00:17:32,559 --> 00:17:37,419
+from unprivileged users oh I see okay
+
+00:17:35,679 --> 00:17:39,669
+that's that's the crux of the problem if
+
+00:17:37,419 --> 00:17:41,740
+this was purely a user space thing where
+
+00:17:39,669 --> 00:17:44,350
+user space could opt in and say I'm not
+
+00:17:41,740 --> 00:17:45,639
+going to use perf at all then yeah we
+
+00:17:44,350 --> 00:17:50,129
+could hand everything over but it
+
+00:17:45,639 --> 00:17:50,129
+doesn't work that way okay thanks
+
+00:17:57,580 --> 00:18:02,499
+that looks like really nice work and the
+
+00:18:00,489 --> 00:18:04,509
+numbers look very impressive also the
+
+00:18:02,499 --> 00:18:06,429
+fidelity of the results when you
+
+00:18:04,509 --> 00:18:09,970
+compared it to what you saw on the host
+
+00:18:06,429 --> 00:18:12,940
+I assume those numbers are for that
+
+00:18:09,970 --> 00:18:15,789
+patch set that you said was nacked
+
+00:18:12,940 --> 00:18:18,190
+yes can you shed some light on what you
+
+00:18:15,789 --> 00:18:19,499
+expect that intermediate patch set to
+
+00:18:18,190 --> 00:18:23,230
+give you in that respect
+
+00:18:19,499 --> 00:18:25,980
+why would you lose a lot or I just
+
+00:18:23,230 --> 00:18:29,320
+speaking from general KVM experience
+
+00:18:25,980 --> 00:18:33,220
+there's no reason that you should have I
+
+00:18:29,320 --> 00:18:36,789
+mean the 3000 X overhead like that's
+
+00:18:33,220 --> 00:18:40,090
+absolutely ridiculous there's like 2 X
+
+00:18:36,789 --> 00:18:41,409
+maybe 10 x maybe but I would expect no
+
+00:18:40,090 --> 00:18:43,029
+worse than that so that's why I say a
+
+00:18:41,409 --> 00:18:44,470
+few microseconds and I'm guessing you
+
+00:18:43,029 --> 00:18:45,879
+still have that decent order right so
+
+00:18:44,470 --> 00:18:48,129
+you expect that you would be more in
+
+00:18:45,879 --> 00:18:50,350
+that area even with your your that's a
+
+00:18:48,129 --> 00:18:51,639
+middle-of-the-road approach that yeah I
+
+00:18:50,350 --> 00:18:53,320
+don't know that we're gonna get there
+
+00:18:51,639 --> 00:18:56,879
+with this intermediate patch set yeah
+
+00:18:53,320 --> 00:18:59,559
+I'm expecting this will be a rather than
+
+00:18:56,879 --> 00:19:01,059
+rather than go for the gold right out of
+
+00:18:59,559 --> 00:19:03,460
+the bat I think we're gonna have some
+
+00:19:01,059 --> 00:19:05,129
+intermediate patches and multiple patch
+
+00:19:03,460 --> 00:19:07,570
+series to get us to the point where we
+
+00:19:05,129 --> 00:19:08,230
+really get that high fidelity that we're
+
+00:19:07,570 --> 00:19:11,609
+looking for
+
+00:19:08,230 --> 00:19:11,609
+all right thanks
+
+00:19:15,080 --> 00:19:21,259
+so when you do the elbe our paths pass
+
+00:19:17,779 --> 00:19:23,149
+through is there any security concerns
+
+00:19:21,259 --> 00:19:24,830
+with that that there might be something
+
+00:19:23,149 --> 00:19:31,070
+in the LPR that the guest was not
+
+00:19:24,830 --> 00:19:32,539
+supposed to see no because we're context
+
+00:19:31,070 --> 00:19:34,669
+switching them so when we go into the
+
+00:19:32,539 --> 00:19:38,119
+guests we purge the values that were
+
+00:19:34,669 --> 00:19:39,529
+there from the host and kind of by
+
+00:19:38,119 --> 00:19:41,299
+definition once you're in the guest is
+
+00:19:39,529 --> 00:19:43,669
+just gonna see guest IP addresses it's
+
+00:19:41,299 --> 00:19:45,289
+not going to see physical addresses for
+
+00:19:43,669 --> 00:19:49,220
+example or we're not going to leave that
+
+00:19:45,289 --> 00:19:53,029
+type of information hi
+
+00:19:49,220 --> 00:19:56,119
+a cushion related to feature called as
+
+00:19:53,029 --> 00:19:59,179
+memory partitioning and monitoring and
+
+00:19:56,119 --> 00:20:01,220
+that is what we call in on the arm world
+
+00:19:59,179 --> 00:20:03,669
+so I think Intel has got a similar
+
+00:20:01,220 --> 00:20:06,470
+feature for partitioning the caches and
+
+00:20:03,669 --> 00:20:09,039
+other part of the system right and
+
+00:20:06,470 --> 00:20:11,600
+probably you can have our different
+
+00:20:09,039 --> 00:20:15,350
+counters for each of such partitioned
+
+00:20:11,600 --> 00:20:17,809
+they have a different partition ID so my
+
+00:20:15,350 --> 00:20:20,419
+question is is there any work which is
+
+00:20:17,809 --> 00:20:23,840
+involved first of all at the host level
+
+00:20:20,419 --> 00:20:26,659
+and and the virtualization layer as well
+
+00:20:23,840 --> 00:20:29,029
+to take care of this partitioning and
+
+00:20:26,659 --> 00:20:31,639
+related counters you're talking about
+
+00:20:29,029 --> 00:20:33,980
+things like Intel's resource director
+
+00:20:31,639 --> 00:20:38,149
+exact knowledge marketing is does the
+
+00:20:33,980 --> 00:20:40,820
+one you're specifically asking if we are
+
+00:20:38,149 --> 00:20:43,070
+gone through to the guest are using it
+
+00:20:40,820 --> 00:20:45,889
+in a virtualization context in a BCP
+
+00:20:43,070 --> 00:20:47,629
+context suppose you have a resource
+
+00:20:45,889 --> 00:20:50,389
+director technology is implemented in
+
+00:20:47,629 --> 00:20:51,440
+the kernel it's similar to cgroups it's
+
+00:20:50,389 --> 00:20:55,249
+not actually cgroups
+
+00:20:51,440 --> 00:20:58,489
+but the concepts are the same and that
+
+00:20:55,249 --> 00:21:01,070
+means you're applying it to essentially
+
+00:20:58,489 --> 00:21:05,659
+the qumu process and the tasks owned by
+
+00:21:01,070 --> 00:21:09,289
+q so there's no reason that you wouldn't
+
+00:21:05,659 --> 00:21:12,379
+be able to use it to assign resources to
+
+00:21:09,289 --> 00:21:15,109
+D CPUs so it should just work as is and
+
+00:21:12,379 --> 00:21:18,669
+if it doesn't we need to work on yeah
+
+00:21:15,109 --> 00:21:18,669
+sure thanks yeah
+
+00:21:25,610 --> 00:21:29,800
+there are no other patients thank you
+
+00:21:30,200 --> 00:21:39,779
+[Applause]
+
+00:21:32,920 --> 00:21:39,779
+
+YouTube URL: https://www.youtube.com/watch?v=Jt21i_ZdMTo
+
+

@@ -1,0 +1,2260 @@
+Title: LPC2019 - Replacing mmap_sem with finer grained locks
+Publication date: 2019-11-18
+Playlist: LPC2019 - Kernel Summit Track
+Description: 
+	In the linux kernel, most operations affecting a process's address space are protected by by mmap_sem (a per-process read-write semaphore).
+
+This simple design is increasingly a problem for multi-threaded applications, and often causes threads that operate on separate parts of their address space to end up blocking on each other due to false sharing issues - mmap_sem only supports locking the entire address space at once, so it can't take into consideration that the operations are not overlapping.
+
+I would like to discuss:
+1- The sort of blocking issues that are seen today due to the current mmap_sem design;
+2- mmap_sem mitigations that have been introduced over time, and have kept the situation bearable but not fundamentally solved the issue;
+3- try to discuss from first principles how the MM data structures and locking mechanisms would have to evolve to support finer grained MM locking, and how to progressively migrate the current MM codebase towards such a finer grained MM locking scheme;
+4- (hopefully) present early results with a fine grained MM locking prototype.
+
+
+Michel Lespinasse (Google)
+Captions: 
+	00:00:00,030 --> 00:00:05,640
+all right so I am Michelle - - I'm a
+
+00:00:02,460 --> 00:00:10,580
+Google employee I walk on the prediction
+
+00:00:05,640 --> 00:00:12,960
+Colonel we have and I want to talk about
+
+00:00:10,580 --> 00:00:16,160
+fine-grained mmm lurking which is
+
+00:00:12,960 --> 00:00:21,390
+replacing the a maps and we have today
+
+00:00:16,160 --> 00:00:23,580
+with some finer grain looks so first I
+
+00:00:21,390 --> 00:00:25,500
+will have a brief remainder reminder
+
+00:00:23,580 --> 00:00:27,119
+about a map Sam we have a we advise
+
+00:00:25,500 --> 00:00:30,150
+semaphore that's part of the mmm
+
+00:00:27,119 --> 00:00:35,250
+structure on it products just about
+
+00:00:30,150 --> 00:00:37,500
+every other mmm structures we have and
+
+00:00:35,250 --> 00:00:40,200
+it's been there a very long time which
+
+00:00:37,500 --> 00:00:42,540
+means it's been abused a lot on everyone
+
+00:00:40,200 --> 00:00:44,969
+added the one thing to be protected by M
+
+00:00:42,540 --> 00:00:46,559
+Maps I'm so it's how to summaries right
+
+00:00:44,969 --> 00:00:50,360
+now because it's kind of everything
+
+00:00:46,559 --> 00:00:50,360
+that's mmm
+
+00:00:52,250 --> 00:01:03,800
+so the original design is that it was to
+
+00:00:58,500 --> 00:01:03,800
+protect the VMA list and arbitrary and
+
+00:01:04,430 --> 00:01:15,840
+anything that challenges VMAs would have
+
+00:01:09,450 --> 00:01:20,580
+a white lock anything that acts upon the
+
+00:01:15,840 --> 00:01:23,640
+content of VMA for example if we want a
+
+00:01:20,580 --> 00:01:26,009
+page fault based on that VMA we decide
+
+00:01:23,640 --> 00:01:30,659
+what page we need to get in and that
+
+00:01:26,009 --> 00:01:33,180
+would have a we'd lock so that to avoid
+
+00:01:30,659 --> 00:01:36,750
+all sorts of races that could happen if
+
+00:01:33,180 --> 00:01:39,090
+this turns at the same time so you can
+
+00:01:36,750 --> 00:01:43,829
+imagine a process with a bunch of VMAs
+
+00:01:39,090 --> 00:01:47,640
+and there's someone trying to map trying
+
+00:01:43,829 --> 00:01:49,890
+to fold the page in a file and it gets
+
+00:01:47,640 --> 00:01:52,470
+brought in the discrete when there's a
+
+00:01:49,890 --> 00:01:58,680
+thread comes and wants to run map that
+
+00:01:52,470 --> 00:02:02,729
+VMA and if we let it process when the
+
+00:01:58,680 --> 00:02:05,040
+fault completes it would try to insert
+
+00:02:02,729 --> 00:02:08,369
+that page into the VMA that doesn't
+
+00:02:05,040 --> 00:02:09,840
+exist anymore that would be race is that
+
+00:02:08,369 --> 00:02:11,549
+the kernel will have to deal with
+
+00:02:09,840 --> 00:02:16,540
+somehow
+
+00:02:11,549 --> 00:02:21,549
+so instead what we do is that while we
+
+00:02:16,540 --> 00:02:25,120
+do that that this create that condition
+
+00:02:21,549 --> 00:02:29,680
+or on the VMA that was there we hold a
+
+00:02:25,120 --> 00:02:32,620
+map sign for weed and if someone tries
+
+00:02:29,680 --> 00:02:34,900
+to MN map that VMA they won't be able to
+
+00:02:32,620 --> 00:02:37,060
+post to post it right away because they
+
+00:02:34,900 --> 00:02:40,390
+will be blocked trying to get vite lock
+
+00:02:37,060 --> 00:02:45,670
+for a map same and we avoid all sorts of
+
+00:02:40,390 --> 00:02:49,500
+races that way so a map same I said it's
+
+00:02:45,670 --> 00:02:54,489
+been there forever it was introduced in
+
+00:02:49,500 --> 00:02:57,519
+96 originally and it was just semaphore
+
+00:02:54,489 --> 00:03:00,280
+and then five years later it was
+
+00:02:57,519 --> 00:03:07,349
+converted to read white semaphore which
+
+00:03:00,280 --> 00:03:07,349
+allowed us to do several patrols at once
+
+00:03:07,739 --> 00:03:10,980
+big progress
+
+00:03:11,500 --> 00:03:20,799
+I said design hasn't had any major
+
+00:03:17,049 --> 00:03:23,560
+chances that has been a lot of bone aid
+
+00:03:20,799 --> 00:03:27,129
+and walk around for no limitations but
+
+00:03:23,560 --> 00:03:31,480
+the fundamental design really is from 20
+
+00:03:27,129 --> 00:03:33,609
+years ago and you know it was super
+
+00:03:31,480 --> 00:03:36,700
+simple at the time I think it was very
+
+00:03:33,609 --> 00:03:38,919
+adequate for what we had electrically
+
+00:03:36,700 --> 00:03:43,720
+the perfect solution for the problems of
+
+00:03:38,919 --> 00:03:47,980
+twenty years ago but things are a bit
+
+00:03:43,720 --> 00:03:51,579
+different now so we have larger machines
+
+00:03:47,980 --> 00:03:55,000
+and some operations that are protected
+
+00:03:51,579 --> 00:03:56,949
+by a maps and may do some amount of work
+
+00:03:55,000 --> 00:03:58,959
+that's proportional to the number of
+
+00:03:56,949 --> 00:04:02,310
+pages the effect for example if you do a
+
+00:03:58,959 --> 00:04:06,000
+really large MN map
+
+00:04:02,310 --> 00:04:08,760
+and so sometimes we have nmap same whole
+
+00:04:06,000 --> 00:04:12,810
+times that can be a lot longer than they
+
+00:04:08,760 --> 00:04:15,810
+were originally we have actual
+
+00:04:12,810 --> 00:04:17,940
+multi-threading that we care about 20
+
+00:04:15,810 --> 00:04:20,640
+years ago we barely had a simpie
+
+00:04:17,940 --> 00:04:23,820
+machines and if we did we probably
+
+00:04:20,640 --> 00:04:26,970
+wanted to burn a few single-threaded
+
+00:04:23,820 --> 00:04:29,310
+programs at once like we were not that
+
+00:04:26,970 --> 00:04:32,490
+serious about multi-threaded performance
+
+00:04:29,310 --> 00:04:36,300
+20 years ago and we have a wider bunch
+
+00:04:32,490 --> 00:04:42,210
+of device speeds so we we don't want to
+
+00:04:36,300 --> 00:04:44,550
+end up with things that want to read
+
+00:04:42,210 --> 00:04:46,410
+from a fast device get broke between
+
+00:04:44,550 --> 00:04:48,810
+things that are waiting from a really
+
+00:04:46,410 --> 00:04:58,100
+slow device and the y know we kind of
+
+00:04:48,810 --> 00:04:58,100
+have this issue with a map same so yeah
+
+00:04:58,580 --> 00:05:04,230
+situation I described when I was
+
+00:05:01,980 --> 00:05:06,210
+introducing and maps and I was saying
+
+00:05:04,230 --> 00:05:08,130
+hey does this program with two threads
+
+00:05:06,210 --> 00:05:10,950
+on its strength to access memory while
+
+00:05:08,130 --> 00:05:12,810
+it's trying to unwrap it will programs
+
+00:05:10,950 --> 00:05:16,140
+don't really do that well programs
+
+00:05:12,810 --> 00:05:18,830
+usually they try to be careful with
+
+00:05:16,140 --> 00:05:22,080
+death whereas they are designed to have
+
+00:05:18,830 --> 00:05:24,060
+to not have the stretch with race with
+
+00:05:22,080 --> 00:05:30,660
+each other so they will have words that
+
+00:05:24,060 --> 00:05:34,050
+try to do independent things that that
+
+00:05:30,660 --> 00:05:36,630
+do simultaneous operation on different
+
+00:05:34,050 --> 00:05:38,520
+parts of the memory but the kernel does
+
+00:05:36,630 --> 00:05:42,120
+not make that distinction because it
+
+00:05:38,520 --> 00:05:46,169
+just sees this looking as being global
+
+00:05:42,120 --> 00:05:48,750
+per mm thing not address large thing and
+
+00:05:46,169 --> 00:05:52,560
+so that introduces false conflicts and
+
+00:05:48,750 --> 00:05:56,250
+these things can be hard for developer
+
+00:05:52,560 --> 00:05:57,950
+to handle because they do things they
+
+00:05:56,250 --> 00:06:00,870
+really think are completely independent
+
+00:05:57,950 --> 00:06:03,120
+as they designed a program they may have
+
+00:06:00,870 --> 00:06:06,360
+some fears that are okay it's off we
+
+00:06:03,120 --> 00:06:08,160
+memory blocks then they have a new
+
+00:06:06,360 --> 00:06:11,370
+software that touches memory they
+
+00:06:08,160 --> 00:06:13,200
+already have allocated maybe they want
+
+00:06:11,370 --> 00:06:14,740
+to spend new des they don't even think
+
+00:06:13,200 --> 00:06:16,539
+of that as being a memory
+
+00:06:14,740 --> 00:06:19,509
+operation but that means that needs to
+
+00:06:16,539 --> 00:06:21,789
+allocate a stack maybe someone runs the
+
+00:06:19,509 --> 00:06:23,710
+PS command and they don't think of that
+
+00:06:21,789 --> 00:06:26,860
+as a memory operation but that means it
+
+00:06:23,710 --> 00:06:28,900
+needs to look had come on arguments that
+
+00:06:26,860 --> 00:06:31,539
+are stored in to its address space and
+
+00:06:28,900 --> 00:06:34,349
+so all of these things that normal
+
+00:06:31,539 --> 00:06:39,729
+people think as being completely
+
+00:06:34,349 --> 00:06:43,509
+independent and up sometimes conflicting
+
+00:06:39,729 --> 00:06:49,409
+on each other because of the old design
+
+00:06:43,509 --> 00:06:52,300
+we have a man set and there has been
+
+00:06:49,409 --> 00:06:55,330
+mitigations introduced over time to try
+
+00:06:52,300 --> 00:06:59,530
+to walk around the issue make it not
+
+00:06:55,330 --> 00:07:05,310
+quite so bad this one I added in October
+
+00:06:59,530 --> 00:07:08,560
+2010 let's say if a page fault and we
+
+00:07:05,310 --> 00:07:11,919
+hitting disk we're gonna release a map
+
+00:07:08,560 --> 00:07:15,970
+same just get the page we want into the
+
+00:07:11,919 --> 00:07:17,830
+page cache and then we try the fault at
+
+00:07:15,970 --> 00:07:19,599
+that point we should just be able to get
+
+00:07:17,830 --> 00:07:22,479
+it from the page cache to the right your
+
+00:07:19,599 --> 00:07:24,460
+process memory that were doing the bulk
+
+00:07:22,479 --> 00:07:27,580
+of the delay we won't be holding a map
+
+00:07:24,460 --> 00:07:31,180
+same I did something similar a bit later
+
+00:07:27,580 --> 00:07:34,990
+4mm populates so when we do large em
+
+00:07:31,180 --> 00:07:37,750
+rocks or map with mm populate we can
+
+00:07:34,990 --> 00:07:42,370
+release a map same while we load all
+
+00:07:37,750 --> 00:07:46,750
+these pages from disk there has been
+
+00:07:42,370 --> 00:07:49,870
+walk-in Emin map where we try while we
+
+00:07:46,750 --> 00:07:52,780
+zap all the user pages to only hold the
+
+00:07:49,870 --> 00:08:02,650
+mid side of a map same all these things
+
+00:07:52,780 --> 00:08:05,469
+really help a lot but they don't cover
+
+00:08:02,650 --> 00:08:09,159
+the whole amount of issue that happens
+
+00:08:05,469 --> 00:08:12,639
+for example we drop if there's a fault
+
+00:08:09,159 --> 00:08:14,909
+that hits this but it could also hit we
+
+00:08:12,639 --> 00:08:14,909
+claim
+
+00:08:15,220 --> 00:08:20,210
+trying to allocate a page and then we
+
+00:08:17,630 --> 00:08:21,950
+don't drop in map same or if the four
+
+00:08:20,210 --> 00:08:24,260
+discs are not from the page well pack
+
+00:08:21,950 --> 00:08:25,790
+pass but from get usual pages we don't
+
+00:08:24,260 --> 00:08:28,850
+know how to drop and maps I mean that
+
+00:08:25,790 --> 00:08:32,110
+case there's a lot of age things that
+
+00:08:28,850 --> 00:08:34,460
+are not just not handled and the
+
+00:08:32,110 --> 00:08:38,510
+application developers are still very
+
+00:08:34,460 --> 00:08:40,580
+confused about it because things walk
+
+00:08:38,510 --> 00:08:43,100
+well most of the time but they have this
+
+00:08:40,580 --> 00:08:45,080
+odd case right it doesn't and they spend
+
+00:08:43,100 --> 00:08:48,200
+tons of time trying to figure out what
+
+00:08:45,080 --> 00:08:51,070
+what's wrong with it and I think in the
+
+00:08:48,200 --> 00:08:54,800
+kernel desert so a lot of complexity you
+
+00:08:51,070 --> 00:08:58,390
+introduced by all these tiny worker ones
+
+00:08:54,800 --> 00:09:08,120
+we do this we try pass and these things
+
+00:08:58,390 --> 00:09:11,720
+it's a bit ugly so I think we want to
+
+00:09:08,120 --> 00:09:14,780
+reconsider that approach and we should
+
+00:09:11,720 --> 00:09:19,370
+consider having a design that just
+
+00:09:14,780 --> 00:09:24,820
+completely avoids blocking on false
+
+00:09:19,370 --> 00:09:27,410
+conflicts that is if you have different
+
+00:09:24,820 --> 00:09:30,290
+different words that want to manipulate
+
+00:09:27,410 --> 00:09:37,630
+non overlapping parts of the memory just
+
+00:09:30,290 --> 00:09:41,090
+let them do it without blocking so yes
+
+00:09:37,630 --> 00:09:44,690
+we want to have blocking only happen if
+
+00:09:41,090 --> 00:09:50,090
+a threads manipulate overlapping memory
+
+00:09:44,690 --> 00:09:52,640
+and yeah we do have shared that as true
+
+00:09:50,090 --> 00:09:54,620
+like global data structures I don't mind
+
+00:09:52,640 --> 00:09:56,060
+having locks around these structures I
+
+00:09:54,620 --> 00:09:59,270
+don't see everything need to be
+
+00:09:56,060 --> 00:10:01,880
+localized I'm just saying when we when
+
+00:09:59,270 --> 00:10:04,610
+we take logs to address shared
+
+00:10:01,880 --> 00:10:07,130
+structures we have to make sure we only
+
+00:10:04,610 --> 00:10:09,680
+hold them for short amounts of time not
+
+00:10:07,130 --> 00:10:12,500
+during file access not while allocating
+
+00:10:09,680 --> 00:10:14,060
+user memory not for operation that go
+
+00:10:12,500 --> 00:10:19,790
+with the number of pages to be
+
+00:10:14,060 --> 00:10:22,490
+manipulating I'm worried about things
+
+00:10:19,790 --> 00:10:24,890
+that introduce very long latency while
+
+00:10:22,490 --> 00:10:26,200
+they operate and and bony amount of
+
+00:10:24,890 --> 00:10:29,920
+things I am know
+
+00:10:26,200 --> 00:10:36,870
+worried about food per se like doing
+
+00:10:29,920 --> 00:10:40,750
+tons of small and maps at once I think
+
+00:10:36,870 --> 00:10:44,079
+yeah I'm okay for now with having some
+
+00:10:40,750 --> 00:10:57,070
+global data structures that that get
+
+00:10:44,079 --> 00:10:59,940
+locked on it just so I think so I've
+
+00:10:57,070 --> 00:11:05,260
+started to work on making a prototype
+
+00:10:59,940 --> 00:11:08,980
+for these things and really studying it
+
+00:11:05,260 --> 00:11:15,160
+as simple as I can only in just the
+
+00:11:08,980 --> 00:11:18,399
+smallest number of easy cases with the
+
+00:11:15,160 --> 00:11:25,209
+idea of progressively extended the
+
+00:11:18,399 --> 00:11:27,790
+number of cases that it can handle in
+
+00:11:25,209 --> 00:11:32,709
+particular that means I want to be able
+
+00:11:27,790 --> 00:11:39,160
+to convert maps and block sites one at a
+
+00:11:32,709 --> 00:11:43,870
+time and also VM Ops types one at a time
+
+00:11:39,160 --> 00:11:47,500
+so a lot of driver defines their own VM
+
+00:11:43,870 --> 00:11:50,380
+VM operations that will be get called
+
+00:11:47,500 --> 00:11:53,980
+back from you know values mm operations
+
+00:11:50,380 --> 00:11:57,670
+and these things may expect to have a
+
+00:11:53,980 --> 00:12:00,399
+global log so you have to allow them to
+
+00:11:57,670 --> 00:12:09,730
+become really one at a time us to have
+
+00:12:00,399 --> 00:12:14,680
+you know something walkable so that
+
+00:12:09,730 --> 00:12:16,870
+means I want to have a replacement API
+
+00:12:14,680 --> 00:12:19,410
+for a maps and that can support both
+
+00:12:16,870 --> 00:12:22,120
+cost low cost Lucas that can be
+
+00:12:19,410 --> 00:12:26,170
+automatically converted from the current
+
+00:12:22,120 --> 00:12:30,839
+uses and fine-grain locus that will have
+
+00:12:26,170 --> 00:12:34,810
+a known al restaurante they walk on and
+
+00:12:30,839 --> 00:12:40,270
+when we do that we want the interaction
+
+00:12:34,810 --> 00:12:42,610
+between fine and large and course
+
+00:12:40,270 --> 00:12:44,589
+to be exactly like between two
+
+00:12:42,610 --> 00:12:47,980
+co-workers because that way when we
+
+00:12:44,589 --> 00:12:50,649
+converse something to be fine-grained we
+
+00:12:47,980 --> 00:12:52,750
+only need to consider the interaction
+
+00:12:50,649 --> 00:12:57,700
+this will have with OSHA already
+
+00:12:52,750 --> 00:13:00,399
+converted fine-grain workers that that
+
+00:12:57,700 --> 00:13:06,670
+makes the conversion a lot more
+
+00:13:00,399 --> 00:13:11,920
+approachable so when we convert 1m maps
+
+00:13:06,670 --> 00:13:14,980
+and malacca presumably it will be
+
+00:13:11,920 --> 00:13:18,220
+accessing some shared data structures
+
+00:13:14,980 --> 00:13:20,170
+and if it's no fine grained that means
+
+00:13:18,220 --> 00:13:23,200
+it doesn't have a lock on the whole
+
+00:13:20,170 --> 00:13:26,170
+address space so it will need to add
+
+00:13:23,200 --> 00:13:30,670
+whatever locks are necessary to protect
+
+00:13:26,170 --> 00:13:34,600
+that data structure and as we add these
+
+00:13:30,670 --> 00:13:37,089
+locks make sure we keep you know with
+
+00:13:34,600 --> 00:13:39,070
+all girls so make sure we don't hold
+
+00:13:37,089 --> 00:13:42,130
+these logs during file access doing
+
+00:13:39,070 --> 00:13:46,260
+allocating is your memory doing things
+
+00:13:42,130 --> 00:13:46,260
+that proportional to the number of pages
+
+00:13:49,140 --> 00:13:55,060
+okay so here we have the first
+
+00:13:52,390 --> 00:13:57,730
+implementation choice that may be
+
+00:13:55,060 --> 00:14:01,360
+controversial that's there's more than
+
+00:13:57,730 --> 00:14:05,110
+one way to go about it I wanted to be
+
+00:14:01,360 --> 00:14:08,440
+able to lock arbitrary address ranges
+
+00:14:05,110 --> 00:14:12,160
+completely independent of the VMS that
+
+00:14:08,440 --> 00:14:16,270
+already exist there's two reasons for
+
+00:14:12,160 --> 00:14:19,149
+that one is that well it's the most
+
+00:14:16,270 --> 00:14:24,310
+directly aligned thing with my goal of
+
+00:14:19,149 --> 00:14:29,110
+avoiding false conflicts the other is
+
+00:14:24,310 --> 00:14:31,829
+that well at first you would think that
+
+00:14:29,110 --> 00:14:36,010
+putting the locks in the VMA is simpler
+
+00:14:31,829 --> 00:14:40,630
+but it kind of broke my head when I try
+
+00:14:36,010 --> 00:14:43,510
+to think about it so if you have if you
+
+00:14:40,630 --> 00:14:46,870
+try to put the address space locks into
+
+00:14:43,510 --> 00:14:49,300
+VMAs it's a bit difficult because if you
+
+00:14:46,870 --> 00:14:52,060
+want to lock an existing address space
+
+00:14:49,300 --> 00:14:53,000
+that could be a number of existing VMAs
+
+00:14:52,060 --> 00:14:55,190
+in it and
+
+00:14:53,000 --> 00:14:57,260
+want to log them all on while you're
+
+00:14:55,190 --> 00:14:58,880
+waiting to get all these logs you don't
+
+00:14:57,260 --> 00:15:01,490
+have a locker than that address space
+
+00:14:58,880 --> 00:15:03,620
+yet so somebody could be removing or
+
+00:15:01,490 --> 00:15:06,650
+creating new VMs within that ones you're
+
+00:15:03,620 --> 00:15:11,240
+trying to work on adjusting is
+
+00:15:06,650 --> 00:15:13,970
+complicated so that's a design choice
+
+00:15:11,240 --> 00:15:16,820
+that may be controversial that's open to
+
+00:15:13,970 --> 00:15:19,400
+change if you know it's proven that
+
+00:15:16,820 --> 00:15:21,410
+those are ways better but that's not
+
+00:15:19,400 --> 00:15:24,200
+where I'm starting because I think by
+
+00:15:21,410 --> 00:15:29,080
+default I want to get closures to this
+
+00:15:24,200 --> 00:15:29,080
+goal I have of avoiding false conflicts
+
+00:15:30,790 --> 00:15:39,860
+so for this implementation I added a
+
+00:15:37,360 --> 00:15:43,910
+ones working data structure that
+
+00:15:39,860 --> 00:15:46,070
+represents the Ranji is that that are
+
+00:15:43,910 --> 00:15:52,190
+locked for rid of a white or that half
+
+00:15:46,070 --> 00:15:57,730
+panting locks on them and that could be
+
+00:15:52,190 --> 00:16:01,850
+read read locks or white locks on
+
+00:15:57,730 --> 00:16:04,280
+arbitrary memory boundaries and there's
+
+00:16:01,850 --> 00:16:07,670
+a neuropsychology ma log that protects
+
+00:16:04,280 --> 00:16:11,150
+both the arbitrary and the ones working
+
+00:16:07,670 --> 00:16:13,130
+data structure and it's kind of
+
+00:16:11,150 --> 00:16:20,710
+convenient to have both under the same
+
+00:16:13,130 --> 00:16:23,720
+rug because quite often we do want to
+
+00:16:20,710 --> 00:16:31,460
+decide on what's the ones to below
+
+00:16:23,720 --> 00:16:37,250
+depending on existing VMAs all right so
+
+00:16:31,460 --> 00:16:40,490
+I have a very preliminary patch that I
+
+00:16:37,250 --> 00:16:43,310
+have been working on it doesn't do very
+
+00:16:40,490 --> 00:16:47,690
+much yet but you know that's the base
+
+00:16:43,310 --> 00:16:53,450
+have been building on so it starts by
+
+00:16:47,690 --> 00:16:57,560
+adding some mm looking API initially
+
+00:16:53,450 --> 00:17:02,089
+that's just of up around with vitamin
+
+00:16:57,560 --> 00:17:06,859
+for codes and it converts all of the
+
+00:17:02,089 --> 00:17:10,709
+existing curl size to that new API using
+
+00:17:06,859 --> 00:17:14,279
+so the point of that API is that now I
+
+00:17:10,709 --> 00:17:18,959
+can extend that API into something that
+
+00:17:14,279 --> 00:17:28,259
+suppose one's working and we implement
+
+00:17:18,959 --> 00:17:30,179
+that API using interval trees so locusts
+
+00:17:28,259 --> 00:17:32,549
+that have been converted automatically
+
+00:17:30,179 --> 00:17:36,779
+used crosswalks but then I can start
+
+00:17:32,549 --> 00:17:42,269
+introducing fine-grain locks one place
+
+00:17:36,779 --> 00:17:46,109
+at a time so the first fight a viper a
+
+00:17:42,269 --> 00:17:48,989
+vital you want to handle probably is do
+
+00:17:46,109 --> 00:17:53,669
+a map because it's can add a canonical
+
+00:17:48,989 --> 00:17:57,419
+one and so first I had to change the API
+
+00:17:53,669 --> 00:18:00,570
+window when do a map is called the color
+
+00:17:57,419 --> 00:18:03,119
+already holds a cost lock on the entire
+
+00:18:00,570 --> 00:18:06,389
+and map same so I wanted to change that
+
+00:18:03,119 --> 00:18:08,820
+so that the color can decide can say hey
+
+00:18:06,389 --> 00:18:11,460
+I don't have a lock you figure out what
+
+00:18:08,820 --> 00:18:13,799
+you need to lock and you'll do it
+
+00:18:11,460 --> 00:18:15,749
+yourself and so you know there's an
+
+00:18:13,799 --> 00:18:20,549
+extra argument that says if the Cora has
+
+00:18:15,749 --> 00:18:25,710
+a lock or not and if it doesn't then do
+
+00:18:20,549 --> 00:18:28,859
+a map will decide what sort of launch
+
+00:18:25,710 --> 00:18:31,200
+locks it want to get and initially it
+
+00:18:28,859 --> 00:18:33,690
+really only tries to get a fine grain
+
+00:18:31,200 --> 00:18:36,389
+lock in the easiest cages that is even
+
+00:18:33,690 --> 00:18:38,519
+whitewashes known if that's an emotion
+
+00:18:36,389 --> 00:18:41,940
+memory you want to map if there's
+
+00:18:38,519 --> 00:18:46,529
+nothing to an map then it will try to
+
+00:18:41,940 --> 00:18:49,859
+get a fine grain lock on exactly the
+
+00:18:46,529 --> 00:18:55,350
+part of memory that it wants to operate
+
+00:18:49,859 --> 00:19:00,379
+on once it has that fine grain lock it
+
+00:18:55,350 --> 00:19:00,379
+will manipulate the
+
+00:19:00,649 --> 00:19:08,700
+the VMA arbitrary to configure the VMA
+
+00:19:06,330 --> 00:19:12,119
+that it wants to add that will be
+
+00:19:08,700 --> 00:19:15,539
+protected by a VM a lock so that another
+
+00:19:12,119 --> 00:19:18,299
+do a map walking in in parallel won't
+
+00:19:15,539 --> 00:19:23,700
+actually have conflicts updating that
+
+00:19:18,299 --> 00:19:26,399
+structure and that's really all it does
+
+00:19:23,700 --> 00:19:30,570
+in that case so it's actually doesn't
+
+00:19:26,399 --> 00:19:34,109
+really add power ISM in in this thing
+
+00:19:30,570 --> 00:19:39,869
+since we still hold a VM a doc but it
+
+00:19:34,109 --> 00:19:45,389
+doesn't have it doesn't have the case of
+
+00:19:39,869 --> 00:19:47,489
+trying to acquire a global lock on the
+
+00:19:45,389 --> 00:19:51,179
+whole address space and waiting for
+
+00:19:47,489 --> 00:19:52,980
+every possible page fold to stop in the
+
+00:19:51,179 --> 00:19:57,480
+in the whole address space before doing
+
+00:19:52,980 --> 00:20:00,629
+that a map it will only stop for read
+
+00:19:57,480 --> 00:20:06,509
+logs that overlap the little piece we
+
+00:20:00,629 --> 00:20:08,759
+want to do map and now you want to
+
+00:20:06,509 --> 00:20:10,830
+extend that with the few cases so if the
+
+00:20:08,759 --> 00:20:17,399
+address is unknown you will need to call
+
+00:20:10,830 --> 00:20:21,090
+get and map we are and that's actually
+
+00:20:17,399 --> 00:20:24,779
+why I have the same VM a law protecting
+
+00:20:21,090 --> 00:20:27,480
+both my ones working structure and my VM
+
+00:20:24,779 --> 00:20:29,309
+alias because before having any round
+
+00:20:27,480 --> 00:20:31,710
+rock I want to be able to call get and
+
+00:20:29,309 --> 00:20:34,259
+mapped we are figure out where there's
+
+00:20:31,710 --> 00:20:37,830
+any empty space market that space is
+
+00:20:34,259 --> 00:20:39,840
+planning a location a quite a fine grain
+
+00:20:37,830 --> 00:20:44,700
+lock on that one that I have you know
+
+00:20:39,840 --> 00:20:46,859
+targeted for a location once I got that
+
+00:20:44,700 --> 00:20:52,919
+allocation verified that nobody has
+
+00:20:46,859 --> 00:20:57,299
+messed with my ranch and then continue
+
+00:20:52,919 --> 00:21:01,790
+as usual if somebody messed with my
+
+00:20:57,299 --> 00:21:02,929
+ranch then I'm okay with falling back to
+
+00:21:01,790 --> 00:21:06,299
+[Music]
+
+00:21:02,929 --> 00:21:08,429
+to acquire your and just realizing
+
+00:21:06,299 --> 00:21:10,349
+the whole thing that way it really
+
+00:21:08,429 --> 00:21:13,129
+should not happen much in fact is that
+
+00:21:10,349 --> 00:21:13,129
+people
+
+00:21:13,320 --> 00:21:21,010
+mess with you as you're trying to
+
+00:21:15,549 --> 00:21:25,630
+educate the brach so that's fine if
+
+00:21:21,010 --> 00:21:30,490
+there is a file in the being mapped why
+
+00:21:25,630 --> 00:21:33,010
+no it's not implemented but you would
+
+00:21:30,490 --> 00:21:38,980
+just have to be a little bit careful
+
+00:21:33,010 --> 00:21:42,309
+before calling the the file and map
+
+00:21:38,980 --> 00:21:44,559
+method because some driver expect that
+
+00:21:42,309 --> 00:21:47,220
+they have a global lock there so you
+
+00:21:44,559 --> 00:21:50,860
+need to go driver per driver and
+
+00:21:47,220 --> 00:21:56,700
+whitelist these cages because most
+
+00:21:50,860 --> 00:21:56,700
+drivers don't care but some may show you
+
+00:22:00,179 --> 00:22:07,539
+and then the do a map was existing VMAs
+
+00:22:04,120 --> 00:22:09,370
+so I also didn't do that yet really you
+
+00:22:07,539 --> 00:22:16,000
+want to do do a man map for us before
+
+00:22:09,370 --> 00:22:19,299
+you even get there are few complications
+
+00:22:16,000 --> 00:22:22,210
+one of them is that just as in the end
+
+00:22:19,299 --> 00:22:24,490
+map with a file case some driver want to
+
+00:22:22,210 --> 00:22:27,190
+have a crosswalk when the VM ops close
+
+00:22:24,490 --> 00:22:34,750
+method is called so again they need to
+
+00:22:27,190 --> 00:22:36,520
+be white listed and when when we zap the
+
+00:22:34,750 --> 00:22:40,390
+user of pages that could take a long
+
+00:22:36,520 --> 00:22:43,649
+time so we obviously want to not hold VM
+
+00:22:40,390 --> 00:22:43,649
+a lock when while we do that
+
+00:22:47,550 --> 00:22:50,670
+[Music]
+
+00:22:52,440 --> 00:22:59,769
+could you so why do you need to get the
+
+00:22:56,679 --> 00:23:01,389
+VMA lock while doing this do a map
+
+00:22:59,769 --> 00:23:03,609
+processing because the VMA lock should
+
+00:23:01,389 --> 00:23:10,450
+only old when you are touching to the
+
+00:23:03,609 --> 00:23:13,179
+vme tree isn't it well do em if you look
+
+00:23:10,450 --> 00:23:15,369
+at least in the easy case of its a non
+
+00:23:13,179 --> 00:23:19,509
+memory you don't earn map and whatever
+
+00:23:15,369 --> 00:23:21,909
+then really all it does is add a new vm
+
+00:23:19,509 --> 00:23:25,029
+a into the vm a tree and so it does need
+
+00:23:21,909 --> 00:23:27,489
+in that case to have vm a log for pretty
+
+00:23:25,029 --> 00:23:29,950
+much the whole operation anyway because
+
+00:23:27,489 --> 00:23:32,559
+all it does is manipulate this global
+
+00:23:29,950 --> 00:23:35,259
+structure to to say there's no one more
+
+00:23:32,559 --> 00:23:36,940
+if you all the vm a log that's mean
+
+00:23:35,259 --> 00:23:38,859
+that's all the other operation that
+
+00:23:36,940 --> 00:23:41,230
+could do a map another price will have
+
+00:23:38,859 --> 00:23:45,460
+to wait for the vm a lock to be realized
+
+00:23:41,230 --> 00:23:48,369
+yes so you still do only in the easy
+
+00:23:45,460 --> 00:23:50,950
+case where the whole operation is just
+
+00:23:48,369 --> 00:23:53,259
+manipulating some global state you still
+
+00:23:50,950 --> 00:23:56,440
+only do one such operation at a time
+
+00:23:53,259 --> 00:23:59,409
+the one thing you benefit from is that
+
+00:23:56,440 --> 00:24:02,109
+before starting that operation you don't
+
+00:23:59,409 --> 00:24:03,519
+have to take the cost lock on the whole
+
+00:24:02,109 --> 00:24:06,669
+address space and that means you don't
+
+00:24:03,519 --> 00:24:09,279
+have to wait for every possible wither
+
+00:24:06,669 --> 00:24:12,249
+on unrelated parts of the address space
+
+00:24:09,279 --> 00:24:16,779
+to complete so you still end up doing
+
+00:24:12,249 --> 00:24:19,659
+only one a map at a time if they are
+
+00:24:16,779 --> 00:24:22,029
+just quick manipulations of the share
+
+00:24:19,659 --> 00:24:25,299
+space but you don't
+
+00:24:22,029 --> 00:24:27,220
+before starting them wait for every page
+
+00:24:25,299 --> 00:24:33,759
+file to complete before you can start to
+
+00:24:27,220 --> 00:24:38,820
+a map so you do we move that that false
+
+00:24:33,759 --> 00:24:38,820
+conflict broking case
+
+00:24:47,980 --> 00:24:55,870
+all right what do we do when we want to
+
+00:24:52,330 --> 00:24:59,980
+acquire what do we do in the page hole
+
+00:24:55,870 --> 00:25:02,080
+pass and I spread that in two parts the
+
+00:24:59,980 --> 00:25:05,580
+first pass is requiring you're on drugs
+
+00:25:02,080 --> 00:25:09,070
+so I think you do want to look at the
+
+00:25:05,580 --> 00:25:12,779
+VMA that's there first and based on that
+
+00:25:09,070 --> 00:25:15,789
+VMA you want to determine an appropriate
+
+00:25:12,779 --> 00:25:20,679
+run for the operation you want to do for
+
+00:25:15,789 --> 00:25:23,740
+example if it's a non VMA you will hope
+
+00:25:20,679 --> 00:25:28,000
+to map but to make pages in there and so
+
+00:25:23,740 --> 00:25:31,899
+you want to one drug to 2 Meg of address
+
+00:25:28,000 --> 00:25:37,059
+space around the 14 address then you
+
+00:25:31,899 --> 00:25:39,340
+will wait to acquire the one drug on
+
+00:25:37,059 --> 00:25:42,250
+that el restaurante and then you will
+
+00:25:39,340 --> 00:25:45,519
+verify that the VMA type has not changed
+
+00:25:42,250 --> 00:25:48,490
+if it has turns that's quite uncommon
+
+00:25:45,519 --> 00:25:52,269
+you can retry with a caution in that
+
+00:25:48,490 --> 00:25:57,210
+case once you have your ones Rock you
+
+00:25:52,269 --> 00:26:08,500
+want immediately to look up at the
+
+00:25:57,210 --> 00:26:10,210
+attributes of the VMA and just just make
+
+00:26:08,500 --> 00:26:12,460
+sure you look at the attributes at the
+
+00:26:10,210 --> 00:26:16,179
+very start of the page holes before you
+
+00:26:12,460 --> 00:26:19,330
+believe this VM Eric because after that
+
+00:26:16,179 --> 00:26:25,419
+the vmas could be going under you what
+
+00:26:19,330 --> 00:26:27,220
+happens is once you have your work look
+
+00:26:25,419 --> 00:26:30,610
+you know the VMA attributes will not
+
+00:26:27,220 --> 00:26:35,289
+change but the vmas themself may still
+
+00:26:30,610 --> 00:26:38,919
+get merge with another vm a so the vm a
+
+00:26:35,289 --> 00:26:40,779
+pointer you had could actually be freed
+
+00:26:38,919 --> 00:26:44,320
+under you and at that sort of things so
+
+00:26:40,779 --> 00:26:49,299
+what happens yeah I didn't make a graph
+
+00:26:44,320 --> 00:26:52,779
+for that but say you have a big vm a
+
+00:26:49,299 --> 00:26:58,360
+here and you're faulting a little part
+
+00:26:52,779 --> 00:27:00,519
+here and so you know the attributes to
+
+00:26:58,360 --> 00:27:01,810
+that little part won't change now if
+
+00:27:00,519 --> 00:27:04,870
+someone makes an operation
+
+00:27:01,810 --> 00:27:08,320
+that VMA gets more inertia that you know
+
+00:27:04,870 --> 00:27:11,350
+has identical attributes that are next
+
+00:27:08,320 --> 00:27:13,060
+to it one of the two will get freed and
+
+00:27:11,350 --> 00:27:18,150
+that may be the one you're walking on
+
+00:27:13,060 --> 00:27:23,920
+and so you have to expect
+
+00:27:18,150 --> 00:27:26,530
+basically in widows you cannot hold on
+
+00:27:23,920 --> 00:27:28,900
+to VMAs you can only be guaranteed that
+
+00:27:26,530 --> 00:27:32,500
+the VMA attributes don't change where
+
+00:27:28,900 --> 00:27:35,200
+you have the the ones rock but the VMAs
+
+00:27:32,500 --> 00:27:38,290
+themselves may go way under you and that
+
+00:27:35,200 --> 00:27:49,240
+is something you have to be to adapt the
+
+00:27:38,290 --> 00:27:51,250
+code for I just want to make sure I
+
+00:27:49,240 --> 00:27:52,570
+understand so whenever you look at the
+
+00:27:51,250 --> 00:27:57,850
+image you need to take the VMA lock
+
+00:27:52,570 --> 00:28:00,640
+right yes so I know I take the VMA look
+
+00:27:57,850 --> 00:28:04,000
+at the same time for taking the Warlock
+
+00:28:00,640 --> 00:28:08,320
+and I can look up at VMAs at the same
+
+00:28:04,000 --> 00:28:11,440
+time and before when I'm done realizing
+
+00:28:08,320 --> 00:28:13,870
+the when I'm done acquiring my ones rock
+
+00:28:11,440 --> 00:28:16,450
+I will this VA my rock but before doing
+
+00:28:13,870 --> 00:28:19,420
+that I may so for the page for path we
+
+00:28:16,450 --> 00:28:21,880
+start by taking the VMA lock finding the
+
+00:28:19,420 --> 00:28:25,420
+VMA taking the ranch lock releasing the
+
+00:28:21,880 --> 00:28:27,760
+VMA lock yes okay so that means that
+
+00:28:25,420 --> 00:28:28,870
+while you gain scalability you probably
+
+00:28:27,760 --> 00:28:31,330
+are losing on single thread performance
+
+00:28:28,870 --> 00:28:38,010
+by a lot of more lock and lock operation
+
+00:28:31,330 --> 00:28:41,560
+on the path yes so I know we would I
+
+00:28:38,010 --> 00:28:44,950
+know we will have one fight on a map
+
+00:28:41,560 --> 00:28:49,120
+same to acquire a map same for weed and
+
+00:28:44,950 --> 00:28:51,370
+then when to release at the end and now
+
+00:28:49,120 --> 00:28:53,530
+we have a few more aware we have at
+
+00:28:51,370 --> 00:28:55,390
+least two bites you know when to acquire
+
+00:28:53,530 --> 00:28:57,400
+the VMA lock and want to believe it and
+
+00:28:55,390 --> 00:28:59,380
+then in the middle you have a few weeds
+
+00:28:57,400 --> 00:29:04,640
+that hopefully cache well but that still
+
+00:28:59,380 --> 00:29:10,760
+at least two wise instead of one so
+
+00:29:04,640 --> 00:29:13,700
+I will get back to that but that's good
+
+00:29:10,760 --> 00:29:15,170
+that's a good observation and I think we
+
+00:29:13,700 --> 00:29:17,059
+may want to do more to get the
+
+00:29:15,170 --> 00:29:18,380
+performance there because especially on
+
+00:29:17,059 --> 00:29:24,049
+the payroll path I worry about the
+
+00:29:18,380 --> 00:29:25,940
+performance so I was hoping I would have
+
+00:29:24,049 --> 00:29:27,740
+my patch that you know in a good state
+
+00:29:25,940 --> 00:29:32,600
+by now really took a little bit longer
+
+00:29:27,740 --> 00:29:36,620
+than I expected I I want to finish the
+
+00:29:32,600 --> 00:29:39,410
+page for pass before I can send it for
+
+00:29:36,620 --> 00:29:44,750
+for sharing with everyone so that it can
+
+00:29:39,410 --> 00:29:46,490
+be a bit more meaningful I'm also hoping
+
+00:29:44,750 --> 00:29:51,040
+that's when we have this implementation
+
+00:29:46,490 --> 00:29:57,910
+people can use it to try various ideas
+
+00:29:51,040 --> 00:30:02,120
+I'll get back to that as well so yes
+
+00:29:57,910 --> 00:30:04,880
+speculative force so we do have this
+
+00:30:02,120 --> 00:30:06,980
+thing that already we have to look up at
+
+00:30:04,880 --> 00:30:10,580
+the VMA characteristics at the start of
+
+00:30:06,980 --> 00:30:15,260
+the page holes and really to do that you
+
+00:30:10,580 --> 00:30:19,419
+wouldn't really have to take a look as
+
+00:30:15,260 --> 00:30:23,780
+you look up the VMA you can do low class
+
+00:30:19,419 --> 00:30:25,730
+VMA lookup and get these characteristics
+
+00:30:23,780 --> 00:30:28,460
+at that time now you wouldn't be
+
+00:30:25,730 --> 00:30:31,220
+guaranteed that the attributes won't
+
+00:30:28,460 --> 00:30:33,140
+change while you do your page faults but
+
+00:30:31,220 --> 00:30:36,799
+when you get to the end of your page one
+
+00:30:33,140 --> 00:30:40,549
+when you're ready to stick that new page
+
+00:30:36,799 --> 00:30:43,370
+into the address space at that point you
+
+00:30:40,549 --> 00:30:46,510
+could check if the VMA hasn't changed
+
+00:30:43,370 --> 00:30:49,610
+and either commit the change you did or
+
+00:30:46,510 --> 00:30:54,650
+back it out if the VMA has changed and
+
+00:30:49,610 --> 00:30:57,470
+so that would be speculative page false
+
+00:30:54,650 --> 00:30:59,809
+so alow had something doing that except
+
+00:30:57,470 --> 00:31:04,040
+that in his implementation he had to
+
+00:30:59,809 --> 00:31:05,929
+take a ref count on VMAs just because we
+
+00:31:04,040 --> 00:31:08,299
+were still passing VMA structures Ramon
+
+00:31:05,929 --> 00:31:09,770
+I think we don't want to pass remade
+
+00:31:08,299 --> 00:31:12,650
+structures around and I think for
+
+00:31:09,770 --> 00:31:16,250
+performance we may want to go the low
+
+00:31:12,650 --> 00:31:17,510
+class pass for page faults like it's
+
+00:31:16,250 --> 00:31:20,030
+kind of a feudal thing
+
+00:31:17,510 --> 00:31:21,950
+I don't want to start there but we may
+
+00:31:20,030 --> 00:31:23,420
+have to do it for purposes which do we
+
+00:31:21,950 --> 00:31:26,060
+already have are we looking at having
+
+00:31:23,420 --> 00:31:29,690
+some form of us you tree that we can
+
+00:31:26,060 --> 00:31:33,910
+look up without taking looks so right
+
+00:31:29,690 --> 00:31:37,280
+now the arbitrary can be looked up
+
+00:31:33,910 --> 00:31:39,220
+without a we lock and you are guaranteed
+
+00:31:37,280 --> 00:31:42,530
+that the lookup will complete if
+
+00:31:39,220 --> 00:31:44,570
+somebody doesn't update where you do
+
+00:31:42,530 --> 00:31:48,440
+your lookup you may end up a garbage
+
+00:31:44,570 --> 00:31:50,300
+result but you can know if that happened
+
+00:31:48,440 --> 00:31:52,700
+or not using a sake rock so if you have
+
+00:31:50,300 --> 00:32:03,950
+the arbitrary process a clock you can
+
+00:31:52,700 --> 00:32:05,510
+end up doing right free lookups I have
+
+00:32:03,950 --> 00:32:08,300
+another question that's a little bit
+
+00:32:05,510 --> 00:32:12,350
+sort of it's a little different little
+
+00:32:08,300 --> 00:32:15,260
+longer so early you mentioned the issue
+
+00:32:12,350 --> 00:32:17,360
+of the lock contention often being like
+
+00:32:15,260 --> 00:32:19,640
+apps trying to fight over memory and
+
+00:32:17,360 --> 00:32:23,300
+stuff one thing that we have seen as a
+
+00:32:19,640 --> 00:32:25,610
+huge problem has actually been there's a
+
+00:32:23,300 --> 00:32:28,400
+lot of concern a lot of app developers
+
+00:32:25,610 --> 00:32:31,040
+think that reading files is free and so
+
+00:32:28,400 --> 00:32:33,860
+we've had problems with people writing
+
+00:32:31,040 --> 00:32:37,490
+tooling to do monitoring to traverse
+
+00:32:33,860 --> 00:32:39,980
+/proc very heavily yes and it has been a
+
+00:32:37,490 --> 00:32:44,390
+major problem that there's too much in
+
+00:32:39,980 --> 00:32:46,280
+map sims holding there that cost in case
+
+00:32:44,390 --> 00:32:48,800
+just to have some debugging information
+
+00:32:46,280 --> 00:32:53,480
+and then it makes a mess we have the
+
+00:32:48,800 --> 00:32:55,870
+same issue at Google I don't have a good
+
+00:32:53,480 --> 00:32:59,120
+answer to that other than telling people
+
+00:32:55,870 --> 00:33:02,510
+so yeah I mean I was hoping that some of
+
+00:32:59,120 --> 00:33:04,880
+his maps some contention plans that we
+
+00:33:02,510 --> 00:33:07,070
+could also retire an address whether we
+
+00:33:04,880 --> 00:33:10,310
+can make some of that data less
+
+00:33:07,070 --> 00:33:12,590
+depending on a map Sam or do something
+
+00:33:10,310 --> 00:33:14,390
+more to to address that problem too
+
+00:33:12,590 --> 00:33:19,790
+because at least for us at Facebook
+
+00:33:14,390 --> 00:33:22,070
+that's been a major problem yeah I have
+
+00:33:19,790 --> 00:33:24,680
+not given much news of that but it does
+
+00:33:22,070 --> 00:33:29,400
+happen at Google - and
+
+00:33:24,680 --> 00:33:31,620
+it's kinda odd because when you work on
+
+00:33:29,400 --> 00:33:33,240
+a Maps them you wouldn't want to work on
+
+00:33:31,620 --> 00:33:35,910
+this face first you want to work on
+
+00:33:33,240 --> 00:33:37,710
+things that you care about first but it
+
+00:33:35,910 --> 00:33:39,270
+turns out people like if there's a way
+
+00:33:37,710 --> 00:33:41,700
+that will break your performance people
+
+00:33:39,270 --> 00:33:45,450
+will use it just in case because they
+
+00:33:41,700 --> 00:33:46,650
+want it to dump this face well yeah one
+
+00:33:45,450 --> 00:33:47,970
+of the problems are seeing is like you
+
+00:33:46,650 --> 00:33:49,770
+have the people writing the apps that
+
+00:33:47,970 --> 00:33:51,510
+are trying to run the services that were
+
+00:33:49,770 --> 00:33:53,070
+using for production and then you have
+
+00:33:51,510 --> 00:33:54,780
+the people writing monitoring tools and
+
+00:33:53,070 --> 00:33:56,220
+they're not the same teams they don't
+
+00:33:54,780 --> 00:33:57,540
+think about the same things and they
+
+00:33:56,220 --> 00:34:07,380
+don't realize that they are stepping on
+
+00:33:57,540 --> 00:34:09,240
+each other right another thing I wanted
+
+00:34:07,380 --> 00:34:12,570
+to say so
+
+00:34:09,240 --> 00:34:15,210
+I have not really worked on smart data
+
+00:34:12,570 --> 00:34:19,200
+structures or on doing things in a
+
+00:34:15,210 --> 00:34:21,660
+really more decentralized way I know I
+
+00:34:19,200 --> 00:34:25,700
+just took the existing data structures
+
+00:34:21,660 --> 00:34:25,700
+and added locks on them really
+
+00:34:27,350 --> 00:34:34,470
+some people have interest in or some
+
+00:34:31,860 --> 00:34:36,180
+people have been discussing doing you
+
+00:34:34,470 --> 00:34:37,770
+know smart or data structures and these
+
+00:34:36,180 --> 00:34:40,860
+descriptions have never been anywhere
+
+00:34:37,770 --> 00:34:44,730
+because we don't have anywhere in the
+
+00:34:40,860 --> 00:34:47,400
+mmm that actually can use these
+
+00:34:44,730 --> 00:34:50,940
+structures and do anything in a
+
+00:34:47,400 --> 00:34:52,770
+congruent way so I know all of the em
+
+00:34:50,940 --> 00:34:58,530
+apps and users the expect that they will
+
+00:34:52,770 --> 00:35:01,740
+have exclusive access and that so if
+
+00:34:58,530 --> 00:35:05,000
+this budget provides the way for users
+
+00:35:01,740 --> 00:35:08,400
+to only log specific none of
+
+00:35:05,000 --> 00:35:11,790
+non-overlapping wrong geez maybe someone
+
+00:35:08,400 --> 00:35:14,120
+else can design a better way to log this
+
+00:35:11,790 --> 00:35:16,920
+none of all a penguin trees without
+
+00:35:14,120 --> 00:35:18,720
+which are relying on the central data
+
+00:35:16,920 --> 00:35:22,230
+structure that has not been my interest
+
+00:35:18,720 --> 00:35:25,550
+but I know some people are interested in
+
+00:35:22,230 --> 00:35:28,110
+higher concurrency in that sense and
+
+00:35:25,550 --> 00:35:33,510
+basically I would hope for this patch
+
+00:35:28,110 --> 00:35:36,540
+set to provide kind of a playground to
+
+00:35:33,510 --> 00:35:37,170
+try new ideas on a lot of people have
+
+00:35:36,540 --> 00:35:40,380
+been
+
+00:35:37,170 --> 00:35:42,150
+kind of providing ideas but it never
+
+00:35:40,380 --> 00:35:44,570
+gets to the implementation stage because
+
+00:35:42,150 --> 00:35:51,960
+we have nothing that can actually use it
+
+00:35:44,570 --> 00:35:56,430
+I hope to see some experimentation going
+
+00:35:51,960 --> 00:36:00,440
+on I want that ratchet and well that's
+
+00:35:56,430 --> 00:36:02,850
+what I have you know one question and
+
+00:36:00,440 --> 00:36:04,800
+we're working on the speakers page
+
+00:36:02,850 --> 00:36:08,060
+faults one of the concern I had when
+
+00:36:04,800 --> 00:36:13,290
+only in the GME that's backed by fire
+
+00:36:08,060 --> 00:36:15,990
+that's when the VMA gets merged or
+
+00:36:13,290 --> 00:36:20,580
+splitted in our back the problems that's
+
+00:36:15,990 --> 00:36:24,300
+the VMP G of values is not some more
+
+00:36:20,580 --> 00:36:27,300
+consistent and that's mainly used in the
+
+00:36:24,300 --> 00:36:31,050
+page fault path to manage the page that
+
+00:36:27,300 --> 00:36:33,180
+you have to map for the file and I don't
+
+00:36:31,050 --> 00:36:47,310
+know how we want to oh you can't read
+
+00:36:33,180 --> 00:36:49,650
+that I have eme attributes is the thing
+
+00:36:47,310 --> 00:36:52,170
+that I did in my in my series for the
+
+00:36:49,650 --> 00:36:55,920
+strategy fish food but I I got this
+
+00:36:52,170 --> 00:36:58,260
+problem with the PG v mpg of that's you
+
+00:36:55,920 --> 00:37:02,000
+can cache it but if you change you know
+
+00:36:58,260 --> 00:37:02,000
+by that values will not be correct
+
+00:37:02,180 --> 00:37:12,030
+because of the BMI boundaries and PG off
+
+00:37:05,760 --> 00:37:14,400
+is no more consistent so if what is that
+
+00:37:12,030 --> 00:37:16,430
+like you change the bounds of the VMA
+
+00:37:14,400 --> 00:37:24,600
+yeah because the VM is get managed
+
+00:37:16,430 --> 00:37:30,900
+distance ah spitted well what should
+
+00:37:24,600 --> 00:37:33,920
+stay constant is the offset between PG f
+
+00:37:30,900 --> 00:37:36,920
+and the start address awesome yeah yeah
+
+00:37:33,920 --> 00:37:36,920
+yes
+
+00:37:40,200 --> 00:37:46,859
+so yeah I think data if you want to
+
+00:37:44,490 --> 00:37:49,410
+revalidate VMA attributes when you're
+
+00:37:46,859 --> 00:37:51,839
+going to commit to you know storing the
+
+00:37:49,410 --> 00:37:53,760
+new page you would want to check that
+
+00:37:51,839 --> 00:37:55,770
+it's still the same page you want it so
+
+00:37:53,760 --> 00:37:59,490
+you don't check PG of itself but you
+
+00:37:55,770 --> 00:38:12,059
+check some you know adjusted PG f PG of
+
+00:37:59,490 --> 00:38:14,760
+thing based on start on PG off yes yeah
+
+00:38:12,059 --> 00:38:16,980
+just be validating that the offset in
+
+00:38:14,760 --> 00:38:19,319
+the file for the VA that you're doing it
+
+00:38:16,980 --> 00:38:20,520
+is consistent yes and that the other
+
+00:38:19,319 --> 00:38:23,510
+permissions and other stuff are
+
+00:38:20,520 --> 00:38:23,510
+consistent yes
+
+00:38:33,119 --> 00:38:42,359
+so what data structure using the track
+
+00:38:35,930 --> 00:38:46,020
+your interval tree so it's list of
+
+00:38:42,359 --> 00:38:50,940
+address its address ranges that people
+
+00:38:46,020 --> 00:38:53,819
+have looked so you can have weed weed
+
+00:38:50,940 --> 00:38:55,799
+locked range of ID rock branch and you
+
+00:38:53,819 --> 00:38:59,430
+add these wrong geez when you try to
+
+00:38:55,799 --> 00:39:01,829
+acquire them you have a white why are
+
+00:38:59,430 --> 00:39:05,430
+you storing them my quarry it's an it's
+
+00:39:01,829 --> 00:39:08,700
+an interval tree arbitrary augmented RBG
+
+00:39:05,430 --> 00:39:11,190
+okay thank you yeah if you look and
+
+00:39:08,700 --> 00:39:12,839
+include a Linux interval tree you'll see
+
+00:39:11,190 --> 00:39:20,210
+that it's based on our B tree so that's
+
+00:39:12,839 --> 00:39:23,520
+already there I see spectrally spec
+
+00:39:20,210 --> 00:39:24,270
+speculative pit 14 they are plaster
+
+00:39:23,520 --> 00:39:25,980
+slide
+
+00:39:24,270 --> 00:39:28,740
+yes what's our butter you think about it
+
+00:39:25,980 --> 00:39:30,839
+is that it means just review the page
+
+00:39:28,740 --> 00:39:34,140
+it's read ahead or something like this
+
+00:39:30,839 --> 00:39:37,890
+or what kind of what what's the meaning
+
+00:39:34,140 --> 00:39:43,349
+of this when I mean speculative page
+
+00:39:37,890 --> 00:39:46,859
+faults I mean at the start of the page
+
+00:39:43,349 --> 00:39:51,869
+first you look up the VMA that you want
+
+00:39:46,859 --> 00:39:54,150
+to fold on and instead of getting a
+
+00:39:51,869 --> 00:39:57,509
+look on that add restaurants to force
+
+00:39:54,150 --> 00:39:59,670
+that VMA to stay round okay you just do
+
+00:39:57,509 --> 00:40:05,190
+you meet and in the end when you're
+
+00:39:59,670 --> 00:40:08,400
+going to commit you your new page to to
+
+00:40:05,190 --> 00:40:10,200
+the process you verify that you still
+
+00:40:08,400 --> 00:40:13,440
+have the right VM a that nobody change
+
+00:40:10,200 --> 00:40:15,839
+the VM a mapping under you so it's
+
+00:40:13,440 --> 00:40:20,220
+speculative in that sense it just means
+
+00:40:15,839 --> 00:40:23,430
+you you in this look look ranging you
+
+00:40:20,220 --> 00:40:28,289
+just feel the whole we ma as possible
+
+00:40:23,430 --> 00:40:32,069
+you want the page named it no you would
+
+00:40:28,289 --> 00:40:34,950
+just read the same number of pages you
+
+00:40:32,069 --> 00:40:37,980
+would as if you had the lock on the VM a
+
+00:40:34,950 --> 00:40:40,410
+so you you you you just process your
+
+00:40:37,980 --> 00:40:44,099
+page for normally except you don't have
+
+00:40:40,410 --> 00:40:45,960
+a lock on the VM a so when you're going
+
+00:40:44,099 --> 00:40:49,499
+to commit your wizard you have to check
+
+00:40:45,960 --> 00:40:51,359
+that the VM a is still there okay but
+
+00:40:49,499 --> 00:40:54,749
+what's the release yes what's the
+
+00:40:51,359 --> 00:41:00,210
+relationship with with the VM a lock
+
+00:40:54,749 --> 00:41:03,690
+because Sims is come come come come
+
+00:41:00,210 --> 00:41:05,700
+method to improve the paid fold and it
+
+00:41:03,690 --> 00:41:09,210
+seems is it not related to that we may
+
+00:41:05,700 --> 00:41:11,430
+look maybe you when you went just the in
+
+00:41:09,210 --> 00:41:14,279
+no mood to paid for you just call yes
+
+00:41:11,430 --> 00:41:19,369
+so you to do the same so if you want to
+
+00:41:14,279 --> 00:41:21,900
+take the ranch lock there's there's
+
+00:41:19,369 --> 00:41:24,119
+shared that I should you for the entire
+
+00:41:21,900 --> 00:41:28,019
+mmm that we present you're on drugs
+
+00:41:24,119 --> 00:41:32,579
+and that's protected by a mutex so you
+
+00:41:28,019 --> 00:41:35,999
+need to whites to the mutex cache line
+
+00:41:32,579 --> 00:41:38,910
+where once when you acquire the lock to
+
+00:41:35,999 --> 00:41:41,489
+insert you one your weed won't Rock and
+
+00:41:38,910 --> 00:41:48,269
+then another of I to that mutex cache
+
+00:41:41,489 --> 00:41:51,029
+trying to release that that that that
+
+00:41:48,269 --> 00:41:53,220
+lock and then when you want to unlock
+
+00:41:51,029 --> 00:41:55,650
+your ranch at the end you have to move
+
+00:41:53,220 --> 00:41:58,109
+rights to that mutex cache line and so
+
+00:41:55,650 --> 00:42:00,059
+some people are concerned that there's
+
+00:41:58,109 --> 00:42:02,249
+going to be potentially too much
+
+00:42:00,059 --> 00:42:04,289
+contention on that mutex
+
+00:42:02,249 --> 00:42:06,060
+cache line and they would like to reduce
+
+00:42:04,289 --> 00:42:09,330
+that
+
+00:42:06,060 --> 00:42:11,280
+by going the wrong the speculative way
+
+00:42:09,330 --> 00:42:13,800
+if you do speculate if you don't have to
+
+00:42:11,280 --> 00:42:17,220
+take these ropes and so you don't you
+
+00:42:13,800 --> 00:42:19,830
+don't have to write to that common cash
+
+00:42:17,220 --> 00:42:31,860
+line all the time to get on release that
+
+00:42:19,830 --> 00:42:35,970
+mutex okay other questions so your pant
+
+00:42:31,860 --> 00:42:37,890
+will change the mmm mint semaphore Rema
+
+00:42:35,970 --> 00:42:43,920
+lock so the women not actually it's just
+
+00:42:37,890 --> 00:42:46,230
+a mutex why yes so yes I still have a
+
+00:42:43,920 --> 00:42:51,960
+still courage and map semaphore which is
+
+00:42:46,230 --> 00:42:54,600
+this interval tree that holds all the
+
+00:42:51,960 --> 00:42:57,210
+locked intervals and then I have a VM a
+
+00:42:54,600 --> 00:43:00,500
+log that just protects the VMA
+
+00:42:57,210 --> 00:43:06,150
+structures yes
+
+00:43:00,500 --> 00:43:07,830
+okay and that's a mutex so we're just
+
+00:43:06,150 --> 00:43:14,010
+about out of time is there one last
+
+00:43:07,830 --> 00:43:16,520
+question if not unless what sank let's
+
+00:43:14,010 --> 00:43:16,520
+
+YouTube URL: https://www.youtube.com/watch?v=Mq95LKV24js
+
+

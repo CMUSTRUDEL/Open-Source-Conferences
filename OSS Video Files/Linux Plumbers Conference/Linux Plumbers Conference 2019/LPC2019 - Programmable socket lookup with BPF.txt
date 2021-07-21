@@ -1,0 +1,2272 @@
+Title: LPC2019 - Programmable socket lookup with BPF
+Publication date: 2019-09-17
+Playlist: Linux Plumbers Conference 2019
+Description: 
+	Programmable socket lookup with BPF
+
+At Netconf 2019 we have presented a BPF-based alternative to steering
+packets into sockets with iptables and TPROXY extension. A mechanism
+which is of interest to us because it allows (1) services to share a
+port number when their IP address ranges don't overlap, and (2) reverse
+proxies to listen on all available port numbers.
+
+The solution adds a new BPF program type BPF_INET_LOOKUP, which is
+invoked during the socket lookup. The BPF program is able to steer SKBs
+by overwriting the key used for listening socket lookup. The attach
+point is associated with a network namespace.
+
+Since then, we have been reworking the solution to follow the existing
+pattern of using maps of socket references for redirecting packets, that
+is REUSEPORT_SOCKARRAY, SOCKMAP, or XSKMAP. We expect to publish the
+next version of BPF_INET_LOOKUP RFC patch set, which addresses the
+feedback from Netconf, in August.
+
+During LPC 2019 BPF Microconference we would like to briefly recap on
+how BPF-driven socket lookup compares to classic bind()-based dispatch,
+TPROXY packet steering, and socket dispatch on TC ingress currently in
+development by Cilium.
+
+Next we would like discuss low-level implementation challenges. How to
+best ensure that packet delivery to connected UDP sockets remains
+unaffected? Can a BPF_INET_LOOKUP program co-exist with reuseport
+groups? Is there a possibility of code sharing with REUSEPORT_SOCKARRAY
+implementation?
+
+Following the implementation discussion, we will touch on performance
+aspects, that is what is the observed cost of running BPF during socket
+lookup both in SYN flood and UDP flood scenarios.
+
+Finally, we want to go into the usability of user-space API. Redirection
+with a BPF map of sockets raises a question who populates the map, and
+if existing network applications like NGINX need to be modified in any
+way to receive traffic steered with this new mechanism.
+
+The desired outcome of the discussion is to identify steps needed to
+graduate the patch set from an RFC series to a ready-for-review
+submission.
+Captions: 
+	00:00:00,480 --> 00:00:01,313
+- We're going to get started
+
+00:00:01,313 --> 00:00:03,550
+because we're running late, so let's get going.
+
+00:00:03,550 --> 00:00:06,300
+The Cloudflare folks here, have been doing a lot of
+
+00:00:06,300 --> 00:00:07,184
+contributions to EBPF land,
+
+00:00:07,184 --> 00:00:10,100
+in a way that's very significant,
+
+00:00:10,100 --> 00:00:12,420
+and non trivial, and they're gonna talk to us
+
+00:00:12,420 --> 00:00:15,340
+about programmable socket lookup with BPF.
+
+00:00:15,340 --> 00:00:17,931
+So give them a round of applause please.
+
+00:00:17,931 --> 00:00:20,681
+(audience claps)
+
+00:00:21,900 --> 00:00:23,070
+- Thank you very much.
+
+00:00:23,070 --> 00:00:24,913
+Hello everyone, my name's Lawrence,
+
+00:00:26,340 --> 00:00:29,450
+this is my colleague Jakub, and we both work for Cloudflare.
+
+00:00:29,450 --> 00:00:31,400
+And today, we're gonna talk about
+
+00:00:31,400 --> 00:00:33,873
+how we want to extend socket lookup with BPF.
+
+00:00:36,740 --> 00:00:39,830
+So first I'll explain a little bit
+
+00:00:39,830 --> 00:00:42,310
+what our problem with the traditional
+
+00:00:42,310 --> 00:00:45,770
+socket API as it is right now.
+
+00:00:45,770 --> 00:00:48,270
+And then, Jakub is gonna talk about our proposal,
+
+00:00:48,270 --> 00:00:53,270
+how we want to extend the socket dispatch with BPF.
+
+00:00:53,640 --> 00:00:56,300
+Afterwards he'll talk about the user-space API
+
+00:00:56,300 --> 00:00:58,610
+that our current RFC patch set has.
+
+00:00:58,610 --> 00:01:01,543
+And then finally, he'll cover the next steps.
+
+00:01:03,630 --> 00:01:05,240
+For a little bit of context,
+
+00:01:05,240 --> 00:01:08,810
+Cloudflare you can think of as a gigantic reverse proxy.
+
+00:01:08,810 --> 00:01:11,690
+So we terminate htp traffic, htps traffic,
+
+00:01:11,690 --> 00:01:13,810
+tcp connections on our edge.
+
+00:01:13,810 --> 00:01:16,460
+We perform security optimization,
+
+00:01:16,460 --> 00:01:19,850
+and then we sell that as a service to our customers.
+
+00:01:19,850 --> 00:01:23,640
+And to do this, we literally use millions of IP's.
+
+00:01:23,640 --> 00:01:24,920
+Anycasted Ips.
+
+00:01:24,920 --> 00:01:27,220
+I had a look, currently that's around
+
+00:01:27,220 --> 00:01:31,423
+160 distinct prefixes across IPV4 and IPV6.
+
+00:01:32,590 --> 00:01:34,630
+We have about 10 daemons that we expose
+
+00:01:34,630 --> 00:01:36,230
+to the public internet, roughly.
+
+00:01:37,180 --> 00:01:39,960
+And kind of, one interesting quirk of our set up
+
+00:01:39,960 --> 00:01:42,530
+is that all machines run all services.
+
+00:01:42,530 --> 00:01:46,120
+So it's not like we have a DNS cluster,
+
+00:01:46,120 --> 00:01:47,943
+no, everything runs everywhere.
+
+00:01:48,830 --> 00:01:51,150
+So really, in in our mental model,
+
+00:01:51,150 --> 00:01:53,430
+we thing of services running of prefixes,
+
+00:01:53,430 --> 00:01:57,663
+and not on individual Ip's, and this creates a problem.
+
+00:01:58,540 --> 00:02:01,070
+It breaks the traditional socket API for us.
+
+00:02:01,070 --> 00:02:02,513
+Let me explain why that is.
+
+00:02:03,660 --> 00:02:06,380
+So the easiest, kind of the common case is
+
+00:02:06,380 --> 00:02:08,600
+you do a bind or listen into a socket,
+
+00:02:08,600 --> 00:02:10,660
+and that means that for a given IP address
+
+00:02:10,660 --> 00:02:14,360
+in part you receive packets on that socket.
+
+00:02:14,360 --> 00:02:17,620
+Which works fine, however if you wanna do this
+
+00:02:17,620 --> 00:02:22,620
+on a subnet, like 256 IP4 addresses, that becomes difficult.
+
+00:02:23,840 --> 00:02:27,090
+The really simple solution might be
+
+00:02:27,090 --> 00:02:29,800
+to just create 256 different sockets,
+
+00:02:29,800 --> 00:02:33,670
+for each IP, we'll create one.
+
+00:02:33,670 --> 00:02:37,500
+And we tried this, however, that doesn't work too well.
+
+00:02:37,500 --> 00:02:40,290
+So we end up creating too many listening sockets,
+
+00:02:40,290 --> 00:02:42,780
+it ends up creating latency spikes.
+
+00:02:42,780 --> 00:02:45,010
+And there's a great blog post Mark
+
+00:02:45,010 --> 00:02:47,923
+that explains what happens.
+
+00:02:48,830 --> 00:02:49,970
+So this doesn't work.
+
+00:02:49,970 --> 00:02:54,950
+Another option might be that we could just listen on any.
+
+00:02:54,950 --> 00:02:57,410
+So we could create a single catch all mapping
+
+00:02:58,310 --> 00:03:00,520
+for this specific port.
+
+00:03:00,520 --> 00:03:02,550
+It doesn't matter what the destination IP is,
+
+00:03:02,550 --> 00:03:03,850
+we'll receive the traffic.
+
+00:03:04,970 --> 00:03:07,290
+Of course, this doesn't work again,
+
+00:03:07,290 --> 00:03:09,080
+because, as I mentioned earlier,
+
+00:03:09,080 --> 00:03:11,410
+we have all services running everywhere.
+
+00:03:11,410 --> 00:03:13,920
+And for example, we run the public DNS resolver,
+
+00:03:13,920 --> 00:03:17,660
+called 1.1.1 on port 53 on one prefix,
+
+00:03:17,660 --> 00:03:19,520
+but on another prefix, we might be running
+
+00:03:19,520 --> 00:03:21,453
+our authoritative DNS server.
+
+00:03:24,140 --> 00:03:27,990
+So problems so far, we can't really bind to prefix.
+
+00:03:27,990 --> 00:03:30,280
+That doesn't exist as a concept.
+
+00:03:30,280 --> 00:03:34,820
+So we came up with an idea, very simple one,
+
+00:03:34,820 --> 00:03:36,190
+which is to add another sockopt,
+
+00:03:36,190 --> 00:03:38,710
+and this sockopt allows us to bind to prefix.
+
+00:03:38,710 --> 00:03:42,400
+So you can create socket that listens on a specific prefix,
+
+00:03:42,400 --> 00:03:45,473
+and you can create many of them, and that fixes our problem.
+
+00:03:46,970 --> 00:03:51,970
+And we proposed this as a patch set to upstream Linux,
+
+00:03:52,330 --> 00:03:55,783
+and then it didn't work out that well.
+
+00:03:57,030 --> 00:03:59,350
+Let's update the slide why we can't upstream
+
+00:03:59,350 --> 00:04:01,060
+as a bind a to prefix.
+
+00:04:01,060 --> 00:04:03,033
+Which in the end, wasn't too bad.
+
+00:04:03,893 --> 00:04:05,310
+The patch isn't that big, so we ended up
+
+00:04:05,310 --> 00:04:08,752
+just kind of carrying it on our own kernel,
+
+00:04:08,752 --> 00:04:11,560
+and we're using this in production, and it works well.
+
+00:04:11,560 --> 00:04:13,330
+However, we hit another problem,
+
+00:04:13,330 --> 00:04:16,120
+which is maybe even more exotic.
+
+00:04:16,120 --> 00:04:18,300
+Which is that we want to bind to all ports.
+
+00:04:18,300 --> 00:04:21,550
+So port any if you consider it that way.
+
+00:04:21,550 --> 00:04:25,310
+And this is because we offer a TCP reverse proxy,
+
+00:04:25,310 --> 00:04:27,880
+which needs to work on all given ports,
+
+00:04:27,880 --> 00:04:30,070
+because our customers might run applications
+
+00:04:30,070 --> 00:04:31,170
+on all of these ports.
+
+00:04:34,110 --> 00:04:36,523
+Again, we might do the naive thing,
+
+00:04:37,417 --> 00:04:40,410
+and just do 65 thousand listen calls,
+
+00:04:40,410 --> 00:04:43,040
+and create these sockets, but we just run into
+
+00:04:43,040 --> 00:04:44,340
+the same problem as before,
+
+00:04:44,340 --> 00:04:46,090
+we have too many listening sockets.
+
+00:04:47,550 --> 00:04:50,460
+So you can't really bind to port any.
+
+00:04:50,460 --> 00:04:51,373
+What do we do?
+
+00:04:52,950 --> 00:04:55,180
+We find another hack.
+
+00:04:55,180 --> 00:04:59,630
+There's a fairly obscure IP tables action,
+
+00:04:59,630 --> 00:05:01,730
+which is call TPROXY, which I think,
+
+00:05:01,730 --> 00:05:03,660
+stands for transparent proxy.
+
+00:05:03,660 --> 00:05:06,271
+And the idea is that, in the fire wall,
+
+00:05:06,271 --> 00:05:07,220
+we can inspect a packet buffer.
+
+00:05:07,220 --> 00:05:09,730
+We could look at it's destination IP address,
+
+00:05:09,730 --> 00:05:11,470
+and if it matches any rule that we want,
+
+00:05:11,470 --> 00:05:15,240
+we can force it to go to a specific magic socket
+
+00:05:15,240 --> 00:05:16,713
+that we set up previously.
+
+00:05:17,960 --> 00:05:20,800
+This works brilliant, once you get it to work.
+
+00:05:20,800 --> 00:05:22,100
+Doing that is a bit involved,
+
+00:05:22,100 --> 00:05:25,530
+so another plug for a blog post here.
+
+00:05:25,530 --> 00:05:28,190
+But it works for us, we have this kind of inter web,
+
+00:05:28,190 --> 00:05:31,563
+when mapping, we can create it multiple times,
+
+00:05:32,554 --> 00:05:33,913
+everything is well.
+
+00:05:34,800 --> 00:05:38,150
+Except that TPROXY wasn't really designed for this.
+
+00:05:38,150 --> 00:05:40,500
+As far as we can tell, the idea behind TPROXY
+
+00:05:40,500 --> 00:05:43,860
+is to intercept traffic that is not destined
+
+00:05:43,860 --> 00:05:45,630
+for the machine that you're running on,
+
+00:05:45,630 --> 00:05:48,400
+and then you can feed it into something like squid
+
+00:05:48,400 --> 00:05:50,140
+to do transparent poxying,
+
+00:05:50,140 --> 00:05:52,770
+or you can deny a request if you want to.
+
+00:05:52,770 --> 00:05:56,380
+However, we ended up using it by intercepting traffic
+
+00:05:56,380 --> 00:05:58,500
+that is actually for the log machine,
+
+00:05:58,500 --> 00:06:00,213
+and that creates a few drawbacks.
+
+00:06:02,330 --> 00:06:05,478
+First, you need to set this socket option,
+
+00:06:05,478 --> 00:06:10,310
+which TPROXY forces you to set.
+
+00:06:10,310 --> 00:06:12,830
+And this comes, I think, from the assumption
+
+00:06:12,830 --> 00:06:15,850
+that I mentioned, that traffic isn't local to the machine.
+
+00:06:15,850 --> 00:06:17,770
+For our use case we don't need it.
+
+00:06:17,770 --> 00:06:20,700
+So if we remove that restriction from TPROXY,
+
+00:06:20,700 --> 00:06:22,500
+it would still work.
+
+00:06:22,500 --> 00:06:25,881
+However, as it stands, setting IP transparent,
+
+00:06:25,881 --> 00:06:27,730
+means that we need CAP NET ADMIN,
+
+00:06:27,730 --> 00:06:31,700
+so we kinda need to work around this in our daemon.
+
+00:06:31,700 --> 00:06:34,480
+Second, the IP table set up is kind of difficult,
+
+00:06:34,480 --> 00:06:36,780
+and fiddly to set up to get it to work right
+
+00:06:36,780 --> 00:06:38,998
+in all of those circumstances that
+
+00:06:38,998 --> 00:06:41,000
+you would expect it to work.
+
+00:06:41,000 --> 00:06:44,070
+Third is that, the performance under SYN flood
+
+00:06:44,070 --> 00:06:46,725
+is it a bit problematic apparently,
+
+00:06:46,725 --> 00:06:49,100
+due to the way it's implemented.
+
+00:06:49,100 --> 00:06:53,170
+And finally, is also crates an inconsistent view
+
+00:06:53,170 --> 00:06:55,820
+of socket bindings.
+
+00:06:55,820 --> 00:06:58,250
+And I think we could live with the first two problems,
+
+00:06:58,250 --> 00:06:59,250
+we've already solved them.
+
+00:06:59,250 --> 00:07:01,520
+And so we have the daemon, we've set up IP tables
+
+00:07:01,520 --> 00:07:03,470
+or the firewall.
+
+00:07:03,470 --> 00:07:06,750
+The third problem is fixable by investing time
+
+00:07:06,750 --> 00:07:09,090
+and improving the implementation,
+
+00:07:09,090 --> 00:07:13,530
+but the fourth problem is really a really big deal breaker
+
+00:07:15,330 --> 00:07:16,850
+for us, and then Jakub is gonna explain
+
+00:07:16,850 --> 00:07:18,083
+a bit more why that is.
+
+00:07:19,760 --> 00:07:21,850
+To get back to our problem slide,
+
+00:07:21,850 --> 00:07:24,560
+we kind of made it work, but our use case
+
+00:07:24,560 --> 00:07:25,900
+is really a massive hack.
+
+00:07:25,900 --> 00:07:29,260
+And so we'd like to replace this with something better.
+
+00:07:29,260 --> 00:07:33,020
+And, I have to admit that I lied a little bit earlier,
+
+00:07:33,020 --> 00:07:36,320
+when I said that our SO bind to prefix was rejected,
+
+00:07:36,320 --> 00:07:39,070
+because the email is much longer.
+
+00:07:39,070 --> 00:07:41,850
+There's some interesting suggestion here,
+
+00:07:41,850 --> 00:07:43,490
+which I wanna share.
+
+00:07:43,490 --> 00:07:45,660
+So instead of adding SO bind to prefix,
+
+00:07:45,660 --> 00:07:50,310
+we should add a mechanism using BPF to achieve what we want.
+
+00:07:50,310 --> 00:07:52,310
+And that's exactly what we're proposing here today,
+
+00:07:52,310 --> 00:07:54,503
+and that's what Jakub is gunna tell you about.
+
+00:07:59,130 --> 00:08:00,063
+- Thanks Laurence.
+
+00:08:02,580 --> 00:08:05,680
+So let's set some context first.
+
+00:08:05,680 --> 00:08:08,650
+For our application to actually receive a packet,
+
+00:08:08,650 --> 00:08:12,040
+we need to go all the way from ingress path,
+
+00:08:12,040 --> 00:08:14,180
+and end up with local delivery.
+
+00:08:14,180 --> 00:08:17,390
+So we start at the next ring buffer,
+
+00:08:17,390 --> 00:08:22,050
+go past the IEP hooks, undergo ingress policing
+
+00:08:22,050 --> 00:08:25,550
+by traffic control, then we need to hit a bunch
+
+00:08:25,550 --> 00:08:28,830
+of net filter hooks that can drop the packet.
+
+00:08:28,830 --> 00:08:33,210
+To finally make a rooting decision for local delivery.
+
+00:08:33,210 --> 00:08:36,020
+Filter some more, and then, finally,
+
+00:08:36,020 --> 00:08:38,960
+pass it to protocol so that it can look
+
+00:08:38,960 --> 00:08:42,340
+for a suitable socket to accept the packet.
+
+00:08:42,340 --> 00:08:44,330
+In this stage, the socket lookup
+
+00:08:44,330 --> 00:08:47,810
+is the one we are finding most limiting, at this point,
+
+00:08:47,810 --> 00:08:50,643
+for our use cases, and one we are trying to extend.
+
+00:08:52,390 --> 00:08:56,070
+So what we are proposing, is to have a lookup mechanism
+
+00:08:56,070 --> 00:08:58,430
+that lives inside the socket lookup,
+
+00:08:58,430 --> 00:09:01,180
+and allows you to steer new connections
+
+00:09:01,180 --> 00:09:05,890
+to any listening socket, leveraging the port of BPF.
+
+00:09:05,890 --> 00:09:08,340
+We're trying to distill what TPROXY does
+
+00:09:08,340 --> 00:09:13,340
+for the local and delivery use case that we are leveraging,
+
+00:09:13,760 --> 00:09:17,520
+and replace our custom bind to prefix solutions.
+
+00:09:17,520 --> 00:09:22,160
+The established connections should work without problems,
+
+00:09:23,561 --> 00:09:26,903
+and we'll show you how we can gracefully integrate it.
+
+00:09:28,880 --> 00:09:30,133
+So here's is the idea.
+
+00:09:31,610 --> 00:09:36,040
+We express the mappings between addresses and ports
+
+00:09:36,910 --> 00:09:39,890
+and sockets that should receive these packets
+
+00:09:39,890 --> 00:09:41,290
+with BPF code.
+
+00:09:41,290 --> 00:09:43,520
+We let the program decide that,
+
+00:09:43,520 --> 00:09:46,660
+based on packet headers, which listening socket
+
+00:09:46,660 --> 00:09:48,590
+should receive the packet.
+
+00:09:48,590 --> 00:09:51,860
+Like in this example, we can have all packets going
+
+00:09:51,860 --> 00:09:56,090
+to a net work prefix, delivered to one listening socket,
+
+00:09:56,090 --> 00:09:59,210
+while all the other packets are going to some
+
+00:09:59,210 --> 00:10:01,620
+network address on all ports,
+
+00:10:01,620 --> 00:10:03,853
+be delivered to another socket.
+
+00:10:07,710 --> 00:10:09,480
+But before we go into the details
+
+00:10:09,480 --> 00:10:12,740
+of how we propose to implement this,
+
+00:10:12,740 --> 00:10:15,960
+let's talk a little why it makes sense
+
+00:10:15,960 --> 00:10:19,350
+to program this inside of socket lookup.
+
+00:10:19,350 --> 00:10:23,160
+Well, as it turns out, other parts of the network stack,
+
+00:10:23,160 --> 00:10:26,041
+can actually go into the socket lookup
+
+00:10:26,041 --> 00:10:29,250
+to check if there're any services listening
+
+00:10:29,250 --> 00:10:31,130
+for one given address.
+
+00:10:31,130 --> 00:10:34,950
+For example, XDP based load balancers,
+
+00:10:34,950 --> 00:10:37,520
+will actually make a socket lookup
+
+00:10:37,520 --> 00:10:39,510
+to base for decision whether they should
+
+00:10:39,510 --> 00:10:41,510
+pass the packet of a stack,
+
+00:10:41,510 --> 00:10:43,893
+or maybe redirect it to another machine.
+
+00:10:45,610 --> 00:10:49,057
+Same thing can happen on TC ingress.
+
+00:10:49,057 --> 00:10:51,770
+It can also base it's decision
+
+00:10:51,770 --> 00:10:53,810
+on an outcome of socket lookup,
+
+00:10:53,810 --> 00:10:57,480
+and there are other parts, other types of BPF programs
+
+00:10:57,480 --> 00:11:00,730
+from C group BPF family that have
+
+00:11:00,730 --> 00:11:03,713
+this helper available to them as well.
+
+00:11:05,650 --> 00:11:07,820
+But that is not all.
+
+00:11:07,820 --> 00:11:12,150
+So the net filter rules, they can also base
+
+00:11:12,150 --> 00:11:17,150
+for match outcome, on the outcome of socket lookup.
+
+00:11:17,190 --> 00:11:20,640
+So by programming the socket lookup itself,
+
+00:11:20,640 --> 00:11:25,530
+we make this mappings of destination addresses and ports
+
+00:11:25,530 --> 00:11:28,633
+visible to all other parts of a network stack.
+
+00:11:33,500 --> 00:11:36,680
+So let's see how we can implement it
+
+00:11:36,680 --> 00:11:40,703
+without breaking how the socket bindings currently work.
+
+00:11:42,680 --> 00:11:46,720
+This is how socket lookup in TCP is at the moment.
+
+00:11:46,720 --> 00:11:49,640
+It's split into three stages.
+
+00:11:49,640 --> 00:11:53,120
+First, we're gonna try to find an established socket
+
+00:11:53,120 --> 00:11:56,200
+by doing a four table match.
+
+00:11:56,200 --> 00:11:59,040
+If we fail to find one, we're gonna look for
+
+00:11:59,040 --> 00:12:02,317
+listening socket bound to the destination address
+
+00:12:02,317 --> 00:12:06,010
+in the port that the packet is last targeted for.
+
+00:12:06,010 --> 00:12:08,110
+And if we fail to do that,
+
+00:12:08,110 --> 00:12:12,427
+we're gonna fall back to a port only lookup,
+
+00:12:12,427 --> 00:12:15,537
+for any wild card socket
+
+00:12:15,537 --> 00:12:17,343
+that our listening on all addresses.
+
+00:12:20,460 --> 00:12:24,160
+So what we've done, we've added a new stage
+
+00:12:24,160 --> 00:12:26,780
+to the lookup that happens right after
+
+00:12:26,780 --> 00:12:28,600
+looking for a connected socket,
+
+00:12:28,600 --> 00:12:32,080
+but before we start looking for listening sockets.
+
+00:12:32,080 --> 00:12:35,040
+We run a BPF program that searches for a socket
+
+00:12:35,040 --> 00:12:38,020
+in a socket array of it's own,
+
+00:12:38,020 --> 00:12:39,770
+and if it finds a suitable one,
+
+00:12:39,770 --> 00:12:41,793
+it can terminate the lookup early.
+
+00:12:43,057 --> 00:12:46,270
+So you might ask why did we decide to do it before
+
+00:12:46,270 --> 00:12:48,380
+looking for a listening socket.
+
+00:12:48,380 --> 00:12:51,730
+Well, that's because we don't want unprivileged applciations
+
+00:12:52,730 --> 00:12:56,970
+to bind over the mappings that we create with BPF.
+
+00:12:56,970 --> 00:13:00,863
+We don't want them to be able to hijack any port or address.
+
+00:13:03,440 --> 00:13:04,980
+What about UDP?
+
+00:13:04,980 --> 00:13:07,200
+UDP is a little bit different.
+
+00:13:07,200 --> 00:13:11,720
+So in UDP the socket lookup is split into just two phases.
+
+00:13:11,720 --> 00:13:15,240
+We don't have the table of connected UDP sockets.
+
+00:13:15,240 --> 00:13:19,070
+So we look for both connected and bound sockets at once,
+
+00:13:19,070 --> 00:13:21,950
+with connected sockets taking the preference,
+
+00:13:21,950 --> 00:13:23,410
+and if failed to do that,
+
+00:13:23,410 --> 00:13:25,763
+we're gonna look for wild card socket.
+
+00:13:27,760 --> 00:13:29,523
+So to integrate with UDP,
+
+00:13:30,720 --> 00:13:33,780
+and maintain how connected sockets work,
+
+00:13:33,780 --> 00:13:36,800
+we have to make changes which are a bit more intrusive.
+
+00:13:36,800 --> 00:13:39,700
+We've split the first phase into two,
+
+00:13:39,700 --> 00:13:44,693
+and added a BPF program in the middle, just like for TCP.
+
+00:13:48,890 --> 00:13:53,600
+So we hooked up our program, let's see how it operates.
+
+00:13:53,600 --> 00:13:56,160
+On in-boot, it receives the IP version,
+
+00:13:56,160 --> 00:13:59,010
+the transfer protocol, and the pocket four table
+
+00:13:59,010 --> 00:14:00,793
+on long cover information.
+
+00:14:02,040 --> 00:14:05,140
+The program then access an area of sockets
+
+00:14:05,140 --> 00:14:09,270
+to find a suitable socket to accept the packet.
+
+00:14:09,270 --> 00:14:11,793
+And if it does, it returns it on output.
+
+00:14:13,070 --> 00:14:15,400
+How does it translate into code?
+
+00:14:15,400 --> 00:14:18,430
+Well we need our array of sockets,
+
+00:14:18,430 --> 00:14:21,540
+so we need to declare a map that pastes together
+
+00:14:21,540 --> 00:14:24,570
+just an integer index into the array,
+
+00:14:24,570 --> 00:14:27,393
+and sort that reference in distorted values.
+
+00:14:29,190 --> 00:14:31,020
+And the second thing we need,
+
+00:14:31,020 --> 00:14:35,810
+is the program itself that encapsulates the steering logic.
+
+00:14:35,810 --> 00:14:40,523
+Much like the filter rules, it has two parts.
+
+00:14:41,960 --> 00:14:44,450
+It will have some action statements
+
+00:14:44,450 --> 00:14:47,680
+to check if we're actually interested in the packet.
+
+00:14:47,680 --> 00:14:50,580
+Like in this example, where we want to match
+
+00:14:50,580 --> 00:14:54,393
+on all packets going to a certain subnet, TCP port 80.
+
+00:14:56,160 --> 00:14:58,270
+And then, it will have an action statement
+
+00:14:58,270 --> 00:15:01,083
+if a program actually wants to take any action.
+
+00:15:02,118 --> 00:15:06,350
+But we don't return the socket directly from our program.
+
+00:15:06,350 --> 00:15:10,920
+Instead, we call into a helper, and pass an index
+
+00:15:10,920 --> 00:15:13,020
+into the socket array to that helper,
+
+00:15:13,020 --> 00:15:14,990
+and the helper will select the socket
+
+00:15:14,990 --> 00:15:18,550
+to be an outcome of a socket lookup for us.
+
+00:15:18,550 --> 00:15:21,890
+The helper also returns an action code
+
+00:15:21,890 --> 00:15:24,113
+for redirection to take place.
+
+00:15:26,104 --> 00:15:27,980
+So as I just mentioned, if all goes well,
+
+00:15:27,980 --> 00:15:30,540
+we return an action code for redirect,
+
+00:15:30,540 --> 00:15:34,220
+but things can also go wrong during that operation.
+
+00:15:34,220 --> 00:15:36,900
+Well their can be no socket in the array
+
+00:15:36,900 --> 00:15:41,140
+under a given index, or it might not be accepting
+
+00:15:41,140 --> 00:15:44,270
+the IP version of a packet, or the transfer protocol
+
+00:15:44,270 --> 00:15:46,033
+might be completely different.
+
+00:15:47,037 --> 00:15:48,610
+In that case, we get an error.
+
+00:15:48,610 --> 00:15:50,820
+And the schematics here are really similar
+
+00:15:50,820 --> 00:15:54,483
+to have rays-port programs selling for sockets.
+
+00:15:57,170 --> 00:15:59,780
+So how does this tie together, to recap?
+
+00:15:59,780 --> 00:16:02,860
+Well the program is allowed to look for a socket,
+
+00:16:02,860 --> 00:16:04,440
+and terminate the lookup early
+
+00:16:04,440 --> 00:16:07,630
+if BPF redirect action call is returned.
+
+00:16:07,630 --> 00:16:10,520
+And in any other case, we fall back
+
+00:16:10,520 --> 00:16:13,023
+to looking for listening socket as usual.
+
+00:16:15,780 --> 00:16:18,050
+So this is the kernel side of things.
+
+00:16:18,050 --> 00:16:20,330
+Now, let's see how we actually
+
+00:16:20,330 --> 00:16:22,513
+put it to use from user space.
+
+00:16:24,450 --> 00:16:26,980
+Well, we need to create an array first
+
+00:16:26,980 --> 00:16:30,400
+for the program to use.
+
+00:16:30,400 --> 00:16:32,280
+And there is nothing surprising there maybe,
+
+00:16:32,280 --> 00:16:36,010
+except for the misleading come up type name,
+
+00:16:36,010 --> 00:16:38,870
+because we are reusing the same data structure
+
+00:16:38,870 --> 00:16:41,113
+as Reuseport programs are using.
+
+00:16:42,769 --> 00:16:46,080
+And once we have that, we need to populate is with sockets.
+
+00:16:46,080 --> 00:16:50,430
+And Reuseport array composes couple of limitations on us.
+
+00:16:50,430 --> 00:16:52,600
+So first of all, the socket has to be
+
+00:16:52,600 --> 00:16:56,220
+already in the listening state before it can be inserted.
+
+00:16:56,220 --> 00:16:59,580
+Then, it also needs to have Reuseport flag set,
+
+00:16:59,580 --> 00:17:04,580
+because it was build to set up load balancing groups.
+
+00:17:04,760 --> 00:17:07,600
+Finally, we need to do it from user space.
+
+00:17:07,600 --> 00:17:09,300
+Don't try doing it from BPF,
+
+00:17:09,300 --> 00:17:10,943
+because that's not supported.
+
+00:17:12,560 --> 00:17:14,220
+But let's back a little.
+
+00:17:14,220 --> 00:17:17,460
+We actually need to have a file descriptor for the socket
+
+00:17:17,460 --> 00:17:22,060
+to pass it as value when inserting it in the array.
+
+00:17:22,060 --> 00:17:25,480
+But, where do we get the file descriptor from
+
+00:17:25,480 --> 00:17:27,950
+if we are not the network server,
+
+00:17:27,950 --> 00:17:31,580
+but actually creates the socket and listening (mumbles)?
+
+00:17:31,580 --> 00:17:33,330
+We'll get back to that in a minute.
+
+00:17:36,260 --> 00:17:39,760
+Assuming we have our array ready and populated with sockets,
+
+00:17:39,760 --> 00:17:43,120
+we load our program, and we've added a new program type
+
+00:17:43,120 --> 00:17:45,423
+to indicate it's unique purpose.
+
+00:17:46,600 --> 00:17:50,880
+And once loaded, we can put it to work by attaching it.
+
+00:17:50,880 --> 00:17:52,900
+But where do we actually attach it to?
+
+00:17:52,900 --> 00:17:55,340
+Well, if we think about it for a minute,
+
+00:17:55,340 --> 00:17:57,800
+we receive packets from a network device,
+
+00:17:57,800 --> 00:18:00,900
+and they end up in a socket receive buffer.
+
+00:18:00,900 --> 00:18:02,980
+Both network devices and sockets
+
+00:18:02,980 --> 00:18:05,690
+are tied to a network name space.
+
+00:18:05,690 --> 00:18:07,610
+So that means the socket lookup happens
+
+00:18:07,610 --> 00:18:10,300
+in the context of network name space,
+
+00:18:10,300 --> 00:18:13,080
+and that is also what we are attaching to.
+
+00:18:13,080 --> 00:18:16,140
+And we are the only other program out there
+
+00:18:16,140 --> 00:18:18,020
+that attaches to the network name space
+
+00:18:18,020 --> 00:18:19,803
+except for a flow dissector.
+
+00:18:24,220 --> 00:18:26,060
+One thing to watch out for,
+
+00:18:26,060 --> 00:18:28,530
+you can't actually point to which name space
+
+00:18:28,530 --> 00:18:30,680
+you want to attach to at the moment.
+
+00:18:30,680 --> 00:18:32,680
+You're always attaching to the current
+
+00:18:32,680 --> 00:18:34,823
+network name space of your process.
+
+00:18:36,120 --> 00:18:39,750
+And then, we also don't allow yet overriding the program.
+
+00:18:39,750 --> 00:18:42,400
+If you want to replace it, you need to do it in two steps
+
+00:18:42,400 --> 00:18:44,773
+by detaching it and reattaching it again.
+
+00:18:46,990 --> 00:18:48,450
+So let's get back to the program
+
+00:18:48,450 --> 00:18:51,070
+of getting the socket file descriptor.
+
+00:18:51,070 --> 00:18:54,750
+Well, as I mentioned, in a typical deployment senario,
+
+00:18:54,750 --> 00:18:57,490
+we expect that the process that manages
+
+00:18:57,490 --> 00:18:59,930
+and populates the socket array.
+
+00:18:59,930 --> 00:19:03,200
+Only the network server that actually uses
+
+00:19:06,613 --> 00:19:09,821
+the listening socket to accept incoming connections.
+
+00:19:09,821 --> 00:19:11,320
+And it turns out that it's not easy
+
+00:19:11,320 --> 00:19:14,140
+to get the file descriptor from the socket
+
+00:19:14,140 --> 00:19:16,580
+if you're an outside process.
+
+00:19:16,580 --> 00:19:20,410
+Now, if I start insert the network server on my laptop,
+
+00:19:20,410 --> 00:19:24,525
+I can see proc-efez, but there's an entry for the socket,
+
+00:19:24,525 --> 00:19:27,920
+and the process has a file descriptor pointing to it.
+
+00:19:27,920 --> 00:19:30,410
+But from the outside, I can't get a second
+
+00:19:31,270 --> 00:19:35,530
+file descriptor pointing to the same socket in any easy way.
+
+00:19:35,530 --> 00:19:38,280
+If I try to open it, simply,
+
+00:19:38,280 --> 00:19:41,392
+the virtual circuit thus, won't let me do it.
+
+00:19:41,392 --> 00:19:43,613
+So how do we get around that?
+
+00:19:44,930 --> 00:19:47,620
+Well, the easiest way out that we have found
+
+00:19:47,620 --> 00:19:51,003
+is if you are using system D socket activation.
+
+00:19:52,648 --> 00:19:54,680
+So if you are using socket activation,
+
+00:19:54,680 --> 00:19:57,540
+you're not creating the listening socket yourself.
+
+00:19:57,540 --> 00:20:00,280
+Actually, system D does it for you,
+
+00:20:00,280 --> 00:20:02,670
+and it passes it to your process
+
+00:20:02,670 --> 00:20:05,874
+as an already open file descriptor.
+
+00:20:05,874 --> 00:20:08,170
+We can use that to your advantage,
+
+00:20:08,170 --> 00:20:10,840
+because system D allows you to link
+
+00:20:10,840 --> 00:20:13,990
+more than one service to a socket unit.
+
+00:20:13,990 --> 00:20:17,440
+In both of these services, we'll get the file descriptor
+
+00:20:17,440 --> 00:20:19,543
+for the socket as they start it.
+
+00:20:20,754 --> 00:20:24,023
+So we just add an extra service,
+
+00:20:24,023 --> 00:20:28,440
+that is only in charge of taking the socket file descriptor,
+
+00:20:28,440 --> 00:20:33,080
+and putting it in the sockarray under some known index.
+
+00:20:33,080 --> 00:20:35,730
+In this example, we are not using a numeric index,
+
+00:20:35,730 --> 00:20:38,760
+but with that, we provide a label for our service.
+
+00:20:38,760 --> 00:20:39,973
+Which is web server.
+
+00:20:43,420 --> 00:20:46,350
+So that's the easy way we thought of,
+
+00:20:46,350 --> 00:20:49,658
+but there a couple of other solutions
+
+00:20:49,658 --> 00:20:53,093
+that might be doable, but maybe a little bit more hard.
+
+00:20:54,130 --> 00:20:57,660
+First, we can think that we can over load sis-codes,
+
+00:20:57,660 --> 00:20:59,660
+and hijack the socket when it is
+
+00:20:59,660 --> 00:21:01,803
+ready to be inserted in the sockarray.
+
+00:21:02,680 --> 00:21:05,700
+Then you can imagine that you might want to just
+
+00:21:05,700 --> 00:21:08,660
+modify your application so that it sends
+
+00:21:08,660 --> 00:21:12,090
+the socket file descriptor over voluntarily
+
+00:21:12,090 --> 00:21:15,297
+to some other service that manages the sockarray.
+
+00:21:16,290 --> 00:21:18,410
+Finally, we have a couple ideas
+
+00:21:18,410 --> 00:21:22,010
+how we could maybe change the sockarray API,
+
+00:21:22,010 --> 00:21:26,174
+to allow you to insert sockets without the need
+
+00:21:26,174 --> 00:21:29,713
+for getting a file descriptor, but we will get back to that.
+
+00:21:33,450 --> 00:21:38,450
+So we've published the RFC version 2 patch this late August.
+
+00:21:39,600 --> 00:21:41,130
+And we're fully functional,
+
+00:21:41,130 --> 00:21:43,100
+but we still have some things to do,
+
+00:21:43,100 --> 00:21:45,913
+and ideas how to improve on that.
+
+00:21:48,790 --> 00:21:53,210
+First thing, we need to keep our eye on performance.
+
+00:21:53,210 --> 00:21:56,100
+So we know that a lot of hard work
+
+00:21:56,100 --> 00:21:59,520
+has gone into TCP receive path,
+
+00:21:59,520 --> 00:22:02,750
+so it withstands SYN flood gracefully.
+
+00:22:02,750 --> 00:22:06,653
+And our code runs on the receive path,
+
+00:22:06,653 --> 00:22:10,463
+so having new code there is not free.
+
+00:22:12,130 --> 00:22:16,280
+We don't have any proper benchmarks yet,
+
+00:22:16,280 --> 00:22:20,305
+only early figures, but we're running a flood
+
+00:22:20,305 --> 00:22:22,560
+that hits a single core.
+
+00:22:22,560 --> 00:22:27,340
+We see around two percent performance hit
+
+00:22:27,340 --> 00:22:29,550
+with packets per second,
+
+00:22:29,550 --> 00:22:32,683
+when a BPBF program is attached and running.
+
+00:22:34,650 --> 00:22:38,970
+Same goes for UDP, and for UDP we even more concerned
+
+00:22:38,970 --> 00:22:41,400
+that the cost of having new program there
+
+00:22:41,400 --> 00:22:44,860
+might be a problem, because we added another stage
+
+00:22:44,860 --> 00:22:45,973
+to the lookup.
+
+00:22:47,240 --> 00:22:51,800
+So in a similar benchmark, we're seeing about four percent
+
+00:22:51,800 --> 00:22:55,100
+of hit when you have a BPF program attached,
+
+00:22:55,100 --> 00:22:58,133
+and a single collar is just receiving a UDP flood.
+
+00:22:59,330 --> 00:23:02,310
+As we get better benchmark results,
+
+00:23:02,310 --> 00:23:05,053
+we're gonna post them following the patches.
+
+00:23:07,290 --> 00:23:09,600
+Some other things we would like to improve on
+
+00:23:09,600 --> 00:23:13,120
+is to provide our program even more information
+
+00:23:13,120 --> 00:23:14,360
+to make a decision.
+
+00:23:14,360 --> 00:23:16,800
+Currently, the program doesn't know
+
+00:23:16,800 --> 00:23:19,720
+for which network device the packet came in.
+
+00:23:19,720 --> 00:23:21,370
+And we would like to change that.
+
+00:23:22,910 --> 00:23:27,723
+Then we're considering of adding one more action
+
+00:23:29,072 --> 00:23:31,630
+for our program to take.
+
+00:23:31,630 --> 00:23:35,570
+We'd like to allow it to terminate the socket lookup
+
+00:23:35,570 --> 00:23:38,160
+without providing any socket,
+
+00:23:38,160 --> 00:23:42,303
+and without looking for any listening sockets.
+
+00:23:44,210 --> 00:23:46,680
+We think that might be needed to gracefully
+
+00:23:46,680 --> 00:23:49,590
+steer away traffic from services
+
+00:23:49,590 --> 00:23:53,513
+that bind to in-address any.
+
+00:23:56,620 --> 00:23:58,380
+Then we would like to iron out
+
+00:23:58,380 --> 00:24:02,323
+this troublesome parts of user space API.
+
+00:24:02,323 --> 00:24:05,150
+There's really no reason we can't allow you
+
+00:24:05,150 --> 00:24:08,380
+to override the program in a single step,
+
+00:24:08,380 --> 00:24:12,350
+or let you point to which network name space
+
+00:24:12,350 --> 00:24:14,230
+you want to attach.
+
+00:24:14,230 --> 00:24:17,980
+Other BPF comments like Quary already support this.
+
+00:24:21,730 --> 00:24:23,210
+Then there is constraint of sockets
+
+00:24:23,210 --> 00:24:25,453
+having various port flag set.
+
+00:24:26,310 --> 00:24:28,933
+Here we are not really setting up
+
+00:24:28,933 --> 00:24:31,460
+a load balancing group of sockets.
+
+00:24:31,460 --> 00:24:33,480
+So this constraint doesn't make sense,
+
+00:24:33,480 --> 00:24:35,633
+and we would like to lift it in some way.
+
+00:24:38,150 --> 00:24:43,150
+Finally, right now, if you're steering new connections
+
+00:24:43,200 --> 00:24:45,083
+with inet lookup to listening socket,
+
+00:24:46,440 --> 00:24:49,060
+we will ignore the fact if you're socket
+
+00:24:49,060 --> 00:24:52,320
+is in the reuse port group.
+
+00:24:52,320 --> 00:24:54,860
+So the load balancing won't happen.
+
+00:24:54,860 --> 00:24:56,650
+Well we obviously need to fix that
+
+00:24:56,650 --> 00:25:00,813
+to ake reuse port work, and be honored by inet lookup.
+
+00:25:04,940 --> 00:25:07,513
+Now, that's something I already mentioned.
+
+00:25:08,960 --> 00:25:10,640
+In order to insert the socket,
+
+00:25:10,640 --> 00:25:12,410
+you need a file descriptor for it.
+
+00:25:12,410 --> 00:25:14,670
+Like do we actually don't do anything
+
+00:25:14,670 --> 00:25:16,010
+with a file descriptor.
+
+00:25:16,010 --> 00:25:19,153
+It's just a way to identify which socket we mean.
+
+00:25:20,180 --> 00:25:23,810
+So sockets happen to have another identifier,
+
+00:25:23,810 --> 00:25:26,880
+that is unique within the network main space,
+
+00:25:26,880 --> 00:25:28,620
+and that's called a socket cookie.
+
+00:25:28,620 --> 00:25:32,240
+And you can get it over by running
+
+00:25:32,240 --> 00:25:33,533
+getsockopter from sock_diag.
+
+00:25:34,800 --> 00:25:38,230
+We would like to extend the sockarray API
+
+00:25:38,230 --> 00:25:40,770
+to allow you to insert the socket into to array
+
+00:25:40,770 --> 00:25:43,423
+just by specifying its cookie value.
+
+00:25:49,340 --> 00:25:51,940
+We've prepared a demo, that shows you
+
+00:25:51,940 --> 00:25:54,880
+how you can program the mappings
+
+00:25:54,880 --> 00:25:58,403
+between addresses, ports, and sockets.
+
+00:25:59,530 --> 00:26:01,602
+Do we have time left the demo?
+
+00:26:01,602 --> 00:26:02,957
+- [Man] Yes, we have 15 minutes.
+
+00:26:02,957 --> 00:26:03,790
+- Cool.
+
+00:26:19,918 --> 00:26:20,751
+- Okay.
+
+00:26:21,900 --> 00:26:22,833
+- Okay, thank you.
+
+00:26:34,212 --> 00:26:39,212
+Let's see if I can.
+
+00:26:41,822 --> 00:26:43,941
+At work it doesn't work.
+
+00:26:43,941 --> 00:26:45,191
+Oh there we go.
+
+00:26:57,670 --> 00:27:02,590
+Okay, so the demo was put together by Mark actually,
+
+00:27:02,590 --> 00:27:06,120
+and these are some proof of concept user space tooling
+
+00:27:12,509 --> 00:27:15,690
+that let's you configure mappings
+
+00:27:15,690 --> 00:27:17,910
+between addresses and ports, as I mentioned,
+
+00:27:17,910 --> 00:27:20,307
+and sockets, and change them dynamically
+
+00:27:20,307 --> 00:27:21,733
+during criat run time.
+
+00:27:23,310 --> 00:27:25,680
+So if you wanna play with all two,
+
+00:27:25,680 --> 00:27:27,849
+yes it does several things,
+
+00:27:27,849 --> 00:27:32,313
+it has some help that you can check out later.
+
+00:27:33,270 --> 00:27:35,230
+So first thing we need to do,
+
+00:27:35,230 --> 00:27:38,020
+is we need to see what is the state
+
+00:27:38,020 --> 00:27:39,960
+of our network name space.
+
+00:27:39,960 --> 00:27:43,920
+Well currently, we don't have any BPF program
+
+00:27:43,920 --> 00:27:47,500
+that will steer packets to listening sockets attached.
+
+00:27:47,500 --> 00:27:50,153
+So let's load something and attach it.
+
+00:27:51,370 --> 00:27:55,200
+Our tool will create all the maps that the program needs,
+
+00:27:55,200 --> 00:27:56,963
+and load it and attach it.
+
+00:27:58,889 --> 00:28:01,080
+The program uses three maps.
+
+00:28:01,080 --> 00:28:03,660
+One of them is sockarray, and the other two
+
+00:28:03,660 --> 00:28:08,440
+allow it to translate or map network prefixes
+
+00:28:08,440 --> 00:28:11,910
+to string service labels, and then add these
+
+00:28:11,910 --> 00:28:15,323
+string service labels to in listening to the socket array.
+
+00:28:19,060 --> 00:28:21,020
+We can see it's loaded.
+
+00:28:21,020 --> 00:28:25,120
+BPF tool can help us confirm the same thing.
+
+00:28:25,120 --> 00:28:27,900
+We haven't extended it yet, so the type of program
+
+00:28:27,900 --> 00:28:29,123
+is just a number.
+
+00:28:32,380 --> 00:28:36,500
+So our BPF program and user space tool,
+
+00:28:36,500 --> 00:28:39,530
+it operates on concepts of services
+
+00:28:39,530 --> 00:28:43,870
+which are just labels for your sockets in the socket array.
+
+00:28:43,870 --> 00:28:46,820
+And bindings, which are mappings between
+
+00:28:46,820 --> 00:28:51,820
+address and port perse and your services.
+
+00:28:52,020 --> 00:28:57,020
+We start with no services configured, and no mappings.
+
+00:28:58,020 --> 00:29:00,890
+So let's register a service, call it terminator,
+
+00:29:00,890 --> 00:29:04,203
+because it will terminate TCP connections.
+
+00:29:08,310 --> 00:29:11,140
+You can see we've created a service,
+
+00:29:11,140 --> 00:29:14,313
+and it has a slot in the sock array reserved,
+
+00:29:15,370 --> 00:29:17,273
+but there is no socket there yet.
+
+00:29:19,404 --> 00:29:20,237
+So we need to do that now.
+
+00:29:20,237 --> 00:29:23,840
+So let's create the listening socket,
+
+00:29:23,840 --> 00:29:28,270
+insert it into socket array, and pass it on to
+
+00:29:28,270 --> 00:29:31,170
+our network server to listen there
+
+00:29:31,170 --> 00:29:33,090
+and accept new connections.
+
+00:29:33,090 --> 00:29:36,857
+So similar to how system D socket activation does,
+
+00:29:36,857 --> 00:29:39,493
+and this is what our helper here will do.
+
+00:29:43,520 --> 00:29:48,503
+So we should have our network server listening for this.
+
+00:29:49,550 --> 00:29:53,383
+It's bound to a port from an FMRL range.
+
+00:29:54,650 --> 00:29:58,060
+So if you take a look on the right hand side,
+
+00:29:58,060 --> 00:30:03,060
+I have actually two instances of a port scanner running,
+
+00:30:03,080 --> 00:30:07,363
+and they are constantly scanning the look back interface.
+
+00:30:09,840 --> 00:30:14,840
+The 127.0.0 1. address,
+
+00:30:15,926 --> 00:30:19,150
+and the other is scanning 127.1.1.1.
+
+00:30:19,150 --> 00:30:22,280
+And I have only a couple services open there.
+
+00:30:22,280 --> 00:30:26,019
+One is SSH and the other one you can't see
+
+00:30:26,019 --> 00:30:28,510
+because the screen is too small actually.
+
+00:30:28,510 --> 00:30:31,370
+But our service is running on a port
+
+00:30:31,370 --> 00:30:34,038
+outside of a scanning range because we are just scanning
+
+00:30:34,038 --> 00:30:36,083
+the first 500 ports.
+
+00:30:37,870 --> 00:30:41,360
+Okay, so we have network server started,
+
+00:30:41,360 --> 00:30:44,450
+we've got the socket in the sockarray,
+
+00:30:44,450 --> 00:30:48,240
+now let's actually redirect some ports
+
+00:30:48,240 --> 00:30:49,770
+and addresses to it.
+
+00:30:49,770 --> 00:30:54,770
+So let's try exposing the service on port 80 on lookback.
+
+00:30:57,060 --> 00:30:59,500
+Now if all goes well, it should show up
+
+00:30:59,500 --> 00:31:04,500
+on the endmap scan, but it doesn't because it's too small.
+
+00:31:05,400 --> 00:31:08,583
+Let me kill one window.
+
+00:31:12,212 --> 00:31:13,045
+Oops.
+
+00:31:22,390 --> 00:31:23,737
+Oh, there we go.
+
+00:31:25,234 --> 00:31:26,067
+Do that.
+
+00:31:33,930 --> 00:31:35,473
+As you see it is really live.
+
+00:31:36,510 --> 00:31:37,343
+All right.
+
+00:31:39,930 --> 00:31:44,033
+So port 80 now appears to be open,
+
+00:31:45,770 --> 00:31:50,523
+because we configured a new mapping to our socket.
+
+00:31:51,490 --> 00:31:56,390
+Now we can also bind over the already listening services.
+
+00:31:56,390 --> 00:31:59,483
+Let's try binding over our SSH server.
+
+00:32:05,178 --> 00:32:07,390
+Well, now Nmap stopped showing the SSH fingerprint,
+
+00:32:07,390 --> 00:32:10,870
+because there's no longer a real SSH server
+
+00:32:10,870 --> 00:32:13,324
+listening in for a connection,
+
+00:32:13,324 --> 00:32:16,093
+just our simple TCP connection terminator.
+
+00:32:16,970 --> 00:32:19,673
+And finally, we can do some interesting things
+
+00:32:19,673 --> 00:32:22,900
+like we can point old points on a loop back address
+
+00:32:22,900 --> 00:32:25,273
+to this one socket.
+
+00:32:27,667 --> 00:32:28,500
+Load.
+
+00:32:31,199 --> 00:32:33,263
+And we can examine the mappings,
+
+00:32:33,263 --> 00:32:35,753
+we have configured and remove any of them.
+
+00:32:37,270 --> 00:32:40,823
+So if we remove a mapping for old ports,
+
+00:32:42,740 --> 00:32:44,963
+we will just go back one step.
+
+00:32:46,600 --> 00:32:49,930
+We can do other things, like we can bind whole subnet
+
+00:32:51,560 --> 00:32:54,220
+on a given port to our socket,
+
+00:32:54,220 --> 00:32:58,230
+and that's why I had two instances inmap running,
+
+00:32:58,230 --> 00:33:00,833
+but unfortunately they can't fit on this screen.
+
+00:33:03,630 --> 00:33:08,630
+So if I bind a whole loop back prefix, 443 comes open.
+
+00:33:10,010 --> 00:33:12,715
+And probably the most extreme case,
+
+00:33:12,715 --> 00:33:14,906
+we can redirect all local addresses
+
+00:33:14,906 --> 00:33:15,743
+and all ports our service.
+
+00:33:20,522 --> 00:33:23,290
+But if we unload the program,
+
+00:33:23,290 --> 00:33:26,820
+all the things go back to their initial state,
+
+00:33:26,820 --> 00:33:29,570
+our listening sockets that we've bound
+
+00:33:30,481 --> 00:33:32,681
+with traditional socket API are still there.
+
+00:33:33,970 --> 00:33:34,963
+So that's the demo.
+
+00:33:37,820 --> 00:33:42,030
+So as we make progress on these next steps and benchmarks,
+
+00:33:42,030 --> 00:33:46,400
+we will publish next version of our patches.
+
+00:33:46,400 --> 00:33:49,200
+But we would love to hear your feedback,
+
+00:33:49,200 --> 00:33:52,623
+concerns or questions, thank you.
+
+00:33:54,470 --> 00:33:55,838
+- Thank you very much.
+
+00:33:55,838 --> 00:33:57,540
+(audience claps)
+
+00:33:57,540 --> 00:33:58,673
+Any questions?
+
+00:34:00,646 --> 00:34:03,470
+I'm gonna get Jobs first.
+
+00:34:03,470 --> 00:34:05,940
+- A question about the map,
+
+00:34:05,940 --> 00:34:09,360
+did you happen to reuse any of the sockmap code
+
+00:34:09,360 --> 00:34:10,950
+that we already have, have you seen that?
+
+00:34:10,950 --> 00:34:11,995
+- [Jakub] Yeah.
+
+00:34:11,995 --> 00:34:13,664
+- Because if you're able to reuse that,
+
+00:34:13,664 --> 00:34:17,210
+we handle all the cases for dynamically adding
+
+00:34:17,210 --> 00:34:19,850
+the FD from the BPF side.
+
+00:34:19,850 --> 00:34:21,090
+Which has actually been quite useful for us,
+
+00:34:21,090 --> 00:34:22,670
+because them we can attach it
+
+00:34:22,670 --> 00:34:24,900
+from the sock ops side as well.
+
+00:34:24,900 --> 00:34:26,290
+So when you do like an establish,
+
+00:34:26,290 --> 00:34:30,320
+you can flip it in or connect or whatever.
+
+00:34:30,320 --> 00:34:32,770
+So just an option, you said it was harder,
+
+00:34:32,770 --> 00:34:34,980
+but sort of all the infrastructure is there to do it
+
+00:34:34,980 --> 00:34:36,840
+and handle it, and it's been tested and running
+
+00:34:36,840 --> 00:34:39,463
+for four or five kernel versions now.
+
+00:34:40,640 --> 00:34:43,272
+- I've definitely need to take a look at that.
+
+00:34:43,272 --> 00:34:48,272
+We are not sharing any code with sockmap.
+
+00:34:48,640 --> 00:34:52,380
+- But I think at least we tried to make it generic,
+
+00:34:52,380 --> 00:34:54,365
+and so that the only place that
+
+00:34:54,365 --> 00:34:58,160
+we do very specific things for our use case
+
+00:34:58,160 --> 00:35:00,620
+for the BPF running on egress and ingress
+
+00:35:00,620 --> 00:35:03,750
+is in the TCP BPF files,
+
+00:35:03,750 --> 00:35:05,940
+and so you would probably have to change the criteria
+
+00:35:05,940 --> 00:35:08,116
+to do insert, because we do a couple of checks
+
+00:35:08,116 --> 00:35:10,310
+on update, when we do the update.
+
+00:35:10,310 --> 00:35:12,180
+But I think we could probably just pull those out too,
+
+00:35:12,180 --> 00:35:14,160
+and then add your set of requirements in front,
+
+00:35:14,160 --> 00:35:16,385
+and I think it is possible.
+
+00:35:16,385 --> 00:35:20,800
+It'll make it easier to add an remove FD's,
+
+00:35:20,800 --> 00:35:23,070
+and also consolidate some more code.
+
+00:35:23,070 --> 00:35:24,967
+- I see, so if I get what you're saying,
+
+00:35:24,967 --> 00:35:29,500
+we should try to use the sockmap data structure
+
+00:35:29,500 --> 00:35:32,279
+instead of sockarray for our service.
+
+00:35:32,279 --> 00:35:33,112
+- Yeah, you'll still need to have
+
+00:35:33,112 --> 00:35:34,110
+your own program name type,
+
+00:35:34,110 --> 00:35:35,500
+because you'll have a few things that are different
+
+00:35:35,500 --> 00:35:37,820
+on the update side, I think, like requirements
+
+00:35:37,820 --> 00:35:39,710
+like you can do listening and sockmap
+
+00:35:39,710 --> 00:35:41,860
+we don't do listening and stuff like this.
+
+00:35:41,860 --> 00:35:43,250
+But definitely the goal was to make that
+
+00:35:43,250 --> 00:35:45,730
+sort of a generic place to stick FD's
+
+00:35:45,730 --> 00:35:46,800
+that are linked to sockets.
+
+00:35:46,800 --> 00:35:47,900
+- [Jakub] Okay.
+
+00:35:47,900 --> 00:35:49,880
+- So if it's not perfect now, maybe we can
+
+00:35:49,880 --> 00:35:52,060
+figure out how to make it better
+
+00:35:52,060 --> 00:35:52,893
+so that it would work.
+
+00:35:52,893 --> 00:35:54,718
+- Yeah, we'll definitely take a look at that,
+
+00:35:54,718 --> 00:35:56,570
+and we are looking into sockmap anyway.
+
+00:35:56,570 --> 00:35:57,670
+- [Man] Yeah, perfect.
+
+00:36:00,030 --> 00:36:01,370
+- [Audience Member] I just wanted to say that
+
+00:36:01,370 --> 00:36:03,750
+I've run into the problem of not being able to
+
+00:36:03,750 --> 00:36:06,250
+open file descriptors that are sockets
+
+00:36:06,250 --> 00:36:08,800
+from proc in the past, and that would actually
+
+00:36:08,800 --> 00:36:10,850
+be a really nice problem if you could solve that
+
+00:36:10,850 --> 00:36:12,520
+for privileged processes.
+
+00:36:12,520 --> 00:36:15,250
+It would be really nice if you could get a second
+
+00:36:15,250 --> 00:36:17,173
+file descriptor and inspect it.
+
+00:36:18,200 --> 00:36:21,070
+So maybe you know if it was net admin
+
+00:36:21,070 --> 00:36:22,850
+then you shouldn't get an error,
+
+00:36:22,850 --> 00:36:26,163
+or for that get buy a cookie or something like that.
+
+00:36:27,010 --> 00:36:29,580
+- Okay, so you actually need the file descriptor
+
+00:36:29,580 --> 00:36:32,290
+to do something meaningful with it?
+
+00:36:32,290 --> 00:36:34,040
+- [Audience Member] Yeah, there seems to be
+
+00:36:34,040 --> 00:36:37,420
+a lot of socket options that you can't get out of the kernel
+
+00:36:37,420 --> 00:36:38,830
+if you don't have the file descriptor.
+
+00:36:38,830 --> 00:36:40,350
+- I see, okay.
+
+00:36:40,350 --> 00:36:41,870
+- [Audience Member] So for de bugging purposes,
+
+00:36:41,870 --> 00:36:43,550
+it would be really nice I think,
+
+00:36:43,550 --> 00:36:45,880
+maybe there's some other ways.
+
+00:36:45,880 --> 00:36:49,363
+We thought about extending the sock diag as well.
+
+00:36:51,130 --> 00:36:54,690
+- So do you recall any previous attempts I should look up
+
+00:36:54,690 --> 00:36:56,450
+on the mailing list?
+
+00:36:56,450 --> 00:36:57,860
+- [Audience Member] I don't know where.
+
+00:36:57,860 --> 00:37:00,300
+- So you're saying, even an idea to take
+
+00:37:00,300 --> 00:37:03,760
+ined diag and pop all the socket option values out
+
+00:37:03,760 --> 00:37:05,870
+in the dump, okay.
+
+00:37:05,870 --> 00:37:07,720
+I don't know what I think about that.
+
+00:37:08,830 --> 00:37:12,520
+It does lead credence to having the actual file descriptor,
+
+00:37:12,520 --> 00:37:16,613
+not some cookie or something not exactly the same thing.
+
+00:37:18,359 --> 00:37:20,180
+- Would it even make sense to look into
+
+00:37:20,180 --> 00:37:23,523
+a virtual sockafest supporting that?
+
+00:37:26,030 --> 00:37:27,890
+- That sounds like some hallway talk to me.
+
+00:37:27,890 --> 00:37:29,620
+That's like a whole new idea right?
+
+00:37:29,620 --> 00:37:31,020
+That would be a really big commitment
+
+00:37:31,020 --> 00:37:33,692
+to start exploring things at that level.
+
+00:37:33,692 --> 00:37:36,535
+- Okay.
+
+00:37:36,535 --> 00:37:38,890
+- TCP repeal of pariods listen call back,
+
+00:37:38,890 --> 00:37:41,340
+that also has access to socket click.
+
+00:37:41,340 --> 00:37:43,110
+Did you investigate you unit,
+
+00:37:43,110 --> 00:37:46,453
+and if you did, did you find any problems with this?
+
+00:37:48,520 --> 00:37:49,353
+This seems particular one.
+
+00:37:49,353 --> 00:37:52,230
+- [Jakub] Sorry I had trouble understanding you.
+
+00:37:52,230 --> 00:37:53,630
+- Please repeat the question.
+
+00:37:53,630 --> 00:37:56,440
+- Yeah TCP BPF prio-ides listen call back,
+
+00:37:56,440 --> 00:37:59,400
+so basically on listen you can do whatever,
+
+00:37:59,400 --> 00:38:01,720
+not whatever but many things with the socket.
+
+00:38:01,720 --> 00:38:03,880
+One of the things you can get socket cookie,
+
+00:38:03,880 --> 00:38:07,040
+and save within the map,
+
+00:38:07,040 --> 00:38:08,720
+and this seems what you really want,
+
+00:38:08,720 --> 00:38:11,060
+because you mentioned a deeper load
+
+00:38:11,060 --> 00:38:12,283
+for listening and bind.
+
+00:38:13,177 --> 00:38:14,820
+So the question is, did you investigate using it,
+
+00:38:14,820 --> 00:38:18,250
+and if you did, did you find any problems with this?
+
+00:38:18,250 --> 00:38:22,290
+- Yeah, we tried doing that, using TCP BPF hooks
+
+00:38:22,290 --> 00:38:24,450
+would be another way to hijack a socket
+
+00:38:24,450 --> 00:38:28,700
+when it's ready to be inserted into sockmap,
+
+00:38:28,700 --> 00:38:31,480
+and the problem there was that sockarray
+
+00:38:31,480 --> 00:38:33,883
+doesn't allow us to do updates from BPF.
+
+00:38:34,720 --> 00:38:36,270
+- [Man] That was the key issue.
+
+00:38:37,229 --> 00:38:39,312
+- [Audience Member] Okay.
+
+00:38:43,030 --> 00:38:45,300
+- That can change in a sockarray (mumbles).
+
+00:38:45,300 --> 00:38:48,010
+So we can make sockarray to allow
+
+00:38:48,010 --> 00:38:50,350
+update from the BPF program.
+
+00:38:50,350 --> 00:38:52,403
+There's nothing stop us from doing that.
+
+00:38:54,210 --> 00:38:57,420
+- From improving the sockarray API you mean?
+
+00:38:57,420 --> 00:38:58,253
+- [Audience Member] Right.
+
+00:38:58,253 --> 00:39:01,990
+- Yeah I think so, we just didn't get time to do that yet.
+
+00:39:01,990 --> 00:39:04,960
+- So together with the TCP BPF option
+
+00:39:04,960 --> 00:39:08,690
+we should be able to intercept all the pan system
+
+00:39:08,690 --> 00:39:10,070
+when they update a sockarray.
+
+00:39:10,070 --> 00:39:12,720
+- Yes, and that seems to be playing nicely
+
+00:39:12,720 --> 00:39:16,200
+with zero time waste charts,
+
+00:39:16,200 --> 00:39:18,920
+because the new process is in the same C group
+
+00:39:18,920 --> 00:39:22,443
+as the old process, so you see both sockets.
+
+00:39:23,370 --> 00:39:25,193
+But we need to work on that more.
+
+00:39:28,100 --> 00:39:30,670
+- I'd also suggest using a new BPF map type
+
+00:39:30,670 --> 00:39:32,013
+instead of reuse port.
+
+00:39:32,990 --> 00:39:35,500
+- It's something that has crossed our minds,
+
+00:39:35,500 --> 00:39:38,100
+because the pipeline is confusing,
+
+00:39:38,100 --> 00:39:41,580
+and maybe new map type but sure,
+
+00:39:41,580 --> 00:39:44,429
+99 percent of the code something like that.
+
+00:39:44,429 --> 00:39:46,823
+We're gonna have to look into that.
+
+00:39:48,210 --> 00:39:50,010
+- [Man] Aims are important.
+
+00:39:50,010 --> 00:39:50,843
+- Exactly.
+
+00:39:51,880 --> 00:39:52,880
+- [Man] Anyone else?
+
+00:39:54,430 --> 00:39:56,010
+Thank you very much.
+
+00:39:56,010 --> 00:39:57,437
+- Thank you.
+
+00:39:57,437 --> 00:39:58,803
+
+YouTube URL: https://www.youtube.com/watch?v=qRDoUpqvYjY
+
+

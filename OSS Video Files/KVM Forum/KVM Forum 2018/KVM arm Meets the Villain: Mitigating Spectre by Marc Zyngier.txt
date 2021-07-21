@@ -1,0 +1,2102 @@
+Title: KVM arm Meets the Villain: Mitigating Spectre by Marc Zyngier
+Publication date: 2018-11-17
+Playlist: KVM Forum 2018
+Description: 
+	The recent discovery of the Spectre and Meltdown vulnerabilities has been an unfortunate disruption in the otherwise rapid pace of KVM/arm development. Significant efforts have been put into analysing how CPU implementations are affected, and in developing a mitigation framework that covers both KVM and VMs by allowing VMs to call hypervisor services to mitigate the vulnerabilities in the virtual machine.
+
+This talk will briefly explain how the vulnerabilities affect ARM
+systems and describe the range of techniques introduced in KVM/arm to mitigate Spectre v2, v3, v3a and v4. We will explain how our mitigation framework hides as much of the diversity of CPU implementations and system integration while trying to keep the overhead as low as possible.
+
+---
+
+Marc Zyngier
+Kernel Hacker
+ARM Ltd
+
+Marc has been working on the Linux kernel since an unexpected encounter with 0.99pl13 in 1993. His first contribution was merged in 1996 in the form of the original version of the MD driver.
+
+Having played with fault tolerant systems at Bull, worked on exotic (and ultimately doomed) CPU architectures at Texas Instruments, and had fun with consumer electronics at TomTom, he has been with ARM since 2010, where he focusses on the Linux kernel, co-maintaining KVM/arm and some parts of the IRQ subsystem. He is also involved in some new aspects of the ARM architecture.
+
+He has presented a number of talks at Linux Plumbers, ELC, and KVM Forum over the past years.
+Captions: 
+	00:00:01,040 --> 00:00:11,940
+[Music]
+
+00:00:05,600 --> 00:00:15,420
+hi everyone I'm Margie I work with um so
+
+00:00:11,940 --> 00:00:19,529
+it's the last talk in a long series of
+
+00:00:15,420 --> 00:00:21,210
+Specter related ones so I may go quickly
+
+00:00:19,529 --> 00:00:23,279
+through some slides because you've
+
+00:00:21,210 --> 00:00:25,590
+probably bored to death and I'm between
+
+00:00:23,279 --> 00:00:26,420
+you and lunch so it's not very good
+
+00:00:25,590 --> 00:00:30,660
+place to be
+
+00:00:26,420 --> 00:00:31,980
+so the original title was a cave here
+
+00:00:30,660 --> 00:00:34,829
+mom means the villain me to get
+
+00:00:31,980 --> 00:00:36,989
+inspector I've just we worked it to be
+
+00:00:34,829 --> 00:00:41,100
+me to get inspector or the architecture
+
+00:00:36,989 --> 00:00:44,520
+level because as you know arm although
+
+00:00:41,100 --> 00:00:46,739
+we design CPUs that you have in your
+
+00:00:44,520 --> 00:00:49,020
+phones and maybe one date servers we
+
+00:00:46,739 --> 00:00:53,190
+also and most importantly define an
+
+00:00:49,020 --> 00:00:55,199
+architecture and which means we're not
+
+00:00:53,190 --> 00:00:58,079
+in control of implementations in general
+
+00:00:55,199 --> 00:01:01,770
+and that put things in a slightly
+
+00:00:58,079 --> 00:01:04,799
+different perspective so a bit of
+
+00:01:01,770 --> 00:01:07,950
+literature the original Google zero
+
+00:01:04,799 --> 00:01:10,350
+project posting with Thailand one two
+
+00:01:07,950 --> 00:01:13,560
+and three which became also spective you
+
+00:01:10,350 --> 00:01:16,200
+want to a meltdown or use both namings
+
+00:01:13,560 --> 00:01:19,530
+or the top because I'm just massively
+
+00:01:16,200 --> 00:01:24,180
+confused in general that's this thing
+
+00:01:19,530 --> 00:01:26,340
+called variant for SSB and there's also
+
+00:01:24,180 --> 00:01:29,159
+the armed white paper which we published
+
+00:01:26,340 --> 00:01:31,560
+just after the initial goals your
+
+00:01:29,159 --> 00:01:37,619
+postings where there's the official
+
+00:01:31,560 --> 00:01:42,090
+armed position on the on all this let's
+
+00:01:37,619 --> 00:01:45,329
+define some terminology so what is an
+
+00:01:42,090 --> 00:01:47,610
+architecture so the way we define it is
+
+00:01:45,329 --> 00:01:52,680
+that is the contract between software
+
+00:01:47,610 --> 00:01:56,670
+and hardware it's a set of rules that
+
+00:01:52,680 --> 00:01:59,280
+defines what is permissible and what is
+
+00:01:56,670 --> 00:02:02,100
+not you can build things in certain ways
+
+00:01:59,280 --> 00:02:05,009
+in any way you want but the things you
+
+00:02:02,100 --> 00:02:06,710
+can do things you can't and that's
+
+00:02:05,009 --> 00:02:08,729
+independent of an implementation really
+
+00:02:06,710 --> 00:02:11,069
+then we have what we call the
+
+00:02:08,729 --> 00:02:13,100
+microarchitecture or an implementation
+
+00:02:11,069 --> 00:02:16,640
+so it's really that it's
+
+00:02:13,100 --> 00:02:20,390
+with building some hardware that matches
+
+00:02:16,640 --> 00:02:23,510
+the architecture and you can do anything
+
+00:02:20,390 --> 00:02:25,160
+you want there as long as you don't
+
+00:02:23,510 --> 00:02:30,680
+break any of the rules that in the
+
+00:02:25,160 --> 00:02:34,790
+architecture and now what is speculative
+
+00:02:30,680 --> 00:02:37,730
+execution so as Alex brilliantly
+
+00:02:34,790 --> 00:02:40,190
+explained is a really good optimization
+
+00:02:37,730 --> 00:02:42,040
+where you can do things before they are
+
+00:02:40,190 --> 00:02:44,060
+actually required and that allows
+
+00:02:42,040 --> 00:02:48,950
+parallelization to occur in the hard way
+
+00:02:44,060 --> 00:02:50,630
+and well one thing Alex didn't say is
+
+00:02:48,950 --> 00:02:54,280
+that you may have to roll back things
+
+00:02:50,630 --> 00:02:57,590
+when when you've mispredicted something
+
+00:02:54,280 --> 00:03:03,430
+that's where things become a bit man not
+
+00:02:57,590 --> 00:03:05,690
+that good so with help from Frank Zappa
+
+00:03:03,430 --> 00:03:07,520
+any good presentation should happen for
+
+00:03:05,690 --> 00:03:12,650
+example code doesn't mean this
+
+00:03:07,520 --> 00:03:14,720
+presentation is good but still so
+
+00:03:12,650 --> 00:03:17,570
+anything any place any time any place
+
+00:03:14,720 --> 00:03:20,990
+for no reason at all and I would add
+
+00:03:17,570 --> 00:03:28,490
+because something somehow somewhere went
+
+00:03:20,990 --> 00:03:30,410
+slightly wrong and with that coming back
+
+00:03:28,490 --> 00:03:32,660
+to something slightly more serious is
+
+00:03:30,410 --> 00:03:36,410
+what is our threat model here we're
+
+00:03:32,660 --> 00:03:39,590
+talking about KVM and we we assume that
+
+00:03:36,410 --> 00:03:43,100
+a hypervisor is at a higher previous
+
+00:03:39,590 --> 00:03:46,040
+level as the guest and we really assume
+
+00:03:43,100 --> 00:03:48,410
+that whatever state we have in the
+
+00:03:46,040 --> 00:03:53,660
+hypervisor it's not visible from the
+
+00:03:48,410 --> 00:03:56,650
+guest well the thing is we're finding
+
+00:03:53,660 --> 00:03:59,660
+out that side-channel attacks allows
+
+00:03:56,650 --> 00:04:04,340
+disclosure of those secrets in your
+
+00:03:59,660 --> 00:04:07,610
+password keys Alex this is my passphrase
+
+00:04:04,340 --> 00:04:09,170
+my secret past razor you know that's
+
+00:04:07,610 --> 00:04:11,810
+really important that Matt makes use of
+
+00:04:09,170 --> 00:04:13,760
+speculative execution one thing to
+
+00:04:11,810 --> 00:04:15,800
+notice is that this is all about this
+
+00:04:13,760 --> 00:04:18,049
+closing data you don't modify data
+
+00:04:15,800 --> 00:04:24,320
+hopefully nobody has been speculative
+
+00:04:18,049 --> 00:04:26,150
+right please don't so I'll go quickly on
+
+00:04:24,320 --> 00:04:28,439
+that one but does that
+
+00:04:26,150 --> 00:04:31,469
+the general principle of these timing
+
+00:04:28,439 --> 00:04:34,710
+attacks is that you start with a large
+
+00:04:31,469 --> 00:04:37,199
+ish array of memory and you one way or
+
+00:04:34,710 --> 00:04:40,159
+another you make sure that it doesn't
+
+00:04:37,199 --> 00:04:44,280
+sit in the cache and then you try to
+
+00:04:40,159 --> 00:04:48,659
+influence the hypervisor so that it uses
+
+00:04:44,280 --> 00:04:51,750
+one of its own secret as an offset into
+
+00:04:48,659 --> 00:04:54,719
+this array of memory and you do that in
+
+00:04:51,750 --> 00:04:59,039
+a speculative way it becomes tricky
+
+00:04:54,719 --> 00:05:03,629
+already and at some point you're able to
+
+00:04:59,039 --> 00:05:06,810
+time you look at the time it takes for
+
+00:05:03,629 --> 00:05:11,430
+you to access this array of memory back
+
+00:05:06,810 --> 00:05:14,939
+in the guest and find out oh that cache
+
+00:05:11,430 --> 00:05:17,639
+line is much faster than the others this
+
+00:05:14,939 --> 00:05:18,870
+goes a tiny bit of information of course
+
+00:05:17,639 --> 00:05:20,969
+the hard part is convincing the
+
+00:05:18,870 --> 00:05:28,949
+hypervisor to use that around the
+
+00:05:20,969 --> 00:05:33,120
+speculation and that's about it so as
+
+00:05:28,949 --> 00:05:36,020
+far as arm is concerned we're looking at
+
+00:05:33,120 --> 00:05:40,370
+four classes of attacks
+
+00:05:36,020 --> 00:05:45,449
+what is Spectre view one which is about
+
+00:05:40,370 --> 00:05:47,370
+doing bad boundary check bypasses the
+
+00:05:45,449 --> 00:05:49,440
+other one is being able to restore
+
+00:05:47,370 --> 00:05:51,389
+branches from one location to another
+
+00:05:49,440 --> 00:05:54,750
+you from the branch predictor aspect
+
+00:05:51,389 --> 00:05:58,110
+attitude we have some form of privilege
+
+00:05:54,750 --> 00:06:00,659
+separation bypass meltdown you know
+
+00:05:58,110 --> 00:06:01,830
+being able to speculate to something
+
+00:06:00,659 --> 00:06:06,839
+well you suppose didn't have access to
+
+00:06:01,830 --> 00:06:08,460
+oh this thing called parent 3a which we
+
+00:06:06,839 --> 00:06:10,949
+initially thought only affected arm
+
+00:06:08,460 --> 00:06:15,589
+until we found out that it also affected
+
+00:06:10,949 --> 00:06:18,770
+x86 who'd have thought which is about
+
+00:06:15,589 --> 00:06:22,139
+having accessible system registers and
+
+00:06:18,770 --> 00:06:24,180
+then things having to do with memory
+
+00:06:22,139 --> 00:06:27,990
+ordering mis-predictions and that's
+
+00:06:24,180 --> 00:06:30,270
+variant for or SSD and of course you
+
+00:06:27,990 --> 00:06:34,199
+know someone will come and combine these
+
+00:06:30,270 --> 00:06:36,140
+things together to create gadgets and we
+
+00:06:34,199 --> 00:06:40,550
+really don't know that
+
+00:06:36,140 --> 00:06:41,840
+so let's start with the the one that is
+
+00:06:40,550 --> 00:06:45,530
+really hard to mitigate really
+
+00:06:41,840 --> 00:06:47,930
+perspective e1 so that's the very very
+
+00:06:45,530 --> 00:06:48,560
+simplified you if you want the real
+
+00:06:47,930 --> 00:06:51,020
+thing
+
+00:06:48,560 --> 00:06:55,040
+please look at the first page of the
+
+00:06:51,020 --> 00:06:58,310
+Google project zero blog post they
+
+00:06:55,040 --> 00:07:01,640
+explain that in in really detailed
+
+00:06:58,310 --> 00:07:07,490
+there's a little way but the gist of it
+
+00:07:01,640 --> 00:07:10,180
+is this boundary check here yeah if if a
+
+00:07:07,490 --> 00:07:13,190
+rebound is the size of your of you are a
+
+00:07:10,180 --> 00:07:16,070
+you have an index and you before using
+
+00:07:13,190 --> 00:07:18,410
+before the referencing that that array
+
+00:07:16,070 --> 00:07:23,000
+you check is it in the in the range and
+
+00:07:18,410 --> 00:07:25,730
+it's all good it's good in it except
+
+00:07:23,000 --> 00:07:27,860
+under special speculation well that
+
+00:07:25,730 --> 00:07:31,760
+check can be bypassed for some arbitrary
+
+00:07:27,860 --> 00:07:34,190
+reason as I said the CPU can do anything
+
+00:07:31,760 --> 00:07:36,980
+you want in any order as long as you
+
+00:07:34,190 --> 00:07:39,260
+respect the the architecture what can
+
+00:07:36,980 --> 00:07:40,790
+happen is that that check is actually
+
+00:07:39,260 --> 00:07:43,790
+can be long to resolve may be that I
+
+00:07:40,790 --> 00:07:46,280
+rebound involves actually missing in the
+
+00:07:43,790 --> 00:07:48,200
+cache and having to load something that
+
+00:07:46,280 --> 00:07:50,180
+that is really far away oh well in the
+
+00:07:48,200 --> 00:07:53,480
+meantime I'm still going to try it out
+
+00:07:50,180 --> 00:07:55,070
+from the access and bad things happen so
+
+00:07:53,480 --> 00:07:58,460
+the hour I can be entrust the index I'm
+
+00:07:55,070 --> 00:08:01,460
+interested the array can be the control
+
+00:07:58,460 --> 00:08:04,310
+of another exception level and yeah
+
+00:08:01,460 --> 00:08:09,620
+again please read the full thing it's
+
+00:08:04,310 --> 00:08:17,800
+it's really interesting so you know had
+
+00:08:09,620 --> 00:08:21,800
+we mitigate that it's a bit complicated
+
+00:08:17,800 --> 00:08:27,140
+so we want to prevent speculation to go
+
+00:08:21,800 --> 00:08:31,670
+beyond that check of our index so the
+
+00:08:27,140 --> 00:08:36,170
+way we do it is that it's a two-stage
+
+00:08:31,670 --> 00:08:38,470
+mechanism so we have a way to which is
+
+00:08:36,170 --> 00:08:43,220
+you know it's a cool hack where we can
+
+00:08:38,470 --> 00:08:45,830
+check that bad boundary so that the the
+
+00:08:43,220 --> 00:08:49,410
+cmp instruction here lets you compare
+
+00:08:45,830 --> 00:08:52,700
+your index and your and your array bound
+
+00:08:49,410 --> 00:08:58,020
+and then we do a subtract with Carrie
+
+00:08:52,700 --> 00:09:02,450
+here but if Carrie calls a equals zero
+
+00:08:58,020 --> 00:09:05,660
+then here you have minus one which is a
+
+00:09:02,450 --> 00:09:09,000
+math basically two loved ones
+
+00:09:05,660 --> 00:09:15,690
+otherwise you end up with zero and what
+
+00:09:09,000 --> 00:09:19,260
+we do here is that we end our index with
+
+00:09:15,690 --> 00:09:21,450
+that mask the result is if we ignore
+
+00:09:19,260 --> 00:09:22,290
+speculation for the moment but if you
+
+00:09:21,450 --> 00:09:26,250
+think of it
+
+00:09:22,290 --> 00:09:29,700
+the result is you add of bound you get
+
+00:09:26,250 --> 00:09:32,220
+something that is zero your out-of-band
+
+00:09:29,700 --> 00:09:37,410
+you get something that is actually what
+
+00:09:32,220 --> 00:09:40,170
+you want but what you've been given so
+
+00:09:37,410 --> 00:09:42,420
+that is good except we still have
+
+00:09:40,170 --> 00:09:47,070
+speculation to deal with and that's the
+
+00:09:42,420 --> 00:09:52,460
+rules that csdb barrier which guarantees
+
+00:09:47,070 --> 00:09:58,010
+that anything that I either depends on
+
+00:09:52,460 --> 00:10:01,710
+on the C cell instruction or use flags
+
+00:09:58,010 --> 00:10:05,610
+would be executed and we there won't be
+
+00:10:01,710 --> 00:10:08,280
+any speculation beyond that barrier it's
+
+00:10:05,610 --> 00:10:11,490
+a bit of a convoluted semantics and it
+
+00:10:08,280 --> 00:10:12,930
+took time to come up with that what
+
+00:10:11,490 --> 00:10:17,700
+actually works on all existing
+
+00:10:12,930 --> 00:10:22,860
+implementation so it's the first example
+
+00:10:17,700 --> 00:10:25,980
+of things where we try to do things that
+
+00:10:22,860 --> 00:10:27,420
+are that you know we we verify that they
+
+00:10:25,980 --> 00:10:28,560
+work on early promotion which means you
+
+00:10:27,420 --> 00:10:34,620
+know coordinating with a lot of
+
+00:10:28,560 --> 00:10:37,290
+implementers people looking at people
+
+00:10:34,620 --> 00:10:44,760
+designing implementations and agreeing
+
+00:10:37,290 --> 00:10:49,590
+on on a common semantic variant one is
+
+00:10:44,760 --> 00:10:51,450
+actually quite quite difficult to deal
+
+00:10:49,590 --> 00:10:55,320
+with because it affects everything that
+
+00:10:51,450 --> 00:10:58,730
+has a privileged boundary it's
+
+00:10:55,320 --> 00:11:01,230
+everywhere including in userspace code
+
+00:10:58,730 --> 00:11:03,089
+KVM is it's not different from any other
+
+00:11:01,230 --> 00:11:05,100
+software in that respect which means we
+
+00:11:03,089 --> 00:11:08,249
+to mitigate it at the API level in the
+
+00:11:05,100 --> 00:11:10,129
+in arm in IO tools so we've done that in
+
+00:11:08,249 --> 00:11:13,259
+a in a few spots where we could actually
+
+00:11:10,129 --> 00:11:16,230
+see that it was vulnerable it's really
+
+00:11:13,259 --> 00:11:18,779
+hard and we rely on static analysis for
+
+00:11:16,230 --> 00:11:22,649
+that now if you don't know about it look
+
+00:11:18,779 --> 00:11:25,499
+at smash the tool at least these days
+
+00:11:22,649 --> 00:11:28,110
+maintained by a bank capita it's really
+
+00:11:25,499 --> 00:11:29,999
+cool it generates a bit too many false
+
+00:11:28,110 --> 00:11:32,370
+positive but it's a really good tool to
+
+00:11:29,999 --> 00:11:34,589
+go and stop inspecting where you could
+
+00:11:32,370 --> 00:11:36,290
+potentially be vulnerable and yeah it's
+
+00:11:34,589 --> 00:11:40,589
+still a work in progress
+
+00:11:36,290 --> 00:11:41,279
+my best friend spectively to spend a lot
+
+00:11:40,589 --> 00:11:44,279
+of time on that one
+
+00:11:41,279 --> 00:11:48,329
+well so what is it's about training your
+
+00:11:44,279 --> 00:11:51,059
+branch predictor and two for the CPU to
+
+00:11:48,329 --> 00:11:53,129
+speculate on the predicted taken path
+
+00:11:51,059 --> 00:11:57,029
+and you stuck your branch predictor and
+
+00:11:53,129 --> 00:11:59,790
+then you jump that so it's very
+
+00:11:57,029 --> 00:12:01,430
+interesting if you can start influencing
+
+00:11:59,790 --> 00:12:03,509
+the branch predictor in another
+
+00:12:01,430 --> 00:12:06,660
+exception level in another privileged
+
+00:12:03,509 --> 00:12:08,579
+context and once you can branch
+
+00:12:06,660 --> 00:12:11,309
+somewhere you can rescue a variant one
+
+00:12:08,579 --> 00:12:13,019
+gadget that's the obvious thing to do
+
+00:12:11,309 --> 00:12:16,699
+and how's that possible
+
+00:12:13,019 --> 00:12:20,370
+well turns out that some CPUs do not
+
+00:12:16,699 --> 00:12:22,370
+fully tag their branch prediction by
+
+00:12:20,370 --> 00:12:23,790
+context and what is the context is an
+
+00:12:22,370 --> 00:12:28,339
+exception level
+
+00:12:23,790 --> 00:12:33,059
+what are you user space kernel space or
+
+00:12:28,339 --> 00:12:35,610
+hypervisor could be tagged by AC which
+
+00:12:33,059 --> 00:12:39,149
+is the equivalent of a PC ID on x86 so
+
+00:12:35,610 --> 00:12:40,949
+it's a each process on arm has an asset
+
+00:12:39,149 --> 00:12:43,740
+you can take and change over the
+
+00:12:40,949 --> 00:12:46,499
+lifetime of the of the of the process
+
+00:12:43,740 --> 00:12:48,839
+but basically that tags a lot of
+
+00:12:46,499 --> 00:12:49,679
+information including utilities and the
+
+00:12:48,839 --> 00:12:52,529
+virtual machine ID
+
+00:12:49,679 --> 00:12:58,259
+so with that you know we can precisely
+
+00:12:52,529 --> 00:13:01,499
+identify any memory access by exception
+
+00:12:58,259 --> 00:13:04,439
+level process virtual machine that works
+
+00:13:01,499 --> 00:13:07,920
+for forward prediction as well except
+
+00:13:04,439 --> 00:13:11,129
+when you don't a number of
+
+00:13:07,920 --> 00:13:13,949
+implementations only tagged diverse
+
+00:13:11,129 --> 00:13:17,970
+prediction by PC and target
+
+00:13:13,949 --> 00:13:21,119
+and these are virtual addresses and if
+
+00:13:17,970 --> 00:13:25,949
+you can't have aliasing across exception
+
+00:13:21,119 --> 00:13:31,470
+levels in terms of vs space oh you're in
+
+00:13:25,949 --> 00:13:34,439
+trouble so how do we mitigate specter V
+
+00:13:31,470 --> 00:13:36,059
+- so the obvious way to do it is to
+
+00:13:34,439 --> 00:13:39,059
+invalidate the branch printer in
+
+00:13:36,059 --> 00:13:41,579
+specific places in the kernel we do it
+
+00:13:39,059 --> 00:13:44,009
+between context switch plus a couple of
+
+00:13:41,579 --> 00:13:47,249
+other places so that you can't mess with
+
+00:13:44,009 --> 00:13:50,189
+the kernel itself and KVM we do that as
+
+00:13:47,249 --> 00:13:54,329
+soon as we exit the guest so that we can
+
+00:13:50,189 --> 00:13:55,799
+safely run the host the trick is we need
+
+00:13:54,329 --> 00:13:58,489
+to do that without executive a single
+
+00:13:55,799 --> 00:14:02,100
+instructor a single branch instruction
+
+00:13:58,489 --> 00:14:04,169
+otherwise the the guest can can prime
+
+00:14:02,100 --> 00:14:06,419
+that branch predictor and off we go
+
+00:14:04,169 --> 00:14:09,600
+so let's invalidate the branch predictor
+
+00:14:06,419 --> 00:14:11,399
+and so on they are 32 it's really easy
+
+00:14:09,600 --> 00:14:14,549
+we have a branch prediction instruction
+
+00:14:11,399 --> 00:14:18,360
+and that works nicely on at least two
+
+00:14:14,549 --> 00:14:20,189
+implementations but actually we don't
+
+00:14:18,360 --> 00:14:23,040
+mandate that the burns crater is visible
+
+00:14:20,189 --> 00:14:25,679
+to software so I'm stopped really which
+
+00:14:23,040 --> 00:14:31,410
+means you it's legal to implement BPI or
+
+00:14:25,679 --> 00:14:38,610
+as a not too bad so on our 64
+
+00:14:31,410 --> 00:14:44,160
+it's much clearer it doesn't exist it's
+
+00:14:38,610 --> 00:14:45,209
+clearer it's not necessarily good we're
+
+00:14:44,160 --> 00:14:49,230
+in a bit of a bind here
+
+00:14:45,209 --> 00:14:52,919
+so we have to do it in a known
+
+00:14:49,230 --> 00:14:55,459
+architectural way and it requires you
+
+00:14:52,919 --> 00:14:58,259
+know diving into the micro arch and
+
+00:14:55,459 --> 00:15:00,179
+grabbing people having actually written
+
+00:14:58,259 --> 00:15:03,089
+the CPU is talking to partners who have
+
+00:15:00,179 --> 00:15:05,970
+implemented their own CPUs and finding
+
+00:15:03,089 --> 00:15:07,709
+out about things a15 you set the chicken
+
+00:15:05,970 --> 00:15:10,529
+bit from secure mode and then you
+
+00:15:07,709 --> 00:15:14,660
+invalidate the whole I cache okay on
+
+00:15:10,529 --> 00:15:14,660
+this 57 you turn the MMU off and back on
+
+00:15:17,329 --> 00:15:24,389
+on the 73 you have from 64-bit mode you
+
+00:15:22,289 --> 00:15:25,949
+have to switch to 32-bit and invalidate
+
+00:15:24,389 --> 00:15:27,139
+the respecter using the 32-bit
+
+00:15:25,949 --> 00:15:31,429
+instruction
+
+00:15:27,139 --> 00:15:35,959
+it's cool it's a nightmare if what you
+
+00:15:31,429 --> 00:15:38,329
+want to do is have a single kernel image
+
+00:15:35,959 --> 00:15:39,859
+that runs everywhere where you and you
+
+00:15:38,329 --> 00:15:42,980
+don't want to litter the whole kernel
+
+00:15:39,859 --> 00:15:45,649
+with you know architecture-specific
+
+00:15:42,980 --> 00:15:47,359
+hacks one thing to notice as well is
+
+00:15:45,649 --> 00:15:51,139
+that most implementations must have
+
+00:15:47,359 --> 00:15:52,730
+microcode like on Intel so how do we do
+
+00:15:51,139 --> 00:15:57,429
+that I'm not going to make this five
+
+00:15:52,730 --> 00:16:01,279
+minutes sorry for lunch
+
+00:15:57,429 --> 00:16:03,259
+so that doesn't scare so one thing we
+
+00:16:01,279 --> 00:16:07,790
+can do is start abstracting things that
+
+00:16:03,259 --> 00:16:11,419
+I needed so we don't have Micro code but
+
+00:16:07,790 --> 00:16:14,419
+we have firmware so most implementations
+
+00:16:11,419 --> 00:16:16,369
+have what we call the sexual mode and so
+
+00:16:14,419 --> 00:16:18,230
+if you look here U is tiny and you could
+
+00:16:16,369 --> 00:16:20,449
+put it complete but trust me
+
+00:16:18,230 --> 00:16:23,569
+so the most privileged exception level
+
+00:16:20,449 --> 00:16:26,089
+is er three and that's where we start
+
+00:16:23,569 --> 00:16:27,439
+things like how a management secure
+
+00:16:26,089 --> 00:16:28,669
+service things basically that you don't
+
+00:16:27,439 --> 00:16:31,879
+want to see in your operating system
+
+00:16:28,669 --> 00:16:34,669
+kernel so you push things over there and
+
+00:16:31,879 --> 00:16:37,610
+you you have a an API to to call into
+
+00:16:34,669 --> 00:16:39,619
+those services so the hypervisor can
+
+00:16:37,610 --> 00:16:42,169
+easily call in two or three to execute
+
+00:16:39,619 --> 00:16:45,559
+something there's only one
+
+00:16:42,169 --> 00:16:46,220
+implementation X gene that doesn't have
+
+00:16:45,559 --> 00:16:50,419
+this feature
+
+00:16:46,220 --> 00:16:52,730
+well top they can turn the branch
+
+00:16:50,419 --> 00:16:57,079
+predictor altogether and yeah we can't
+
+00:16:52,730 --> 00:16:58,369
+support these guys so let's say we that
+
+00:16:57,079 --> 00:17:02,209
+we're going to implement things at the
+
+00:16:58,369 --> 00:17:04,069
+author so dropping to your three on its
+
+00:17:02,209 --> 00:17:05,779
+apps per chip it's like taking an
+
+00:17:04,069 --> 00:17:11,389
+interrupt or doing a Cisco that's the
+
+00:17:05,779 --> 00:17:12,919
+same the same properties but or SMC
+
+00:17:11,389 --> 00:17:14,720
+calling convention follows the procedure
+
+00:17:12,919 --> 00:17:18,289
+calling convention which means you need
+
+00:17:14,720 --> 00:17:21,319
+to stash all the live registers that you
+
+00:17:18,289 --> 00:17:26,000
+would normally save if there are Cori
+
+00:17:21,319 --> 00:17:30,320
+save registers but we're coming from a
+
+00:17:26,000 --> 00:17:34,669
+guest all the registers are live and we
+
+00:17:30,320 --> 00:17:36,080
+need to save 18 of them that all of a
+
+00:17:34,669 --> 00:17:37,250
+sudden that's that's an overhead if
+
+00:17:36,080 --> 00:17:39,170
+you're if you're really
+
+00:17:37,250 --> 00:17:42,470
+exit heavy
+
+00:17:39,170 --> 00:17:43,880
+so let's credit let's invent a new
+
+00:17:42,470 --> 00:17:46,820
+column convention that you know only
+
+00:17:43,880 --> 00:17:49,640
+clubbers at most four registers provider
+
+00:17:46,820 --> 00:17:51,590
+less MCCCD discovery so we can get the
+
+00:17:49,640 --> 00:17:54,800
+version and we define some new
+
+00:17:51,590 --> 00:17:56,660
+architecture workarounds takes a bit of
+
+00:17:54,800 --> 00:17:59,810
+negotiation back and forth with people
+
+00:17:56,660 --> 00:18:02,090
+designing these things but we got
+
+00:17:59,810 --> 00:18:05,540
+implemented in the amplitude firmware
+
+00:18:02,090 --> 00:18:08,690
+and each vendor can now provide their
+
+00:18:05,540 --> 00:18:11,750
+own architected way of invalidate into
+
+00:18:08,690 --> 00:18:13,550
+branch predictor one thing to notice is
+
+00:18:11,750 --> 00:18:17,660
+if you don't have an implementation you
+
+00:18:13,550 --> 00:18:23,240
+probably don't have a mitigation choose
+
+00:18:17,660 --> 00:18:25,760
+your vendor so SMCC
+
+00:18:23,240 --> 00:18:29,660
+artwork around one as you can guess from
+
+00:18:25,760 --> 00:18:31,880
+the one there's a - so it's implemented
+
+00:18:29,660 --> 00:18:33,800
+on top of that collie Convention and
+
+00:18:31,880 --> 00:18:35,900
+it's the system-wide service and it's
+
+00:18:33,800 --> 00:18:37,160
+allow the color to find out whether it's
+
+00:18:35,900 --> 00:18:39,920
+implemented but also whether that
+
+00:18:37,160 --> 00:18:41,450
+particular CPU requires it and that's
+
+00:18:39,920 --> 00:18:46,400
+because we support a symmetric
+
+00:18:41,450 --> 00:18:49,970
+configuration like big little panic yeah
+
+00:18:46,400 --> 00:18:52,070
+big little slice back so the thing is
+
+00:18:49,970 --> 00:18:56,870
+it's always safe to call that service on
+
+00:18:52,070 --> 00:18:58,880
+any CPU it's just that it comes at the
+
+00:18:56,870 --> 00:19:06,020
+expense of performance if you don't
+
+00:18:58,880 --> 00:19:08,050
+require it so how do we do that so
+
+00:19:06,020 --> 00:19:11,090
+remember this invalidate thing before
+
+00:19:08,050 --> 00:19:13,160
+any branch so it's quite a constraint so
+
+00:19:11,090 --> 00:19:15,950
+we we need that to be the first thing
+
+00:19:13,160 --> 00:19:18,380
+that happens as we exit and it needs to
+
+00:19:15,950 --> 00:19:19,520
+be in the exception vector before we can
+
+00:19:18,380 --> 00:19:21,950
+branch anywhere else because that's
+
+00:19:19,520 --> 00:19:24,950
+where we land so that gives us 32
+
+00:19:21,950 --> 00:19:27,890
+instruction on a 64-bit system and we
+
+00:19:24,950 --> 00:19:31,760
+don't want that to impact non affected
+
+00:19:27,890 --> 00:19:34,970
+CPUs on the griddle so we introduce per
+
+00:19:31,760 --> 00:19:37,130
+CPU vectors instead of having one set of
+
+00:19:34,970 --> 00:19:40,220
+vectors that all the CPU uses we
+
+00:19:37,130 --> 00:19:43,390
+introduce you know vectors for effective
+
+00:19:40,220 --> 00:19:46,790
+CPUs vectors for non effective CPUs and
+
+00:19:43,390 --> 00:19:49,430
+we so we have these non affected CPU
+
+00:19:46,790 --> 00:19:52,029
+vectors we called canonical vectors and
+
+00:19:49,430 --> 00:19:54,279
+and once that for
+
+00:19:52,029 --> 00:19:57,840
+for the affected CPU so we invalidate
+
+00:19:54,279 --> 00:20:05,349
+and then we branch all good
+
+00:19:57,840 --> 00:20:08,219
+what about 32-bit Tina very fine though
+
+00:20:05,349 --> 00:20:10,659
+there's no good firmware story on 32-bit
+
+00:20:08,219 --> 00:20:12,460
+32-bit has a long history of embedded
+
+00:20:10,659 --> 00:20:16,379
+stuff where people run Linux in secure
+
+00:20:12,460 --> 00:20:18,809
+mode so it's all it's all a big mess
+
+00:20:16,379 --> 00:20:21,249
+fortunately there's exactly two
+
+00:20:18,809 --> 00:20:23,139
+effective implementations a 15 which
+
+00:20:21,249 --> 00:20:26,289
+we've seen we can validate the our cache
+
+00:20:23,139 --> 00:20:28,690
+and a 12 a 17 which despite having to
+
+00:20:26,289 --> 00:20:29,739
+name is exactly the same CPU we can use
+
+00:20:28,690 --> 00:20:32,710
+the PIO
+
+00:20:29,739 --> 00:20:37,149
+and we can use the same vector trick and
+
+00:20:32,710 --> 00:20:39,369
+the trouble is we need to invalidate to
+
+00:20:37,149 --> 00:20:42,460
+the invalidation and branch somewhere
+
+00:20:39,369 --> 00:20:45,149
+else in exactly one single instruction
+
+00:20:42,460 --> 00:20:49,210
+and that's not going to happen
+
+00:20:45,149 --> 00:20:54,009
+so and that's terrifying that's how we
+
+00:20:49,210 --> 00:20:55,839
+do it so at the top here we have the
+
+00:20:54,009 --> 00:20:58,570
+normal vectors you know it's a set of
+
+00:20:55,839 --> 00:21:01,419
+range it's eight branches the CPU drops
+
+00:20:58,570 --> 00:21:05,820
+you at the right position in the vectors
+
+00:21:01,419 --> 00:21:10,419
+and that's here the way we hack things
+
+00:21:05,820 --> 00:21:12,729
+for affected CPUs so the requirement is
+
+00:21:10,419 --> 00:21:16,210
+that we start with a 64-bit align stack
+
+00:21:12,729 --> 00:21:20,139
+and we entered at any point here and for
+
+00:21:16,210 --> 00:21:21,879
+through adding one to the stack then we
+
+00:21:20,139 --> 00:21:24,999
+evaluate the branch predictor at that
+
+00:21:21,879 --> 00:21:35,789
+point we're safe and here we have our
+
+00:21:24,999 --> 00:21:35,789
+smoke arm and come back hello yes
+
+00:21:36,110 --> 00:21:44,760
+what's happening wrong button probably
+
+00:21:40,730 --> 00:21:47,670
+here we have our decoding where we you
+
+00:21:44,760 --> 00:21:51,690
+are an exclusive all with that value
+
+00:21:47,670 --> 00:21:52,920
+here which clears we test that oh we
+
+00:21:51,690 --> 00:21:56,880
+found the right value at the bottom bits
+
+00:21:52,920 --> 00:22:02,010
+are zero if it's not there if it's not
+
+00:21:56,880 --> 00:22:03,960
+zero we restore these bits by doing an
+
+00:22:02,010 --> 00:22:06,450
+extreme or again with the same value and
+
+00:22:03,960 --> 00:22:09,450
+if it was zero then we're good we've
+
+00:22:06,450 --> 00:22:12,270
+aligned our stack back to a 64-bit
+
+00:22:09,450 --> 00:22:14,940
+binary and we can safely branch don't
+
+00:22:12,270 --> 00:22:16,650
+try this at home it's if you do that
+
+00:22:14,940 --> 00:22:18,540
+with thumb too it's even more
+
+00:22:16,650 --> 00:22:27,750
+complicated look at the code it sits on
+
+00:22:18,540 --> 00:22:32,220
+the kernel that's much faster because if
+
+00:22:27,750 --> 00:22:33,840
+you if you start subtracting one now I
+
+00:22:32,220 --> 00:22:35,760
+see what you mean that would become a
+
+00:22:33,840 --> 00:22:37,380
+long string of conditional instruction
+
+00:22:35,760 --> 00:22:42,240
+yeah you could do that as well that
+
+00:22:37,380 --> 00:22:45,630
+could probably work as well some two may
+
+00:22:42,240 --> 00:22:51,450
+be problematic way I remove half the
+
+00:22:45,630 --> 00:22:54,390
+code here have to fit fixing variant you
+
+00:22:51,450 --> 00:22:57,030
+ready we want to fix it for good
+
+00:22:54,390 --> 00:22:59,940
+so it only exists because this lack of
+
+00:22:57,030 --> 00:23:04,770
+tagging in the cpu so the architecture
+
+00:22:59,940 --> 00:23:06,870
+now out loud that kind of behavior until
+
+00:23:04,770 --> 00:23:11,640
+now you could build things like this if
+
+00:23:06,870 --> 00:23:14,010
+you come up with a new CPU and you allow
+
+00:23:11,640 --> 00:23:17,700
+aliasing you're out of spec you're not
+
+00:23:14,010 --> 00:23:20,600
+an army implementation we expose that
+
+00:23:17,700 --> 00:23:22,799
+fact to into a system register so
+
+00:23:20,600 --> 00:23:24,929
+hypervisors an oasis can read the stem
+
+00:23:22,799 --> 00:23:29,040
+you know whether they are protected or
+
+00:23:24,929 --> 00:23:31,700
+not and we've updated actually a number
+
+00:23:29,040 --> 00:23:33,809
+of implementations to support this
+
+00:23:31,700 --> 00:23:37,230
+meltdown that's going to be quick
+
+00:23:33,809 --> 00:23:40,200
+because guess what there's only one
+
+00:23:37,230 --> 00:23:42,660
+affected implementation in arm so you
+
+00:23:40,200 --> 00:23:45,679
+don't know what that is now yeah not
+
+00:23:42,660 --> 00:23:49,480
+user accessible or look it's accessible
+
+00:23:45,679 --> 00:23:51,430
+how do we mitigate in KVM well
+
+00:23:49,480 --> 00:23:54,820
+it's pretty it's pretty nice because the
+
+00:23:51,430 --> 00:23:56,380
+Gastronauts er0 ktml - well guess what
+
+00:23:54,820 --> 00:23:58,540
+yes we are one yes
+
+00:23:56,380 --> 00:24:01,900
+KVM Atia - these are different
+
+00:23:58,540 --> 00:24:04,270
+transition regime they don't you can't
+
+00:24:01,900 --> 00:24:07,230
+they don't interact directly so you
+
+00:24:04,270 --> 00:24:11,740
+can't exploit anything directly in KVM
+
+00:24:07,230 --> 00:24:13,600
+from the guests is the use of space side
+
+00:24:11,740 --> 00:24:16,330
+you need to worry about and that's
+
+00:24:13,600 --> 00:24:17,530
+protected by kpti and the only known
+
+00:24:16,330 --> 00:24:21,670
+implementation has been already
+
+00:24:17,530 --> 00:24:26,500
+addressed so let's move on there are
+
+00:24:21,670 --> 00:24:29,500
+three a so that's one's fun it's vaguely
+
+00:24:26,500 --> 00:24:32,320
+similar to meltdown in the sense that it
+
+00:24:29,500 --> 00:24:35,590
+allows the bypass of the privilege
+
+00:24:32,320 --> 00:24:37,510
+separation and in this case it's a
+
+00:24:35,590 --> 00:24:41,170
+system register they couldn't have an MS
+
+00:24:37,510 --> 00:24:44,770
+all on the x86 side so it sounds worse
+
+00:24:41,170 --> 00:24:45,880
+than it is really because most of the
+
+00:24:44,770 --> 00:24:49,930
+values you have in these system
+
+00:24:45,880 --> 00:24:51,250
+registers they are they are static they
+
+00:24:49,930 --> 00:24:53,770
+don't reveal anything you mean you can
+
+00:24:51,250 --> 00:24:56,830
+read VM Linux and find out what these
+
+00:24:53,770 --> 00:24:58,900
+values are can read the source code the
+
+00:24:56,830 --> 00:25:01,390
+only thing that's interesting is the
+
+00:24:58,900 --> 00:25:03,220
+vector based register where you branch
+
+00:25:01,390 --> 00:25:04,840
+when you take an exception and this
+
+00:25:03,220 --> 00:25:07,740
+one's interesting because it's a virtual
+
+00:25:04,840 --> 00:25:11,680
+address which means you can disclose
+
+00:25:07,740 --> 00:25:14,140
+where how you kernel is mapped in memory
+
+00:25:11,680 --> 00:25:17,650
+which means you bypass things like que
+
+00:25:14,140 --> 00:25:19,890
+sera annoying especially annoying for me
+
+00:25:17,650 --> 00:25:22,720
+because I was in the process of writing
+
+00:25:19,890 --> 00:25:26,410
+randomization of high virtual addresses
+
+00:25:22,720 --> 00:25:31,960
+so this thing completely defeats four
+
+00:25:26,410 --> 00:25:33,310
+weeks of work don't do that so anything
+
+00:25:31,960 --> 00:25:35,710
+of course you can combine it with other
+
+00:25:33,310 --> 00:25:39,700
+things and we know of two affected
+
+00:25:35,710 --> 00:25:40,810
+implementation 57 and 72 so is that
+
+00:25:39,700 --> 00:25:42,550
+possible where world
+
+00:25:40,810 --> 00:25:49,600
+yes we're speculating we just return the
+
+00:25:42,550 --> 00:25:52,200
+data is always the same thing so we've
+
+00:25:49,600 --> 00:25:56,200
+learned a few things from kpti is that
+
+00:25:52,200 --> 00:25:57,940
+with kpti we said the vectors at the
+
+00:25:56,200 --> 00:25:59,830
+well-known location because the kernels
+
+00:25:57,940 --> 00:26:02,050
+not matter we still need to map our
+
+00:25:59,830 --> 00:26:04,830
+vectors so that we can take a page fault
+
+00:26:02,050 --> 00:26:04,830
+or an enterprise
+
+00:26:05,700 --> 00:26:09,640
+the good news is that doesn't disclose
+
+00:26:08,230 --> 00:26:11,590
+anything about the kernel layout I
+
+00:26:09,640 --> 00:26:13,600
+thought that was the way we justified
+
+00:26:11,590 --> 00:26:13,870
+merging the kpti patch is the first
+
+00:26:13,600 --> 00:26:15,850
+place
+
+00:26:13,870 --> 00:26:19,390
+oh look shiny it fixes some potential
+
+00:26:15,850 --> 00:26:22,660
+disclosure of on the ankh a set off and
+
+00:26:19,390 --> 00:26:25,630
+we can use the same trick so the idea is
+
+00:26:22,660 --> 00:26:27,730
+we're going to ID map the vectors like
+
+00:26:25,630 --> 00:26:30,429
+basically VI equals PA for the vectors
+
+00:26:27,730 --> 00:26:33,640
+so that doesn't disclose anything about
+
+00:26:30,429 --> 00:26:36,850
+the hypervisor V a layout and we can
+
+00:26:33,640 --> 00:26:38,799
+branch back to our known ID map vectors
+
+00:26:36,850 --> 00:26:41,440
+and yeah you said branch to the vectors
+
+00:26:38,799 --> 00:26:44,350
+there was something about that yeah that
+
+00:26:41,440 --> 00:26:46,380
+won't be a last question I'm very sorry
+
+00:26:44,350 --> 00:26:51,040
+if you want to leave by any mean I
+
+00:26:46,380 --> 00:26:55,179
+understand lunch has priority so we need
+
+00:26:51,040 --> 00:26:58,330
+to branch from these vectors these are
+
+00:26:55,179 --> 00:27:01,860
+my vectors into the the real ones which
+
+00:26:58,330 --> 00:27:04,840
+is some random very location so or
+
+00:27:01,860 --> 00:27:08,140
+address space is about 52 bit there on
+
+00:27:04,840 --> 00:27:12,340
+these on the CPU is actually 48 still
+
+00:27:08,140 --> 00:27:16,780
+it's quite large and our our direct
+
+00:27:12,340 --> 00:27:19,690
+branches are PC relative means our max
+
+00:27:16,780 --> 00:27:22,980
+displacement is foggy I'm not going to
+
+00:27:19,690 --> 00:27:25,590
+cut it in a 48-bit aerospace so we must
+
+00:27:22,980 --> 00:27:29,620
+do an indirect branch after having
+
+00:27:25,590 --> 00:27:32,110
+mitigated video and there are two
+
+00:27:29,620 --> 00:27:34,570
+possibilities either we load that target
+
+00:27:32,110 --> 00:27:36,490
+address from memory that's cheap
+
+00:27:34,570 --> 00:27:38,500
+but it's easy but that's not cheap
+
+00:27:36,490 --> 00:27:41,230
+that's not very efficient or we can
+
+00:27:38,500 --> 00:27:45,690
+patch the target and dress a crop using
+
+00:27:41,230 --> 00:27:48,520
+a complicated series of immediate loads
+
+00:27:45,690 --> 00:27:51,580
+and that's quite hard so of course if
+
+00:27:48,520 --> 00:27:55,780
+it's hard we're going to do that so much
+
+00:27:51,580 --> 00:28:00,120
+fun and for that we rely on alternative
+
+00:27:55,780 --> 00:28:02,919
+sequences so so far we've had
+
+00:28:00,120 --> 00:28:05,320
+alternative seconds little bit like x86
+
+00:28:02,919 --> 00:28:07,780
+where we say okay here's the canonical
+
+00:28:05,320 --> 00:28:10,270
+set of of instructions and we can
+
+00:28:07,780 --> 00:28:13,090
+replace them under some conditions with
+
+00:28:10,270 --> 00:28:14,830
+this other set of instruction here it's
+
+00:28:13,090 --> 00:28:16,830
+a knob that gets replaced with a branch
+
+00:28:14,830 --> 00:28:21,870
+if arm 64
+
+00:28:16,830 --> 00:28:23,490
+as privileged access never so for what
+
+00:28:21,870 --> 00:28:26,880
+we want to do here we need that to be
+
+00:28:23,490 --> 00:28:29,429
+slightly more dynamic and turns out we
+
+00:28:26,880 --> 00:28:33,200
+have a good way of generating dynamic
+
+00:28:29,429 --> 00:28:37,890
+stuff we are BPF in the kernel great
+
+00:28:33,200 --> 00:28:40,289
+which means we have all kind of helpers
+
+00:28:37,890 --> 00:28:42,870
+to generate any encoding for any
+
+00:28:40,289 --> 00:28:45,480
+instruction and we can basically patch
+
+00:28:42,870 --> 00:28:46,909
+our kernel so let's use that to our
+
+00:28:45,480 --> 00:28:50,519
+advantage
+
+00:28:46,909 --> 00:28:54,029
+and we so here on the Left we have this
+
+00:28:50,519 --> 00:28:56,429
+new slightly different version of an
+
+00:28:54,029 --> 00:28:59,760
+alternative which is additive CBC before
+
+00:28:56,429 --> 00:29:03,659
+call back fix this and this is a C
+
+00:28:59,760 --> 00:29:08,399
+function is going to replace this branch
+
+00:29:03,659 --> 00:29:10,620
+and a series of not with stall to the
+
+00:29:08,399 --> 00:29:15,059
+stack because we need to make some space
+
+00:29:10,620 --> 00:29:16,799
+a move of some some constants with the
+
+00:29:15,059 --> 00:29:23,970
+right shift installed no to build a
+
+00:29:16,799 --> 00:29:26,909
+48-bit address and then an indirect
+
+00:29:23,970 --> 00:29:31,679
+branch so all that gets computed at
+
+00:29:26,909 --> 00:29:35,720
+runtime and passion to the kernel it
+
+00:29:31,679 --> 00:29:38,720
+works really well actually surprising
+
+00:29:35,720 --> 00:29:43,649
+but yeah it's a lot of effort for one
+
+00:29:38,720 --> 00:29:46,649
+single registers one single register but
+
+00:29:43,649 --> 00:29:48,779
+we've gained a full randomization of the
+
+00:29:46,649 --> 00:29:49,590
+vs base which is our interesting
+
+00:29:48,779 --> 00:29:53,899
+security feature
+
+00:29:49,590 --> 00:29:56,070
+just in case we we get some more of this
+
+00:29:53,899 --> 00:30:00,210
+thankfully there's only two
+
+00:29:56,070 --> 00:30:02,610
+implementations affected and then we
+
+00:30:00,210 --> 00:30:04,110
+have SSB which is the last one I worked
+
+00:30:02,610 --> 00:30:06,299
+on in fact I don't want to work on
+
+00:30:04,110 --> 00:30:09,450
+another one after that
+
+00:30:06,299 --> 00:30:12,779
+speculative store bypass and the idea is
+
+00:30:09,450 --> 00:30:16,019
+that under speculation a load from an
+
+00:30:12,779 --> 00:30:18,419
+address can observe the result of a
+
+00:30:16,019 --> 00:30:22,559
+store that is not the latest store and
+
+00:30:18,419 --> 00:30:25,770
+at that address so you do store still
+
+00:30:22,559 --> 00:30:29,880
+want to address a store to to address a
+
+00:30:25,770 --> 00:30:32,090
+load from a and you may get one under
+
+00:30:29,880 --> 00:30:32,090
+speaker
+
+00:30:32,810 --> 00:30:39,540
+so in the kernel
+
+00:30:36,950 --> 00:30:42,540
+the thing that reword me is the way we
+
+00:30:39,540 --> 00:30:45,330
+use the stack with your sis call from
+
+00:30:42,540 --> 00:30:48,360
+user space we store things on the stack
+
+00:30:45,330 --> 00:30:51,750
+we process that we turn to use a space
+
+00:30:48,360 --> 00:30:54,090
+and then at some other point later in a
+
+00:30:51,750 --> 00:30:56,460
+completely unrelated context we're going
+
+00:30:54,090 --> 00:30:58,890
+to reuse that stack frame for an
+
+00:30:56,460 --> 00:31:00,360
+entirely different purpose and we're
+
+00:30:58,890 --> 00:31:01,890
+going to store something on the stack
+
+00:31:00,360 --> 00:31:04,920
+read back from it
+
+00:31:01,890 --> 00:31:08,250
+oh wait are we reading the right value
+
+00:31:04,920 --> 00:31:12,480
+or the one that's been generated by user
+
+00:31:08,250 --> 00:31:16,830
+space earlier that bit is slightly
+
+00:31:12,480 --> 00:31:20,660
+frightening and yeah how's that possible
+
+00:31:16,830 --> 00:31:22,980
+speculation may ignore the dependency
+
+00:31:20,660 --> 00:31:25,190
+because you have a right buffer that
+
+00:31:22,980 --> 00:31:27,840
+doesn't forward things immediately or
+
+00:31:25,190 --> 00:31:29,700
+you've used a different VA for example
+
+00:31:27,840 --> 00:31:35,070
+maybe there's plenty of ways to to build
+
+00:31:29,700 --> 00:31:37,260
+something that has this behavior so at
+
+00:31:35,070 --> 00:31:38,610
+the time of the discovery we didn't have
+
+00:31:37,260 --> 00:31:43,380
+anything to prevent that in the
+
+00:31:38,610 --> 00:31:47,450
+architecture but all implementations had
+
+00:31:43,380 --> 00:31:51,000
+something that had a chicken beef
+
+00:31:47,450 --> 00:31:54,510
+similar to load bypassed all disable if
+
+00:31:51,000 --> 00:31:59,550
+you have a store in flight you can't
+
+00:31:54,510 --> 00:32:01,020
+have a load that bypasses it so that
+
+00:31:59,550 --> 00:32:06,260
+really guarantees that variant for
+
+00:32:01,020 --> 00:32:11,010
+cannot occur but it affects all load so
+
+00:32:06,260 --> 00:32:13,530
+that's configurable for me r3 and if the
+
+00:32:11,010 --> 00:32:16,380
+overhead is minimal if your core is not
+
+00:32:13,530 --> 00:32:18,210
+heavily speculating you know if you
+
+00:32:16,380 --> 00:32:21,360
+don't rely massively on speculation to
+
+00:32:18,210 --> 00:32:24,120
+get all of your performance then you set
+
+00:32:21,360 --> 00:32:26,430
+it for me or three and you don't you
+
+00:32:24,120 --> 00:32:30,330
+know okay you disable that but you're
+
+00:32:26,430 --> 00:32:32,910
+safe forever the alternative is to
+
+00:32:30,330 --> 00:32:35,990
+invent yet another secure service this
+
+00:32:32,910 --> 00:32:38,010
+time workaround - which is enabled on
+
+00:32:35,990 --> 00:32:40,170
+entry from user space into the kernel
+
+00:32:38,010 --> 00:32:41,730
+disabled on exit and then we can have
+
+00:32:40,170 --> 00:32:46,680
+buying mechanism
+
+00:32:41,730 --> 00:32:49,590
+where the process has to be mitigated so
+
+00:32:46,680 --> 00:32:52,980
+that's mostly what xx6 does except that
+
+00:32:49,590 --> 00:32:57,660
+we always mitigate the kernel always
+
+00:32:52,980 --> 00:33:01,230
+always always on x86 you would enter the
+
+00:32:57,660 --> 00:33:03,150
+kernel not mitigated set-ups it er CTR
+
+00:33:01,230 --> 00:33:08,370
+to be mitigated and exit with the
+
+00:33:03,150 --> 00:33:10,290
+mitigation on so how does it work it's
+
+00:33:08,370 --> 00:33:11,610
+just like workaround one except that
+
+00:33:10,290 --> 00:33:16,920
+this time it has a state a neighbor or
+
+00:33:11,610 --> 00:33:20,250
+disabled so again it's system-wide but
+
+00:33:16,920 --> 00:33:23,460
+per CPU mitigation status again big
+
+00:33:20,250 --> 00:33:25,890
+little and we expose the mitigation to
+
+00:33:23,460 --> 00:33:30,500
+VMs so the guests can change mitigation
+
+00:33:25,890 --> 00:33:32,910
+state between I mean at any point by
+
+00:33:30,500 --> 00:33:36,720
+calling in to the hypervisor with the
+
+00:33:32,910 --> 00:33:40,560
+same workaround to call and KVM for us
+
+00:33:36,720 --> 00:33:42,630
+that we are free and has to keep track
+
+00:33:40,560 --> 00:33:45,690
+of that context tracking of that context
+
+00:33:42,630 --> 00:33:47,730
+which means that context becomes part of
+
+00:33:45,690 --> 00:33:55,500
+the mitigation state of the migration
+
+00:33:47,730 --> 00:33:57,270
+state so moving on with by and for
+
+00:33:55,500 --> 00:34:04,110
+because this thing is not going away
+
+00:33:57,270 --> 00:34:05,820
+it's not not easy to mitigate but what
+
+00:34:04,110 --> 00:34:08,640
+we've done so far is that we've
+
+00:34:05,820 --> 00:34:14,400
+architected a way to actually enable
+
+00:34:08,640 --> 00:34:15,930
+disable that feature without taking the
+
+00:34:14,400 --> 00:34:19,410
+trap so now we have a piece state bit
+
+00:34:15,930 --> 00:34:22,200
+that we can set or clear and we default
+
+00:34:19,410 --> 00:34:23,880
+to secure so if you by default you boot
+
+00:34:22,200 --> 00:34:25,470
+without did set to zero as in any
+
+00:34:23,880 --> 00:34:27,420
+revision of the architecture and that
+
+00:34:25,470 --> 00:34:29,280
+feature is disabled it now requires a
+
+00:34:27,420 --> 00:34:33,030
+buy-in from any exception level to
+
+00:34:29,280 --> 00:34:34,680
+enable it so we save quite a lot of
+
+00:34:33,030 --> 00:34:37,080
+performance by simply not trapping us
+
+00:34:34,680 --> 00:34:42,800
+that it's pretty good and we've just
+
+00:34:37,080 --> 00:34:46,740
+merged the patches for that into 420 so
+
+00:34:42,800 --> 00:34:49,140
+as a conclusion we've changed a lot of
+
+00:34:46,740 --> 00:34:52,040
+things in the way the kernel works and
+
+00:34:49,140 --> 00:34:55,530
+KVM works for arm to cope with these
+
+00:34:52,040 --> 00:34:58,500
+specter mitigations Joe and with
+
+00:34:55,530 --> 00:35:00,510
+to introduce a neighbor of abstraction
+
+00:34:58,500 --> 00:35:03,300
+effectively we've moved part of the
+
+00:35:00,510 --> 00:35:04,500
+architecture into the firmware because
+
+00:35:03,300 --> 00:35:08,220
+that's the only place where we could
+
+00:35:04,500 --> 00:35:13,260
+safely mitigate it without ended up with
+
+00:35:08,220 --> 00:35:14,880
+a massive complexity problem has taken
+
+00:35:13,260 --> 00:35:16,640
+month of really really hard
+
+00:35:14,880 --> 00:35:20,340
+collaboration between architecture
+
+00:35:16,640 --> 00:35:24,560
+implementations firmware and the kernel
+
+00:35:20,340 --> 00:35:27,510
+group at home and and we've managed to
+
+00:35:24,560 --> 00:35:31,560
+introduce mechanisms in the architecture
+
+00:35:27,510 --> 00:35:35,420
+to to make sure it's a bit more
+
+00:35:31,560 --> 00:35:39,480
+manageable in the future but still it's
+
+00:35:35,420 --> 00:35:41,100
+it's been heavy and all that thank you
+
+00:35:39,480 --> 00:35:45,320
+I need to our questions
+
+00:35:41,100 --> 00:35:51,099
+[Applause]
+
+00:35:45,320 --> 00:35:51,099
+
+YouTube URL: https://www.youtube.com/watch?v=Mc_kwXJz-cQ
+
+

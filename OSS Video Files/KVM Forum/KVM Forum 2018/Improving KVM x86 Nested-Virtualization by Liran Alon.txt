@@ -1,0 +1,2019 @@
+Title: Improving KVM x86 Nested-Virtualization by Liran Alon
+Publication date: 2018-11-14
+Playlist: KVM Forum 2018
+Description: 
+	In this presentation, we will share our insights on current state and issues of KVM nVMX support in various mechanisms.
+We will deep dive into a nVMX mechanism which had many issues: nVMX event-injection. We will cover how it works, examine an interesting issue we have encountered, analyze it's root-cause and explain the fix we have upstream. Then, we will cover recent work done on other nVMX mechanisms in high-level and highlight pending nVMX issues which are still not resolved and suggest possible directions for the future of nVMX.
+
+---
+
+Liran Alon
+Virtualization Architect
+Oracle
+
+Liran Alon is the Virtualization Architect of OCI Israel (Oracle Cloud Infrastructure).
+
+He is involved and lead projects in multiple areas of the company's public cloud offering such as Compute, Networking and Virtualization.
+In addition, Liran is a very active KVM contributor (mostly, but not limited to, nVMX).
+
+He has been involved in the past few years in advancing state-of-the-art of KVM nested-virtualization and the adjustment of QEMU/SeaBIOS/OVMF to support VMs from other hypervisors. In addition he worked on, and lead, the development of Oracle Ravello's propriety binary-translation hypervisor, which is optimized to run as a nested-hypervisor (on top of the public cloud) and able to expose AMD SVM with NPT (on CPU with no HW virt-extensions), and many more virtualization challenges.
+
+Previous to his work at Oracle, Liran has worked for over 6 years as Security Researcher & Developer for Israel PMO & IDF. There he has gained vast experience on OS Internals (Windows & Linux), kernel development, x86 architecture,
+reverse-engineering, vulnerabilities, exploits, exploit mitigations and security-products internals.
+
+Liran has a B.Sc. in Computer Science From Tel-Aviv University. In addition, he regularly lectures on various OS Internals courses.
+Captions: 
+	00:00:01,040 --> 00:00:08,849
+[Music]
+
+00:00:05,450 --> 00:00:10,490
+so hi my name is Liran allen and today
+
+00:00:08,849 --> 00:00:13,969
+I'm going to present to you about
+
+00:00:10,490 --> 00:00:18,330
+improving KVM x86 nested virtualization
+
+00:00:13,969 --> 00:00:21,090
+so Who am I I'm an architect on OCI on
+
+00:00:18,330 --> 00:00:24,869
+the Oracle public cloud infrastructure
+
+00:00:21,090 --> 00:00:27,240
+there is such a thing and on the past
+
+00:00:24,869 --> 00:00:29,429
+four years I walk on virtualization Sdn
+
+00:00:27,240 --> 00:00:31,800
+and cloud computing but most of my
+
+00:00:29,429 --> 00:00:34,260
+experience is actually in the security
+
+00:00:31,800 --> 00:00:37,440
+area as a research and developer and I'm
+
+00:00:34,260 --> 00:00:39,840
+active KVM nvme contributor and also a
+
+00:00:37,440 --> 00:00:41,850
+very active Twitter user so you can feel
+
+00:00:39,840 --> 00:00:45,239
+free to follow that message me at any
+
+00:00:41,850 --> 00:00:47,610
+time so what I'm going to talk about so
+
+00:00:45,239 --> 00:00:50,309
+even though the title says x86 I'm only
+
+00:00:47,610 --> 00:00:51,660
+going to talk about Intel CPUs and it's
+
+00:00:50,309 --> 00:00:53,309
+really hard to talk about all the
+
+00:00:51,660 --> 00:00:55,350
+improvements that we have made to nvm
+
+00:00:53,309 --> 00:00:57,480
+mix during the past year so what I
+
+00:00:55,350 --> 00:01:00,539
+decided to do is to deep dive into one
+
+00:00:57,480 --> 00:01:02,489
+specific mechanism that I think had the
+
+00:01:00,539 --> 00:01:04,710
+most issue statistically both in this
+
+00:01:02,489 --> 00:01:07,170
+year and in the previous year which is
+
+00:01:04,710 --> 00:01:09,119
+event injection and I also this
+
+00:01:07,170 --> 00:01:12,150
+mechanism was built over time by fixing
+
+00:01:09,119 --> 00:01:13,950
+edge cases and bugs and there is no
+
+00:01:12,150 --> 00:01:15,119
+other public documentation besides the
+
+00:01:13,950 --> 00:01:16,979
+code so I think this is a good
+
+00:01:15,119 --> 00:01:19,140
+opportunity to do that and I believe
+
+00:01:16,979 --> 00:01:20,790
+that some of the lessons that we have
+
+00:01:19,140 --> 00:01:23,460
+learned during building this mechanism
+
+00:01:20,790 --> 00:01:25,380
+is also relevant to other architectures
+
+00:01:23,460 --> 00:01:28,380
+that just now add nested support like
+
+00:01:25,380 --> 00:01:30,810
+power 9 and so after I will do if dive
+
+00:01:28,380 --> 00:01:32,490
+into this mechanism what I will do is I
+
+00:01:30,810 --> 00:01:34,590
+will present only in very high-level
+
+00:01:32,490 --> 00:01:36,659
+they passed your walk that done on the
+
+00:01:34,590 --> 00:01:38,909
+end via mix and I will highlight some
+
+00:01:36,659 --> 00:01:40,590
+pending open issues and to finish I
+
+00:01:38,909 --> 00:01:43,470
+would suggest time of my own personal
+
+00:01:40,590 --> 00:01:46,619
+ideas on what should maybe do the future
+
+00:01:43,470 --> 00:01:48,329
+direction of env a mix so I will start
+
+00:01:46,619 --> 00:01:50,220
+with a very very quick introduction to
+
+00:01:48,329 --> 00:01:53,340
+how and vmx walks for those not familiar
+
+00:01:50,220 --> 00:01:55,860
+with so here we see a layer 0 hypervisor
+
+00:01:53,340 --> 00:01:58,140
+that runs under one guest and it does so
+
+00:01:55,860 --> 00:02:00,750
+by creating a VM CS that I was named BMC
+
+00:01:58,140 --> 00:02:02,820
+a01 to signify that this is the VM CS
+
+00:02:00,750 --> 00:02:04,740
+used by their 0 to run the layer 1 guest
+
+00:02:02,820 --> 00:02:07,170
+now because we're talking about the
+
+00:02:04,740 --> 00:02:08,759
+nested case there one also creates a VM
+
+00:02:07,170 --> 00:02:12,180
+CS just we will name by the same
+
+00:02:08,759 --> 00:02:13,770
+convention VM CS 1 2 but when layer 1
+
+00:02:12,180 --> 00:02:16,080
+actually tries to you
+
+00:02:13,770 --> 00:02:17,790
+- guess this was actually trap -
+
+00:02:16,080 --> 00:02:20,490
+delivery of a hypervisor which will need
+
+00:02:17,790 --> 00:02:22,650
+to immolate the correct behavior and the
+
+00:02:20,490 --> 00:02:24,420
+what lr0 will do is basically need to
+
+00:02:22,650 --> 00:02:26,430
+run the lair to guess on the behalf of
+
+00:02:24,420 --> 00:02:28,410
+layer one and the way that it will do
+
+00:02:26,430 --> 00:02:31,230
+that is that it will create a third vm c
+
+00:02:28,410 --> 00:02:32,880
+s called vm c s 0 - and it will
+
+00:02:31,230 --> 00:02:35,250
+basically be the logical merge of the
+
+00:02:32,880 --> 00:02:38,430
+constraints written both in vm CA 0 1
+
+00:02:35,250 --> 00:02:40,650
+and VSS want to and after when there are
+
+00:02:38,430 --> 00:02:42,900
+0 is created this VM see s it will run
+
+00:02:40,650 --> 00:02:45,150
+directly the relative guesses bed on the
+
+00:02:42,900 --> 00:02:47,610
+behalf of layer 1 and at some point of
+
+00:02:45,150 --> 00:02:50,010
+time this layer 2 guest will trap to the
+
+00:02:47,610 --> 00:02:52,110
+alert server hypervisor again and now
+
+00:02:50,010 --> 00:02:54,510
+there are 2 option of what the layer of
+
+00:02:52,110 --> 00:02:56,460
+hypervisor can do the first option is
+
+00:02:54,510 --> 00:02:58,290
+that this exit that just now happened
+
+00:02:56,460 --> 00:03:00,990
+from the layer 2 guest needs to actually
+
+00:02:58,290 --> 00:03:02,850
+be handled by the layer 1 hypervisor so
+
+00:03:00,990 --> 00:03:04,920
+in this case layer will need to immolate
+
+00:03:02,850 --> 00:03:07,320
+an exit from there - to layer 1 and
+
+00:03:04,920 --> 00:03:09,660
+resume the layer 1 guest but otherwise
+
+00:03:07,320 --> 00:03:11,700
+it will just behave as usual it will
+
+00:03:09,660 --> 00:03:12,360
+just handle the exit on the layer 0
+
+00:03:11,700 --> 00:03:14,370
+hypervisor
+
+00:03:12,360 --> 00:03:16,800
+and after it will handle the exit it
+
+00:03:14,370 --> 00:03:19,140
+will resume with the active vm CS which
+
+00:03:16,800 --> 00:03:21,330
+is VLC a 0 2 and therefore run there -
+
+00:03:19,140 --> 00:03:23,870
+again so this is basically the
+
+00:03:21,330 --> 00:03:26,790
+high-level flow of how an via mix works
+
+00:03:23,870 --> 00:03:28,770
+so after I understand that we have the
+
+00:03:26,790 --> 00:03:31,320
+basic background to talk about the NBA
+
+00:03:28,770 --> 00:03:32,670
+mix invent injection mechanism so when
+
+00:03:31,320 --> 00:03:34,140
+I'm talking about the event injection
+
+00:03:32,670 --> 00:03:36,540
+I'm talking about the mechanism that is
+
+00:03:34,140 --> 00:03:38,940
+responsible for injecting events and the
+
+00:03:36,540 --> 00:03:42,630
+events are interrupts exceptions and in
+
+00:03:38,940 --> 00:03:44,640
+maizena semis so in order to understand
+
+00:03:42,630 --> 00:03:46,170
+how this mechanism works for the nested
+
+00:03:44,640 --> 00:03:48,540
+case we first need to understand how it
+
+00:03:46,170 --> 00:03:52,140
+works for the no nested case so here is
+
+00:03:48,540 --> 00:03:53,970
+a very simple example of our 1 guess the
+
+00:03:52,140 --> 00:03:56,160
+does the read immerse our operation and
+
+00:03:53,970 --> 00:03:59,310
+this operation is being trapped to delay
+
+00:03:56,160 --> 00:04:01,290
+0 hypervisor now layer 0 sees that this
+
+00:03:59,310 --> 00:04:03,990
+freedom so specifically as attempting to
+
+00:04:01,290 --> 00:04:06,180
+read an unhandled MSR and therefore the
+
+00:04:03,990 --> 00:04:08,340
+hypervisor decided they should queue of
+
+00:04:06,180 --> 00:04:09,870
+general protection exception now the way
+
+00:04:08,340 --> 00:04:12,000
+that it will do that is that it will
+
+00:04:09,870 --> 00:04:14,250
+save a pending exception in a pair of
+
+00:04:12,000 --> 00:04:16,140
+virtual CPU software struct and after
+
+00:04:14,250 --> 00:04:18,359
+that it will request a special k vm
+
+00:04:16,140 --> 00:04:21,299
+request called kayvyun rec event now
+
+00:04:18,359 --> 00:04:24,300
+this is a request as usual is evaluated
+
+00:04:21,299 --> 00:04:26,160
+on the next entry to the guest and this
+
+00:04:24,300 --> 00:04:27,510
+kayvyun wreck event is responsible for
+
+00:04:26,160 --> 00:04:30,120
+deciding what's of the
+
+00:04:27,510 --> 00:04:31,650
+what we should we do with all the events
+
+00:04:30,120 --> 00:04:34,320
+that are queued on this pair of ultra
+
+00:04:31,650 --> 00:04:36,000
+CPU software strap and in this case it
+
+00:04:34,320 --> 00:04:38,160
+will suggest that we have a queued the
+
+00:04:36,000 --> 00:04:40,200
+pending exception and we just want to
+
+00:04:38,160 --> 00:04:42,270
+inject it and the way that it will do
+
+00:04:40,200 --> 00:04:44,580
+that is that it will take this queued
+
+00:04:42,270 --> 00:04:46,410
+exception write it to the active vm CS
+
+00:04:44,580 --> 00:04:47,850
+and then just resume the guest which
+
+00:04:46,410 --> 00:04:48,780
+will cause the CPU to inject the
+
+00:04:47,850 --> 00:04:51,780
+exception to the guest
+
+00:04:48,780 --> 00:04:54,540
+so this basically sums up how it works
+
+00:04:51,780 --> 00:04:56,070
+for the non nested case now when we are
+
+00:04:54,540 --> 00:04:57,930
+trying to talk about the nested case
+
+00:04:56,070 --> 00:05:01,290
+this gets only a little bit more
+
+00:04:57,930 --> 00:05:03,450
+complicated so now de leur to the rhythm
+
+00:05:01,290 --> 00:05:05,040
+separation is being done from the lower
+
+00:05:03,450 --> 00:05:07,260
+two guys and not from the lower one and
+
+00:05:05,040 --> 00:05:09,180
+that's also assumed that the rhythm is
+
+00:05:07,260 --> 00:05:10,800
+our trap is not does not need to be
+
+00:05:09,180 --> 00:05:13,110
+reflected to delay one guest
+
+00:05:10,800 --> 00:05:15,510
+so everything behaved the same layer 0
+
+00:05:13,110 --> 00:05:18,510
+now immolates this the rhythm Michelle
+
+00:05:15,510 --> 00:05:20,160
+it also decides to cue a GP but now when
+
+00:05:18,510 --> 00:05:22,950
+they work a peon relevant have the runs
+
+00:05:20,160 --> 00:05:25,290
+before resuming the road to guest it
+
+00:05:22,950 --> 00:05:27,270
+also adds another special check it
+
+00:05:25,290 --> 00:05:28,350
+checks if the virtual CPU is in gas mode
+
+00:05:27,270 --> 00:05:31,020
+which means that we are currently
+
+00:05:28,350 --> 00:05:33,540
+running there too and if we have any
+
+00:05:31,020 --> 00:05:35,580
+cute event that should cause an exit
+
+00:05:33,540 --> 00:05:37,500
+from the l2 to their one and in this
+
+00:05:35,580 --> 00:05:40,140
+case instead of just writing the
+
+00:05:37,500 --> 00:05:43,050
+exception into the active vm CS which is
+
+00:05:40,140 --> 00:05:45,990
+now BMC a 0 2 instead it will emulate an
+
+00:05:43,050 --> 00:05:48,780
+exit from relative to their one so this
+
+00:05:45,990 --> 00:05:51,300
+basically sums up the most simplest
+
+00:05:48,780 --> 00:05:53,520
+scenario for the nested event injection
+
+00:05:51,300 --> 00:05:55,170
+mechanism but now let's start to
+
+00:05:53,520 --> 00:05:57,840
+complicate things with more possible
+
+00:05:55,170 --> 00:06:00,360
+scenarios so the next thing that can
+
+00:05:57,840 --> 00:06:02,760
+happen on x86 is that when the CPU
+
+00:06:00,360 --> 00:06:04,850
+attempts to deliver an exception the
+
+00:06:02,760 --> 00:06:08,640
+exception delivery itself can fail and
+
+00:06:04,850 --> 00:06:10,530
+such an example is that when the CPU
+
+00:06:08,640 --> 00:06:12,000
+tries to deliver an exception it needs
+
+00:06:10,530 --> 00:06:13,860
+to write the exception frame to the
+
+00:06:12,000 --> 00:06:16,290
+stock but the stack of the gas can be
+
+00:06:13,860 --> 00:06:17,910
+unmapped on the impetus of the host so
+
+00:06:16,290 --> 00:06:20,730
+in this case the CPU cannot really
+
+00:06:17,910 --> 00:06:22,860
+deliver the exit the event and what it
+
+00:06:20,730 --> 00:06:25,890
+will do instead is it will exit on EPT
+
+00:06:22,860 --> 00:06:28,440
+violation but also it will record inside
+
+00:06:25,890 --> 00:06:30,630
+a special BMC ash field called IDT
+
+00:06:28,440 --> 00:06:32,400
+vectoring info the event that the CPU
+
+00:06:30,630 --> 00:06:34,650
+has attempted to deliver but could not
+
+00:06:32,400 --> 00:06:36,510
+because of the exit so the way that
+
+00:06:34,650 --> 00:06:39,090
+kayvyun handles this and again we are
+
+00:06:36,510 --> 00:06:40,190
+talking about the no nested case is that
+
+00:06:39,090 --> 00:06:41,690
+on every exit
+
+00:06:40,190 --> 00:06:43,130
+from the guests of the house KVM checks
+
+00:06:41,690 --> 00:06:45,590
+if this special BMC has filled this
+
+00:06:43,130 --> 00:06:48,080
+value and if it is it basically just
+
+00:06:45,590 --> 00:06:51,440
+takes the event that was recorded there
+
+00:06:48,080 --> 00:06:53,870
+by the CPU and cues it as an injective
+
+00:06:51,440 --> 00:06:56,210
+event in our software virtual CPUs of
+
+00:06:53,870 --> 00:06:58,370
+those Prada and then we request the KPM
+
+00:06:56,210 --> 00:07:00,290
+req event so what will happen is
+
+00:06:58,370 --> 00:07:01,640
+basically that when the CPU exit during
+
+00:07:00,290 --> 00:07:03,890
+the attempt to deliver the event
+
+00:07:01,640 --> 00:07:06,350
+kayvyun will leak you the event on the
+
+00:07:03,890 --> 00:07:08,300
+software stock then on the next entry it
+
+00:07:06,350 --> 00:07:10,490
+will handle the exit and then the next
+
+00:07:08,300 --> 00:07:13,340
+entry to the guest it with this KVM req
+
+00:07:10,490 --> 00:07:15,710
+event we see that we have a QD exception
+
+00:07:13,340 --> 00:07:17,900
+and then basically just reinjected to
+
+00:07:15,710 --> 00:07:20,690
+the guest so this is the way that it
+
+00:07:17,900 --> 00:07:22,730
+works for the NA nested case and now
+
+00:07:20,690 --> 00:07:25,850
+let's try to take also this scenario
+
+00:07:22,730 --> 00:07:27,980
+also to the nested case so now we are
+
+00:07:25,850 --> 00:07:30,200
+talking about a scenario that the CPU
+
+00:07:27,980 --> 00:07:33,350
+attempts to deliver an event directly to
+
+00:07:30,200 --> 00:07:34,670
+the layer 2 guest but again the CPU has
+
+00:07:33,350 --> 00:07:36,590
+failed to do so because it is
+
+00:07:34,670 --> 00:07:39,680
+encountered a condition the children
+
+00:07:36,590 --> 00:07:41,900
+result in an exit so now this diverges
+
+00:07:39,680 --> 00:07:44,810
+into two possible scenarios the first
+
+00:07:41,900 --> 00:07:46,880
+one is that the the one responsible to
+
+00:07:44,810 --> 00:07:48,530
+handle this exit is actually the layer
+
+00:07:46,880 --> 00:07:51,110
+one guest and not delivery of a
+
+00:07:48,530 --> 00:07:53,150
+hypervisor and this means that the exit
+
+00:07:51,110 --> 00:07:55,940
+should be reflected to layer one but it
+
+00:07:53,150 --> 00:07:57,680
+should not just be reflected as usual we
+
+00:07:55,940 --> 00:07:59,419
+should reflect it to it to layer one
+
+00:07:57,680 --> 00:08:01,640
+that he has got an exit during an
+
+00:07:59,419 --> 00:08:02,630
+attempt to deliver an event exactly like
+
+00:08:01,640 --> 00:08:04,669
+the previous scenario
+
+00:08:02,630 --> 00:08:07,220
+so this basically means that we also
+
+00:08:04,669 --> 00:08:09,560
+need to take the queued event that we
+
+00:08:07,220 --> 00:08:12,200
+have put on a software stock and put it
+
+00:08:09,560 --> 00:08:13,820
+on the VM cs1 to IDT Victorian form
+
+00:08:12,200 --> 00:08:15,650
+because this is going to be the field
+
+00:08:13,820 --> 00:08:17,480
+that player one will look at to
+
+00:08:15,650 --> 00:08:19,640
+understand if it got an event during
+
+00:08:17,480 --> 00:08:21,740
+attempt to delay an exit during the
+
+00:08:19,640 --> 00:08:24,230
+attempt to deliver an event now the
+
+00:08:21,740 --> 00:08:25,640
+other scenario is that the exit that
+
+00:08:24,230 --> 00:08:27,740
+occurred during the attempt to deliver
+
+00:08:25,640 --> 00:08:30,800
+the event to learn to I should actually
+
+00:08:27,740 --> 00:08:33,020
+be handled in the layer zero hypervisor
+
+00:08:30,800 --> 00:08:35,270
+so in this case the layer zero
+
+00:08:33,020 --> 00:08:38,479
+hypervisor needs to handle the exit but
+
+00:08:35,270 --> 00:08:40,700
+after that this event that we need to
+
+00:08:38,479 --> 00:08:43,190
+inject into delay to guest must not be a
+
+00:08:40,700 --> 00:08:45,650
+be able to be intercepted by their one
+
+00:08:43,190 --> 00:08:48,740
+and the reason for this is that once the
+
+00:08:45,650 --> 00:08:51,940
+acute event was written to the active vm
+
+00:08:48,740 --> 00:08:56,380
+CS there one should never be able
+
+00:08:51,940 --> 00:08:58,480
+- to see if that this event was not
+
+00:08:56,380 --> 00:08:59,980
+actually delivered because layer zero
+
+00:08:58,480 --> 00:09:01,420
+didn't prepare the environments right
+
+00:08:59,980 --> 00:09:03,430
+for the event to successfully be
+
+00:09:01,420 --> 00:09:05,050
+delivered from their one perspective it
+
+00:09:03,430 --> 00:09:07,270
+already had its chance to intercept the
+
+00:09:05,050 --> 00:09:09,420
+event when it was first killed and after
+
+00:09:07,270 --> 00:09:10,780
+that it's injected from his perspective
+
+00:09:09,420 --> 00:09:13,540
+now
+
+00:09:10,780 --> 00:09:15,970
+one may ask himself how exactly that in
+
+00:09:13,540 --> 00:09:18,700
+this case the KPM wreck event handler of
+
+00:09:15,970 --> 00:09:20,890
+layer zero actually knew that layer one
+
+00:09:18,700 --> 00:09:23,530
+must not intercept the event even though
+
+00:09:20,890 --> 00:09:26,320
+the virtual CPUs in gas mode and we do
+
+00:09:23,530 --> 00:09:29,230
+have a cued event that should cause an
+
+00:09:26,320 --> 00:09:31,570
+exit from layer 2 to their 1 so the
+
+00:09:29,230 --> 00:09:33,700
+answer for this is that we have a state
+
+00:09:31,570 --> 00:09:35,710
+attached to every queued event whether
+
+00:09:33,700 --> 00:09:37,840
+it is in a pending state or in an
+
+00:09:35,710 --> 00:09:39,970
+injected state so in the first example
+
+00:09:37,840 --> 00:09:42,760
+that I showed you with the rhythm cell
+
+00:09:39,970 --> 00:09:45,640
+the queue the event has entered with an
+
+00:09:42,760 --> 00:09:47,740
+impending state and but once the event
+
+00:09:45,640 --> 00:09:50,410
+was written at least once to the V MCS
+
+00:09:47,740 --> 00:09:51,970
+then from this point onwards the event
+
+00:09:50,410 --> 00:09:54,850
+is going to be with an injected state
+
+00:09:51,970 --> 00:09:56,890
+even if we hewed it after an exit during
+
+00:09:54,850 --> 00:09:59,140
+the attempt to deliver it like in the
+
+00:09:56,890 --> 00:10:01,030
+previous example so if I return back you
+
+00:09:59,140 --> 00:10:03,010
+see that here we also queue the event in
+
+00:10:01,030 --> 00:10:04,870
+an injected stay and this is very
+
+00:10:03,010 --> 00:10:06,430
+important for env a mixed code to have a
+
+00:10:04,870 --> 00:10:10,780
+clear separation between these states
+
+00:10:06,430 --> 00:10:12,670
+because otherwise basically the KVM req
+
+00:10:10,780 --> 00:10:15,010
+event tender cannot know if this event
+
+00:10:12,670 --> 00:10:17,290
+can be intercepted by the one or not and
+
+00:10:15,010 --> 00:10:19,060
+we had many issues of not separating
+
+00:10:17,290 --> 00:10:21,910
+this correctly for all the types of
+
+00:10:19,060 --> 00:10:24,910
+events like interrupts exception etc so
+
+00:10:21,910 --> 00:10:26,590
+this is an important point so what I'm
+
+00:10:24,910 --> 00:10:28,540
+going to do now is I'm going to analyze
+
+00:10:26,590 --> 00:10:31,060
+an interesting scenario that we had in
+
+00:10:28,540 --> 00:10:34,589
+production because we run in Oracle or
+
+00:10:31,060 --> 00:10:37,030
+Velo a lot of nested scenarios and I
+
+00:10:34,589 --> 00:10:39,190
+using this scenario I will be able to
+
+00:10:37,030 --> 00:10:41,710
+teach you about another important
+
+00:10:39,190 --> 00:10:43,390
+mechanism so we had a case that when
+
+00:10:41,710 --> 00:10:46,450
+there one hosts are basically running
+
+00:10:43,390 --> 00:10:50,650
+there to guess sometimes about 5 until
+
+00:10:46,450 --> 00:10:53,380
+10% of them is going to get stuck and
+
+00:10:50,650 --> 00:10:56,560
+what when we examine these hosts what we
+
+00:10:53,380 --> 00:10:58,630
+saw is that the all the layer 1 CPUs
+
+00:10:56,560 --> 00:11:01,370
+besides one we're basically attempted to
+
+00:10:58,630 --> 00:11:03,620
+grab the name you lock but one
+
+00:11:01,370 --> 00:11:05,779
+CPU is basically holding this MMU lot
+
+00:11:03,620 --> 00:11:07,910
+and it is waiting for something else and
+
+00:11:05,779 --> 00:11:10,520
+this something else is basically an IP I
+
+00:11:07,910 --> 00:11:13,040
+that he has sent to some target CPU but
+
+00:11:10,520 --> 00:11:15,020
+from some reason is never accepted so
+
+00:11:13,040 --> 00:11:18,740
+the next thing that we did is we
+
+00:11:15,020 --> 00:11:21,170
+basically reproduce this bug on a debug
+
+00:11:18,740 --> 00:11:22,160
+environment and we trace the what KVM at
+
+00:11:21,170 --> 00:11:24,589
+layer 0 CS
+
+00:11:22,160 --> 00:11:27,080
+so you don't need to understand all the
+
+00:11:24,589 --> 00:11:29,420
+bits I will just go what but who is the
+
+00:11:27,080 --> 00:11:31,430
+translation but the idea is that the
+
+00:11:29,420 --> 00:11:33,529
+first event that we saw is that we saw
+
+00:11:31,430 --> 00:11:36,920
+an exit from there - to learn 0 on the
+
+00:11:33,529 --> 00:11:38,690
+attempt to deliver and interrupt d2 so
+
+00:11:36,920 --> 00:11:41,150
+like we said before on this case what
+
+00:11:38,690 --> 00:11:44,029
+Kevin is going to do is to cue this D to
+
+00:11:41,150 --> 00:11:47,089
+interrupt is an injected state and also
+
+00:11:44,029 --> 00:11:49,670
+signify the kayvyun req event now before
+
+00:11:47,089 --> 00:11:51,529
+the KPM req event handler has run the
+
+00:11:49,670 --> 00:11:54,440
+next event that we see in the log is
+
+00:11:51,529 --> 00:11:57,320
+that also we got an IP i from another
+
+00:11:54,440 --> 00:11:59,150
+layer one cpu that resulted in a queuing
+
+00:11:57,320 --> 00:12:02,120
+and another pending interrupts waiting
+
+00:11:59,150 --> 00:12:03,800
+for layer 1 so now when the KPM rack
+
+00:12:02,120 --> 00:12:06,020
+event error is going to be run before
+
+00:12:03,800 --> 00:12:07,820
+resuming the layer to guess what will
+
+00:12:06,020 --> 00:12:10,190
+happen is that it will see have both
+
+00:12:07,820 --> 00:12:12,980
+events queued one is an injected state
+
+00:12:10,190 --> 00:12:14,779
+in one in an spending state now what we
+
+00:12:12,980 --> 00:12:16,640
+see next on the log is that the next
+
+00:12:14,779 --> 00:12:18,140
+thing that happens is that the KP are
+
+00:12:16,640 --> 00:12:20,300
+active and decided to take only the
+
+00:12:18,140 --> 00:12:22,670
+queued injected event and write it to
+
+00:12:20,300 --> 00:12:24,410
+the active VMC s which is VM set 0 2 and
+
+00:12:22,670 --> 00:12:25,910
+then resume there to guess which
+
+00:12:24,410 --> 00:12:28,250
+basically result in the rain injection
+
+00:12:25,910 --> 00:12:30,740
+of the interrupt and the next event that
+
+00:12:28,250 --> 00:12:33,320
+we say is an exit from layer to layer 0
+
+00:12:30,740 --> 00:12:35,450
+on an EPT valuation this time not during
+
+00:12:33,320 --> 00:12:37,820
+attempt to deliver an event and then we
+
+00:12:35,450 --> 00:12:39,800
+just resumed every one but something
+
+00:12:37,820 --> 00:12:41,420
+interesting we see here is that the KPM
+
+00:12:39,800 --> 00:12:43,850
+req event is not signaled at this point
+
+00:12:41,420 --> 00:12:46,790
+and therefore there one has never
+
+00:12:43,850 --> 00:12:48,410
+receive this pending IP I even though we
+
+00:12:46,790 --> 00:12:50,089
+have a pending interrupt in the local
+
+00:12:48,410 --> 00:12:53,029
+Opik because no one is looking on this
+
+00:12:50,089 --> 00:12:54,470
+queued interrupt so when we try to
+
+00:12:53,029 --> 00:12:57,110
+analyze and think about where exactly
+
+00:12:54,470 --> 00:12:58,730
+this happens we we understand first of
+
+00:12:57,110 --> 00:13:00,020
+all that the KPM wreck event is not
+
+00:12:58,730 --> 00:13:02,810
+signal at this point and therefore
+
+00:13:00,020 --> 00:13:05,209
+depending interrupt is not evaluated but
+
+00:13:02,810 --> 00:13:06,950
+we may ask yourself at some point of
+
+00:13:05,209 --> 00:13:09,320
+time we were at this scenario that we
+
+00:13:06,950 --> 00:13:10,880
+have these two cute events and what KVM
+
+00:13:09,320 --> 00:13:12,140
+decided to do is to take the queued
+
+00:13:10,880 --> 00:13:14,240
+injected event and
+
+00:13:12,140 --> 00:13:16,550
+ejected but maybe we could have taken
+
+00:13:14,240 --> 00:13:19,280
+another day decision maybe we could have
+
+00:13:16,550 --> 00:13:22,280
+a taken a decision to take this pending
+
+00:13:19,280 --> 00:13:24,410
+interrupt and evaluate it and decide
+
+00:13:22,280 --> 00:13:26,480
+because we have a pending interrupts to
+
+00:13:24,410 --> 00:13:28,850
+exit from layer to layer one on an
+
+00:13:26,480 --> 00:13:31,520
+external interrupt but if we will do
+
+00:13:28,850 --> 00:13:33,710
+such a thing we will need to also take
+
+00:13:31,520 --> 00:13:36,620
+this cute injected event and write it
+
+00:13:33,710 --> 00:13:39,260
+into V MCS one two and this will cause
+
+00:13:36,620 --> 00:13:41,030
+the layer one a guess to think that it
+
+00:13:39,260 --> 00:13:42,710
+got an exit on external interrupts
+
+00:13:41,030 --> 00:13:44,600
+during the attempt to deliver an
+
+00:13:42,710 --> 00:13:47,300
+interrupt and this is a scenario that
+
+00:13:44,600 --> 00:13:50,300
+can never happen in a real CPU because
+
+00:13:47,300 --> 00:13:52,880
+only very specific exit can interrupt
+
+00:13:50,300 --> 00:13:54,770
+the delivery of an event and external
+
+00:13:52,880 --> 00:13:56,840
+interrupt is not one of them so we
+
+00:13:54,770 --> 00:13:59,630
+cannot take this decision and kept in
+
+00:13:56,840 --> 00:14:02,150
+relevant detail the right decision but
+
+00:13:59,630 --> 00:14:04,220
+if we try to think a little bit more and
+
+00:14:02,150 --> 00:14:07,790
+what we really wanted we wanted that the
+
+00:14:04,220 --> 00:14:09,560
+event which is in the injected state to
+
+00:14:07,790 --> 00:14:11,840
+really be re-injected into the layer two
+
+00:14:09,560 --> 00:14:14,930
+guest but immediately after the CPU
+
+00:14:11,840 --> 00:14:16,880
+finishes this injection to exit back to
+
+00:14:14,930 --> 00:14:19,730
+layer zero to reevaluate what should be
+
+00:14:16,880 --> 00:14:21,800
+done with the layer one pending event so
+
+00:14:19,730 --> 00:14:24,050
+the way that this is implemented on how
+
+00:14:21,800 --> 00:14:25,970
+to fix this issue is basically leverage
+
+00:14:24,050 --> 00:14:28,160
+a mechanism called immediate exit and
+
+00:14:25,970 --> 00:14:29,930
+the idea is that sometimes we have a
+
+00:14:28,160 --> 00:14:32,330
+cute event the truth will result in an
+
+00:14:29,930 --> 00:14:35,060
+exit from there to to layer one but
+
+00:14:32,330 --> 00:14:36,770
+because of some reason we cannot
+
+00:14:35,060 --> 00:14:38,540
+actually exist right now from layer to
+
+00:14:36,770 --> 00:14:41,510
+layer one like in the case we have a
+
+00:14:38,540 --> 00:14:43,130
+cute injected event for there too so in
+
+00:14:41,510 --> 00:14:45,800
+this case we can request an immediate
+
+00:14:43,130 --> 00:14:47,450
+exit and the idea is that we before
+
+00:14:45,800 --> 00:14:50,360
+resuming the layer to guess with the
+
+00:14:47,450 --> 00:14:52,850
+injected interrupt what we can do we can
+
+00:14:50,360 --> 00:14:54,730
+set KVM wreck event and then also
+
+00:14:52,850 --> 00:14:58,130
+disable the interrupted the host and
+
+00:14:54,730 --> 00:15:00,560
+issue a self IP I and because interrupts
+
+00:14:58,130 --> 00:15:02,720
+are right now disabled this idea is not
+
+00:15:00,560 --> 00:15:05,360
+delivered and then we resumed alert to
+
+00:15:02,720 --> 00:15:07,550
+gas now when the CPU will actually
+
+00:15:05,360 --> 00:15:09,860
+resume the layer to gas because it has
+
+00:15:07,550 --> 00:15:11,870
+in its active V MCS an injected event
+
+00:15:09,860 --> 00:15:14,390
+this will be injected into the lair to
+
+00:15:11,870 --> 00:15:17,930
+gas and immediately after the CPU sees
+
+00:15:14,390 --> 00:15:20,120
+that the immediately after the CPU
+
+00:15:17,930 --> 00:15:22,160
+injected the event to delay to a guest
+
+00:15:20,120 --> 00:15:24,140
+it will see that it has a self ipi
+
+00:15:22,160 --> 00:15:26,060
+waiting for the host and therefore it
+
+00:15:24,140 --> 00:15:28,250
+will immediately exit back to the host
+
+00:15:26,060 --> 00:15:30,440
+and the host because it has a kayvyun
+
+00:15:28,250 --> 00:15:31,880
+relevant no signal it will also evaluate
+
+00:15:30,440 --> 00:15:34,700
+what should be done with the layer one
+
+00:15:31,880 --> 00:15:36,500
+pending event and therefore decide in
+
+00:15:34,700 --> 00:15:38,240
+this example to take the pending
+
+00:15:36,500 --> 00:15:42,320
+interrupt and exit from layer to layer
+
+00:15:38,240 --> 00:15:44,540
+one as it should so this was actually
+
+00:15:42,320 --> 00:15:46,730
+the fix the committee title I think
+
+00:15:44,540 --> 00:15:49,280
+specify this very well and we says that
+
+00:15:46,730 --> 00:15:51,440
+what we the fix was basically to require
+
+00:15:49,280 --> 00:15:53,390
+an immediate exit when an event is being
+
+00:15:51,440 --> 00:15:57,200
+ejected to layer two and we have a layer
+
+00:15:53,390 --> 00:15:59,750
+one event pending so this this basically
+
+00:15:57,200 --> 00:16:00,950
+sums up a high-level overview of how an
+
+00:15:59,750 --> 00:16:04,040
+via mix in vent injection mechanism
+
+00:16:00,950 --> 00:16:06,380
+works so what I will do now with the
+
+00:16:04,040 --> 00:16:08,690
+few minutes that I have left is
+
+00:16:06,380 --> 00:16:12,860
+basically go in a very very high level
+
+00:16:08,690 --> 00:16:15,650
+on how how the past you'd walk that
+
+00:16:12,860 --> 00:16:17,990
+happens on an via mix so I won't deep
+
+00:16:15,650 --> 00:16:20,090
+dive into everything but as I said a lot
+
+00:16:17,990 --> 00:16:22,220
+we had a lot a lot of fixes on the nvm
+
+00:16:20,090 --> 00:16:24,680
+excipient injection most of them was
+
+00:16:22,220 --> 00:16:26,240
+actually very similar to the what we did
+
+00:16:24,680 --> 00:16:28,310
+to the issue that you just saw is
+
+00:16:26,240 --> 00:16:29,840
+basically missing opportunities to
+
+00:16:28,310 --> 00:16:32,330
+reevaluate what should be done with
+
+00:16:29,840 --> 00:16:34,130
+layer 1 a pending event but we also as a
+
+00:16:32,330 --> 00:16:36,260
+community fix a lot of stuff like that
+
+00:16:34,130 --> 00:16:38,210
+supporting a semis in that are received
+
+00:16:36,260 --> 00:16:39,950
+in guest mode and also better handle the
+
+00:16:38,210 --> 00:16:42,800
+case that there one don't intercept
+
+00:16:39,950 --> 00:16:44,210
+external interrupt and one of the now
+
+00:16:42,800 --> 00:16:46,910
+it's written is that to do but this was
+
+00:16:44,210 --> 00:16:48,830
+recently fixed by Jim Matheson and one
+
+00:16:46,910 --> 00:16:51,470
+of the big open issues that we had is
+
+00:16:48,830 --> 00:16:54,860
+that basically the user space api's that
+
+00:16:51,470 --> 00:16:57,110
+are used to query the queue the virtual
+
+00:16:54,860 --> 00:16:59,660
+CPU events and to set the queued virtual
+
+00:16:57,110 --> 00:17:01,880
+CPU events a well didn't knew how to
+
+00:16:59,660 --> 00:17:03,620
+separate between whether an event is in
+
+00:17:01,880 --> 00:17:05,570
+the pending state or injected stay and
+
+00:17:03,620 --> 00:17:09,050
+this basically means that these api's
+
+00:17:05,570 --> 00:17:11,240
+were broken for an via mix workloads and
+
+00:17:09,050 --> 00:17:14,600
+it breaks things for example I can be a
+
+00:17:11,240 --> 00:17:16,250
+mix live migration and moving on to the
+
+00:17:14,600 --> 00:17:19,280
+next mechanism we also had a bunch of
+
+00:17:16,250 --> 00:17:21,110
+fixes in nested epoch V and mostly race
+
+00:17:19,280 --> 00:17:23,810
+conditions and also a bug that will lead
+
+00:17:21,110 --> 00:17:25,490
+to avoids it macro corruption so this is
+
+00:17:23,810 --> 00:17:28,130
+very technical but the nice thing about
+
+00:17:25,490 --> 00:17:28,430
+it is that after we fix them will not be
+
+00:17:28,130 --> 00:17:30,290
+a
+
+00:17:28,430 --> 00:17:32,420
+were now able to run a 6i as a
+
+00:17:30,290 --> 00:17:34,790
+hypervisor layer 1 hypervisor on top of
+
+00:17:32,420 --> 00:17:37,100
+k vm with a pic v enabled and this
+
+00:17:34,790 --> 00:17:39,410
+wasn't possible before you will
+
+00:17:37,100 --> 00:17:42,830
+encounter a bunch of Weald states like
+
+00:17:39,410 --> 00:17:44,390
+es6 i losing network connectivity and i
+
+00:17:42,830 --> 00:17:47,870
+don't have time to talk about the other
+
+00:17:44,390 --> 00:17:49,910
+to do and other things that also
+
+00:17:47,870 --> 00:17:51,230
+interesting that we made we made a lot
+
+00:17:49,910 --> 00:17:53,660
+of improvements to nested mmm you
+
+00:17:51,230 --> 00:17:56,600
+basically nested v PID was completely
+
+00:17:53,660 --> 00:17:59,600
+broken when validated sometimes the
+
+00:17:56,600 --> 00:18:02,890
+wrong TLB mappings and we also optimize
+
+00:17:59,600 --> 00:18:05,390
+by removing a lot of TLB flushes and
+
+00:18:02,890 --> 00:18:07,820
+because of Jim Madison last year
+
+00:18:05,390 --> 00:18:09,860
+KVM forum presentation that was also a
+
+00:18:07,820 --> 00:18:12,890
+bunch of optimization to the layer 1 to
+
+00:18:09,860 --> 00:18:14,840
+load to vm entry path and we had a bunch
+
+00:18:12,890 --> 00:18:17,510
+of issues by of exposing the wrong via
+
+00:18:14,840 --> 00:18:19,100
+mix features to the guest this is mostly
+
+00:18:17,510 --> 00:18:20,930
+because it's very confusing because it's
+
+00:18:19,100 --> 00:18:23,570
+affected by multiple factors as you see
+
+00:18:20,930 --> 00:18:26,090
+here so failing to consider one of them
+
+00:18:23,570 --> 00:18:29,420
+caused you to add 11 hypervisor to
+
+00:18:26,090 --> 00:18:31,880
+basically fail and and this was all
+
+00:18:29,420 --> 00:18:33,740
+improvement to existing mechanism also
+
+00:18:31,880 --> 00:18:35,690
+to new mechanism that we have been
+
+00:18:33,740 --> 00:18:38,210
+implementing the past year one of them
+
+00:18:35,690 --> 00:18:39,590
+was pushed very hard by Google which is
+
+00:18:38,210 --> 00:18:41,990
+basically and via mixed migration
+
+00:18:39,590 --> 00:18:43,970
+support the idea was that if we will be
+
+00:18:41,990 --> 00:18:46,850
+able to set the VM mix features exposed
+
+00:18:43,970 --> 00:18:49,370
+to the guest from user space and also be
+
+00:18:46,850 --> 00:18:51,860
+able to query and set the internal state
+
+00:18:49,370 --> 00:18:53,950
+used by kayvyun to run there to guest we
+
+00:18:51,860 --> 00:18:57,520
+will be able to emigrate and via mix
+
+00:18:53,950 --> 00:18:59,660
+woke up the turn nested hypervisors
+
+00:18:57,520 --> 00:19:01,910
+unfortunately we still don't have the
+
+00:18:59,660 --> 00:19:03,980
+patches for using these capabilities in
+
+00:19:01,910 --> 00:19:06,470
+Kim you because Google don't use it so I
+
+00:19:03,980 --> 00:19:10,310
+have submitted the patch series that to
+
+00:19:06,470 --> 00:19:13,760
+do that in the last a new mechanism that
+
+00:19:10,310 --> 00:19:16,030
+I want to talk about is that we also G
+
+00:19:13,760 --> 00:19:17,870
+Mattson as from Google implemented
+
+00:19:16,030 --> 00:19:20,480
+mechanism called memes are shattering
+
+00:19:17,870 --> 00:19:22,460
+future virtualization which I have then
+
+00:19:20,480 --> 00:19:24,350
+further modified therefore upstream and
+
+00:19:22,460 --> 00:19:26,150
+the idea is to support our really
+
+00:19:24,350 --> 00:19:28,520
+special use case of envy a mix which is
+
+00:19:26,150 --> 00:19:30,890
+three purple totalization well the layer
+
+00:19:28,520 --> 00:19:33,620
+to guest is also a hypervisor that runs
+
+00:19:30,890 --> 00:19:36,860
+their free guest and the reason that
+
+00:19:33,620 --> 00:19:38,510
+this is complex is because if if ler one
+
+00:19:36,860 --> 00:19:40,950
+don't have a VM seer shadowing feature
+
+00:19:38,510 --> 00:19:43,350
+then it means that all the layer two
+
+00:19:40,950 --> 00:19:45,540
+reason VM rights are going to trap to
+
+00:19:43,350 --> 00:19:47,160
+the layer 0 hypervisor and also these
+
+00:19:45,540 --> 00:19:50,190
+exits needs to be reflected to the layer
+
+00:19:47,160 --> 00:19:52,590
+1 hypervisor so basically the idea is to
+
+00:19:50,190 --> 00:19:55,380
+expose a VM stare shadowing to layer 1
+
+00:19:52,590 --> 00:19:58,160
+and therefore there to be a VM reason
+
+00:19:55,380 --> 00:20:00,740
+boomers don't need to even exit but
+
+00:19:58,160 --> 00:20:04,380
+unfortunately even this is already merge
+
+00:20:00,740 --> 00:20:06,720
+mostly but this it still doesn't provide
+
+00:20:04,380 --> 00:20:09,660
+for our production wall so that actually
+
+00:20:06,720 --> 00:20:11,010
+needs it good enough performance and I
+
+00:20:09,660 --> 00:20:13,080
+don't have time to deep dive into the
+
+00:20:11,010 --> 00:20:15,210
+details but I have putted the details in
+
+00:20:13,080 --> 00:20:16,890
+the appendix slides and there's a still
+
+00:20:15,210 --> 00:20:18,810
+a bunch of open a optimization
+
+00:20:16,890 --> 00:20:20,760
+opportunities that we can't be done to
+
+00:20:18,810 --> 00:20:22,860
+the series that I have submitted but I
+
+00:20:20,760 --> 00:20:26,490
+don't have time to deep dive into that
+
+00:20:22,860 --> 00:20:28,680
+as well and so the other thing that I
+
+00:20:26,490 --> 00:20:31,080
+wanted to say is that all these recent
+
+00:20:28,680 --> 00:20:33,060
+improvements have made I've gone to a
+
+00:20:31,080 --> 00:20:36,150
+real big milestone from my perspective
+
+00:20:33,060 --> 00:20:38,250
+is that now Apollo has created a commit
+
+00:20:36,150 --> 00:20:41,780
+that basically our neighbors and NASA
+
+00:20:38,250 --> 00:20:45,450
+virtualization on nvm mix by default
+
+00:20:41,780 --> 00:20:49,140
+from a sense kernel 4.20 and which is
+
+00:20:45,450 --> 00:20:51,210
+really nice a very big milestone and and
+
+00:20:49,140 --> 00:20:52,890
+I also promise to tell you about some
+
+00:20:51,210 --> 00:20:55,800
+personal opinions about the future
+
+00:20:52,890 --> 00:20:58,140
+direction of nvm mix so I think that the
+
+00:20:55,800 --> 00:21:00,330
+semantics of env mix was horrible like
+
+00:20:58,140 --> 00:21:03,230
+two years ago but now it's really stable
+
+00:21:00,330 --> 00:21:05,610
+stabilized very well and I think that
+
+00:21:03,230 --> 00:21:07,680
+now it's the time to improve the
+
+00:21:05,610 --> 00:21:09,180
+performance of nested workloads and I
+
+00:21:07,680 --> 00:21:12,540
+think that Microsoft have proven that
+
+00:21:09,180 --> 00:21:14,970
+the PV interface for NS today is it's
+
+00:21:12,540 --> 00:21:16,950
+getting really good performance and and
+
+00:21:14,970 --> 00:21:20,220
+the next logical step is to say ok let's
+
+00:21:16,950 --> 00:21:22,260
+have a similar PV interface also for kvn
+
+00:21:20,220 --> 00:21:24,360
+and the reason that I don't say just
+
+00:21:22,260 --> 00:21:26,370
+let's use the EVM CS all the time is
+
+00:21:24,360 --> 00:21:28,530
+because they wanted are familiar with
+
+00:21:26,370 --> 00:21:31,440
+the EVM says Dita's knows that this is
+
+00:21:28,530 --> 00:21:33,870
+very tightly coupled to the PV interface
+
+00:21:31,440 --> 00:21:35,610
+of hyper-v and we cannot really what we
+
+00:21:33,870 --> 00:21:38,820
+don't really want to just expose all the
+
+00:21:35,610 --> 00:21:42,030
+time hyper-v PV interface but this also
+
+00:21:38,820 --> 00:21:43,470
+leads me to the to the thinking that if
+
+00:21:42,030 --> 00:21:46,290
+we will go with the approach of
+
+00:21:43,470 --> 00:21:48,480
+implementing a PV interface for KVM
+
+00:21:46,290 --> 00:21:50,250
+Furness that will eventually reach us in
+
+00:21:48,480 --> 00:21:52,530
+a scenario that every hypervisor
+
+00:21:50,250 --> 00:21:54,220
+implements its own PV interface of
+
+00:21:52,530 --> 00:21:56,530
+nested and
+
+00:21:54,220 --> 00:21:58,000
+and because we can mix and match all
+
+00:21:56,530 --> 00:22:00,820
+these different hypervisors between
+
+00:21:58,000 --> 00:22:02,590
+their zero and their one basically we
+
+00:22:00,820 --> 00:22:05,230
+will have we will lit with a very very
+
+00:22:02,590 --> 00:22:09,190
+complex code which I think it's a
+
+00:22:05,230 --> 00:22:11,920
+horrible future to imagine so maybe we
+
+00:22:09,190 --> 00:22:14,710
+should draft a PV interface for nested
+
+00:22:11,920 --> 00:22:17,080
+which will be quote hypervisor which I
+
+00:22:14,710 --> 00:22:19,270
+think can be very similar to EVM CS we
+
+00:22:17,080 --> 00:22:21,190
+just need to modify it a bit so it will
+
+00:22:19,270 --> 00:22:23,830
+be more generic like the other should
+
+00:22:21,190 --> 00:22:27,310
+not be specified in a assists page of
+
+00:22:23,830 --> 00:22:30,370
+hyper-v for example and so to conclude
+
+00:22:27,310 --> 00:22:33,760
+basically in via mix of going with a lot
+
+00:22:30,370 --> 00:22:35,470
+of enhancements over the past year I
+
+00:22:33,760 --> 00:22:38,080
+I couldn't talk about everything about
+
+00:22:35,470 --> 00:22:39,550
+only a half an hour I'm sorry but I have
+
+00:22:38,080 --> 00:22:42,100
+put because I want to encourage other
+
+00:22:39,550 --> 00:22:44,230
+people to join the effort of improving
+
+00:22:42,100 --> 00:22:46,510
+and remix boot are really really really
+
+00:22:44,230 --> 00:22:49,150
+big stay present like five lectures
+
+00:22:46,510 --> 00:22:50,740
+presentation in the appendix that you
+
+00:22:49,150 --> 00:22:54,490
+can all read to learn about this
+
+00:22:50,740 --> 00:22:56,680
+mechanism much more and one more thing I
+
+00:22:54,490 --> 00:22:58,480
+wanted to say before finishing is that I
+
+00:22:56,680 --> 00:23:01,410
+believe that the KVM unit test we have
+
+00:22:58,480 --> 00:23:04,030
+today for the vm mix as a very efficient
+
+00:23:01,410 --> 00:23:06,340
+sufficient because they mostly test the
+
+00:23:04,030 --> 00:23:08,590
+edge cases and regression test and we
+
+00:23:06,340 --> 00:23:11,320
+don't have even basic functionalities
+
+00:23:08,590 --> 00:23:13,570
+for a test for all the vm x features for
+
+00:23:11,320 --> 00:23:15,610
+example we don't have even a single unit
+
+00:23:13,570 --> 00:23:17,830
+as for virtual interrupt delivery we
+
+00:23:15,610 --> 00:23:19,900
+don't have a single unit test for
+
+00:23:17,830 --> 00:23:21,880
+posting interrupts and cetera and i
+
+00:23:19,900 --> 00:23:24,880
+think someone needs to basically go over
+
+00:23:21,880 --> 00:23:29,110
+the entire vm expect and just implement
+
+00:23:24,880 --> 00:23:31,420
+a basic functionalities test for for
+
+00:23:29,110 --> 00:23:33,370
+which vm x feature and like i said we
+
+00:23:31,420 --> 00:23:35,880
+have a couple of big challenges ahead of
+
+00:23:33,370 --> 00:23:38,410
+improving triple virtualization a
+
+00:23:35,880 --> 00:23:40,740
+performance and maybe drafting across
+
+00:23:38,410 --> 00:23:44,380
+hypervisor peepin to faithfulness turn
+
+00:23:40,740 --> 00:23:46,870
+so that's all i have to say probably no
+
+00:23:44,380 --> 00:23:51,030
+time for questions i assume there are
+
+00:23:46,870 --> 00:23:51,030
+wow that's amazing ok so
+
+00:23:59,000 --> 00:24:04,350
+what did you mean by triple
+
+00:24:00,950 --> 00:24:06,270
+virtualization so basically the I
+
+00:24:04,350 --> 00:24:09,270
+because I have a lot of a pending slides
+
+00:24:06,270 --> 00:24:11,070
+I can just show you and by the idea is
+
+00:24:09,270 --> 00:24:13,440
+that in Oracle or Villa we have a
+
+00:24:11,070 --> 00:24:15,960
+special scenario that we're on a nested
+
+00:24:13,440 --> 00:24:18,450
+workloads on top of a Google public
+
+00:24:15,960 --> 00:24:20,309
+cloud instance so you can enrich a
+
+00:24:18,450 --> 00:24:22,260
+scenario that learns you know is the
+
+00:24:20,309 --> 00:24:24,000
+public health hypervisor layer one is
+
+00:24:22,260 --> 00:24:26,700
+another hypervisor which is proprietary
+
+00:24:24,000 --> 00:24:29,850
+to us and then we are on a guest that is
+
+00:24:26,700 --> 00:24:32,549
+also a hypervisor like e6i that runs VMs
+
+00:24:29,850 --> 00:24:35,309
+so this is what I define as triple
+
+00:24:32,549 --> 00:24:36,990
+virtualization and in this case delay to
+
+00:24:35,309 --> 00:24:38,760
+what is a unique here is that the layer
+
+00:24:36,990 --> 00:24:40,620
+to guest is also a hypervisor
+
+00:24:38,760 --> 00:24:42,450
+and therefore it's going to execute
+
+00:24:40,620 --> 00:24:45,559
+things like VM rates being rights being
+
+00:24:42,450 --> 00:24:45,559
+pointer load and things like that
+
+00:24:50,600 --> 00:24:56,250
+anything else well I'll just ask you so
+
+00:24:55,350 --> 00:24:58,740
+do you
+
+00:24:56,250 --> 00:25:01,440
+what you're looking at for the proposed
+
+00:24:58,740 --> 00:25:07,470
+PV interface would that help the
+
+00:25:01,440 --> 00:25:09,870
+scenario what an l-3 would an l2 VM read
+
+00:25:07,470 --> 00:25:11,820
+VM write be able to use that new pv
+
+00:25:09,870 --> 00:25:13,980
+interface instead to speed that up so
+
+00:25:11,820 --> 00:25:16,140
+yes if we will have a good people
+
+00:25:13,980 --> 00:25:18,059
+interface for nested similar to evey MCS
+
+00:25:16,140 --> 00:25:20,070
+it will help the performance of this
+
+00:25:18,059 --> 00:25:21,870
+triple-wall code actually one of the
+
+00:25:20,070 --> 00:25:23,490
+things that I tried to do is to take the
+
+00:25:21,870 --> 00:25:27,539
+walk that was presented in the previous
+
+00:25:23,490 --> 00:25:30,690
+lecture of EVM CS and put KVM as both
+
+00:25:27,539 --> 00:25:32,549
+being able to expose evm says and KVM
+
+00:25:30,690 --> 00:25:34,830
+utilizing DVM CS on top of each other
+
+00:25:32,549 --> 00:25:37,919
+and this actually led me to find a
+
+00:25:34,830 --> 00:25:41,130
+couple of bugs and dot pack series but
+
+00:25:37,919 --> 00:25:43,080
+it does improve performance a lot so I
+
+00:25:41,130 --> 00:25:45,600
+agree that the drafting a previous
+
+00:25:43,080 --> 00:25:47,429
+nested interface can maybe eliminate the
+
+00:25:45,600 --> 00:25:50,340
+problems with this triple virtualization
+
+00:25:47,429 --> 00:25:54,720
+but there are a couple of more over
+
+00:25:50,340 --> 00:25:56,070
+hands so what you consider the triple
+
+00:25:54,720 --> 00:25:57,750
+virtualization scenario at least
+
+00:25:56,070 --> 00:26:00,270
+functionally stable at this stage
+
+00:25:57,750 --> 00:26:01,950
+already just an optimal or is also some
+
+00:26:00,270 --> 00:26:06,830
+corner cases remaining so it is
+
+00:26:01,950 --> 00:26:06,830
+functional it's not optimal that's good
+
+00:26:18,779 --> 00:26:21,779
+okay
+
+00:26:22,840 --> 00:26:31,019
+[Applause]
+
+00:26:25,240 --> 00:26:31,019
+
+YouTube URL: https://www.youtube.com/watch?v=Pc7F-n5278w
+
+

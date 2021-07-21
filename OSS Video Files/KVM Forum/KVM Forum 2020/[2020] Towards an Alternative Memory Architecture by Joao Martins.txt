@@ -1,0 +1,2268 @@
+Title: [2020] Towards an Alternative Memory Architecture by Joao Martins
+Publication date: 2020-12-09
+Playlist: KVM Forum 2020
+Description: 
+	We waste a lot of memory managing guest memory (ironic eh?). And in today's cloud ecosystem PCI passthrough is important and an increasing commodity. This gives us an opportunity to make a mean and lean hypervisor which can shed some of its layers. This talk discusses memory efficiency, particularly focusing on one of its oldest overheads: per page metadata. Particularly on what it means to strip that away, what it entails for security and performance, and how the DAX subsystem can be improved to fill in the gap, drawing KVM closer to that of a partitioned hypervisor.
+
+---
+
+João Martins
+Oracle, Snr Principal Software Engineer
+
+João is a Snr Principal Software Engineer working in the Oracle Linux Virtualization group. His work includes both Xen and more recently KVM, usually digging in networking performance and the hypervisor. Prior to Oracle, he did research on specialized OSes in the context of network middleboxes. Previous speaking experience includes XenSummit, FOSDEM and various research conferences.
+Captions: 
+	00:00:05,759 --> 00:00:09,840
+hello everyone
+
+00:00:07,359 --> 00:00:11,840
+my name is martinez um and i'm here to
+
+00:00:09,840 --> 00:00:13,440
+talk about memory efficiency and ways we
+
+00:00:11,840 --> 00:00:15,920
+could fix it
+
+00:00:13,440 --> 00:00:16,640
+and i'll start with the short motivation
+
+00:00:15,920 --> 00:00:20,080
+with
+
+00:00:16,640 --> 00:00:23,199
+what got us here linux keeps
+
+00:00:20,080 --> 00:00:26,400
+the a map of all physical
+
+00:00:23,199 --> 00:00:28,640
+memory in its page
+
+00:00:26,400 --> 00:00:30,240
+in the kernel page tables which is
+
+00:00:28,640 --> 00:00:33,120
+called the direct map
+
+00:00:30,240 --> 00:00:34,239
+this added space is modified uh in a lot
+
+00:00:33,120 --> 00:00:36,410
+of ways
+
+00:00:34,239 --> 00:00:37,920
+throughout the different os uh
+
+00:00:36,410 --> 00:00:41,120
+[Music]
+
+00:00:37,920 --> 00:00:44,719
+stages uh throughout the os life cycle
+
+00:00:41,120 --> 00:00:44,719
+at boot when initializing
+
+00:00:45,200 --> 00:00:52,079
+the memory map and all the system ram
+
+00:00:48,879 --> 00:00:54,160
+or at hot plug when you you know
+
+00:00:52,079 --> 00:00:55,199
+hot plugging a new memory or when you
+
+00:00:54,160 --> 00:00:58,320
+try to map
+
+00:00:55,199 --> 00:01:00,879
+an io address
+
+00:00:58,320 --> 00:01:02,640
+of this address split may be baked by
+
+00:01:00,879 --> 00:01:05,280
+various kinds of metadata
+
+00:01:02,640 --> 00:01:06,799
+um which track different different
+
+00:01:05,280 --> 00:01:09,840
+things they have different granularities
+
+00:01:06,799 --> 00:01:13,439
+we have memblog which describes
+
+00:01:09,840 --> 00:01:16,799
+blocks of memory uh
+
+00:01:13,439 --> 00:01:20,400
+you have the underlying memory model
+
+00:01:16,799 --> 00:01:22,640
+so v-map map and um which
+
+00:01:20,400 --> 00:01:26,960
+looks like a single contiguous regions
+
+00:01:22,640 --> 00:01:31,439
+which in each individual
+
+00:01:26,960 --> 00:01:34,640
+address points to start pages
+
+00:01:31,439 --> 00:01:35,280
+although um at the lower end as you can
+
+00:01:34,640 --> 00:01:39,119
+see you have
+
+00:01:35,280 --> 00:01:41,759
+swept pages the address space though may
+
+00:01:39,119 --> 00:01:44,479
+manage what goes in the actual page
+
+00:01:41,759 --> 00:01:46,399
+tables may be done in
+
+00:01:44,479 --> 00:01:47,759
+bigger chunks so usually it's often the
+
+00:01:46,399 --> 00:01:52,560
+case that you use
+
+00:01:47,759 --> 00:01:52,560
+two megabyte pages for direct map
+
+00:01:52,799 --> 00:01:56,320
+so what the process may think it has
+
+00:01:54,720 --> 00:01:58,880
+mapped when it sets up
+
+00:01:56,320 --> 00:02:00,560
+a guest with the memory slots or any
+
+00:01:58,880 --> 00:02:02,479
+private vmm data
+
+00:02:00,560 --> 00:02:04,240
+when it's when you enter the kernel and
+
+00:02:02,479 --> 00:02:04,640
+you switch to the kernel page tables you
+
+00:02:04,240 --> 00:02:07,840
+have
+
+00:02:04,640 --> 00:02:11,120
+all guest memory rep rightly available
+
+00:02:07,840 --> 00:02:14,560
+alongside other
+
+00:02:11,120 --> 00:02:16,879
+kernel kernel allocations or anonymous
+
+00:02:14,560 --> 00:02:16,879
+memory
+
+00:02:18,560 --> 00:02:22,480
+with respect to this uh the direct map i
+
+00:02:21,440 --> 00:02:25,200
+would like to highlight
+
+00:02:22,480 --> 00:02:27,680
+one particular metadata structure that
+
+00:02:25,200 --> 00:02:31,040
+is structured which is going to be
+
+00:02:27,680 --> 00:02:34,560
+the source of most of the talk
+
+00:02:31,040 --> 00:02:36,640
+uh the data structure design
+
+00:02:34,560 --> 00:02:38,720
+is largely derived by the needs of page
+
+00:02:36,640 --> 00:02:41,760
+cache and anonymous memory
+
+00:02:38,720 --> 00:02:43,920
+and it's also a structure used by
+
+00:02:41,760 --> 00:02:47,519
+most kernel services in the most
+
+00:02:43,920 --> 00:02:49,680
+granular way of tracking memory
+
+00:02:47,519 --> 00:02:52,319
+the purpose of the structure the data
+
+00:02:49,680 --> 00:02:57,360
+structure is to track
+
+00:02:52,319 --> 00:02:57,360
+references to pfm alongside
+
+00:02:57,920 --> 00:03:03,200
+file mappings uh and other subsystem
+
+00:03:01,120 --> 00:03:06,560
+specific
+
+00:03:03,200 --> 00:03:09,920
+data usually
+
+00:03:06,560 --> 00:03:12,080
+uh you get one of those uh strap pages
+
+00:03:09,920 --> 00:03:13,599
+when you say use the body allocator with
+
+00:03:12,080 --> 00:03:16,640
+pallet page
+
+00:03:13,599 --> 00:03:19,360
+or get free pages uh or
+
+00:03:16,640 --> 00:03:20,640
+you you grab a reference to an existing
+
+00:03:19,360 --> 00:03:22,560
+page
+
+00:03:20,640 --> 00:03:24,239
+um to a particular page with getting
+
+00:03:22,560 --> 00:03:26,720
+your pages where you pin memory short or
+
+00:03:24,239 --> 00:03:26,720
+long term
+
+00:03:26,879 --> 00:03:29,920
+although the data structure has some
+
+00:03:29,040 --> 00:03:32,080
+overhead
+
+00:03:29,920 --> 00:03:33,519
+the size of the structure is about 64
+
+00:03:32,080 --> 00:03:36,319
+bytes
+
+00:03:33,519 --> 00:03:38,560
+and it's usually tracking 4k although
+
+00:03:36,319 --> 00:03:43,040
+certain architectures allow this to be
+
+00:03:38,560 --> 00:03:44,640
+tracked in a bigger trend like arm64
+
+00:03:43,040 --> 00:03:46,560
+lets you play with
+
+00:03:44,640 --> 00:03:47,840
+what's going to be the underlying page
+
+00:03:46,560 --> 00:03:51,599
+size uh
+
+00:03:47,840 --> 00:03:54,560
+so saying 64k um
+
+00:03:51,599 --> 00:03:56,720
+in on top of the structure you have
+
+00:03:54,560 --> 00:03:58,799
+other overheads on top like you spend
+
+00:03:56,720 --> 00:04:00,560
+eight bytes per apt entry
+
+00:03:58,799 --> 00:04:02,319
+and the process page tables you spend
+
+00:04:00,560 --> 00:04:04,959
+about eight bytes as well for
+
+00:04:02,319 --> 00:04:05,599
+hpt entry although these costs can be
+
+00:04:04,959 --> 00:04:08,640
+available
+
+00:04:05,599 --> 00:04:12,080
+when you try to use
+
+00:04:08,640 --> 00:04:14,400
+uh huge pages which to amortize that
+
+00:04:12,080 --> 00:04:15,680
+page table cost to a great extent so
+
+00:04:14,400 --> 00:04:18,880
+when you put it all together
+
+00:04:15,680 --> 00:04:21,280
+we are just talking about 1.5 to 1.75
+
+00:04:18,880 --> 00:04:23,280
+percent of forced physical memory
+
+00:04:21,280 --> 00:04:24,560
+which at the first class does not look
+
+00:04:23,280 --> 00:04:27,680
+much but
+
+00:04:24,560 --> 00:04:31,600
+let's let's uh revisit uh what
+
+00:04:27,680 --> 00:04:34,479
+that actually means in practical terms
+
+00:04:31,600 --> 00:04:36,000
+so if we extrapolate that to say two
+
+00:04:34,479 --> 00:04:38,320
+terabytes of memory we are
+
+00:04:36,000 --> 00:04:39,919
+spending about 32 to 36 gigabytes of
+
+00:04:38,320 --> 00:04:43,360
+memory
+
+00:04:39,919 --> 00:04:47,040
+uh so for short that's roughly
+
+00:04:43,360 --> 00:04:49,360
+that's 16 gigs per terabyte
+
+00:04:47,040 --> 00:04:50,880
+and if you work for a slightly bigger
+
+00:04:49,360 --> 00:04:51,720
+machine like an 8 terabyte machine you
+
+00:04:50,880 --> 00:04:54,800
+spend about
+
+00:04:51,720 --> 00:04:57,840
+128 gigabytes of memory to 160
+
+00:04:54,800 --> 00:05:00,400
+gigabytes of memory these are not really
+
+00:04:57,840 --> 00:05:01,039
+um crazy numbers these are actually
+
+00:05:00,400 --> 00:05:03,840
+numbers on
+
+00:05:01,039 --> 00:05:06,000
+machines we have problems with uh where
+
+00:05:03,840 --> 00:05:09,280
+a lot of this memory you're spending
+
+00:05:06,000 --> 00:05:11,840
+could hopefully be used to actually boot
+
+00:05:09,280 --> 00:05:11,840
+more guests
+
+00:05:12,080 --> 00:05:17,919
+if we take in consideration how uh
+
+00:05:15,759 --> 00:05:19,759
+how this is where this is going and that
+
+00:05:17,919 --> 00:05:23,280
+the fact that beams are getting
+
+00:05:19,759 --> 00:05:24,000
+more dense uh if you take a 64 terabytes
+
+00:05:23,280 --> 00:05:25,840
+machine
+
+00:05:24,000 --> 00:05:29,039
+to put this overhead in perspective you
+
+00:05:25,840 --> 00:05:32,800
+would be spending about 1.2 terabytes
+
+00:05:29,039 --> 00:05:34,639
+um in stockpin
+
+00:05:32,800 --> 00:05:36,880
+take that into account with the recent
+
+00:05:34,639 --> 00:05:39,600
+spec uh the recent
+
+00:05:36,880 --> 00:05:40,160
+vulnerabilities in hardware and cpus
+
+00:05:39,600 --> 00:05:42,800
+where
+
+00:05:40,160 --> 00:05:43,199
+we could speculatively take advantage of
+
+00:05:42,800 --> 00:05:46,400
+these
+
+00:05:43,199 --> 00:05:49,120
+code gadgets or
+
+00:05:46,400 --> 00:05:50,000
+or you could potentially leak all the
+
+00:05:49,120 --> 00:05:53,360
+memory map
+
+00:05:50,000 --> 00:05:57,199
+by the kernel in user space
+
+00:05:53,360 --> 00:06:00,240
+uh or exploiting through more uh
+
+00:05:57,199 --> 00:06:01,039
+cpu resources uh to lower cpu resources
+
+00:06:00,240 --> 00:06:05,360
+like
+
+00:06:01,039 --> 00:06:08,560
+the l1 cache the lndita cache or
+
+00:06:05,360 --> 00:06:10,479
+my architectural buffers uh
+
+00:06:08,560 --> 00:06:11,680
+one thing all these have one thing in
+
+00:06:10,479 --> 00:06:14,319
+common which is
+
+00:06:11,680 --> 00:06:15,039
+given that the kernel maps everything
+
+00:06:14,319 --> 00:06:18,560
+therefore
+
+00:06:15,039 --> 00:06:19,199
+everything is lickable the one i would
+
+00:06:18,560 --> 00:06:22,479
+like to give
+
+00:06:19,199 --> 00:06:26,240
+special emphasis is spectre v1 which is
+
+00:06:22,479 --> 00:06:28,000
+hard to mitigate um and that
+
+00:06:26,240 --> 00:06:31,199
+you have just so many code gadgets you
+
+00:06:28,000 --> 00:06:33,600
+need to hunt and
+
+00:06:31,199 --> 00:06:35,600
+every new merge window adds potentially
+
+00:06:33,600 --> 00:06:39,520
+new code gadgets that you
+
+00:06:35,600 --> 00:06:41,840
+could exploit so the main premise i'm
+
+00:06:39,520 --> 00:06:43,520
+trying to raise here is can we do better
+
+00:06:41,840 --> 00:06:46,080
+for hypervisors
+
+00:06:43,520 --> 00:06:48,400
+uh the problem uh the problems we see is
+
+00:06:46,080 --> 00:06:49,759
+that a given struct page does not really
+
+00:06:48,400 --> 00:06:52,720
+reflect
+
+00:06:49,759 --> 00:06:56,319
+what goes in the page tables and if you
+
+00:06:52,720 --> 00:06:56,319
+look at more modern hypervisors
+
+00:06:56,720 --> 00:07:00,319
+we won't be needing the majority of the
+
+00:06:58,960 --> 00:07:03,440
+kernel services say
+
+00:07:00,319 --> 00:07:06,639
+if you're just doing cpu
+
+00:07:03,440 --> 00:07:08,400
+memory and pci devices
+
+00:07:06,639 --> 00:07:10,080
+on those circumstances we are
+
+00:07:08,400 --> 00:07:13,919
+essentially we
+
+00:07:10,080 --> 00:07:16,880
+essentially losing a lot of efficiency
+
+00:07:13,919 --> 00:07:19,199
+to what represents a largely idle
+
+00:07:16,880 --> 00:07:22,240
+infrastructure throughout the
+
+00:07:19,199 --> 00:07:25,520
+uh guest's lifetime or host lifetime
+
+00:07:22,240 --> 00:07:27,280
+while potentially unnecessarily mapping
+
+00:07:25,520 --> 00:07:30,800
+all customers data when we probably
+
+00:07:27,280 --> 00:07:33,199
+don't need to
+
+00:07:30,800 --> 00:07:33,919
+so the first step towards fixing some of
+
+00:07:33,199 --> 00:07:36,479
+this
+
+00:07:33,919 --> 00:07:39,360
+led us to what happens if you try to
+
+00:07:36,479 --> 00:07:39,360
+remove strutpage
+
+00:07:39,599 --> 00:07:43,360
+first let me describe what today is one
+
+00:07:42,960 --> 00:07:46,560
+way
+
+00:07:43,360 --> 00:07:47,440
+you could you can do some of this and
+
+00:07:46,560 --> 00:07:50,800
+that's through
+
+00:07:47,440 --> 00:07:54,479
+def mam and mam equals x uh
+
+00:07:50,800 --> 00:07:58,400
+what essentially you do as a user is you
+
+00:07:54,479 --> 00:08:00,560
+specify man equals and some amount
+
+00:07:58,400 --> 00:08:01,759
+and that's going to be an amount which
+
+00:08:00,560 --> 00:08:05,199
+you're limited
+
+00:08:01,759 --> 00:08:07,120
+to by the kernel and
+
+00:08:05,199 --> 00:08:08,720
+you have this special device called fm
+
+00:08:07,120 --> 00:08:12,400
+where you can map
+
+00:08:08,720 --> 00:08:14,479
+every uh every memory on the system
+
+00:08:12,400 --> 00:08:15,520
+um one problem there are a couple of
+
+00:08:14,479 --> 00:08:16,160
+problems with this that i would like to
+
+00:08:15,520 --> 00:08:18,639
+enumerate
+
+00:08:16,160 --> 00:08:19,680
+uh first and foremost when you specify
+
+00:08:18,639 --> 00:08:21,919
+mem equals x
+
+00:08:19,680 --> 00:08:22,720
+you have no way to characterize where
+
+00:08:21,919 --> 00:08:25,440
+exactly
+
+00:08:22,720 --> 00:08:26,080
+you want to take that amount from so you
+
+00:08:25,440 --> 00:08:29,360
+potentially
+
+00:08:26,080 --> 00:08:30,560
+either restrict one to the first node or
+
+00:08:29,360 --> 00:08:34,560
+straddling
+
+00:08:30,560 --> 00:08:38,240
+all nodes uh to fulfill
+
+00:08:34,560 --> 00:08:40,320
+that parameter although you do have a
+
+00:08:38,240 --> 00:08:41,919
+mechanism that you do not necessarily
+
+00:08:40,320 --> 00:08:43,039
+need to have strike pages for that
+
+00:08:41,919 --> 00:08:45,279
+memory
+
+00:08:43,039 --> 00:08:48,080
+and but you're limited to a single
+
+00:08:45,279 --> 00:08:48,080
+contiguous chunk
+
+00:08:48,399 --> 00:08:55,760
+also you can only map you can only
+
+00:08:52,320 --> 00:08:58,320
+memory map that memory in 4k
+
+00:08:55,760 --> 00:09:02,160
+uh page sizes you have no two megabyte
+
+00:08:58,320 --> 00:09:02,160
+huge pages or one gigabyte huge pages
+
+00:09:02,320 --> 00:09:06,320
+which then goes to my next point when
+
+00:09:04,560 --> 00:09:11,279
+you're dealing with fragmentation
+
+00:09:06,320 --> 00:09:13,279
+uh across hundreds thousands of
+
+00:09:11,279 --> 00:09:14,720
+guests creations and tear-downs you're
+
+00:09:13,279 --> 00:09:15,519
+potentially giving me the fragmented
+
+00:09:14,720 --> 00:09:18,080
+systems
+
+00:09:15,519 --> 00:09:20,839
+so in addition to not having huge pages
+
+00:09:18,080 --> 00:09:24,640
+which sort of amortizes some of that
+
+00:09:20,839 --> 00:09:27,680
+um uh you want the ability to
+
+00:09:24,640 --> 00:09:29,680
+pick holes uh free
+
+00:09:27,680 --> 00:09:31,519
+free holes you have within allocated
+
+00:09:29,680 --> 00:09:33,600
+chunks to accommodate the given
+
+00:09:31,519 --> 00:09:36,720
+allocation
+
+00:09:33,600 --> 00:09:37,360
+and in order to do that with fmm we need
+
+00:09:36,720 --> 00:09:40,160
+to
+
+00:09:37,360 --> 00:09:42,240
+map several times devmap and space and
+
+00:09:40,160 --> 00:09:45,600
+use different page offsets
+
+00:09:42,240 --> 00:09:48,480
+um but you still need to give devman
+
+00:09:45,600 --> 00:09:50,160
+access to a given vmm which then you
+
+00:09:48,480 --> 00:09:53,839
+know breaks a little bit
+
+00:09:50,160 --> 00:09:56,240
+uh the case where vmm runs in
+
+00:09:53,839 --> 00:09:57,600
+potentially the privileged environment
+
+00:09:56,240 --> 00:10:00,000
+and therefore
+
+00:09:57,600 --> 00:10:01,600
+should not have been able to map any
+
+00:10:00,000 --> 00:10:04,160
+memory on the system
+
+00:10:01,600 --> 00:10:06,320
+and finally you don't have a way to give
+
+00:10:04,160 --> 00:10:08,000
+some of that memory back
+
+00:10:06,320 --> 00:10:10,560
+to the colonel so you'll try to rescue
+
+00:10:08,000 --> 00:10:13,200
+the host from out of memory's
+
+00:10:10,560 --> 00:10:13,200
+situation
+
+00:10:13,600 --> 00:10:20,640
+all these problems let us look at tax
+
+00:10:17,120 --> 00:10:22,640
+which is the other mechanism which
+
+00:10:20,640 --> 00:10:23,920
+purpose is to give you direct access to
+
+00:10:22,640 --> 00:10:26,240
+memory
+
+00:10:23,920 --> 00:10:27,360
+its bigger consumer is pmem and the
+
+00:10:26,240 --> 00:10:29,680
+interface behind
+
+00:10:27,360 --> 00:10:30,560
+the device text is very simple it's a
+
+00:10:29,680 --> 00:10:32,800
+character device
+
+00:10:30,560 --> 00:10:34,880
+which you instrument to csfs you create
+
+00:10:32,800 --> 00:10:37,519
+to ccfs
+
+00:10:34,880 --> 00:10:38,640
+and which just lets you in the kernel
+
+00:10:37,519 --> 00:10:41,680
+memory map
+
+00:10:38,640 --> 00:10:45,040
+a given chunk of memory
+
+00:10:41,680 --> 00:10:48,160
+application is a a given memory map so
+
+00:10:45,040 --> 00:10:50,959
+all this metadata is then created
+
+00:10:48,160 --> 00:10:51,920
+and application has control over how the
+
+00:10:50,959 --> 00:10:55,040
+memory is mapped
+
+00:10:51,920 --> 00:10:56,800
+like in 4k pages 2 megabytes or 1
+
+00:10:55,040 --> 00:10:59,920
+gigabyte pages
+
+00:10:56,800 --> 00:11:02,880
+and any exception you have uh
+
+00:10:59,920 --> 00:11:03,680
+like mcs and x86 are forward back to the
+
+00:11:02,880 --> 00:11:07,040
+application
+
+00:11:03,680 --> 00:11:10,240
+uh they you get a signal
+
+00:11:07,040 --> 00:11:12,560
+and final finally you have memory er
+
+00:11:10,240 --> 00:11:14,880
+mechanisms to return that back that
+
+00:11:12,560 --> 00:11:18,320
+memory back to the kernel say with dax
+
+00:11:14,880 --> 00:11:21,279
+km driver uh you can
+
+00:11:18,320 --> 00:11:22,480
+emulate some of this uh with mem map
+
+00:11:21,279 --> 00:11:24,079
+option
+
+00:11:22,480 --> 00:11:26,640
+although the problem with using this
+
+00:11:24,079 --> 00:11:30,399
+option is that you give
+
+00:11:26,640 --> 00:11:33,440
+that option has a lot of um
+
+00:11:30,399 --> 00:11:36,720
+power uh uh into
+
+00:11:33,440 --> 00:11:39,440
+messing up with your memory map so users
+
+00:11:36,720 --> 00:11:41,200
+really need deep knowledge of what your
+
+00:11:39,440 --> 00:11:44,000
+hardware memory map looks like
+
+00:11:41,200 --> 00:11:45,680
+to be able to pick an actual run range
+
+00:11:44,000 --> 00:11:48,320
+one thing i'd like to clarify here
+
+00:11:45,680 --> 00:11:49,839
+uh is that usually people can fuse call
+
+00:11:48,320 --> 00:11:52,720
+decks as one thing
+
+00:11:49,839 --> 00:11:53,839
+but there are two kinds of daxes and and
+
+00:11:52,720 --> 00:11:56,720
+there's the pman
+
+00:11:53,839 --> 00:11:58,000
+so there is device tags which is this
+
+00:11:56,720 --> 00:12:00,560
+very simple
+
+00:11:58,000 --> 00:12:02,240
+uh device there's pman which is the
+
+00:12:00,560 --> 00:12:04,560
+block device and there is file system
+
+00:12:02,240 --> 00:12:04,560
+decks
+
+00:12:04,639 --> 00:12:07,680
+which purpose is to bypass the page
+
+00:12:06,240 --> 00:12:08,959
+cache so
+
+00:12:07,680 --> 00:12:10,880
+these are all three different things and
+
+00:12:08,959 --> 00:12:13,920
+the one i'm emphasizing here is dax
+
+00:12:10,880 --> 00:12:16,720
+device tax as i'm sort of hinting there
+
+00:12:13,920 --> 00:12:19,839
+is a couple of problems with device tax
+
+00:12:16,720 --> 00:12:21,360
+and it's largely uh derived from its
+
+00:12:19,839 --> 00:12:25,279
+biggest consumer which is
+
+00:12:21,360 --> 00:12:26,720
+p man persistent memory namespaces are
+
+00:12:25,279 --> 00:12:30,880
+not supported
+
+00:12:26,720 --> 00:12:33,839
+do not support these contiguous regions
+
+00:12:30,880 --> 00:12:37,120
+they support uh only you can only have a
+
+00:12:33,839 --> 00:12:39,839
+namespace with one contiguous chunk
+
+00:12:37,120 --> 00:12:40,720
+in addition to that uh because you need
+
+00:12:39,839 --> 00:12:43,279
+to initialize
+
+00:12:40,720 --> 00:12:45,519
+all these many extract pages you have
+
+00:12:43,279 --> 00:12:48,240
+long initialization time of your
+
+00:12:45,519 --> 00:12:49,519
+uh dex device in bringing it up online
+
+00:12:48,240 --> 00:12:52,320
+because you need to clear
+
+00:12:49,519 --> 00:12:53,440
+all that memory and to add that while
+
+00:12:52,320 --> 00:12:56,480
+you can represent
+
+00:12:53,440 --> 00:12:59,680
+huge pages uh in the page tables
+
+00:12:56,480 --> 00:13:03,200
+uh the way these page strike pages look
+
+00:12:59,680 --> 00:13:05,760
+are not uh are not the same
+
+00:13:03,200 --> 00:13:07,839
+as say transparent each pages or hp
+
+00:13:05,760 --> 00:13:09,920
+jlbfs where you you would
+
+00:13:07,839 --> 00:13:12,240
+have a head page and a couple of tell
+
+00:13:09,920 --> 00:13:15,600
+pages to represent the two megabyte or
+
+00:13:12,240 --> 00:13:17,200
+one gigabyte page uh so these
+
+00:13:15,600 --> 00:13:18,880
+you gotta look at the page tables to
+
+00:13:17,200 --> 00:13:21,680
+understand whether a given struct page
+
+00:13:18,880 --> 00:13:24,720
+belongs or not to
+
+00:13:21,680 --> 00:13:26,480
+a a huge page
+
+00:13:24,720 --> 00:13:27,839
+and finally you need architectural
+
+00:13:26,480 --> 00:13:29,760
+support for
+
+00:13:27,839 --> 00:13:31,120
+devmap which is the kernel way to tell
+
+00:13:29,760 --> 00:13:34,320
+that this divide this
+
+00:13:31,120 --> 00:13:37,600
+particular page basically
+
+00:13:34,320 --> 00:13:40,000
+a pfn belongs to a particular device map
+
+00:13:37,600 --> 00:13:40,880
+and therefore his own device special
+
+00:13:40,000 --> 00:13:45,519
+zone
+
+00:13:40,880 --> 00:13:50,000
+in the uh in the kernel
+
+00:13:45,519 --> 00:13:52,720
+so um the main question we got were
+
+00:13:50,000 --> 00:13:53,920
+we got into was how we could repurpose
+
+00:13:52,720 --> 00:13:57,440
+some of this
+
+00:13:53,920 --> 00:13:59,680
+uh device text already provides you uh
+
+00:13:57,440 --> 00:14:01,279
+everything that we need and how we could
+
+00:13:59,680 --> 00:14:03,839
+repurpose some of this
+
+00:14:01,279 --> 00:14:06,079
+while fixing making some improvements to
+
+00:14:03,839 --> 00:14:08,959
+repurpose this to volatile memory
+
+00:14:06,079 --> 00:14:11,279
+with that let us look to dax h-mem which
+
+00:14:08,959 --> 00:14:13,839
+is the driver
+
+00:14:11,279 --> 00:14:16,000
+which can be used for performance
+
+00:14:13,839 --> 00:14:19,279
+differentiated ram
+
+00:14:16,000 --> 00:14:23,279
+we essentially remove this mem option
+
+00:14:19,279 --> 00:14:26,720
+from here and we instead use efi
+
+00:14:23,279 --> 00:14:27,600
+and we added the f5 memory map such that
+
+00:14:26,720 --> 00:14:31,839
+we mark
+
+00:14:27,600 --> 00:14:35,120
+ram ranges with efi specific memory
+
+00:14:31,839 --> 00:14:37,839
+so we only need to care in
+
+00:14:35,120 --> 00:14:38,800
+about ram ranges and we don't need to
+
+00:14:37,839 --> 00:14:42,560
+understand
+
+00:14:38,800 --> 00:14:45,519
+uh how exactly is firmware exposing
+
+00:14:42,560 --> 00:14:46,240
+uh everything else that is not ram and
+
+00:14:45,519 --> 00:14:49,920
+we essentially
+
+00:14:46,240 --> 00:14:51,839
+have an ability for firmware to dedicate
+
+00:14:49,920 --> 00:14:53,360
+memory to user space when memory styled
+
+00:14:51,839 --> 00:14:55,680
+with the specific purpose
+
+00:14:53,360 --> 00:14:56,560
+attribute it means that the kernel is
+
+00:14:55,680 --> 00:14:59,600
+going to create
+
+00:14:56,560 --> 00:15:02,639
+one next device and let's
+
+00:14:59,600 --> 00:15:03,920
+give that to user space as a memory
+
+00:15:02,639 --> 00:15:07,199
+mappable uh
+
+00:15:03,920 --> 00:15:10,560
+that that's device so we essentially
+
+00:15:07,199 --> 00:15:12,560
+all had to we had to fix is
+
+00:15:10,560 --> 00:15:14,959
+we had to just support these contiguous
+
+00:15:12,560 --> 00:15:17,360
+regions where we try to pick
+
+00:15:14,959 --> 00:15:18,320
+all three ranges to accommodate the
+
+00:15:17,360 --> 00:15:21,760
+given allocation
+
+00:15:18,320 --> 00:15:23,920
+as opposed to um
+
+00:15:21,760 --> 00:15:25,680
+deal with uh just contiguous chunks and
+
+00:15:23,920 --> 00:15:27,440
+we and that helps tremendously with
+
+00:15:25,680 --> 00:15:28,959
+dealing with fragmentation
+
+00:15:27,440 --> 00:15:30,800
+and then the way you allocate this you
+
+00:15:28,959 --> 00:15:32,560
+can either give the application control
+
+00:15:30,800 --> 00:15:35,839
+over what ranges to peak
+
+00:15:32,560 --> 00:15:38,320
+or you can reserve to the dax mediation
+
+00:15:35,839 --> 00:15:40,399
+where there's a simple range allocated
+
+00:15:38,320 --> 00:15:43,279
+where it adjusts
+
+00:15:40,399 --> 00:15:43,839
+ranges or allocate new ones to fulfill
+
+00:15:43,279 --> 00:15:46,959
+the
+
+00:15:43,839 --> 00:15:48,560
+allocation provided by the user
+
+00:15:46,959 --> 00:15:51,120
+the fact where you specify mappings
+
+00:15:48,560 --> 00:15:55,199
+especially useful for use cases like
+
+00:15:51,120 --> 00:15:58,480
+vmm live restart kmu live update or
+
+00:15:55,199 --> 00:16:00,720
+a kvm live update where you want to
+
+00:15:58,480 --> 00:16:03,759
+preserve the exact same ranges
+
+00:16:00,720 --> 00:16:06,480
+while not scrubbing that memory
+
+00:16:03,759 --> 00:16:07,120
+the next time you memory map it again
+
+00:16:06,480 --> 00:16:08,720
+and so
+
+00:16:07,120 --> 00:16:10,399
+i like to refer to jason zhang and
+
+00:16:08,720 --> 00:16:11,519
+stephen cesar's presentations which
+
+00:16:10,399 --> 00:16:15,279
+cover a lot of
+
+00:16:11,519 --> 00:16:15,279
+uh what i refer here
+
+00:16:16,399 --> 00:16:19,680
+so the next step was then obviously to
+
+00:16:18,480 --> 00:16:22,880
+remove struct page from
+
+00:16:19,680 --> 00:16:26,079
+device text uh a lot of the bigger
+
+00:16:22,880 --> 00:16:27,120
+infrastructure work was for repurposing
+
+00:16:26,079 --> 00:16:29,360
+dax
+
+00:16:27,120 --> 00:16:30,800
+and so fixing this discontiguous
+
+00:16:29,360 --> 00:16:34,240
+limitation
+
+00:16:30,800 --> 00:16:36,959
+and all that left remaining was to
+
+00:16:34,240 --> 00:16:38,959
+have a pageless memory map and we still
+
+00:16:36,959 --> 00:16:42,480
+keep the same properties behind decks
+
+00:16:38,959 --> 00:16:43,360
+so uh static dfm mapping for a given va
+
+00:16:42,480 --> 00:16:46,800
+range
+
+00:16:43,360 --> 00:16:50,639
+and so uh you still know
+
+00:16:46,800 --> 00:16:53,839
+what you will know um
+
+00:16:50,639 --> 00:16:54,399
+at device creation what's a va is going
+
+00:16:53,839 --> 00:16:57,199
+to
+
+00:16:54,399 --> 00:16:58,079
+be mapped to a particular pfn and
+
+00:16:57,199 --> 00:17:01,519
+essentially
+
+00:16:58,079 --> 00:17:04,720
+the vma type is going to be essentially
+
+00:17:01,519 --> 00:17:05,199
+a pfn map which in korvian karma means
+
+00:17:04,720 --> 00:17:08,079
+that
+
+00:17:05,199 --> 00:17:10,319
+i have no struct pages we leverage a lot
+
+00:17:08,079 --> 00:17:11,199
+of the work that by karim has had where
+
+00:17:10,319 --> 00:17:13,919
+it introduces
+
+00:17:11,199 --> 00:17:16,000
+an alternative guest mapping series when
+
+00:17:13,919 --> 00:17:19,120
+memory is not picked by struct pages
+
+00:17:16,000 --> 00:17:20,480
+and we had to simply fix not in kvm
+
+00:17:19,120 --> 00:17:22,799
+we'll average a lot of networks we had
+
+00:17:20,480 --> 00:17:25,280
+no changes specific to dax or anything
+
+00:17:22,799 --> 00:17:26,000
+was mostly bug fixes which are general
+
+00:17:25,280 --> 00:17:29,600
+to
+
+00:17:26,000 --> 00:17:31,280
+the usage of pfn maps um
+
+00:17:29,600 --> 00:17:32,960
+but we had to support huge phases for
+
+00:17:31,280 --> 00:17:34,000
+page special especially is how the
+
+00:17:32,960 --> 00:17:37,440
+kernel
+
+00:17:34,000 --> 00:17:38,720
+says uh this memory does not have a
+
+00:17:37,440 --> 00:17:40,640
+strip page
+
+00:17:38,720 --> 00:17:42,960
+and finally we had to fix out memory
+
+00:17:40,640 --> 00:17:46,400
+failure as the kernel bails out
+
+00:17:42,960 --> 00:17:47,760
+early when he has an mcu on memory it
+
+00:17:46,400 --> 00:17:51,679
+does not track
+
+00:17:47,760 --> 00:17:54,240
+and we had to uh reflect what's uh
+
+00:17:51,679 --> 00:17:54,799
+what the actual casual property uh is
+
+00:17:54,240 --> 00:17:56,880
+for ram
+
+00:17:54,799 --> 00:17:59,120
+and so be able to map it as right back
+
+00:17:56,880 --> 00:18:00,880
+as opposed to uncashable
+
+00:17:59,120 --> 00:18:02,400
+but that's nothing really different that
+
+00:18:00,880 --> 00:18:04,960
+it's not done for death man
+
+00:18:02,400 --> 00:18:06,240
+and again there was no logic specific to
+
+00:18:04,960 --> 00:18:08,799
+dex
+
+00:18:06,240 --> 00:18:10,160
+uh to make this work so i would like to
+
+00:18:08,799 --> 00:18:11,280
+defer to the previous diagram i
+
+00:18:10,160 --> 00:18:13,360
+explained earlier
+
+00:18:11,280 --> 00:18:14,559
+where we have all the memory types in
+
+00:18:13,360 --> 00:18:17,039
+the right map and
+
+00:18:14,559 --> 00:18:19,200
+uh and we're essentially doing here by
+
+00:18:17,039 --> 00:18:20,640
+removing struct page we gain this memory
+
+00:18:19,200 --> 00:18:23,200
+efficiency back
+
+00:18:20,640 --> 00:18:24,559
+and remove other guest memory from the
+
+00:18:23,200 --> 00:18:28,160
+direct map
+
+00:18:24,559 --> 00:18:31,679
+so less subject to leakage
+
+00:18:28,160 --> 00:18:34,400
+in practice uh what we
+
+00:18:31,679 --> 00:18:35,360
+do is you would specify this efi fake
+
+00:18:34,400 --> 00:18:39,039
+map
+
+00:18:35,360 --> 00:18:41,679
+uh the option as you can tell from what
+
+00:18:39,039 --> 00:18:44,080
+it describes it's not really intuitive
+
+00:18:41,679 --> 00:18:46,240
+so they still work there to make this
+
+00:18:44,080 --> 00:18:47,600
+slightly more user friendly but what we
+
+00:18:46,240 --> 00:18:50,640
+are essentially describing
+
+00:18:47,600 --> 00:18:51,360
+here is that my hypervisor is going to
+
+00:18:50,640 --> 00:18:55,360
+have
+
+00:18:51,360 --> 00:18:59,360
+16 gigabytes per node available for
+
+00:18:55,360 --> 00:19:03,600
+user space kernel manage allocations
+
+00:18:59,360 --> 00:19:07,120
+or and you associate the rest for dax
+
+00:19:03,600 --> 00:19:10,640
+and so dex has 368
+
+00:19:07,120 --> 00:19:11,679
+gigs per node so you essentially bring
+
+00:19:10,640 --> 00:19:15,039
+up two regions
+
+00:19:11,679 --> 00:19:16,960
+one predominance on a procfs this
+
+00:19:15,039 --> 00:19:18,960
+appears as soft reserved
+
+00:19:16,960 --> 00:19:20,240
+and you then supposed to use the dax
+
+00:19:18,960 --> 00:19:22,080
+tools to
+
+00:19:20,240 --> 00:19:24,000
+instrument this region or you know you
+
+00:19:22,080 --> 00:19:26,960
+cannot also come up with the
+
+00:19:24,000 --> 00:19:28,960
+your own tools which uses the csfs api
+
+00:19:26,960 --> 00:19:31,200
+uh for the purpose
+
+00:19:28,960 --> 00:19:33,200
+and you can then create uh various
+
+00:19:31,200 --> 00:19:33,600
+devices with you know a 30 gigabytes
+
+00:19:33,200 --> 00:19:36,400
+guest
+
+00:19:33,600 --> 00:19:37,280
+with uh given huge pages and you select
+
+00:19:36,400 --> 00:19:41,280
+which
+
+00:19:37,280 --> 00:19:42,799
+region you want and then optionally what
+
+00:19:41,280 --> 00:19:44,080
+we are trying to introduce with pages
+
+00:19:42,799 --> 00:19:45,280
+memory is that you pass on this new
+
+00:19:44,080 --> 00:19:48,480
+metadata and
+
+00:19:45,280 --> 00:19:51,600
+you are not going to create strict pages
+
+00:19:48,480 --> 00:19:53,840
+for these devices which
+
+00:19:51,600 --> 00:19:56,480
+also tremendously speeds up the bring up
+
+00:19:53,840 --> 00:19:56,480
+of the device
+
+00:19:57,679 --> 00:20:02,559
+and can you you then use this like any
+
+00:20:00,000 --> 00:20:04,640
+other regular file-based memory
+
+00:20:02,559 --> 00:20:06,640
+and not there's nothing really different
+
+00:20:04,640 --> 00:20:08,240
+there and it's the same for ucldfs or
+
+00:20:06,640 --> 00:20:11,360
+any other
+
+00:20:08,240 --> 00:20:11,360
+shared memory mechanism
+
+00:20:12,159 --> 00:20:15,919
+uh use case that i see for this you
+
+00:20:14,080 --> 00:20:17,840
+could let the kvm bind
+
+00:20:15,919 --> 00:20:20,240
+to these devices similar to what we do
+
+00:20:17,840 --> 00:20:21,120
+for dax km where we give back memory to
+
+00:20:20,240 --> 00:20:24,960
+the kernel
+
+00:20:21,120 --> 00:20:27,440
+but here uh kvm would use it to
+
+00:20:24,960 --> 00:20:29,440
+to back some of those data structures
+
+00:20:27,440 --> 00:20:30,240
+used when doing work on behalf of the
+
+00:20:29,440 --> 00:20:32,840
+guest
+
+00:20:30,240 --> 00:20:34,720
+such as we would be hiding the vcp
+
+00:20:32,840 --> 00:20:37,360
+registers um
+
+00:20:34,720 --> 00:20:39,039
+or kvmyopic and there is a couple of
+
+00:20:37,360 --> 00:20:39,679
+call sites i'm just this is just for
+
+00:20:39,039 --> 00:20:41,600
+example
+
+00:20:39,679 --> 00:20:43,200
+finding purposes does not need to be
+
+00:20:41,600 --> 00:20:44,640
+pageless so long as it's not part of the
+
+00:20:43,200 --> 00:20:47,280
+direct map or it's
+
+00:20:44,640 --> 00:20:49,039
+isolated in some form but this would be
+
+00:20:47,280 --> 00:20:49,440
+one way to implement a poor man version
+
+00:20:49,039 --> 00:20:51,200
+of
+
+00:20:49,440 --> 00:20:55,919
+process local memory which was a sub
+
+00:20:51,200 --> 00:20:58,240
+point proposed by some of the aws faults
+
+00:20:55,919 --> 00:20:59,840
+the user space another use case could be
+
+00:20:58,240 --> 00:21:02,960
+to use this memory for
+
+00:20:59,840 --> 00:21:04,880
+any other vmm allocations
+
+00:21:02,960 --> 00:21:06,400
+and it could well serve as a memory pool
+
+00:21:04,880 --> 00:21:08,960
+as opposed to reserved to anonymous
+
+00:21:06,400 --> 00:21:08,960
+allocations
+
+00:21:09,200 --> 00:21:13,200
+to recap on some of the advantages by
+
+00:21:11,840 --> 00:21:16,640
+removing threat page
+
+00:21:13,200 --> 00:21:20,159
+you sort of kill two
+
+00:21:16,640 --> 00:21:23,760
+birds in one shot which is
+
+00:21:20,159 --> 00:21:26,799
+uh you get a ton of memory back uh
+
+00:21:23,760 --> 00:21:30,720
+that is being lost in
+
+00:21:26,799 --> 00:21:32,320
+stock page uh and fundamentally
+
+00:21:30,720 --> 00:21:34,159
+because you're the current does not map
+
+00:21:32,320 --> 00:21:37,440
+the mapping the
+
+00:21:34,159 --> 00:21:40,799
+that same customer data is less prone
+
+00:21:37,440 --> 00:21:41,200
+to leakage by other guests you skip this
+
+00:21:40,799 --> 00:21:44,080
+by
+
+00:21:41,200 --> 00:21:46,880
+uh preserving that memory across
+
+00:21:44,080 --> 00:21:48,960
+hypervisor or vmware live a live update
+
+00:21:46,880 --> 00:21:50,960
+are more easily done fundamentally given
+
+00:21:48,960 --> 00:21:54,320
+that how box works and gives
+
+00:21:50,960 --> 00:21:56,880
+that control to the application
+
+00:21:54,320 --> 00:21:58,400
+and hunting down spectrum big edges
+
+00:21:56,880 --> 00:22:01,120
+especially those done on
+
+00:21:58,400 --> 00:22:02,080
+the context of guest memory gets a lot
+
+00:22:01,120 --> 00:22:05,200
+more easily
+
+00:22:02,080 --> 00:22:05,840
+mitigated but there are pitfalls in
+
+00:22:05,200 --> 00:22:08,640
+doing
+
+00:22:05,840 --> 00:22:09,120
+this approach as well and that means
+
+00:22:08,640 --> 00:22:12,159
+that
+
+00:22:09,120 --> 00:22:14,799
+once you remove struct page
+
+00:22:12,159 --> 00:22:16,400
+uh you're on your own uh and so
+
+00:22:14,799 --> 00:22:19,760
+subsystems don't really
+
+00:22:16,400 --> 00:22:24,320
+work well without it and you're
+
+00:22:19,760 --> 00:22:25,919
+largely losing certain kernel services
+
+00:22:24,320 --> 00:22:27,520
+given that you don't have get to the
+
+00:22:25,919 --> 00:22:28,480
+pages you can use your pages and so on
+
+00:22:27,520 --> 00:22:30,799
+and so forth
+
+00:22:28,480 --> 00:22:32,000
+so for example an easy pick is that
+
+00:22:30,799 --> 00:22:34,960
+directio
+
+00:22:32,000 --> 00:22:35,440
+and uh zero copy networking i o doesn't
+
+00:22:34,960 --> 00:22:38,080
+work
+
+00:22:35,440 --> 00:22:39,440
+uh for example if you send message
+
+00:22:38,080 --> 00:22:42,640
+message zero copy
+
+00:22:39,440 --> 00:22:44,720
+or if you use or direct um you given
+
+00:22:42,640 --> 00:22:47,760
+that get user pages do not return you
+
+00:22:44,720 --> 00:22:48,640
+any actual struct pages you know you
+
+00:22:47,760 --> 00:22:51,919
+will fade the
+
+00:22:48,640 --> 00:22:54,000
+the the i o
+
+00:22:51,919 --> 00:22:56,320
+this does work for certain specialized
+
+00:22:54,000 --> 00:22:58,880
+cases such as the case of kvm
+
+00:22:56,320 --> 00:23:00,960
+or if you do basic pci assignment but
+
+00:22:58,880 --> 00:23:03,919
+even there there are some issues
+
+00:23:00,960 --> 00:23:04,320
+but in which you need to in addition to
+
+00:23:03,919 --> 00:23:06,400
+use
+
+00:23:04,320 --> 00:23:09,280
+follow pfn you're expected to track page
+
+00:23:06,400 --> 00:23:11,360
+table entry updates
+
+00:23:09,280 --> 00:23:12,880
+to reflect that in your secondary mmu
+
+00:23:11,360 --> 00:23:15,840
+mapping so
+
+00:23:12,880 --> 00:23:16,080
+you usually need to register some form
+
+00:23:15,840 --> 00:23:18,720
+of
+
+00:23:16,080 --> 00:23:21,360
+memory notifier uh in addition to users
+
+00:23:18,720 --> 00:23:24,559
+for pfm kvm does it right
+
+00:23:21,360 --> 00:23:26,480
+uh but other subsystems would need so so
+
+00:23:24,559 --> 00:23:27,760
+if you're mapping if you're giving a
+
+00:23:26,480 --> 00:23:31,280
+device to
+
+00:23:27,760 --> 00:23:34,960
+vfio uh it does work today but
+
+00:23:31,280 --> 00:23:36,640
+if you invalidate one given va range
+
+00:23:34,960 --> 00:23:38,320
+you may want to reflect that into the
+
+00:23:36,640 --> 00:23:41,440
+immune
+
+00:23:38,320 --> 00:23:41,840
+underlying mappings io does work but
+
+00:23:41,440 --> 00:23:45,520
+again
+
+00:23:41,840 --> 00:23:47,360
+is limited to uh copy based
+
+00:23:45,520 --> 00:23:49,760
+which is also the default in the host
+
+00:23:47,360 --> 00:23:52,480
+net vhost does work because the
+
+00:23:49,760 --> 00:23:53,760
+mm owner is the same as the vmn is the
+
+00:23:52,480 --> 00:23:55,279
+vmm so
+
+00:23:53,760 --> 00:23:56,799
+we just had to come up with a little
+
+00:23:55,279 --> 00:23:59,840
+trick with the host
+
+00:23:56,799 --> 00:24:01,440
+uh skazi for remote storage where you
+
+00:23:59,840 --> 00:24:04,640
+allocate staging buffers
+
+00:24:01,440 --> 00:24:07,840
+for um uh
+
+00:24:04,640 --> 00:24:11,200
+drive some of that um
+
+00:24:07,840 --> 00:24:13,440
+i o but
+
+00:24:11,200 --> 00:24:15,039
+there is a big there is a big uh
+
+00:24:13,440 --> 00:24:18,000
+drawback which is
+
+00:24:15,039 --> 00:24:19,039
+uh losing kernel services and so what
+
+00:24:18,000 --> 00:24:22,400
+are the directions
+
+00:24:19,039 --> 00:24:25,120
+we are looking at here naturally this
+
+00:24:22,400 --> 00:24:26,400
+uh goes um there are two approaches
+
+00:24:25,120 --> 00:24:28,400
+another long-term approach we are
+
+00:24:26,400 --> 00:24:30,799
+looking at which is the ssi it takes a
+
+00:24:28,400 --> 00:24:33,200
+safer approach into securing
+
+00:24:30,799 --> 00:24:33,919
+a greater portion of what kvn is
+
+00:24:33,200 --> 00:24:36,000
+handling
+
+00:24:33,919 --> 00:24:37,039
+versus this approach of removing struct
+
+00:24:36,000 --> 00:24:39,919
+page which is
+
+00:24:37,039 --> 00:24:40,720
+the opposite which is you're trying to
+
+00:24:39,919 --> 00:24:43,440
+protect
+
+00:24:40,720 --> 00:24:44,799
+uh certain chunks of memory but i
+
+00:24:43,440 --> 00:24:48,320
+believe this could work
+
+00:24:44,799 --> 00:24:51,520
+uh in concert and so you could use
+
+00:24:48,320 --> 00:24:54,240
+this mechanism to say protect uh
+
+00:24:51,520 --> 00:24:56,400
+customers and using asi to protect vmm
+
+00:24:54,240 --> 00:25:00,159
+and kernel private details is a better
+
+00:24:56,400 --> 00:25:01,279
+that's a better catch-all to what's
+
+00:25:00,159 --> 00:25:03,679
+going to be
+
+00:25:01,279 --> 00:25:05,679
+um a number of allocations then on
+
+00:25:03,679 --> 00:25:07,600
+behalf of the guests
+
+00:25:05,679 --> 00:25:09,200
+but maybe the pages could also serve as
+
+00:25:07,600 --> 00:25:11,679
+a performance improvement
+
+00:25:09,200 --> 00:25:12,559
+say if you're not exiting to user space
+
+00:25:11,679 --> 00:25:13,679
+would you need
+
+00:25:12,559 --> 00:25:15,840
+could you leave some of these
+
+00:25:13,679 --> 00:25:18,000
+mitigations say the nds flush
+
+00:25:15,840 --> 00:25:19,279
+if you're not exiting to user space
+
+00:25:18,000 --> 00:25:21,120
+could that serve as the performance
+
+00:25:19,279 --> 00:25:24,559
+optimization
+
+00:25:21,120 --> 00:25:26,720
+also the larger problem at hand here is
+
+00:25:24,559 --> 00:25:26,720
+that
+
+00:25:27,120 --> 00:25:31,840
+we need to work better uh strike pages
+
+00:25:30,400 --> 00:25:33,760
+need to reflect better what the
+
+00:25:31,840 --> 00:25:36,080
+underlying size and the page table
+
+00:25:33,760 --> 00:25:37,760
+or the alternative is to have subsystems
+
+00:25:36,080 --> 00:25:39,440
+work with struct pages
+
+00:25:37,760 --> 00:25:41,600
+one good example is the large page in
+
+00:25:39,440 --> 00:25:43,919
+the page cache work is that
+
+00:25:41,600 --> 00:25:45,279
+you only look at the page head pages to
+
+00:25:43,919 --> 00:25:49,200
+compute any
+
+00:25:45,279 --> 00:25:51,120
+address uh uh
+
+00:25:49,200 --> 00:25:53,120
+any computations we do on a particular
+
+00:25:51,120 --> 00:25:55,520
+address and we don't need to
+
+00:25:53,120 --> 00:25:57,360
+use all those tail pages in that sort of
+
+00:25:55,520 --> 00:26:01,039
+becomes an implementation
+
+00:25:57,360 --> 00:26:01,919
+detail uh from subsystem or from user
+
+00:26:01,039 --> 00:26:03,840
+perspective
+
+00:26:01,919 --> 00:26:05,520
+so get user pages for example we just
+
+00:26:03,840 --> 00:26:08,080
+return you head pages
+
+00:26:05,520 --> 00:26:09,600
+and no tail pages just this is a more
+
+00:26:08,080 --> 00:26:10,799
+easy example
+
+00:26:09,600 --> 00:26:12,640
+but there is also an interesting
+
+00:26:10,799 --> 00:26:14,640
+approach which i thought
+
+00:26:12,640 --> 00:26:16,960
+i would mention and that happened like a
+
+00:26:14,640 --> 00:26:20,240
+month or so ago
+
+00:26:16,960 --> 00:26:23,120
+and that is for external allocators like
+
+00:26:20,240 --> 00:26:24,880
+hcl bfs and dax i would like to remember
+
+00:26:23,120 --> 00:26:25,520
+that dexter also used for pm this is so
+
+00:26:24,880 --> 00:26:27,600
+this is
+
+00:26:25,520 --> 00:26:29,440
+not only applicable for this but for
+
+00:26:27,600 --> 00:26:31,520
+also persistent memory
+
+00:26:29,440 --> 00:26:33,360
+but one interesting question raised by
+
+00:26:31,520 --> 00:26:37,039
+the bad dance folks is
+
+00:26:33,360 --> 00:26:37,520
+what happens if portions of the v-man
+
+00:26:37,039 --> 00:26:40,559
+map
+
+00:26:37,520 --> 00:26:44,400
+or use the same tail pages
+
+00:26:40,559 --> 00:26:46,720
+sorry uh what if all these tail pages
+
+00:26:44,400 --> 00:26:47,679
+could use the same big bit memory
+
+00:26:46,720 --> 00:26:51,600
+provided that
+
+00:26:47,679 --> 00:26:53,440
+you represent in a subset of unique
+
+00:26:51,600 --> 00:26:55,679
+stock pages all the information that you
+
+00:26:53,440 --> 00:26:56,400
+need for a two megabyte or one gigabyte
+
+00:26:55,679 --> 00:26:58,880
+page
+
+00:26:56,400 --> 00:26:59,679
+what happens if the remaining ones are
+
+00:26:58,880 --> 00:27:03,440
+not needed
+
+00:26:59,679 --> 00:27:03,440
+and they all point to the same memory
+
+00:27:03,919 --> 00:27:07,679
+that would mean one thing you need less
+
+00:27:06,080 --> 00:27:09,279
+memory to make the straight pages you
+
+00:27:07,679 --> 00:27:11,520
+still have those track pages
+
+00:27:09,279 --> 00:27:12,400
+uh so the it does look like that you
+
+00:27:11,520 --> 00:27:15,600
+have one
+
+00:27:12,400 --> 00:27:17,919
+uniquely to every 4k chunk the others
+
+00:27:15,600 --> 00:27:21,200
+pointing to the same memory
+
+00:27:17,919 --> 00:27:22,799
+if such a mechanism was possible uh that
+
+00:27:21,200 --> 00:27:25,440
+would be applicable for
+
+00:27:22,799 --> 00:27:26,320
+uclb fs index which pre-allocated and re
+
+00:27:25,440 --> 00:27:28,480
+pre-assigned
+
+00:27:26,320 --> 00:27:29,840
+chunks at boot or rather can pre-assign
+
+00:27:28,480 --> 00:27:32,240
+chunks of boot
+
+00:27:29,840 --> 00:27:32,880
+and if dex had support for these more
+
+00:27:32,240 --> 00:27:36,720
+page
+
+00:27:32,880 --> 00:27:39,919
+compound pages uh it would also serve um
+
+00:27:36,720 --> 00:27:41,760
+it's also could also fix other problems
+
+00:27:39,919 --> 00:27:45,600
+we have for persistent memory
+
+00:27:41,760 --> 00:27:48,080
+uh uh where we would pin faster
+
+00:27:45,600 --> 00:27:50,559
+or initialize quicker some of these
+
+00:27:48,080 --> 00:27:52,559
+lacks some of these namespaces
+
+00:27:50,559 --> 00:27:54,159
+these are also something we are looking
+
+00:27:52,559 --> 00:27:58,799
+at at the moment and hopefully
+
+00:27:54,159 --> 00:28:01,840
+we can have an update um in a few weeks
+
+00:27:58,799 --> 00:28:02,240
+and with that i'd like to conclude um
+
+00:28:01,840 --> 00:28:04,640
+for
+
+00:28:02,240 --> 00:28:06,960
+5.10 is going to have a lot of this uh
+
+00:28:04,640 --> 00:28:09,760
+repurposing of decks for volatile memory
+
+00:28:06,960 --> 00:28:10,320
+and provides a way to carve out struct
+
+00:28:09,760 --> 00:28:14,000
+page
+
+00:28:10,320 --> 00:28:17,120
+um which fills up uh
+
+00:28:14,000 --> 00:28:18,399
+fits a given use case when your
+
+00:28:17,120 --> 00:28:21,520
+hypervisor is not
+
+00:28:18,399 --> 00:28:23,679
+using so many this doesn't need to
+
+00:28:21,520 --> 00:28:26,559
+provide so many kernel services
+
+00:28:23,679 --> 00:28:28,240
+uh the dax huge pages proper support is
+
+00:28:26,559 --> 00:28:29,760
+going to continue and we are looking at
+
+00:28:28,240 --> 00:28:31,520
+alternatives such that we don't have
+
+00:28:29,760 --> 00:28:33,919
+such a big compromise
+
+00:28:31,520 --> 00:28:35,360
+into having giving away so many kernel
+
+00:28:33,919 --> 00:28:36,159
+services and what i was trying to
+
+00:28:35,360 --> 00:28:38,720
+propose here
+
+00:28:36,159 --> 00:28:39,279
+is to have sort of a harder boundary
+
+00:28:38,720 --> 00:28:40,960
+between
+
+00:28:39,279 --> 00:28:42,799
+what's hypervised and what's guess and
+
+00:28:40,960 --> 00:28:45,120
+what's gas or customer data
+
+00:28:42,799 --> 00:28:46,640
+and at least in lesser known for me was
+
+00:28:45,120 --> 00:28:48,320
+that
+
+00:28:46,640 --> 00:28:50,799
+when you strip away such according to
+
+00:28:48,320 --> 00:28:54,480
+structures as a web page
+
+00:28:50,799 --> 00:28:57,600
+uh it was interesting to note that uh
+
+00:28:54,480 --> 00:28:59,440
+not much is needed other when
+
+00:28:57,600 --> 00:29:00,960
+your hypervisor doesn't need to provide
+
+00:28:59,440 --> 00:29:03,760
+that much uh
+
+00:29:00,960 --> 00:29:05,360
+services and with that thank you for
+
+00:29:03,760 --> 00:29:08,399
+listening to me some links here
+
+00:29:05,360 --> 00:29:11,360
+of some of the work i'm talking about
+
+00:29:08,399 --> 00:29:14,320
+i'd like to thank matthew mike kravitz
+
+00:29:11,360 --> 00:29:26,159
+uh lehana law and nikita as they all
+
+00:29:14,320 --> 00:29:26,159
+
+YouTube URL: https://www.youtube.com/watch?v=beY10yfODDo
+
+

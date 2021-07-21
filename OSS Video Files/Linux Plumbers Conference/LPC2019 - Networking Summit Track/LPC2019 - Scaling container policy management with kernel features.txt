@@ -1,0 +1,3123 @@
+Title: LPC2019 - Scaling container policy management with kernel features
+Publication date: 2019-11-18
+Playlist: LPC2019 - Networking Summit Track
+Description: 
+	Scaling container policy management with kernel features
+
+Speaker
+ Joe Stringer (Cilium.io)
+
+Description
+Cilium is an open source project which implements the Container Network
+Interface (CNI) to provide networking and security functions in modern
+application environments. The primary focus of the Cilium community recently
+has been on scaling these functions to support thousands of nodes and hundreds
+of thousands of containers. Such environments impose a high rate of churn as
+containers and nodes appear and leave the cluster. For each change, the
+networking plugin needs to handle the incoming events and ensure that policy is
+in sync with network configuration state. This creates a strong incentive to
+efficiently interpret and map down cluster events into the required Linux
+networking configuration to minimize the window during which there are
+discrepancies between the desired and realized state in the cluster---something
+that is made possible through eBPF and other kernel features.
+
+Cilium realizes these policy and container events through the use of many
+aspects of the networking stack, from rules to routes, tc to socket hooks,
+skb-mark to the skb-cb. Modelling the changes to datapath state involves a
+non-trivial amount of work in the userspace daemon to structure the desired
+state from external entities and allow incremental adjustments to be made,
+keeping the amount of work required to handle an event proportional to its
+impact on the kernel configuration. Some aspects of datapath configuration such
+as the implementation of L7 policy have gone through multiple iterations, which
+provides a window for us to explore the past, present and future of transparent
+proxies.
+
+This talk will discuss the container policy model used by Cilium to apply
+whitelist filtering of requests at layers 3, 4 and 7; memoization techniques
+used to cache intermediate policy computation artifacts; and impacts on
+dataplane design and kernel features when considering large container based
+deployments with high rates of change in cluster state.
+Captions: 
+	00:00:00,600 --> 00:00:01,670
+- [Dave] Good morning everyone.
+
+00:00:01,670 --> 00:00:02,920
+Welcome to the third and final day
+
+00:00:02,920 --> 00:00:06,160
+of the Networking Track at LPC 2019.
+
+00:00:07,320 --> 00:00:09,170
+My shirt on Monday was really popular
+
+00:00:09,170 --> 00:00:10,970
+so I wore the other one that I have.
+
+00:00:13,190 --> 00:00:16,050
+Today we'll start the day with Joe Stringer.
+
+00:00:16,050 --> 00:00:17,780
+Joe used to do a lot of work on OVS
+
+00:00:17,780 --> 00:00:20,247
+but now he's doing all cool things, Cilium and BPF.
+
+00:00:20,247 --> 00:00:22,440
+And he's gonna talk to us about scaling container
+
+00:00:22,440 --> 00:00:23,870
+policy management with kernel features.
+
+00:00:23,870 --> 00:00:26,594
+So please give him a very warm welcome.
+
+00:00:26,594 --> 00:00:30,160
+(audience applauds)
+
+00:00:30,160 --> 00:00:31,350
+- Thanks Dave.
+
+00:00:31,350 --> 00:00:34,430
+Yeah so this is gonna be a talk about some of the ways
+
+00:00:34,430 --> 00:00:36,280
+that we configure the kernel,
+
+00:00:36,280 --> 00:00:39,380
+in terms of BPF, in terms of netfilter,
+
+00:00:39,380 --> 00:00:42,577
+a little bit of other various different features.
+
+00:00:42,577 --> 00:00:46,690
+And particularly how that allows us to achieve
+
+00:00:46,690 --> 00:00:50,563
+a higher level of scale when managing container networking.
+
+00:00:51,430 --> 00:00:54,010
+So first, I'll start with a little bit of background
+
+00:00:54,010 --> 00:00:57,290
+and definition of some of the, what do I mean by scale,
+
+00:00:57,290 --> 00:00:59,490
+what kind of environment am I talking about?
+
+00:01:01,494 --> 00:01:03,350
+And just a brief overview of that.
+
+00:01:03,350 --> 00:01:05,720
+Then I wanna talk about how we instantiate
+
+00:01:05,720 --> 00:01:07,400
+the BPF dataplane
+
+00:01:08,550 --> 00:01:11,000
+within a node and attach that to containers
+
+00:01:11,000 --> 00:01:12,950
+to provide the networking and security.
+
+00:01:14,070 --> 00:01:17,360
+Then later on I'll talk about identity-based security,
+
+00:01:17,360 --> 00:01:18,193
+where we
+
+00:01:20,400 --> 00:01:23,710
+apply security based on numeric integers
+
+00:01:23,710 --> 00:01:26,250
+which are associated with sets of labels
+
+00:01:26,250 --> 00:01:28,840
+from a container or a pod.
+
+00:01:28,840 --> 00:01:30,950
+And then later on, I'll get into the nitty gritty details
+
+00:01:30,950 --> 00:01:33,783
+of how we do L7 redirection and security.
+
+00:01:35,951 --> 00:01:39,860
+So first up, I wanted to briefly describe.
+
+00:01:39,860 --> 00:01:44,170
+So Cilium is a container networking plug-in
+
+00:01:44,170 --> 00:01:47,470
+which works with Kubernetes and other orchestrators.
+
+00:01:47,470 --> 00:01:49,870
+So in the Kubernetes world what you have is
+
+00:01:49,870 --> 00:01:52,420
+a centralized master which handles requests
+
+00:01:52,420 --> 00:01:57,420
+from users and from nodes to organize the cluster.
+
+00:01:58,040 --> 00:01:59,850
+So, for instance, if someone wants to deploy
+
+00:01:59,850 --> 00:02:02,010
+an application then they will write the YAML file
+
+00:02:02,010 --> 00:02:05,430
+and they will send this YAML file to the centralized master.
+
+00:02:05,430 --> 00:02:07,230
+And then the master will go and schedule that
+
+00:02:07,230 --> 00:02:10,750
+on individual nodes, depending on the current resource usage
+
+00:02:10,750 --> 00:02:12,170
+of the node,
+
+00:02:12,170 --> 00:02:14,210
+and the
+
+00:02:14,210 --> 00:02:15,530
+resource expectations
+
+00:02:15,530 --> 00:02:18,363
+of the pod which you can define as a operator.
+
+00:02:19,340 --> 00:02:21,700
+So then along with the master
+
+00:02:21,700 --> 00:02:22,910
+you've got various different workers.
+
+00:02:22,910 --> 00:02:25,430
+So you can have perhaps thousands of these worker nodes
+
+00:02:25,430 --> 00:02:30,430
+which are providing the place where these workloads can run.
+
+00:02:31,340 --> 00:02:34,570
+And then you also have this shared KV store etcd
+
+00:02:34,570 --> 00:02:37,410
+on the side which finds backup of the state
+
+00:02:37,410 --> 00:02:39,210
+that you've applied in your cluster.
+
+00:02:41,070 --> 00:02:43,560
+So for Kubernetes plugins, so what's the responsibility
+
+00:02:43,560 --> 00:02:45,688
+of a Kubernetes network plugin?
+
+00:02:45,688 --> 00:02:47,870
+So first up, you've got plumbing the local connectivity
+
+00:02:47,870 --> 00:02:51,553
+between a pod that exists on a node and the node itself,
+
+00:02:52,480 --> 00:02:55,710
+and then if it's anything more than a very trivial plugin
+
+00:02:55,710 --> 00:02:58,590
+then it's going to also connect remote nodes,
+
+00:02:58,590 --> 00:03:02,210
+so this may be done by establishing a tunnel mesh,
+
+00:03:02,210 --> 00:03:05,190
+or it may be done by plugging routes into the Linux kernel
+
+00:03:05,190 --> 00:03:07,730
+to tell one node how to connect to another node,
+
+00:03:07,730 --> 00:03:10,823
+how to forward traffic to pods on other nodes.
+
+00:03:11,830 --> 00:03:14,610
+There's also services or loadbalancing
+
+00:03:14,610 --> 00:03:18,150
+where we configure virtual IP addresses
+
+00:03:18,150 --> 00:03:20,300
+and allow pods to be able to connect to these
+
+00:03:20,300 --> 00:03:24,750
+and then farm out the requests to different back-ends
+
+00:03:24,750 --> 00:03:27,673
+that will provide that service.
+
+00:03:28,610 --> 00:03:31,861
+And then the more advanced Kubernetes network plugins
+
+00:03:31,861 --> 00:03:33,590
+also provide some sort of network policy
+
+00:03:33,590 --> 00:03:36,703
+in terms of IP addresses or identities or so on.
+
+00:03:38,820 --> 00:03:40,740
+So Cilium, Cilium is an agent that runs
+
+00:03:40,740 --> 00:03:43,320
+on each node in the cluster.
+
+00:03:43,320 --> 00:03:45,670
+It's a heavy user of eBPF but also does a lot
+
+00:03:45,670 --> 00:03:48,333
+of configuration of other aspects of the Linux stack.
+
+00:03:49,280 --> 00:03:51,090
+And one of the key points of Cilium is
+
+00:03:51,090 --> 00:03:54,280
+this identity-based security that it does.
+
+00:03:54,280 --> 00:03:57,160
+Using the labels of pods on containers
+
+00:03:57,160 --> 00:04:00,360
+and applying security efficiently through that.
+
+00:04:00,360 --> 00:04:03,350
+And one of the key goals of Cilium is also
+
+00:04:03,350 --> 00:04:04,710
+to be scalable.
+
+00:04:04,710 --> 00:04:06,490
+So a lot of the other networking plugins
+
+00:04:06,490 --> 00:04:10,200
+that are out there with Kubernetes do pretty naive things
+
+00:04:10,200 --> 00:04:12,340
+when it comes to contracting the kernel.
+
+00:04:12,340 --> 00:04:14,270
+So some of my colleagues talked about this yesterday
+
+00:04:14,270 --> 00:04:16,590
+with the way that they configured a lot
+
+00:04:16,590 --> 00:04:19,740
+of IP tables rules to achieve
+
+00:04:20,978 --> 00:04:22,110
+the services,
+
+00:04:22,110 --> 00:04:24,940
+and so what we're going to do is avoid some
+
+00:04:24,940 --> 00:04:25,840
+of those mistakes.
+
+00:04:28,110 --> 00:04:30,220
+So there's various different things you can do obviously
+
+00:04:30,220 --> 00:04:31,570
+to try and scale out.
+
+00:04:31,570 --> 00:04:34,790
+I'm not going to cover the entire magnitude
+
+00:04:34,790 --> 00:04:37,353
+of all the work that you need to do to scale out.
+
+00:04:38,690 --> 00:04:41,240
+So, there's a lot of work that some
+
+00:04:41,240 --> 00:04:42,610
+of my colleagues did in terms
+
+00:04:42,610 --> 00:04:44,620
+of managing cluster interactions,
+
+00:04:44,620 --> 00:04:46,390
+in terms of minimizing the number of events
+
+00:04:46,390 --> 00:04:51,390
+between nodes, the sizes of those events, and so on.
+
+00:04:51,430 --> 00:04:53,270
+If you want more details, then there's a link
+
+00:04:53,270 --> 00:04:54,280
+to the Cilium blog below,
+
+00:04:54,280 --> 00:04:56,410
+which has a bunch of details on that.
+
+00:04:56,410 --> 00:04:58,520
+So what I'm more focused on here is optimizing
+
+00:04:58,520 --> 00:04:59,450
+the work within the nodes,
+
+00:04:59,450 --> 00:05:00,820
+so when we have particular events
+
+00:05:00,820 --> 00:05:02,210
+that we need to process,
+
+00:05:02,210 --> 00:05:04,730
+things like creation of a pod,
+
+00:05:04,730 --> 00:05:06,683
+or creation of a policy,
+
+00:05:07,810 --> 00:05:10,410
+then how can we map that implementation
+
+00:05:10,410 --> 00:05:12,043
+down into the datapath.
+
+00:05:14,840 --> 00:05:17,690
+So first up, deploying fast datapaths fast.
+
+00:05:17,690 --> 00:05:20,920
+So Cilium from the ground up has been written
+
+00:05:20,920 --> 00:05:23,670
+in such a way that ideally we will do the minimal amount
+
+00:05:23,670 --> 00:05:27,770
+of work necessary to apply the networking and policy
+
+00:05:27,770 --> 00:05:30,410
+for a container to provide those, you know,
+
+00:05:30,410 --> 00:05:32,700
+the forwarding connectivity, service connectivity
+
+00:05:32,700 --> 00:05:34,073
+in the policy.
+
+00:05:35,260 --> 00:05:39,390
+So within the BPF code that we have,
+
+00:05:39,390 --> 00:05:42,030
+we have hash defines, which will enable
+
+00:05:42,030 --> 00:05:43,030
+or disable code.
+
+00:05:43,030 --> 00:05:47,590
+We also hard code the individual IPs and MAC addresses
+
+00:05:47,590 --> 00:05:51,410
+and identities into the BPF code that's actually attached
+
+00:05:51,410 --> 00:05:52,763
+to an individual pod.
+
+00:05:53,810 --> 00:05:55,740
+And so one of the initial consequences of this was
+
+00:05:55,740 --> 00:05:58,470
+that we would have to invoke the compiler
+
+00:05:58,470 --> 00:06:00,720
+for every single pod that we run on the node.
+
+00:06:01,590 --> 00:06:02,880
+So if you want to run 20 nodes,
+
+00:06:02,880 --> 00:06:04,940
+then you're going to run the compiler 20 times.
+
+00:06:04,940 --> 00:06:07,500
+And this is a lot of processing.
+
+00:06:07,500 --> 00:06:12,500
+And it can also slow down the ability to deploy your pods
+
+00:06:13,350 --> 00:06:15,490
+across your cluster, 'cause if every single node is spending
+
+00:06:15,490 --> 00:06:19,460
+so much time compiling and attaching these programs,
+
+00:06:19,460 --> 00:06:23,113
+then you just can't scale out your cost risk as quickly.
+
+00:06:27,958 --> 00:06:30,420
+So what we did was something that we actually talked
+
+00:06:30,420 --> 00:06:33,180
+about last year at Linux Plumbers was ELF templating.
+
+00:06:33,180 --> 00:06:35,440
+So the idea here is that we invoke the compiler once
+
+00:06:35,440 --> 00:06:37,170
+and it generates an ELF file,
+
+00:06:37,170 --> 00:06:41,140
+which then have convenient access points
+
+00:06:41,140 --> 00:06:43,700
+within that ELF file where we can substitute static data
+
+00:06:43,700 --> 00:06:46,250
+like IP addresses and identities.
+
+00:06:46,250 --> 00:06:48,980
+So we compile the program once for a given datapath
+
+00:06:48,980 --> 00:06:51,160
+configuration, which is typically the same
+
+00:06:51,160 --> 00:06:53,270
+across all the pods within an agent,
+
+00:06:53,270 --> 00:06:55,323
+like a particular agent lifetime.
+
+00:06:56,917 --> 00:06:59,770
+And then when we go to load and attach
+
+00:06:59,770 --> 00:07:03,580
+that program onto individual pods within the node,
+
+00:07:03,580 --> 00:07:07,113
+then we will substitute the values for each of those.
+
+00:07:08,780 --> 00:07:11,150
+And so in terms of time,
+
+00:07:11,150 --> 00:07:15,580
+this has a significant speed-up, like 20 times faster,
+
+00:07:15,580 --> 00:07:18,767
+for an individual pod to be spun-up.
+
+00:07:18,767 --> 00:07:21,230
+But this is also saves a whole bunch of memory,
+
+00:07:21,230 --> 00:07:23,713
+and CPU as well.
+
+00:07:26,360 --> 00:07:28,490
+And so between this and then a bunch
+
+00:07:28,490 --> 00:07:30,774
+of the other work that we did on improving
+
+00:07:30,774 --> 00:07:35,380
+the control plane interactions between nodes,
+
+00:07:35,380 --> 00:07:39,380
+we were able to significantly decrease the CPU usage,
+
+00:07:39,380 --> 00:07:43,083
+and improve the speed at which we can deploy.
+
+00:07:44,010 --> 00:07:46,520
+So in this grafana dashboard,
+
+00:07:46,520 --> 00:07:49,270
+what we're demonstrating is we've got 1000 nodes
+
+00:07:49,270 --> 00:07:50,960
+in a GKE environment,
+
+00:07:50,960 --> 00:07:54,340
+and we're scaling from 30,000 pods up to 60,000 pods.
+
+00:07:54,340 --> 00:07:56,020
+And the thing I wanna highlight here is
+
+00:07:56,020 --> 00:07:58,840
+in the middle, we have the CPU usage per node,
+
+00:07:58,840 --> 00:08:01,910
+and the average CPU usage is around about 5%
+
+00:08:01,910 --> 00:08:04,383
+across the deployment time.
+
+00:08:05,300 --> 00:08:07,450
+And then maybe one of the nodes is reaching
+
+00:08:07,450 --> 00:08:10,430
+up to about 20% CPU in terms of the CPU usage
+
+00:08:10,430 --> 00:08:12,463
+of the Cilium container.
+
+00:08:15,470 --> 00:08:18,070
+So I won't get into the details of how that actually works,
+
+00:08:18,070 --> 00:08:21,060
+if you're interested, then we can discuss a bit later,
+
+00:08:21,060 --> 00:08:24,080
+it's a lot of fun with the ELF files,
+
+00:08:24,080 --> 00:08:26,460
+we also did some work in libebpf and in the kernel
+
+00:08:26,460 --> 00:08:30,450
+to facilitate this, but we can leave that
+
+00:08:30,450 --> 00:08:32,193
+for perhaps a little bit later.
+
+00:08:33,750 --> 00:08:38,170
+So one of the main things that we've done here is basically
+
+00:08:38,170 --> 00:08:41,374
+we optimized the compilation execution
+
+00:08:41,374 --> 00:08:44,720
+from running once, running the compiler once
+
+00:08:44,720 --> 00:08:47,600
+for every single pod deploy within the node,
+
+00:08:47,600 --> 00:08:48,700
+to just running it once,
+
+00:08:48,700 --> 00:08:52,190
+and then attaching N times.
+
+00:08:52,190 --> 00:08:53,690
+So one of the things that would be kind of interesting is
+
+00:08:53,690 --> 00:08:55,460
+if we could actually push this further down
+
+00:08:55,460 --> 00:08:56,610
+into the kernel and say,
+
+00:08:56,610 --> 00:08:58,770
+maybe I could load a eBPF program
+
+00:08:58,770 --> 00:09:00,400
+and it would be verified once.
+
+00:09:00,400 --> 00:09:02,610
+And then I have some sort of a clone action
+
+00:09:02,610 --> 00:09:07,610
+where I can duplicate that pre-verified BPF program
+
+00:09:07,780 --> 00:09:12,460
+in the kernel with reinstantiation of its own maps,
+
+00:09:12,460 --> 00:09:13,750
+and then I don't have to go
+
+00:09:13,750 --> 00:09:15,583
+through the verifier cost as well.
+
+00:09:17,710 --> 00:09:19,600
+And then another interesting idea for us
+
+00:09:19,600 --> 00:09:21,960
+would also be if we can somehow have a way
+
+00:09:21,960 --> 00:09:25,422
+to templatize code in the kernel.
+
+00:09:25,422 --> 00:09:27,840
+So at the moment, we tend to shy away
+
+00:09:27,840 --> 00:09:30,330
+from the extremity of enabling
+
+00:09:30,330 --> 00:09:32,160
+and disabling different code piles depending
+
+00:09:32,160 --> 00:09:33,800
+on the configuration, for instance,
+
+00:09:33,800 --> 00:09:35,050
+if nobody's running policy,
+
+00:09:35,050 --> 00:09:37,240
+then do we really need to do map lookups to it
+
+00:09:37,240 --> 00:09:38,440
+to implement policy.
+
+00:09:38,440 --> 00:09:41,120
+If nobody runs services, then we don't need
+
+00:09:41,120 --> 00:09:42,960
+to run that code.
+
+00:09:42,960 --> 00:09:47,030
+But in practice what we tend to do is
+
+00:09:47,030 --> 00:09:48,700
+include all of that code, and then
+
+00:09:48,700 --> 00:09:51,210
+there's no way to, if you want to enable or disable
+
+00:09:51,210 --> 00:09:54,010
+that at runtime, we go and invoke the compiler again,
+
+00:09:54,010 --> 00:09:56,460
+and then we have to invoke the verifier again.
+
+00:09:56,460 --> 00:09:59,650
+- [Dave] So on the first order of consideration,
+
+00:09:59,650 --> 00:10:02,683
+it sounds like what you want is a clone plus relocations.
+
+00:10:04,430 --> 00:10:07,730
+- Yeah. Because I think the main thing is the maps, right?
+
+00:10:07,730 --> 00:10:08,833
+So, someone asked--
+
+00:10:08,833 --> 00:10:10,660
+- [Dave] Does the maps, but also, like you're saying
+
+00:10:10,660 --> 00:10:12,730
+you want to put the IP addresses
+
+00:10:12,730 --> 00:10:15,650
+of the individual pods patched into the code?
+
+00:10:15,650 --> 00:10:17,218
+- Yes, yes - Or something like that?
+
+00:10:17,218 --> 00:10:18,051
+- Yeah, so, I guess--
+
+00:10:18,051 --> 00:10:19,280
+- [Dave] That's why I say relocation.
+
+00:10:19,280 --> 00:10:21,200
+- Yeah, yeah, so I guess,
+
+00:10:21,200 --> 00:10:23,169
+because I skipped over the details,
+
+00:10:23,169 --> 00:10:25,410
+there's something kind of a bit missing there,
+
+00:10:25,410 --> 00:10:27,580
+but the way I see it is things
+
+00:10:27,580 --> 00:10:29,370
+like that IP address identity and so on,
+
+00:10:29,370 --> 00:10:30,840
+you can imagine are in a map,
+
+00:10:30,840 --> 00:10:31,885
+- [Dave] Ahh.
+
+00:10:31,885 --> 00:10:34,780
+- And this is how it works, conceptually,
+
+00:10:34,780 --> 00:10:36,503
+in the libebpf implementation.
+
+00:10:36,503 --> 00:10:37,930
+- So it's the map keys that change in the code.
+
+00:10:37,930 --> 00:10:39,310
+- Right. So you can imagine
+
+00:10:39,310 --> 00:10:43,500
+instantiating a new map that represents the data section,
+
+00:10:43,500 --> 00:10:45,137
+or the read-only data section, and so on.
+
+00:10:45,137 --> 00:10:48,313
+- Is the box on, the box audio?
+
+00:10:51,150 --> 00:10:52,480
+The box audio.
+
+00:10:52,480 --> 00:10:53,313
+He took it.
+
+00:10:54,710 --> 00:10:57,513
+- [Attendee] Okay. Or the global data section, right?
+
+00:10:58,440 --> 00:10:59,794
+- Yeah.
+
+00:10:59,794 --> 00:11:03,480
+- Which is implicitly a map, but not accessible
+
+00:11:03,480 --> 00:11:05,883
+from outside, necessarily?
+
+00:11:06,730 --> 00:11:09,860
+Or you want to update it atomically, maybe?
+
+00:11:09,860 --> 00:11:10,693
+- [Dave] Oh, I see.
+
+00:11:10,693 --> 00:11:11,770
+- For the clone program.
+
+00:11:11,770 --> 00:11:12,603
+- [Dave] Okay.
+
+00:11:15,900 --> 00:11:17,300
+So we would need reference counting
+
+00:11:17,300 --> 00:11:18,960
+for the BPF program, oh no,
+
+00:11:18,960 --> 00:11:20,260
+we wouldn't do that, we would actually
+
+00:11:20,260 --> 00:11:21,680
+be making a new copy.
+
+00:11:21,680 --> 00:11:23,180
+- [Attendee] Yeah, right.
+
+00:11:23,180 --> 00:11:24,510
+- Yeah, so this is kind of a high level idea,
+
+00:11:24,510 --> 00:11:26,440
+I mean, some of the maps we would want,
+
+00:11:26,440 --> 00:11:29,130
+we would want to share with the original template,
+
+00:11:29,130 --> 00:11:30,780
+and then potentially some of the maps
+
+00:11:30,780 --> 00:11:32,850
+we want to go and instantiate a new one for each.
+
+00:11:32,850 --> 00:11:34,870
+So I don't know for sure how you
+
+00:11:34,870 --> 00:11:37,100
+would actually structure this.
+
+00:11:37,100 --> 00:11:40,040
+- And then, so there wouldn't be any instruction rewriting,
+
+00:11:40,040 --> 00:11:40,873
+correct?
+
+00:11:40,873 --> 00:11:41,791
+- [Attendee] No.
+
+00:11:41,791 --> 00:11:43,491
+- Except for the keys to the maps.
+
+00:11:44,360 --> 00:11:45,317
+- [Attendee] Yes.
+
+00:11:45,317 --> 00:11:46,150
+- [Dave] Okay.
+
+00:11:46,150 --> 00:11:48,570
+- Because we hard code the actual addresses to it.
+
+00:11:48,570 --> 00:11:50,960
+- [Dave] Okay, because if you had to do that,
+
+00:11:50,960 --> 00:11:53,100
+then you would have to redo constant blinding
+
+00:11:53,100 --> 00:11:54,920
+and everything, so you couldn't avoid
+
+00:11:54,920 --> 00:11:57,403
+the verifier completely, in the second clone.
+
+00:11:59,070 --> 00:12:01,270
+- Yeah. I mean, constant blinding is only like
+
+00:12:01,270 --> 00:12:03,720
+for privilege, but I agree, yes.
+
+00:12:03,720 --> 00:12:05,360
+- [Dave] It would be a consideration.
+
+00:12:05,360 --> 00:12:07,653
+- It would probably have to be rigided--
+
+00:12:07,653 --> 00:12:08,486
+- [Dave] Yes.
+
+00:12:08,486 --> 00:12:10,050
+- To some extent. Or at least only the addresses
+
+00:12:10,050 --> 00:12:11,700
+would have to be updated by the--
+
+00:12:13,270 --> 00:12:14,370
+- [Dave] Yes. - Yeah.
+
+00:12:16,450 --> 00:12:17,493
+- Okay, thank you.
+
+00:12:20,440 --> 00:12:22,540
+- So moving on to identity-based security.
+
+00:12:23,980 --> 00:12:26,740
+So this diagram is trying to give some sense
+
+00:12:26,740 --> 00:12:28,720
+of the different interactions that happen
+
+00:12:28,720 --> 00:12:32,330
+within the cluster to apply identity-based security.
+
+00:12:32,330 --> 00:12:33,920
+So in the upper right-hand side
+
+00:12:33,920 --> 00:12:37,090
+of the slide, we have the Kubernetes master.
+
+00:12:37,090 --> 00:12:40,040
+So there the deployments are configured,
+
+00:12:40,040 --> 00:12:43,200
+so this is in terms of which pods are desired
+
+00:12:43,200 --> 00:12:45,180
+to be existing in the cluster.
+
+00:12:45,180 --> 00:12:46,770
+So in this case we've got the Star Wars app,
+
+00:12:46,770 --> 00:12:48,200
+where we deploy tiefighter pods
+
+00:12:48,200 --> 00:12:51,000
+and deathstar pods within the cluster.
+
+00:12:51,000 --> 00:12:53,430
+And then in there we'll also have some sort
+
+00:12:53,430 --> 00:12:56,720
+of a policy which will determine who is allowed
+
+00:12:56,720 --> 00:12:57,553
+to talk to whom.
+
+00:12:58,440 --> 00:13:00,780
+So when the deployment is created,
+
+00:13:00,780 --> 00:13:02,330
+so an agent handles that event,
+
+00:13:02,330 --> 00:13:04,210
+and it will plumb the connectivity
+
+00:13:04,210 --> 00:13:06,060
+within the node and across the nodes,
+
+00:13:06,060 --> 00:13:08,690
+to allow the tiefighter to reach the worker node,
+
+00:13:08,690 --> 00:13:10,823
+and to reach other nodes.
+
+00:13:14,245 --> 00:13:16,130
+And then the Cilium agent will also look
+
+00:13:16,130 --> 00:13:18,230
+at a set of labels that are associated
+
+00:13:18,230 --> 00:13:22,070
+with this pod, and will allocate an identity
+
+00:13:22,070 --> 00:13:24,380
+that identifies that set of labels.
+
+00:13:24,380 --> 00:13:26,340
+So if we have, like, five tiefighters
+
+00:13:26,340 --> 00:13:29,030
+in this environment, they will have the same identity.
+
+00:13:29,030 --> 00:13:31,690
+And so this is typically in larger scale environments
+
+00:13:31,690 --> 00:13:33,640
+this is allocated through etcd.
+
+00:13:33,640 --> 00:13:35,760
+In smaller environments, we can avoid it
+
+00:13:35,760 --> 00:13:38,660
+and just do it directly through the Kubernetes API server.
+
+00:13:40,200 --> 00:13:42,033
+So here we have identities for a tiefighter
+
+00:13:42,033 --> 00:13:43,270
+and for the deathstar.
+
+00:13:43,270 --> 00:13:45,050
+So when the tiefighter wants to send traffic
+
+00:13:45,050 --> 00:13:47,030
+to the deathstar, it sends traffic through
+
+00:13:47,030 --> 00:13:48,210
+into the BPF program,
+
+00:13:48,210 --> 00:13:51,440
+and we attach the identity of the source
+
+00:13:51,440 --> 00:13:53,020
+within the packet,
+
+00:13:53,020 --> 00:13:55,890
+in this case I have an IPv6 example,
+
+00:13:55,890 --> 00:13:57,410
+and then that identity is transferred
+
+00:13:57,410 --> 00:13:59,270
+with the packet to the destination,
+
+00:13:59,270 --> 00:14:00,960
+and then when the BPF program
+
+00:14:00,960 --> 00:14:03,207
+at the destination receives this,
+
+00:14:03,207 --> 00:14:06,220
+it is, so it has the source identity,
+
+00:14:06,220 --> 00:14:07,530
+it's just an integer,
+
+00:14:07,530 --> 00:14:08,770
+it has the destination identity,
+
+00:14:08,770 --> 00:14:11,290
+it's an integer, and it can do a simple map lookup
+
+00:14:11,290 --> 00:14:14,020
+to determine is this allowed to talk to this.
+
+00:14:14,020 --> 00:14:15,760
+If so, pass the traffic, otherwise,
+
+00:14:15,760 --> 00:14:16,610
+drop the traffic.
+
+00:14:18,120 --> 00:14:19,530
+So you may do it through IPv6,
+
+00:14:19,530 --> 00:14:20,530
+there are other ways to do it, you know,
+
+00:14:20,530 --> 00:14:22,053
+through tunnels and so on.
+
+00:14:24,740 --> 00:14:26,566
+To give a real world example, like this is
+
+00:14:26,566 --> 00:14:29,173
+one of our getting started guide policies.
+
+00:14:30,010 --> 00:14:32,960
+So in the middle, we have a spec here
+
+00:14:32,960 --> 00:14:35,262
+which says endpointSelector matchLabels.
+
+00:14:35,262 --> 00:14:37,680
+We're matching on pods that have the label
+
+00:14:37,680 --> 00:14:40,860
+organization 'empire' and class 'deathstar'.
+
+00:14:40,860 --> 00:14:43,390
+So this policy will apply to the deathstar.
+
+00:14:43,390 --> 00:14:44,900
+And then supplying an ingress policy,
+
+00:14:44,900 --> 00:14:46,420
+which is a whitelist,
+
+00:14:46,420 --> 00:14:48,900
+and it says we are allowing traffic
+
+00:14:48,900 --> 00:14:50,200
+that comes from the empire.
+
+00:14:50,200 --> 00:14:51,270
+So we're not gonna allow traffic
+
+00:14:51,270 --> 00:14:52,620
+that comes from the alliance.
+
+00:14:52,620 --> 00:14:57,620
+And in this case, it's port 80 and TCP.
+
+00:14:57,950 --> 00:15:02,600
+So, in the sort of control plane level,
+
+00:15:02,600 --> 00:15:05,420
+we may have some set of identities, for instance,
+
+00:15:05,420 --> 00:15:07,420
+we have an identity for the deathstar, for the tiefighter,
+
+00:15:07,420 --> 00:15:10,230
+maybe you have other identities for xwing, and so on.
+
+00:15:11,420 --> 00:15:13,660
+And so what we do is we look at the policy
+
+00:15:13,660 --> 00:15:16,780
+and for every single match label statement,
+
+00:15:16,780 --> 00:15:18,347
+we go across all the identities,
+
+00:15:18,347 --> 00:15:21,540
+and we determine which identities does this particular
+
+00:15:21,540 --> 00:15:23,843
+match label's statement apply to.
+
+00:15:25,180 --> 00:15:27,150
+So the one in the middle
+
+00:15:27,150 --> 00:15:29,810
+of the slide here is the policy
+
+00:15:30,645 --> 00:15:31,478
+of traffic
+
+00:15:31,478 --> 00:15:34,930
+that the policy will affect,
+
+00:15:34,930 --> 00:15:36,300
+and then at the bottom of the slide,
+
+00:15:36,300 --> 00:15:37,330
+it's selecting the deathstar,
+
+00:15:37,330 --> 00:15:40,893
+so this is which pods will we apply that policy to.
+
+00:15:43,400 --> 00:15:46,080
+So there's a bit more details in the blog post
+
+00:15:46,080 --> 00:15:49,903
+about sort of how this helps us with scale,
+
+00:15:49,903 --> 00:15:51,760
+but I think the long and short of it is
+
+00:15:51,760 --> 00:15:54,380
+that you may have a potentially very large number
+
+00:15:54,380 --> 00:15:56,250
+of identities within this cluster.
+
+00:15:56,250 --> 00:15:59,430
+You may have various different policies
+
+00:15:59,430 --> 00:16:02,430
+and so there needs to be some amount of crunching
+
+00:16:02,430 --> 00:16:05,160
+of all of the match label statements in your policies,
+
+00:16:05,160 --> 00:16:09,150
+against all the identities that exist in your cluster,
+
+00:16:09,150 --> 00:16:13,160
+to determine which pods do the policies need
+
+00:16:13,160 --> 00:16:16,830
+to apply to, and what traffic is allowed by those policies.
+
+00:16:16,830 --> 00:16:18,520
+So there's a bunch of optimizations we can do there,
+
+00:16:18,520 --> 00:16:20,290
+but it's mostly out of kernel land,
+
+00:16:20,290 --> 00:16:23,490
+so I'll sort of gloss over it for now,
+
+00:16:23,490 --> 00:16:24,940
+and move on to the dataplane.
+
+00:16:27,810 --> 00:16:32,740
+So given these, the mapping that saves the match labels,
+
+00:16:32,740 --> 00:16:35,050
+is going to now allow this identity,
+
+00:16:35,050 --> 00:16:37,050
+what we do is we plumb down something
+
+00:16:37,050 --> 00:16:40,127
+like allow this identity 12468
+
+00:16:40,127 --> 00:16:41,790
+and a particular port and protocol
+
+00:16:41,790 --> 00:16:44,963
+down into a BPF map in the kernel.
+
+00:16:45,910 --> 00:16:47,670
+So then when our tiefighter sends its traffic
+
+00:16:47,670 --> 00:16:50,300
+from this remote node with this identity in the packet,
+
+00:16:50,300 --> 00:16:51,920
+we receive it into that node.
+
+00:16:51,920 --> 00:16:54,200
+We need to do effectively endpoint routing,
+
+00:16:54,200 --> 00:16:55,980
+we say which endpoint are we going to try
+
+00:16:55,980 --> 00:16:57,930
+to send this traffic to.
+
+00:16:57,930 --> 00:17:00,080
+We'll do some sort of connection tracking
+
+00:17:00,080 --> 00:17:04,713
+to associate the packet back to the original direction.
+
+00:17:06,410 --> 00:17:08,020
+Tuple, which allows us to do policy based
+
+00:17:08,020 --> 00:17:09,810
+on forward direction tuple,
+
+00:17:09,810 --> 00:17:11,330
+and then we'll apply this policy.
+
+00:17:11,330 --> 00:17:12,890
+So there's no IP addresses here,
+
+00:17:12,890 --> 00:17:16,603
+it's just an identity lookup, and a port.
+
+00:17:17,630 --> 00:17:18,550
+So if the traffic's allowed,
+
+00:17:18,550 --> 00:17:20,100
+we'll send the traffic to the deathstar,
+
+00:17:20,100 --> 00:17:21,973
+otherwise we'll drop the traffic.
+
+00:17:23,845 --> 00:17:25,345
+So that's the ingress example.
+
+00:17:26,250 --> 00:17:27,470
+When it comes to egress, of course,
+
+00:17:27,470 --> 00:17:29,120
+we can't quite do the same thing.
+
+00:17:30,430 --> 00:17:32,100
+So what we do here is,
+
+00:17:32,100 --> 00:17:33,070
+assuming it's a similar policy,
+
+00:17:33,070 --> 00:17:36,920
+we were only allowing a certain amount of traffic
+
+00:17:36,920 --> 00:17:38,733
+from the tiefighter outbound,
+
+00:17:39,950 --> 00:17:42,830
+then we'll plumb down some sort of identity,
+
+00:17:42,830 --> 00:17:44,170
+and I'll get to in a moment
+
+00:17:44,170 --> 00:17:46,260
+how we'll determine that identity.
+
+00:17:46,260 --> 00:17:47,980
+But again, that's into the policy map.
+
+00:17:47,980 --> 00:17:49,120
+So our general flow will be like
+
+00:17:49,120 --> 00:17:52,760
+we'll apply services, the connection tracking reversal
+
+00:17:52,760 --> 00:17:53,863
+of the tuple,
+
+00:17:55,110 --> 00:17:57,470
+then we'll have this identity map.
+
+00:17:57,470 --> 00:17:58,340
+So in this identity map,
+
+00:17:58,340 --> 00:18:00,500
+we just map a particular destination IP address
+
+00:18:00,500 --> 00:18:01,333
+to an identity.
+
+00:18:03,170 --> 00:18:04,690
+And so once we've now got this identity,
+
+00:18:04,690 --> 00:18:05,800
+we can go into the policy,
+
+00:18:05,800 --> 00:18:08,280
+we can apply that policy based on an identity,
+
+00:18:08,280 --> 00:18:09,393
+plus the direction.
+
+00:18:11,820 --> 00:18:12,653
+And then if it's allowed,
+
+00:18:12,653 --> 00:18:14,220
+then we'll go on to the do we need
+
+00:18:14,220 --> 00:18:15,340
+to forward it to a local endpoint,
+
+00:18:15,340 --> 00:18:19,377
+or do we need to send it over a tunnel, and so on.
+
+00:18:19,377 --> 00:18:21,720
+So one of the nice things that we have here is
+
+00:18:21,720 --> 00:18:24,390
+we've kind of divorced the policy calculation
+
+00:18:24,390 --> 00:18:27,880
+and policy determination from the addressing
+
+00:18:27,880 --> 00:18:30,070
+of individual parts.
+
+00:18:30,070 --> 00:18:33,700
+So, if you have some set of identities in a cluster,
+
+00:18:33,700 --> 00:18:34,940
+we'll go and crunch the policy,
+
+00:18:34,940 --> 00:18:37,370
+we'll do all that sort of expensive stuff,
+
+00:18:37,370 --> 00:18:40,250
+and we'll generate this policy map entry,
+
+00:18:40,250 --> 00:18:42,460
+which we can also cache.
+
+00:18:42,460 --> 00:18:43,890
+And then when a new instance
+
+00:18:43,890 --> 00:18:46,280
+of the tiefighter spins up somewhere in the cluster,
+
+00:18:46,280 --> 00:18:48,390
+the only thing we need to propagate is the fact
+
+00:18:48,390 --> 00:18:51,802
+that this particular IP address has this identity.
+
+00:18:51,802 --> 00:18:53,400
+And so we can do this very easily with a KV store
+
+00:18:53,400 --> 00:18:55,140
+and then the event is effectively
+
+00:18:55,140 --> 00:18:57,870
+just plumbing all the way down into a BPF map.
+
+00:18:57,870 --> 00:18:59,700
+So the amount of computation is minimal
+
+00:18:59,700 --> 00:19:02,550
+for pod spin-up, pod spin-down,
+
+00:19:02,550 --> 00:19:03,880
+which is a very common operation,
+
+00:19:03,880 --> 00:19:06,120
+it's far more common than policy changes
+
+00:19:06,120 --> 00:19:07,563
+within a cluster.
+
+00:19:09,080 --> 00:19:10,430
+So that's a pretty big win.
+
+00:19:12,640 --> 00:19:14,733
+So next up, L7 security.
+
+00:19:20,930 --> 00:19:23,840
+So increasingly, what we're seeing is that
+
+00:19:23,840 --> 00:19:25,280
+a lot of applications are being written
+
+00:19:25,280 --> 00:19:26,520
+on the same protocols, you know,
+
+00:19:26,520 --> 00:19:28,699
+everybody runs their REST APIs
+
+00:19:28,699 --> 00:19:30,283
+and their GRPC apps and so on.
+
+00:19:31,130 --> 00:19:35,080
+And so the port is no longer all that interesting
+
+00:19:35,080 --> 00:19:37,390
+of a differentiator in terms of your policy.
+
+00:19:37,390 --> 00:19:40,410
+If everyone's running on port 80 or 443,
+
+00:19:40,410 --> 00:19:43,620
+it doesn't necessarily mean anything
+
+00:19:43,620 --> 00:19:44,983
+to restrict that traffic.
+
+00:19:46,700 --> 00:19:49,000
+So it makes a lot more sense if we can typify,
+
+00:19:49,000 --> 00:19:51,400
+like, a particular container has a certain set of labels,
+
+00:19:51,400 --> 00:19:53,170
+and it has a responsibility,
+
+00:19:53,170 --> 00:19:55,230
+and for a particular container,
+
+00:19:55,230 --> 00:19:57,610
+maybe it's supposed to post some data
+
+00:19:57,610 --> 00:20:00,543
+into another container in your application.
+
+00:20:01,380 --> 00:20:02,580
+But it's not allowed to delete,
+
+00:20:02,580 --> 00:20:05,604
+because delete is kind of, it's an invasive operation.
+
+00:20:05,604 --> 00:20:08,480
+So maybe a different container is responsible
+
+00:20:08,480 --> 00:20:11,713
+for executing the deletes on data within your cluster.
+
+00:20:12,620 --> 00:20:14,350
+And then you may have some front-end which is allowed
+
+00:20:14,350 --> 00:20:16,930
+to fetch particular URLs and serve those,
+
+00:20:16,930 --> 00:20:19,340
+but it's not allowed to fetch the sensitive information,
+
+00:20:19,340 --> 00:20:21,000
+and pass that back.
+
+00:20:21,000 --> 00:20:21,833
+And so what we're trying
+
+00:20:21,833 --> 00:20:24,200
+to do here is apply policy differently,
+
+00:20:24,200 --> 00:20:29,200
+depending on effectively the L7 protocol that exists there.
+
+00:20:32,420 --> 00:20:34,620
+So I hope that this is readable,
+
+00:20:34,620 --> 00:20:36,130
+the font's not too bold,
+
+00:20:36,130 --> 00:20:39,009
+but if we go back to our Star Wars example,
+
+00:20:39,009 --> 00:20:41,690
+if we have the tiefighter is trying
+
+00:20:41,690 --> 00:20:46,260
+to execute a POST request to the deathstar V1 API,
+
+00:20:46,260 --> 00:20:47,830
+to request landing,
+
+00:20:47,830 --> 00:20:48,920
+then what you'd expect is,
+
+00:20:48,920 --> 00:20:52,400
+okay, sure, yeah, it's allowed to land the tiefighter.
+
+00:20:52,400 --> 00:20:54,240
+It's fine. Ship's landed.
+
+00:20:54,240 --> 00:20:56,210
+But if the tiefighter goes and tries to execute
+
+00:20:56,210 --> 00:20:59,330
+like a PUT request to the exhaust port
+
+00:20:59,330 --> 00:21:00,523
+of the deathstar,
+
+00:21:02,030 --> 00:21:04,230
+then there's only really one way to respond.
+
+00:21:05,440 --> 00:21:07,140
+And what better way to respond than
+
+00:21:07,140 --> 00:21:11,307
+to tease the rebel scum with emojis.
+
+00:21:13,110 --> 00:21:14,720
+By the way, real option,
+
+00:21:14,720 --> 00:21:15,800
+the command line's at the bottom
+
+00:21:15,800 --> 00:21:18,540
+if you wanna play around with emoji rejection messages.
+
+00:21:18,540 --> 00:21:20,290
+Go ahead, you can talk to me later.
+
+00:21:22,230 --> 00:21:25,780
+So moving on to how does this work.
+
+00:21:25,780 --> 00:21:28,024
+So how do we actually plumb this?
+
+00:21:28,024 --> 00:21:28,980
+So this is the diagram that we had before,
+
+00:21:28,980 --> 00:21:32,420
+where we have the L3 flow of the traffic outbound
+
+00:21:32,420 --> 00:21:33,253
+from the node.
+
+00:21:34,670 --> 00:21:36,870
+In this case, what we're doing is doing redirection
+
+00:21:36,870 --> 00:21:39,963
+into a userspace proxy for the L7 processing.
+
+00:21:40,840 --> 00:21:44,001
+And one of the nice things we get with this is that
+
+00:21:44,001 --> 00:21:47,520
+there's a lot of different protocol implementations
+
+00:21:47,520 --> 00:21:50,030
+in libraries out there in various different languages,
+
+00:21:50,030 --> 00:21:51,750
+and if we can pass this into a userspace daemon,
+
+00:21:51,750 --> 00:21:54,860
+then we can easily reuse a lot of those libraries
+
+00:21:54,860 --> 00:21:56,483
+to apply our policy.
+
+00:22:01,068 --> 00:22:02,460
+So it kind of, it gets to the point where like
+
+00:22:02,460 --> 00:22:06,188
+if a customer wants some particular API, you know,
+
+00:22:06,188 --> 00:22:08,770
+I want to be able to filter on Cassandra requests
+
+00:22:08,770 --> 00:22:09,870
+or something like that,
+
+00:22:09,870 --> 00:22:11,970
+then it's pretty easy to just pick up a library
+
+00:22:11,970 --> 00:22:13,280
+and hack away on a weekend
+
+00:22:13,280 --> 00:22:16,793
+and come up with a way to filter that traffic within Cilium.
+
+00:22:18,010 --> 00:22:20,600
+So I want to take a closer look at this particular piece,
+
+00:22:20,600 --> 00:22:23,560
+where we somehow need to redirect this traffic
+
+00:22:23,560 --> 00:22:25,230
+into the proxy.
+
+00:22:25,230 --> 00:22:27,810
+It looks very simple and easy on this diagram,
+
+00:22:27,810 --> 00:22:30,010
+but we'll get into some details in a moment.
+
+00:22:31,040 --> 00:22:31,873
+It's painful.
+
+00:22:33,420 --> 00:22:36,660
+So initially, what we did was
+
+00:22:36,660 --> 00:22:38,890
+basically instantiate this proxy
+
+00:22:38,890 --> 00:22:40,940
+for every single port that's in our policy,
+
+00:22:40,940 --> 00:22:42,610
+and for every single endpoint that exists
+
+00:22:42,610 --> 00:22:43,460
+within the node,
+
+00:22:43,460 --> 00:22:44,710
+we would go and configure listeners,
+
+00:22:44,710 --> 00:22:46,210
+they'd configure the sockets,
+
+00:22:46,210 --> 00:22:48,130
+and we've have a lot of coordination between the agent
+
+00:22:48,130 --> 00:22:50,203
+and the proxy to establish these.
+
+00:22:51,870 --> 00:22:54,677
+And then obviously the agent needs to configure the policy
+
+00:22:54,677 --> 00:22:55,943
+and the proxy as well.
+
+00:22:57,438 --> 00:22:58,830
+But then the agent is responsible
+
+00:22:58,830 --> 00:23:00,710
+for populating the BPF map,
+
+00:23:00,710 --> 00:23:04,570
+which says given a destination,
+
+00:23:04,570 --> 00:23:06,020
+identity, and port,
+
+00:23:06,020 --> 00:23:08,430
+we're going to do a redirection to a particular port
+
+00:23:08,430 --> 00:23:09,290
+in the proxy.
+
+00:23:09,290 --> 00:23:10,770
+And so we have this mapping
+
+00:23:10,770 --> 00:23:13,930
+where the first port here is mapping to port 12345,
+
+00:23:13,930 --> 00:23:17,043
+and then the second port is 54321 in the BPF map.
+
+00:23:17,990 --> 00:23:19,230
+So this is a potentially large number
+
+00:23:19,230 --> 00:23:21,430
+of sockets to configure,
+
+00:23:21,430 --> 00:23:24,520
+and then every single time an endpoint spins up,
+
+00:23:24,520 --> 00:23:26,150
+or appears on the node,
+
+00:23:26,150 --> 00:23:27,790
+then we have to go and crunch this policy
+
+00:23:27,790 --> 00:23:29,350
+and configure the proxy,
+
+00:23:29,350 --> 00:23:32,010
+coordinate between the agent and proxy,
+
+00:23:32,010 --> 00:23:34,790
+and configuring the BPF map.
+
+00:23:34,790 --> 00:23:36,070
+Things may fail,
+
+00:23:36,070 --> 00:23:38,383
+and you have to deal with all the complexity there.
+
+00:23:39,760 --> 00:23:42,760
+So what happens in this model when we send traffic through?
+
+00:23:42,760 --> 00:23:44,663
+So we've got traffic from A to B.
+
+00:23:45,910 --> 00:23:48,690
+So to be able to redirect this traffic to the proxy,
+
+00:23:48,690 --> 00:23:51,360
+a simple way is we know that the proxy is listening
+
+00:23:53,520 --> 00:23:54,620
+on the local stack,
+
+00:23:54,620 --> 00:23:55,750
+on a particular port,
+
+00:23:55,750 --> 00:24:00,400
+so if we just NAT the destination to that port and protocol,
+
+00:24:00,400 --> 00:24:01,700
+and then just pass it up the stack,
+
+00:24:01,700 --> 00:24:03,210
+the stack is naturally just going to forward
+
+00:24:03,210 --> 00:24:05,163
+that traffic out to the proxy port.
+
+00:24:06,200 --> 00:24:08,940
+And so that's kind of in some ways quite easy,
+
+00:24:08,940 --> 00:24:11,260
+but then once the traffic arrives at the proxy port,
+
+00:24:11,260 --> 00:24:14,293
+we no longer have the context of the original destination.
+
+00:24:15,360 --> 00:24:16,840
+So if we don't need to allow the traffic,
+
+00:24:16,840 --> 00:24:19,320
+well actually, even to allow the traffic,
+
+00:24:19,320 --> 00:24:21,270
+we need to know about the destination
+
+00:24:21,270 --> 00:24:22,820
+to be able to apply the policy.
+
+00:24:24,680 --> 00:24:27,290
+So what do we do to fetch that destination back out?
+
+00:24:27,290 --> 00:24:29,070
+Well, we can create a BPF map,
+
+00:24:29,070 --> 00:24:30,340
+which then stores that state.
+
+00:24:30,340 --> 00:24:32,440
+So when we do the NAT,
+
+00:24:32,440 --> 00:24:33,273
+we will
+
+00:24:34,290 --> 00:24:36,020
+store the value,
+
+00:24:36,020 --> 00:24:38,460
+which will be the original destination
+
+00:24:38,460 --> 00:24:40,910
+that this packet was destined to,
+
+00:24:40,910 --> 00:24:44,110
+and then it will be keyed by some form
+
+00:24:44,110 --> 00:24:46,190
+of a tuple that we're passing up to the proxy.
+
+00:24:46,190 --> 00:24:48,140
+So when the proxy receives at the end,
+
+00:24:48,140 --> 00:24:52,240
+it executes the BPF lookup to fetch the destination.
+
+00:24:52,240 --> 00:24:55,020
+And then it's able to establish an outbound connection,
+
+00:24:55,020 --> 00:24:57,220
+assuming that the policy allows the traffic.
+
+00:24:58,120 --> 00:24:59,753
+And then it just kind of works.
+
+00:25:01,580 --> 00:25:03,610
+So there's a couple of problems we have with this.
+
+00:25:03,610 --> 00:25:06,340
+So you're doing per-packet NAT,
+
+00:25:06,340 --> 00:25:07,630
+the coordination with the proxy map,
+
+00:25:07,630 --> 00:25:09,140
+so that's another map that we have to manage,
+
+00:25:09,140 --> 00:25:12,690
+and coordinate between the agent and the proxy.
+
+00:25:12,690 --> 00:25:15,380
+The proxy is now doing BPF syscalls as well.
+
+00:25:15,380 --> 00:25:17,800
+And then we've got this costly config
+
+00:25:17,800 --> 00:25:20,733
+and complicated debugging between the,
+
+00:25:22,750 --> 00:25:24,150
+you know, if something goes wrong,
+
+00:25:24,150 --> 00:25:26,700
+how do we actually figure out what's going on here.
+
+00:25:29,187 --> 00:25:30,710
+So one thing we've changed recently,
+
+00:25:30,710 --> 00:25:33,420
+we've looked at using IP_TRANSPARENT.
+
+00:25:33,420 --> 00:25:35,210
+So the nice thing here is that we can reduce
+
+00:25:35,210 --> 00:25:37,900
+from having some number of dynamic ports
+
+00:25:37,900 --> 00:25:40,950
+that are configured based on endpoints running
+
+00:25:40,950 --> 00:25:43,820
+to just one port that can be established the first time
+
+00:25:43,820 --> 00:25:45,103
+that the agent starts up.
+
+00:25:46,800 --> 00:25:49,540
+So then when the agent actually needs to configure the BPF,
+
+00:25:49,540 --> 00:25:51,990
+it knows that for this particular protocol,
+
+00:25:51,990 --> 00:25:54,640
+I just need to plumb this one port that I know about.
+
+00:25:57,200 --> 00:25:59,890
+So to do this, we need a sprinkling of netfilter,
+
+00:25:59,890 --> 00:26:01,580
+a little bit of policy routing over there,
+
+00:26:01,580 --> 00:26:04,500
+and watch out for the mark of the beast,
+
+00:26:04,500 --> 00:26:05,960
+the SKB mark.
+
+00:26:05,960 --> 00:26:08,010
+So we have the traffic coming in,
+
+00:26:08,010 --> 00:26:11,160
+we need to mark the SKB,
+
+00:26:11,160 --> 00:26:12,410
+and then based on that mark
+
+00:26:12,410 --> 00:26:14,160
+we're passing up to some IP tables rule,
+
+00:26:14,160 --> 00:26:16,750
+that IP tables rule is matching on this mark,
+
+00:26:16,750 --> 00:26:19,150
+so now we know this mark is representing
+
+00:26:19,150 --> 00:26:21,050
+this traffic needs to go to the proxy.
+
+00:26:22,262 --> 00:26:25,500
+And then we do a jump to the transparent proxy logic
+
+00:26:25,500 --> 00:26:28,683
+on the particular port that we've previously configured.
+
+00:26:30,210 --> 00:26:32,540
+And then we need to further mark the traffic
+
+00:26:32,540 --> 00:26:34,880
+so that policy routing can then pick that up
+
+00:26:34,880 --> 00:26:36,550
+so then we can configure the IP rule to match
+
+00:26:36,550 --> 00:26:37,590
+on that mark,
+
+00:26:37,590 --> 00:26:39,990
+and do a lookup in a local special table,
+
+00:26:39,990 --> 00:26:42,530
+which then enforces that that traffic will be routed
+
+00:26:42,530 --> 00:26:43,753
+up to the local proxy.
+
+00:26:45,784 --> 00:26:47,330
+So there's a few problems we have with this.
+
+00:26:47,330 --> 00:26:49,130
+So one is in terms of debuggability.
+
+00:26:51,660 --> 00:26:55,430
+Cilium is not operating in a, you know, in a vacuum.
+
+00:26:55,430 --> 00:26:56,380
+Cilium needs to integrate
+
+00:26:56,380 --> 00:26:57,960
+with various other Kubernetes components,
+
+00:26:57,960 --> 00:27:00,800
+which may also be configuring netfilter
+
+00:27:00,800 --> 00:27:03,200
+and perhaps routes and so on as well.
+
+00:27:03,200 --> 00:27:04,780
+So when you want to try and debug
+
+00:27:04,780 --> 00:27:05,800
+and figure out, like,
+
+00:27:05,800 --> 00:27:08,730
+in this particular customer configuration,
+
+00:27:08,730 --> 00:27:12,830
+why is my L7 traffic not being forwarded correctly?
+
+00:27:12,830 --> 00:27:15,420
+Then you start doing things like adding IP tables rules
+
+00:27:15,420 --> 00:27:16,510
+into individual chains,
+
+00:27:16,510 --> 00:27:18,668
+and trying to do like -J log,
+
+00:27:18,668 --> 00:27:20,320
+and trying to debug all this, right?
+
+00:27:20,320 --> 00:27:21,573
+It's a pain.
+
+00:27:23,480 --> 00:27:25,590
+Whereas if everything is in BPF,
+
+00:27:25,590 --> 00:27:26,890
+we have some really nice helpers
+
+00:27:26,890 --> 00:27:29,860
+in the Cilium BPF implementation,
+
+00:27:29,860 --> 00:27:31,270
+where we use a paraffin buffer
+
+00:27:31,270 --> 00:27:33,450
+to emit notification events,
+
+00:27:33,450 --> 00:27:35,060
+so if we need to drop traffic,
+
+00:27:35,060 --> 00:27:36,730
+we can emit a drop event,
+
+00:27:36,730 --> 00:27:38,650
+and we can include a whole bunch of metadata,
+
+00:27:38,650 --> 00:27:41,890
+including packet contents, where it was in the datapath,
+
+00:27:41,890 --> 00:27:43,920
+the reason why we actually dropped the traffic,
+
+00:27:43,920 --> 00:27:44,930
+and so on.
+
+00:27:44,930 --> 00:27:47,280
+So it's far more rich if we're actually able to
+
+00:27:48,710 --> 00:27:50,697
+push this logic down into the BPF.
+
+00:27:50,697 --> 00:27:51,830
+And this also means,
+
+00:27:51,830 --> 00:27:54,360
+it's easy to onboard newer developers as well,
+
+00:27:54,360 --> 00:27:56,100
+because rather than saying,
+
+00:27:56,100 --> 00:27:59,270
+okay, you have to understand the entire forwarding stack,
+
+00:27:59,270 --> 00:28:02,400
+it's more like here's the code which executes our packets,
+
+00:28:02,400 --> 00:28:04,260
+and you can follow through in the BPF
+
+00:28:04,260 --> 00:28:08,613
+and see, okay, this is what's happening with the packet.
+
+00:28:10,319 --> 00:28:11,560
+So an initial implementation
+
+00:28:11,560 --> 00:28:15,520
+that I looked at was socket assign.
+
+00:28:15,520 --> 00:28:18,440
+So the idea is, we already have a socket lookup,
+
+00:28:18,440 --> 00:28:21,710
+if we can do a assign of that socket into the SKB
+
+00:28:21,710 --> 00:28:23,680
+and then pass that up the stack,
+
+00:28:23,680 --> 00:28:26,930
+the idea is I want to sort of pass that packet
+
+00:28:26,930 --> 00:28:27,953
+into that socket.
+
+00:28:29,640 --> 00:28:31,619
+So this is literally just like a SKB,
+
+00:28:31,619 --> 00:28:33,513
+SK equals the socket,
+
+00:28:34,420 --> 00:28:36,750
+and you do have to deal with rift counting, and so on,
+
+00:28:36,750 --> 00:28:38,050
+but it's sort of a detail.
+
+00:28:40,733 --> 00:28:42,790
+And then the other part is of course
+
+00:28:42,790 --> 00:28:44,580
+you have to set up the socket destructor,
+
+00:28:44,580 --> 00:28:45,460
+the SKB destructors,
+
+00:28:45,460 --> 00:28:47,313
+so that you'll actually free that socket.
+
+00:28:48,720 --> 00:28:51,193
+So in this case, we basically mark the packet,
+
+00:28:51,193 --> 00:28:54,280
+and then we still have this policy routing piece,
+
+00:28:54,280 --> 00:28:55,423
+based on this mark,
+
+00:28:56,340 --> 00:28:59,490
+but this at least works for,
+
+00:28:59,490 --> 00:29:01,360
+like it works locally for the TCP cases
+
+00:29:01,360 --> 00:29:03,320
+that I've been trying out,
+
+00:29:03,320 --> 00:29:04,593
+still working on the UDP.
+
+00:29:06,240 --> 00:29:08,060
+But conceptually, really what I want to do is say,
+
+00:29:08,060 --> 00:29:09,200
+actually, socket redirect.
+
+00:29:09,200 --> 00:29:11,930
+I don't want to care about
+
+00:29:11,930 --> 00:29:15,320
+how do I configure netfilter and IP tables,
+
+00:29:15,320 --> 00:29:19,100
+and IP route, and IP rule, and all of these things.
+
+00:29:19,100 --> 00:29:21,590
+If I already know from the agent,
+
+00:29:21,590 --> 00:29:23,610
+sorry, from the BPF,
+
+00:29:23,610 --> 00:29:25,260
+I know this traffic needs to go to a proxy,
+
+00:29:25,260 --> 00:29:27,623
+all I need to do is get it there somehow.
+
+00:29:28,720 --> 00:29:30,730
+So if I could do some socket lookups
+
+00:29:30,730 --> 00:29:32,950
+to determine the T proxy port, that I need to,
+
+00:29:32,950 --> 00:29:34,990
+sorry, the IP transparent port on the proxy,
+
+00:29:34,990 --> 00:29:37,250
+that I need to redirect the traffic to,
+
+00:29:37,250 --> 00:29:39,396
+and I could do some sort of like sk_redirect
+
+00:29:39,396 --> 00:29:42,220
+and just pass that packet to that socket.
+
+00:29:42,220 --> 00:29:44,540
+Then that would be much simpler,
+
+00:29:44,540 --> 00:29:47,825
+and would also allow all the debuggability improvements
+
+00:29:47,825 --> 00:29:50,513
+that we get from having it in BPF.
+
+00:29:53,460 --> 00:29:55,580
+So there is one hiccup there,
+
+00:29:55,580 --> 00:29:59,610
+which, so currently in the kernel,
+
+00:29:59,610 --> 00:30:01,023
+after you go through TC,
+
+00:30:02,250 --> 00:30:05,300
+so we're attaching BPF programs to TC ingress.
+
+00:30:05,300 --> 00:30:07,850
+So after that execution, there's actually an skb_orphan()
+
+00:30:07,850 --> 00:30:10,330
+which will release that socket reference
+
+00:30:10,330 --> 00:30:12,470
+before it goes into IP tables PREROUTING,
+
+00:30:12,470 --> 00:30:13,513
+and so on.
+
+00:30:15,080 --> 00:30:17,930
+And so like in my local testing to get this working,
+
+00:30:17,930 --> 00:30:20,080
+I basically just deleted that line of code.
+
+00:30:21,030 --> 00:30:21,990
+But obviously I have to come up
+
+00:30:21,990 --> 00:30:23,640
+with something a bit more robust.
+
+00:30:30,990 --> 00:30:34,570
+But yeah, so when I posted on the mailing list
+
+00:30:34,570 --> 00:30:37,010
+about this, I found that TC folks are actually already
+
+00:30:37,010 --> 00:30:39,333
+carrying hack to do something just like this.
+
+00:30:41,070 --> 00:30:44,160
+So Eric Dumaize suggested maybe we can just move
+
+00:30:44,160 --> 00:30:47,360
+the skb_orphan() away from that path
+
+00:30:47,360 --> 00:30:49,280
+into dev_forward_skb().
+
+00:30:50,390 --> 00:30:51,960
+There weren't a lot of other replies
+
+00:30:51,960 --> 00:30:53,860
+on the mailing list, so maybe that's just fine,
+
+00:30:53,860 --> 00:30:56,060
+I'll just post the patch when we just do it.
+
+00:30:59,200 --> 00:31:01,120
+- [Dave] Sounds good to me.
+
+00:31:01,120 --> 00:31:02,820
+- We've got somebody who wants to,
+
+00:31:06,150 --> 00:31:07,870
+and I'm by no means an expert here,
+
+00:31:07,870 --> 00:31:09,530
+so if it doesn't make sense--
+
+00:31:09,530 --> 00:31:10,680
+- This is probably a naive question,
+
+00:31:10,680 --> 00:31:12,290
+but if you had a different return value,
+
+00:31:12,290 --> 00:31:14,310
+like TC no orphan or something like that,
+
+00:31:14,310 --> 00:31:15,560
+could you do it that way?
+
+00:31:16,710 --> 00:31:17,543
+- Potentially, yes.
+
+00:31:17,543 --> 00:31:18,810
+So, I guess what that would mean is
+
+00:31:18,810 --> 00:31:21,110
+that in the fixed code, you would need to switch on
+
+00:31:21,110 --> 00:31:23,850
+that return value, and then somehow bypass
+
+00:31:23,850 --> 00:31:26,813
+whatever bits of the stack or next tier after that.
+
+00:31:28,010 --> 00:31:30,270
+Perhaps that's another direction I need to look at next.
+
+00:31:30,270 --> 00:31:32,250
+- Just in case this doesn't work out,
+
+00:31:32,250 --> 00:31:34,690
+another thing you could do is turn the
+
+00:31:34,690 --> 00:31:36,360
+socket pointer into the unsigned long
+
+00:31:36,360 --> 00:31:37,820
+and use a state bit at the bottom
+
+00:31:37,820 --> 00:31:40,160
+to say this is a sticky socket,
+
+00:31:40,160 --> 00:31:41,400
+don't orphan it.
+
+00:31:41,400 --> 00:31:42,290
+- Yeah.
+
+00:31:42,290 --> 00:31:45,180
+- Because that orphan probably is really important
+
+00:31:45,180 --> 00:31:48,140
+when it actually is used, so I think you should.
+
+00:31:48,140 --> 00:31:51,490
+- It's one of these things where I don't know
+
+00:31:51,490 --> 00:31:53,863
+how you actually establish what it's,
+
+00:31:54,740 --> 00:31:56,850
+all the different cases that it's responsible for,
+
+00:31:56,850 --> 00:31:58,790
+and that's what makes me, that's why I haven't gone--
+
+00:31:58,790 --> 00:32:01,240
+- So if your domain is your situation, you should
+
+00:32:02,670 --> 00:32:05,930
+decrease the scope to the situation you're familiar with.
+
+00:32:05,930 --> 00:32:06,763
+- Yeah.
+
+00:32:06,763 --> 00:32:07,596
+- Great.
+
+00:32:08,620 --> 00:32:11,690
+I like the progression on the slide figures,
+
+00:32:11,690 --> 00:32:14,500
+because always a good presentation is one
+
+00:32:14,500 --> 00:32:17,236
+where the arrows and boxes decrease over time.
+
+00:32:17,236 --> 00:32:19,319
+(laughs)
+
+00:32:22,600 --> 00:32:24,580
+- Okay, so to summarize,
+
+00:32:24,580 --> 00:32:27,820
+so there's a bunch of things about how you scale policy.
+
+00:32:27,820 --> 00:32:29,360
+There's things around processing cost,
+
+00:32:29,360 --> 00:32:33,200
+so how many events are you generating across the cluster?
+
+00:32:33,200 --> 00:32:35,069
+What's the cost for each of those events?
+
+00:32:35,069 --> 00:32:36,823
+And so that could be the cost in terms
+
+00:32:36,823 --> 00:32:38,060
+of the actual data, the size of that event
+
+00:32:38,060 --> 00:32:40,420
+that you're propagating across the cluster,
+
+00:32:40,420 --> 00:32:43,060
+but also in terms of the amount of processing
+
+00:32:43,060 --> 00:32:45,880
+that you do to handle that individual event.
+
+00:32:45,880 --> 00:32:47,970
+So one of the big gains that we've had is
+
+00:32:47,970 --> 00:32:51,130
+when we've just separated the policy implementation
+
+00:32:51,130 --> 00:32:52,950
+from the addressing.
+
+00:32:52,950 --> 00:32:55,140
+That's greatly simplified and allowed us
+
+00:32:55,140 --> 00:32:57,383
+to execute policy relatively,
+
+00:32:59,640 --> 00:33:00,860
+infrequently,
+
+00:33:00,860 --> 00:33:04,300
+and then generate some BPF state,
+
+00:33:04,300 --> 00:33:06,750
+which then, the things that actually happen often
+
+00:33:06,750 --> 00:33:08,210
+which is creation of pods,
+
+00:33:08,210 --> 00:33:09,690
+and deletion of pods,
+
+00:33:09,690 --> 00:33:12,023
+can have a minimal processing cost.
+
+00:33:13,020 --> 00:33:15,370
+So overall, I think like we've basically been looking
+
+00:33:15,370 --> 00:33:17,130
+at frontloading expensive operations, you know,
+
+00:33:17,130 --> 00:33:18,700
+when it comes to the templating,
+
+00:33:18,700 --> 00:33:20,280
+rather than compiling every single time,
+
+00:33:20,280 --> 00:33:22,210
+we can be a little bit smarter
+
+00:33:22,210 --> 00:33:23,570
+about compiling at the start,
+
+00:33:23,570 --> 00:33:25,840
+generate an ELF, and then substitute values
+
+00:33:25,840 --> 00:33:27,602
+in that ELF when necessary,
+
+00:33:27,602 --> 00:33:30,633
+to apply some change in config.
+
+00:33:31,590 --> 00:33:32,570
+When it comes to the policy,
+
+00:33:32,570 --> 00:33:35,218
+we're saying reduce the number of times you have
+
+00:33:35,218 --> 00:33:39,200
+to calculate that policy and do it at the start.
+
+00:33:39,200 --> 00:33:40,250
+When it comes to the L7,
+
+00:33:40,250 --> 00:33:44,050
+we're configuring a single port using IP_TRANSPARENT
+
+00:33:44,050 --> 00:33:46,180
+at the start rather than every single time you need
+
+00:33:46,180 --> 00:33:48,060
+to start up a pod, you know,
+
+00:33:48,060 --> 00:33:50,490
+you're doing all this coordination.
+
+00:33:50,490 --> 00:33:52,550
+So the kind of nice thing is that I think a lot
+
+00:33:52,550 --> 00:33:54,752
+of these aren't sort of one of these things
+
+00:33:54,752 --> 00:33:56,620
+where you have to trade off one thing vs. another.
+
+00:33:56,620 --> 00:33:57,660
+You're actually saying, like, no,
+
+00:33:57,660 --> 00:33:59,350
+just frontload the expensive operations,
+
+00:33:59,350 --> 00:34:02,643
+and it doesn't have to have a runtime cost per packet.
+
+00:34:04,090 --> 00:34:08,023
+So that's all my slides. Thank you very much.
+
+00:34:08,960 --> 00:34:10,840
+- [Dave] If you have any questions, get that box.
+
+00:34:10,840 --> 00:34:11,840
+Yes, he has the box.
+
+00:34:13,050 --> 00:34:16,930
+- [Attendee] So, I've been thinking about this cloning,
+
+00:34:16,930 --> 00:34:20,300
+the program idea you have, it's really cool,
+
+00:34:20,300 --> 00:34:22,113
+so, just few considerations.
+
+00:34:23,710 --> 00:34:27,060
+Safety considerations. When verifier compares,
+
+00:34:27,060 --> 00:34:29,290
+like one of the ideas you have with your clone
+
+00:34:29,290 --> 00:34:31,310
+and replace some of the constants, right?
+
+00:34:31,310 --> 00:34:33,810
+So the constant, because we track most of them
+
+00:34:33,810 --> 00:34:36,340
+precisely, we cannot just like replace,
+
+00:34:36,340 --> 00:34:39,100
+any constant. Because if it goes later somewhere
+
+00:34:39,100 --> 00:34:41,570
+in a pass the verifier sees, oh,
+
+00:34:41,570 --> 00:34:43,610
+this was like two, and we compare it
+
+00:34:43,610 --> 00:34:45,117
+with three, it knows it all is false,
+
+00:34:45,117 --> 00:34:47,090
+and it will not like
+
+00:34:47,090 --> 00:34:49,720
+prune has passed it, maybe potentially even eliminated
+
+00:34:49,720 --> 00:34:52,090
+by the verifiers, dead code,
+
+00:34:52,090 --> 00:34:54,298
+and all the code compressed, like way before just
+
+00:34:54,298 --> 00:34:58,330
+replacing any constant, we cannot just do that.
+
+00:34:58,330 --> 00:35:00,910
+- My understanding was we weren't replacing constants,
+
+00:35:00,910 --> 00:35:04,384
+we were replacing map keys, only,
+
+00:35:04,384 --> 00:35:05,400
+in the--
+
+00:35:05,400 --> 00:35:07,360
+- [Attendee] It's, you don't know, right?
+
+00:35:07,360 --> 00:35:08,230
+So if the same--
+
+00:35:08,230 --> 00:35:09,631
+- [Dave] No, but I'm saying that--
+
+00:35:09,631 --> 00:35:11,770
+- It could be in a key, but deflated this value
+
+00:35:11,770 --> 00:35:13,960
+as an integer, or was later used,
+
+00:35:13,960 --> 00:35:15,640
+and now to be precise,
+
+00:35:15,640 --> 00:35:17,778
+so we have this whole precise tracking as well--
+
+00:35:17,778 --> 00:35:18,611
+- [Dave] Oh, yeah.
+
+00:35:18,611 --> 00:35:20,120
+- So if we keep this information,
+
+00:35:20,120 --> 00:35:22,420
+that the constant was not precise,
+
+00:35:22,420 --> 00:35:23,950
+then potentially we can say,
+
+00:35:23,950 --> 00:35:26,090
+but then it will go like different datapaths,
+
+00:35:26,090 --> 00:35:27,840
+like this branch, it is precise,
+
+00:35:27,840 --> 00:35:28,800
+this is not,
+
+00:35:28,800 --> 00:35:31,130
+so it get hairy,
+
+00:35:31,130 --> 00:35:33,460
+so that's one thing we make sure we do right.
+
+00:35:33,460 --> 00:35:35,690
+And the second, even if we just cloning
+
+00:35:35,690 --> 00:35:38,000
+only for the purpose of replacing the map,
+
+00:35:38,000 --> 00:35:41,010
+need to make sure map is pretty much exactly the same
+
+00:35:41,010 --> 00:35:43,280
+that the key value size is the same,
+
+00:35:43,280 --> 00:35:46,580
+and if it's using something like VPSPN log inside,
+
+00:35:46,580 --> 00:35:48,900
+it also has to be in the same position,
+
+00:35:48,900 --> 00:35:51,690
+otherwise we can adjust like clone and arbitrary
+
+00:35:51,690 --> 00:35:53,260
+replace the maps.
+
+00:35:53,260 --> 00:35:57,441
+- Yeah, so, I guess the model I had in mind was the
+
+00:35:57,441 --> 00:35:59,850
+sort of, the kernel was responsible for that,
+
+00:35:59,850 --> 00:36:01,420
+and it says, like,
+
+00:36:01,420 --> 00:36:03,230
+when I'm cloning these maps, like,
+
+00:36:03,230 --> 00:36:05,740
+I'm actually directly creating another map
+
+00:36:05,740 --> 00:36:07,300
+with the exact same attributes,
+
+00:36:07,300 --> 00:36:10,750
+but in practice I haven't thought through to that degree
+
+00:36:10,750 --> 00:36:13,453
+that I know how that interface would look like.
+
+00:36:14,430 --> 00:36:16,650
+- I think the easiest would be to start off
+
+00:36:16,650 --> 00:36:18,040
+like the global data stuff,
+
+00:36:18,040 --> 00:36:20,840
+like the read-only and the data section
+
+00:36:20,840 --> 00:36:22,380
+and the others.
+
+00:36:22,380 --> 00:36:24,330
+You still have to make sure if you have a
+
+00:36:24,330 --> 00:36:26,320
+spin lock in it, I don't know if you support this case,
+
+00:36:26,320 --> 00:36:29,820
+but potentially, but other than that,
+
+00:36:29,820 --> 00:36:32,060
+I mean, all this stuff are just like loads,
+
+00:36:32,060 --> 00:36:36,180
+so the verifier wouldn't have to reverify it, I think.
+
+00:36:36,180 --> 00:36:39,810
+As long as those constraints in terms
+
+00:36:39,810 --> 00:36:43,313
+of map properties still fit, so I think
+
+00:36:43,313 --> 00:36:46,930
+that would be the most straightforward path
+
+00:36:46,930 --> 00:36:48,113
+to implement actually.
+
+00:36:49,440 --> 00:36:50,767
+- Yeah, because at that time, like,
+
+00:36:50,767 --> 00:36:52,470
+the verifier doesn't know what the load
+
+00:36:52,470 --> 00:36:54,513
+from the map is, so it already has to.
+
+00:36:56,080 --> 00:36:57,980
+- [Attendee] So that was one comment,
+
+00:36:57,980 --> 00:36:59,750
+another comment I had for the
+
+00:37:01,680 --> 00:37:03,780
+for the per packet cost,
+
+00:37:03,780 --> 00:37:04,740
+that you were saying you're doing
+
+00:37:04,740 --> 00:37:07,400
+this per packet nod and per packet lookup.
+
+00:37:07,400 --> 00:37:10,110
+So if you already know the socket,
+
+00:37:10,110 --> 00:37:12,230
+can you use like a socket locker storage
+
+00:37:12,230 --> 00:37:13,840
+to avoid all the lookups?
+
+00:37:16,780 --> 00:37:17,903
+- So, I think,
+
+00:37:18,840 --> 00:37:22,063
+what we have in the BPF is like a port?
+
+00:37:26,011 --> 00:37:29,050
+So we're doing the socket lookup to use that port
+
+00:37:29,050 --> 00:37:31,550
+to find the transparent socket.
+
+00:37:31,550 --> 00:37:33,330
+So are you suggesting
+
+00:37:35,130 --> 00:37:37,500
+- [Attendee] Well, I don't know the exact details,
+
+00:37:37,500 --> 00:37:40,020
+like whether you have a socket available there,
+
+00:37:40,020 --> 00:37:43,263
+but like, if you do, I'm saying like
+
+00:37:43,263 --> 00:37:46,500
+all the state, all the separations
+
+00:37:46,500 --> 00:37:47,763
+that you do per packet,
+
+00:37:49,440 --> 00:37:51,050
+well yeah, this stuff,
+
+00:37:51,050 --> 00:37:54,940
+not quite that, but I think it was during the full part
+
+00:37:54,940 --> 00:37:57,210
+of the presentation, where you're saying you're doing all
+
+00:37:57,210 --> 00:37:59,470
+of the sys nod, D nod, and so on, so forth,
+
+00:37:59,470 --> 00:38:01,750
+and all of them are individual lookups,
+
+00:38:01,750 --> 00:38:04,760
+so if you can construct them in sort of like sequence
+
+00:38:04,760 --> 00:38:07,620
+of things to do, and just store it as part
+
+00:38:07,620 --> 00:38:10,090
+of the socket local storage, and then just apply it
+
+00:38:10,090 --> 00:38:14,943
+per packet, then it only will be socket actions to apply.
+
+00:38:19,450 --> 00:38:22,670
+- [Attendee] I think that once we add the policy piece
+
+00:38:22,670 --> 00:38:24,960
+to the BPF sock op stuff, then a lot of that makes a lot
+
+00:38:24,960 --> 00:38:25,793
+of sense.
+
+00:38:25,793 --> 00:38:28,398
+So like right now, the policies don't end the data path?
+
+00:38:28,398 --> 00:38:29,231
+- Correct.
+
+00:38:29,231 --> 00:38:30,580
+- [Attendee] With these lookups, but if we do the policy
+
+00:38:30,580 --> 00:38:33,470
+and the BPF, let's talk about establish state,
+
+00:38:33,470 --> 00:38:35,610
+like TCP established connect,
+
+00:38:35,610 --> 00:38:36,860
+then we can just add the metadata
+
+00:38:36,860 --> 00:38:39,220
+of the socket at that point and use it?
+
+00:38:39,220 --> 00:38:42,090
+- But when you're coming into a node, and you're going
+
+00:38:42,090 --> 00:38:43,600
+up the stack, like
+
+00:38:45,330 --> 00:38:47,750
+- Before it's established, the socket, you mean?
+
+00:38:47,750 --> 00:38:48,583
+- [Joe] Well yeah.
+
+00:38:48,583 --> 00:38:50,200
+- Yeah.
+
+00:38:50,200 --> 00:38:52,190
+- Then you still have to do all of that somehow.
+
+00:38:52,190 --> 00:38:54,840
+Even if it's just the first packet of the connection.
+
+00:39:03,710 --> 00:39:05,540
+- [Attendee] Going back to the program cloning,
+
+00:39:05,540 --> 00:39:07,060
+in this glorious world where we might have
+
+00:39:07,060 --> 00:39:09,730
+BPF function calls across programs,
+
+00:39:09,730 --> 00:39:11,640
+could we instead have all the static data
+
+00:39:11,640 --> 00:39:13,810
+in one small program that would then BPF call
+
+00:39:13,810 --> 00:39:15,720
+into the big program with all the logic,
+
+00:39:15,720 --> 00:39:17,080
+and so that you would only have to reload
+
+00:39:17,080 --> 00:39:20,120
+and reverify the program with the static data?
+
+00:39:20,120 --> 00:39:22,400
+And you kind of sidestep this whole cloning
+
+00:39:22,400 --> 00:39:24,660
+entire programs thing by just passing all
+
+00:39:24,660 --> 00:39:26,470
+of the primers through BPF calls.
+
+00:39:26,470 --> 00:39:29,240
+- Yeah, maybe if all of the data is like accessed
+
+00:39:29,240 --> 00:39:30,986
+at a particular point, I mean - [Attendee] Yeah.
+
+00:39:30,986 --> 00:39:33,580
+- I suspect that our structure right now is
+
+00:39:33,580 --> 00:39:37,870
+like fully spread out, so I don't know how viable that is,
+
+00:39:37,870 --> 00:39:39,423
+but it's an interesting idea.
+
+00:39:42,520 --> 00:39:44,650
+- [Attendee] So I wanted to ask more about
+
+00:39:44,650 --> 00:39:47,310
+delivering to a van by proxy.
+
+00:39:47,310 --> 00:39:49,940
+So T proxy will do a lookup,
+
+00:39:49,940 --> 00:39:52,300
+and then two steps, it will first try
+
+00:39:52,300 --> 00:39:55,340
+to find established socket, and then look
+
+00:39:55,340 --> 00:39:56,890
+for a catch-all socket.
+
+00:39:56,890 --> 00:40:00,660
+So how do you do that with BPF replacement,
+
+00:40:00,660 --> 00:40:02,980
+I understand that you do a socket lookup,
+
+00:40:02,980 --> 00:40:04,930
+and if you find an established socket,
+
+00:40:04,930 --> 00:40:07,100
+do you also do sks_sign or do you just
+
+00:40:07,100 --> 00:40:10,593
+let it pass and let the network stack deal with it?
+
+00:40:12,590 --> 00:40:15,053
+- I think I was sks_sign in both cases.
+
+00:40:16,620 --> 00:40:18,233
+I would have to look at the details
+
+00:40:18,233 --> 00:40:19,137
+of my implementation, yeah.
+
+00:40:19,137 --> 00:40:21,320
+- And just do reply to like, say,
+
+00:40:21,320 --> 00:40:23,460
+we could potentially
+
+00:40:24,460 --> 00:40:25,860
+start
+
+00:40:25,860 --> 00:40:27,740
+only via catch-all socket,
+
+00:40:27,740 --> 00:40:31,840
+but everything after the send packet will be going
+
+00:40:31,840 --> 00:40:34,410
+to connected socket, which we have to lookup
+
+00:40:35,290 --> 00:40:36,423
+each time, I guess.
+
+00:40:38,400 --> 00:40:41,550
+Because we'll have, well, established circuits
+
+00:40:41,550 --> 00:40:42,860
+per connections, or
+
+00:40:44,840 --> 00:40:47,953
+- Yeah, so in this case, for every, what is it,
+
+00:40:49,390 --> 00:40:52,120
+so initially you have the IP_TRANSPARENT socket,
+
+00:40:52,120 --> 00:40:53,760
+and then whenever it accepts a new socket,
+
+00:40:53,760 --> 00:40:55,360
+there's like a child socket associated
+
+00:40:55,360 --> 00:40:56,600
+with it, right?
+
+00:40:56,600 --> 00:40:59,520
+That's what you're saying. So isn't it a separate
+
+00:41:00,380 --> 00:41:01,750
+socket for that particular tuple.
+
+00:41:01,750 --> 00:41:04,110
+So in this case, we've got traffic outbound
+
+00:41:04,110 --> 00:41:06,793
+to any arbitrary destination, anywhere.
+
+00:41:07,770 --> 00:41:10,640
+And so each of those will have sort of a child socket
+
+00:41:10,640 --> 00:41:13,310
+under the IP_TRANSPARENT socket.
+
+00:41:13,310 --> 00:41:14,350
+And then we need to make sure
+
+00:41:14,350 --> 00:41:15,910
+that it's actually delivering to that one,
+
+00:41:15,910 --> 00:41:18,214
+and not back up to the IP_TRANSPARENT socket,
+
+00:41:18,214 --> 00:41:19,340
+because then the proxy is just gonna get confused,
+
+00:41:19,340 --> 00:41:21,090
+it doesn't know how to handle that.
+
+00:41:23,830 --> 00:41:25,280
+- [Dave] Any other questions?
+
+00:41:30,330 --> 00:41:33,300
+- [Attendee] Thank you. You kind of, on the next slide
+
+00:41:33,300 --> 00:41:37,120
+or the one after that, you show by doing the socket redirect
+
+00:41:37,120 --> 00:41:39,990
+you bypass routing and netfilter, how does,
+
+00:41:39,990 --> 00:41:41,710
+I understand how you bypassed routing,
+
+00:41:41,710 --> 00:41:45,720
+but I don't get how the netfilter bypass will work.
+
+00:41:45,720 --> 00:41:49,283
+- So, yeah, so my idea is, you basically have two pieces,
+
+00:41:51,150 --> 00:41:52,780
+the T proxy piece here is effectively
+
+00:41:52,780 --> 00:41:54,150
+just doing a socket assign,
+
+00:41:54,150 --> 00:41:57,380
+it's just SKB, SK is the socket,
+
+00:41:57,380 --> 00:42:00,530
+and then the routing piece is doing, like,
+
+00:42:00,530 --> 00:42:01,363
+setting the DST.
+
+00:42:04,290 --> 00:42:06,140
+So at least in my mind how this works
+
+00:42:07,549 --> 00:42:09,662
+is you just need to do both of those steps.
+
+00:42:09,662 --> 00:42:11,300
+So to replace netfilter, you need to do the socket assign.
+
+00:42:11,300 --> 00:42:13,820
+To replace the routing, you need to set the DST.
+
+00:42:13,820 --> 00:42:16,320
+And then otherwise, it's kind of like early demux.
+
+00:42:17,335 --> 00:42:18,683
+- [Attendee] And demux still goes through that,
+
+00:42:18,683 --> 00:42:19,657
+but it wasn't--
+
+00:42:19,657 --> 00:42:24,483
+- Ah, yes, so step N is redelete netfilter entirely.
+
+00:42:26,410 --> 00:42:27,840
+So we have customers actually requesting
+
+00:42:27,840 --> 00:42:29,700
+this kind of thing, for latency reasons,
+
+00:42:29,700 --> 00:42:31,460
+if you just compile out netfilter entirely,
+
+00:42:31,460 --> 00:42:34,780
+then you can gain some, bunch of latency improvements,
+
+00:42:34,780 --> 00:42:36,660
+even throughput improvements, it's,
+
+00:42:36,660 --> 00:42:38,983
+we've got people who are really interested in this.
+
+00:42:41,570 --> 00:42:42,820
+- [Dave] Anyone else? Oh.
+
+00:42:45,660 --> 00:42:48,297
+- [Attendee] Two questions. One. Do you do similar ELFs
+
+00:42:48,297 --> 00:42:50,810
+and policy on the inbound?
+
+00:42:50,810 --> 00:42:51,690
+- Yes.
+
+00:42:51,690 --> 00:42:53,800
+- [Attendee] Okay, so basically, each packet
+
+00:42:53,800 --> 00:42:55,793
+traverses T proxy twice?
+
+00:42:57,030 --> 00:43:00,430
+On the exit's host and on the inbound host, right?
+
+00:43:00,430 --> 00:43:02,790
+- Right. Well yeah, I mean, it's subject to the policy,
+
+00:43:02,790 --> 00:43:04,570
+but yes, that's a mode in--
+
+00:43:04,570 --> 00:43:07,060
+- [Attendee] Okay, and do you know what's the
+
+00:43:07,060 --> 00:43:09,070
+performance of the T proxy, because now we need
+
+00:43:09,070 --> 00:43:11,490
+to jump the bucket to the userspace application,
+
+00:43:11,490 --> 00:43:12,543
+and then back, right?
+
+00:43:13,500 --> 00:43:14,420
+- Yeah, so this is one of these things
+
+00:43:14,420 --> 00:43:18,430
+where I think if you're really concerned about L7 security,
+
+00:43:18,430 --> 00:43:19,263
+then,
+
+00:43:20,560 --> 00:43:21,603
+you know,
+
+00:43:21,603 --> 00:43:23,520
+how much it costs it kind of a secondary consideration,
+
+00:43:23,520 --> 00:43:25,330
+and we can always optimize this, we can work on it,
+
+00:43:25,330 --> 00:43:27,680
+we can say is there something we're doing less efficiently,
+
+00:43:27,680 --> 00:43:31,990
+for instance, the socket lookup call currently always does
+
+00:43:31,990 --> 00:43:33,856
+two socket lookups, if it doesn't,
+
+00:43:33,856 --> 00:43:35,770
+first it would try and look at
+
+00:43:35,770 --> 00:43:37,850
+like the forward tuple, and then it'll reverse the tuple,
+
+00:43:37,850 --> 00:43:38,683
+and look it up.
+
+00:43:38,683 --> 00:43:40,607
+So maybe there's some slightly smarter things
+
+00:43:40,607 --> 00:43:41,768
+that we can do there,
+
+00:43:41,768 --> 00:43:42,780
+where we introduce some flags
+
+00:43:42,780 --> 00:43:44,760
+so we can do one particular direction lookup,
+
+00:43:44,760 --> 00:43:48,990
+and optimize the number of lookups in the socket table.
+
+00:43:48,990 --> 00:43:50,359
+- [Attendee] Okay, so basically,
+
+00:43:50,359 --> 00:43:53,680
+for the L3 policy, it is fast because it's BPF,
+
+00:43:53,680 --> 00:43:55,363
+for L7, you don't care that much.
+
+00:44:02,290 --> 00:44:04,890
+- [Dave] Okay? Thank you very much Joe.
+
+00:44:04,890 --> 00:44:05,852
+- Thank you.
+
+00:44:05,852 --> 00:44:08,102
+
+YouTube URL: https://www.youtube.com/watch?v=b-Tdn_TOoS8
+
+

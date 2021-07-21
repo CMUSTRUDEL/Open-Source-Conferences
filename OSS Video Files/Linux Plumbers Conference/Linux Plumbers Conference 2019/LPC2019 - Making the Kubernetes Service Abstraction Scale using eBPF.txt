@@ -1,0 +1,2471 @@
+Title: LPC2019 - Making the Kubernetes Service Abstraction Scale using eBPF
+Publication date: 2019-09-17
+Playlist: Linux Plumbers Conference 2019
+Description: 
+	Making the Kubernetes Service Abstraction Scale using eBPF
+
+Speakers
+Mr Borkmann Daniel (Cilium)
+Mr Pumputis Martynas (Cilium)
+
+Description
+In this talk, we will present a scalable re-implementation of the Kubernetes service abstraction with the help of eBPF. We will discuss recent changes in the kernel which made the implementation possible, and some changes in the future which would simplify the implementation.
+
+Kubernetes is an open-source container orchestration multi-component distributed system. It provides mechanisms for deploying, maintaining and scaling applications running in containers across a multi-host cluster. Its smallest scheduling unit is called a pod. A pod consists of multiple co-located containers. Each pod has its own network namespace and is addressed by an unique IP address in a cluster. Network connectivity to and among pods is handled by an external plugin.
+
+Multiple pods which provide the same functionality can be grouped into services. Each service is reachable within a cluster via its virtual IP address allocated by Kubernetes. Also, a service can be exposed to outside of a cluster via the public IP address of a cluster host IP address and a port which is allocated by Kubernetes. Each request sent to a service is load-balanced to any of its pods.
+
+Kube-proxy is a Kubernetes component which is responsible for the service abstraction implementation. The default implementation is based on Netfilter's iptables. For each service and its pods it creates couple rules in the nat table which do a load-balancing to pods. For example, for the "nginx" service which virtual IP address is 10.107.41.178 and which is running two pods with IP addresses 10.217.1.154 and 10.217.1.159 the following relevant iptables rules are created:
+
+
+-A KUBE-SERVICES -d 10.107.41.178/32 -p tcp -m comment --comment "default/nginx: cluster IP" -m tcp --dport 80 -j KUBE-SVC-253L2MOZ6TC5FE7P
+
+-A KUBE-SVC-253L2MOZ6TC5FE7P -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-PCCJCD7AQBIZDZ2N
+-A KUBE-SVC-253L2MOZ6TC5FE7P -j KUBE-SEP-UFVSO22B5A7KHVMO
+
+-A KUBE-SEP-PCCJCD7AQBIZDZ2N -s 10.217.1.154/32 -j KUBE-MARK-MASQ
+-A KUBE-SEP-PCCJCD7AQBIZDZ2N -p tcp -m tcp -j DNAT --to-destination 10.217.1.154:80
+-A KUBE-SEP-UFVSO22B5A7KHVMO -s 10.217.1.159/32 -j KUBE-MARK-MASQ
+-A KUBE-SEP-UFVSO22B5A7KHVMO -p tcp -m tcp -j DNAT --to-destination 10.217.1.159:80
+
+It has been demonstrated [1][2][3] that kube-proxy due to its foundational technologies (Netfilter, iptables) is one of the major pain points when running Kubernetes at large scale from performance, reliability, and operations perspective.
+
+Cilium is an open-source networking and security plugin for container orchestration systems, such as Kubernetes. Unlike the majority of such networking plugins, it heavily relies on eBPF technology which lets one to dynamically reprogram the kernel.
+
+The most recent Cilium v1.6 release brings the implementation in eBPF of the Kubernetes service abstraction. This allows one to run a Kubernetes cluster without kube-proxy. Thus, it makes Kubernetes no longer dependent on Netfilter/iptables. This improves scalability and reliability of a Kubernetes cluster.
+
+No Kubernetes knowledge is required. The talk might be relevant for those who are interested in container networking with eBPF (loadbalancing, NAT).
+
+[1]: https://sched.co/MPch
+[2]: https://bit.ly/2xKk2pr
+[3]: https://bit.ly/2WU7BCN
+Captions: 
+	00:00:00,810 --> 00:00:04,100
+- Martinus and Daniel will be discussing
+
+00:00:04,100 --> 00:00:08,570
+optimizing the service abstraction in Kubernetes
+
+00:00:08,570 --> 00:00:10,550
+making it scale better using BPF
+
+00:00:10,550 --> 00:00:12,895
+so please give them a warm welcome.
+
+00:00:12,895 --> 00:00:15,145
+(clapping)
+
+00:00:18,280 --> 00:00:20,740
+- Hi there, my name is Martinus.
+
+00:00:20,740 --> 00:00:23,440
+So today's talk is going to be about making
+
+00:00:23,440 --> 00:00:27,010
+the Kubernetes abstraction to scale with BPF.
+
+00:00:27,010 --> 00:00:28,990
+So first part will be given by me
+
+00:00:28,990 --> 00:00:31,720
+and the second part by my colleague Daniel.
+
+00:00:31,720 --> 00:00:34,180
+So the problem we are trying to solve
+
+00:00:34,180 --> 00:00:35,540
+is that Kubernetes,
+
+00:00:35,540 --> 00:00:38,060
+which is Quintainer's orchestrator
+
+00:00:38,060 --> 00:00:41,930
+or just distribute that Quintainer's scheduler,
+
+00:00:41,930 --> 00:00:43,221
+relies a lot on iptables
+
+00:00:43,221 --> 00:00:47,930
+to implement the service abstraction.
+
+00:00:47,930 --> 00:00:50,130
+So for each service and it's endpoint
+
+00:00:50,130 --> 00:00:52,820
+it creates multiple rules,
+
+00:00:52,820 --> 00:00:55,390
+so in the case of 5,000 services
+
+00:00:55,390 --> 00:00:58,440
+we have 25,000 of iptable rules
+
+00:00:58,440 --> 00:01:01,170
+which makes service traffic
+
+00:01:01,170 --> 00:01:04,500
+to experience slow and unpredictable latencies
+
+00:01:04,500 --> 00:01:07,940
+because each packet has to traverse the rules
+
+00:01:07,940 --> 00:01:12,400
+until a rule matching that packet can be found.
+
+00:01:12,400 --> 00:01:16,090
+And also another problem is that with iptables
+
+00:01:16,090 --> 00:01:18,830
+you cannot change a single rule,
+
+00:01:18,830 --> 00:01:21,810
+you need to install all rules at once,
+
+00:01:21,810 --> 00:01:23,590
+and this becomes slow
+
+00:01:23,590 --> 00:01:26,000
+especially in the dynamic environments
+
+00:01:26,000 --> 00:01:28,400
+where you create and kill parts
+
+00:01:28,400 --> 00:01:32,340
+like every hour you can create thousands of parts.
+
+00:01:32,340 --> 00:01:35,400
+And the last thing is like availabilities
+
+00:01:35,400 --> 00:01:38,600
+so iptables is using net filters conntrack
+
+00:01:38,600 --> 00:01:42,320
+and this is, it is prone to some race conditions,
+
+00:01:42,320 --> 00:01:46,770
+so it becomes obvious in the case of UDP where,
+
+00:01:46,770 --> 00:01:48,170
+one packet can be lost
+
+00:01:48,170 --> 00:01:50,833
+and it results in application load amounts.
+
+00:01:52,352 --> 00:01:55,840
+So before we dive into the implementation details
+
+00:01:55,840 --> 00:01:59,173
+let's look into Kubernetes networking basics.
+
+00:02:00,070 --> 00:02:03,330
+So Kubernetes is a scheduler for Quintainers
+
+00:02:03,330 --> 00:02:07,080
+and the smallest schedulable unit is a pod
+
+00:02:07,080 --> 00:02:10,700
+and the pod itself can consist of multiple quintainers
+
+00:02:10,700 --> 00:02:13,600
+and each quintainer in the pod's running
+
+00:02:13,600 --> 00:02:15,590
+in the same network name space
+
+00:02:15,590 --> 00:02:18,260
+and they share the same network device
+
+00:02:18,260 --> 00:02:22,170
+and Kubernetes consists of multiple components,
+
+00:02:22,170 --> 00:02:24,163
+some are optional some are not,
+
+00:02:25,282 --> 00:02:29,880
+and for this talk we put just a couple of components,
+
+00:02:29,880 --> 00:02:31,280
+the relevant ones,
+
+00:02:31,280 --> 00:02:33,130
+so first one is a kubelet,
+
+00:02:33,130 --> 00:02:36,280
+this is the main component for starting a pod,
+
+00:02:36,280 --> 00:02:38,060
+then there's a CNI plugin,
+
+00:02:38,060 --> 00:02:41,470
+which is not shift with Kubernetes
+
+00:02:41,470 --> 00:02:44,510
+but it's up to your user which one to use,
+
+00:02:44,510 --> 00:02:47,540
+and in this talk we'll be using cilium,
+
+00:02:47,540 --> 00:02:49,920
+and the main task of the CNI plugin
+
+00:02:49,920 --> 00:02:53,133
+is to configure the network for the pod.
+
+00:02:53,133 --> 00:02:55,650
+And next one is the kube-apiserver
+
+00:02:55,650 --> 00:02:57,800
+so it's basically the entry point
+
+00:02:57,800 --> 00:02:59,430
+for your cluster configuration
+
+00:02:59,430 --> 00:03:02,550
+so once you want to deploy a new pod,
+
+00:03:02,550 --> 00:03:04,320
+install a new service, et cetera,
+
+00:03:04,320 --> 00:03:07,320
+you talk to a kube-apiserver.
+
+00:03:07,320 --> 00:03:10,180
+So for instance once a user wants
+
+00:03:10,180 --> 00:03:13,280
+to deploy a quintainer in the cluster,
+
+00:03:13,280 --> 00:03:15,480
+after a scheduling decision has been made
+
+00:03:15,480 --> 00:03:17,090
+on which node to run that quintainer,
+
+00:03:17,090 --> 00:03:21,450
+kube-apiserver notifies the kubelet in the cluster
+
+00:03:21,450 --> 00:03:23,970
+about the change and the pause back
+
+00:03:23,970 --> 00:03:26,856
+and then the kubelet on the Node B
+
+00:03:26,856 --> 00:03:31,160
+asks the quintainer runtime to start Quintainer
+
+00:03:31,160 --> 00:03:33,880
+without networking being configured,
+
+00:03:33,880 --> 00:03:36,580
+and then it talks to the CNI plugin
+
+00:03:36,580 --> 00:03:39,000
+to configure the network for it.
+
+00:03:39,000 --> 00:03:43,970
+And it's up to network plugin how to configure the network
+
+00:03:43,970 --> 00:03:46,330
+but there's hard set requirements for Kubernetes
+
+00:03:46,330 --> 00:03:50,160
+that each pod has to be IP addressable
+
+00:03:50,160 --> 00:03:53,290
+and should be reached from any other pods in the cluster
+
+00:03:53,290 --> 00:03:55,923
+and also from the host inside the cluster.
+
+00:03:59,476 --> 00:04:03,177
+So we cannot use the pod IP to reach pods reliably
+
+00:04:04,040 --> 00:04:07,330
+in the sense that Kubernetes doesn't guarantee
+
+00:04:07,330 --> 00:04:09,377
+that the same pod IP would be used
+
+00:04:09,377 --> 00:04:12,290
+after a pod has been terminated
+
+00:04:12,290 --> 00:04:14,890
+or deleted and recreated.
+
+00:04:14,890 --> 00:04:19,640
+So for this Kubernetes provides the service abstraction
+
+00:04:19,640 --> 00:04:23,748
+so we can group pods into logical units
+
+00:04:23,748 --> 00:04:28,748
+and Kubernetes will allocate virtual IP for that unit
+
+00:04:29,350 --> 00:04:34,040
+and each pod can be reached by using this virtual IP.
+
+00:04:34,040 --> 00:04:37,230
+So on the right side we see the service definition,
+
+00:04:37,230 --> 00:04:40,640
+we basically select the engine x pods
+
+00:04:40,640 --> 00:04:43,470
+and we create an engine x service.
+
+00:04:43,470 --> 00:04:45,960
+And Kubernetes allocates for us
+
+00:04:45,960 --> 00:04:50,860
+the virtual IP 3.3.3.3 and as you can see
+
+00:04:50,860 --> 00:04:52,770
+that service has two endpoints
+
+00:04:52,770 --> 00:04:54,563
+with the given IP address.
+
+00:04:55,850 --> 00:04:58,150
+So there are multiple service types
+
+00:04:58,150 --> 00:04:59,990
+but for this talk it's enough to know
+
+00:04:59,990 --> 00:05:03,330
+that there's a cluster IP and a node part
+
+00:05:03,330 --> 00:05:04,750
+and for the sake of completion
+
+00:05:04,750 --> 00:05:06,930
+we listed all the service types.
+
+00:05:06,930 --> 00:05:09,530
+And the component which implements
+
+00:05:09,530 --> 00:05:12,110
+the service abstraction in Kubernetes
+
+00:05:12,110 --> 00:05:13,530
+is called kube-proxy,
+
+00:05:13,530 --> 00:05:16,070
+so basically this component is responsible
+
+00:05:16,070 --> 00:05:18,610
+for installing the iptables rules.
+
+00:05:18,610 --> 00:05:21,233
+And this component is optional
+
+00:05:21,233 --> 00:05:23,443
+and it can be disabled.
+
+00:05:24,530 --> 00:05:26,800
+So let's look at the cluster IP service.
+
+00:05:26,800 --> 00:05:28,920
+So this is the default service
+
+00:05:28,920 --> 00:05:33,470
+and basically it allows either a host
+
+00:05:33,470 --> 00:05:37,450
+in the Kubernetes cluster or the pod
+
+00:05:37,450 --> 00:05:41,140
+to reach a service via virtual IP.
+
+00:05:41,140 --> 00:05:44,850
+And the way that kube-proxy implements it
+
+00:05:44,850 --> 00:05:47,500
+is with the following iptables rules.
+
+00:05:47,500 --> 00:05:51,640
+So because the service has to be reached
+
+00:05:51,640 --> 00:05:53,450
+either from the pod network name space
+
+00:05:53,450 --> 00:05:56,670
+or from the host network name space,
+
+00:05:56,670 --> 00:06:00,923
+it installs backups during rule net table
+
+00:06:04,144 --> 00:06:06,290
+prerouting output chain.
+
+00:06:06,290 --> 00:06:09,860
+And in the kube service chain we do the action,
+
+00:06:09,860 --> 00:06:12,670
+it does the actual service matching,
+
+00:06:12,670 --> 00:06:15,860
+so the matching is based on the protocol,
+
+00:06:15,860 --> 00:06:18,930
+destination IP and destination port.
+
+00:06:18,930 --> 00:06:20,840
+And once a service is found,
+
+00:06:20,840 --> 00:06:23,010
+it jumps into the service chain
+
+00:06:23,010 --> 00:06:25,200
+and in that chain based on the probability
+
+00:06:25,200 --> 00:06:29,840
+selects the actual endpoint to which to route the request.
+
+00:06:29,840 --> 00:06:31,310
+So it's basically a poor man's
+
+00:06:31,310 --> 00:06:33,620
+load balancer with iptables.
+
+00:06:33,620 --> 00:06:36,690
+And the endpoint chain is responsible
+
+00:06:36,690 --> 00:06:41,690
+for doing the DNAT translation to the actual pod IP.
+
+00:06:43,850 --> 00:06:47,500
+The other service type is called NodePort.
+
+00:06:47,500 --> 00:06:50,690
+This type is similar to a ClusterIP,
+
+00:06:50,690 --> 00:06:54,570
+but in addition it makes services accessible from outside.
+
+00:06:54,570 --> 00:06:59,070
+So kube-apiserver allocates some port number
+
+00:06:59,070 --> 00:07:00,970
+from predefined range
+
+00:07:00,970 --> 00:07:04,900
+and also kube-proxy installs the following rules.
+
+00:07:04,900 --> 00:07:07,210
+It basically installs a rule to jump into
+
+00:07:07,210 --> 00:07:09,490
+the kube NodePorts chain
+
+00:07:09,490 --> 00:07:12,440
+and in that chain we do the, again, matching,
+
+00:07:12,440 --> 00:07:17,360
+but this time just on protocol and on the destination port.
+
+00:07:17,360 --> 00:07:22,150
+And once a matching rule is found,
+
+00:07:22,150 --> 00:07:24,900
+it jumps to the same service chain.
+
+00:07:24,900 --> 00:07:27,810
+So as you can see from this rules
+
+00:07:27,810 --> 00:07:30,280
+that the more services you have,
+
+00:07:30,280 --> 00:07:31,540
+the more rules you have
+
+00:07:31,540 --> 00:07:35,350
+and the more rules your packet has to traverse.
+
+00:07:35,350 --> 00:07:37,890
+So this is example just for one service
+
+00:07:37,890 --> 00:07:41,970
+but if you have 5,000 services
+
+00:07:41,970 --> 00:07:44,120
+then you have in the kube service chain
+
+00:07:44,120 --> 00:07:45,580
+10,000 rules.
+
+00:07:45,580 --> 00:07:47,840
+So if your service ends up being
+
+00:07:47,840 --> 00:07:50,183
+at the very bottom of that chain
+
+00:07:50,183 --> 00:07:55,133
+so your request will experience high latencies.
+
+00:07:56,060 --> 00:07:58,920
+So with this in mind let's look
+
+00:07:58,920 --> 00:08:00,540
+how we replaced kube-proxy
+
+00:08:02,193 --> 00:08:04,373
+re-implemented kube-proxy with BPF and Cilium.
+
+00:08:06,970 --> 00:08:09,720
+So the work is being done over the couple
+
+00:08:09,720 --> 00:08:12,210
+of last few months, I would say.
+
+00:08:12,210 --> 00:08:15,040
+So Cilium itself is a CNI plugin
+
+00:08:15,040 --> 00:08:18,460
+and it consists of two components
+
+00:08:18,460 --> 00:08:20,520
+so cilium-agent, it's a daemon
+
+00:08:20,520 --> 00:08:23,030
+which runs in each Kubernetes node,
+
+00:08:23,030 --> 00:08:26,150
+and besides that Cilium shifts
+
+00:08:26,150 --> 00:08:29,260
+with CNI executable binary
+
+00:08:29,260 --> 00:08:31,290
+which is being called by kubelet
+
+00:08:31,290 --> 00:08:35,260
+when it has to provision a new pod
+
+00:08:35,260 --> 00:08:38,720
+and the kubelet actually executes that binary
+
+00:08:38,720 --> 00:08:40,330
+and the binary talks to,
+
+00:08:40,330 --> 00:08:43,239
+first it configures network,
+
+00:08:43,239 --> 00:08:45,320
+creates network interfaces,
+
+00:08:45,320 --> 00:08:47,340
+like network devices for the pod,
+
+00:08:47,340 --> 00:08:48,820
+most of the network name space
+
+00:08:48,820 --> 00:08:50,280
+and in this case we are running
+
+00:08:50,280 --> 00:08:51,927
+in the virtual ethernet mode,
+
+00:08:51,927 --> 00:08:54,780
+but we also support the IP VLAN.
+
+00:08:54,780 --> 00:08:58,164
+And once the devices were created
+
+00:08:58,164 --> 00:08:59,940
+and moved to the network name space
+
+00:08:59,940 --> 00:09:02,730
+next it talks to the cilium-agent over API
+
+00:09:02,730 --> 00:09:04,760
+to allocate the IP address
+
+00:09:05,660 --> 00:09:08,360
+and also to register this pod
+
+00:09:08,360 --> 00:09:09,820
+and inside the cilium-agent
+
+00:09:09,820 --> 00:09:13,133
+which populates the meta-data and BPF
+
+00:09:13,133 --> 00:09:18,133
+and also loads on the TC-ingress BPF program.
+
+00:09:18,660 --> 00:09:20,298
+And besides that cilium-agent
+
+00:09:20,298 --> 00:09:22,470
+is talking to the kube-apiserver
+
+00:09:22,470 --> 00:09:26,610
+and it gets all the notification from there
+
+00:09:26,610 --> 00:09:28,810
+so for instance once it receives
+
+00:09:28,810 --> 00:09:31,400
+an event for a service update,
+
+00:09:31,400 --> 00:09:34,740
+it reflects that update in the BPF map.
+
+00:09:34,740 --> 00:09:38,440
+And to make a pod reachable from our host
+
+00:09:38,440 --> 00:09:41,380
+we have the cilium-host network device,
+
+00:09:41,380 --> 00:09:45,290
+and for the interconnectivity between pods
+
+00:09:45,290 --> 00:09:47,960
+we either can install an IP route
+
+00:09:47,960 --> 00:09:49,770
+or we can do the tunneling
+
+00:09:49,770 --> 00:09:51,730
+with the help of vxlan or geneve
+
+00:09:51,730 --> 00:09:53,930
+and we create just a single device
+
+00:09:53,930 --> 00:09:56,720
+and then we configure like meta-data
+
+00:09:56,720 --> 00:09:59,773
+to establish a tunnel mesh between devices.
+
+00:10:02,208 --> 00:10:05,240
+So before the 1.6 version,
+
+00:10:05,240 --> 00:10:08,450
+so 1.6 is the latest table,
+
+00:10:08,450 --> 00:10:12,350
+we had the partial implementation of ClusterIP and BPF
+
+00:10:12,350 --> 00:10:17,350
+so in the case of, let's say, client running on node A
+
+00:10:17,550 --> 00:10:20,300
+and server running on node B,
+
+00:10:21,500 --> 00:10:23,310
+we had the following programs.
+
+00:10:23,310 --> 00:10:28,187
+So one program is attached to the TC-ingress of lxc0
+
+00:10:29,230 --> 00:10:31,540
+and this program is doing the following:
+
+00:10:31,540 --> 00:10:34,140
+so it looks up the BPF maps,
+
+00:10:34,140 --> 00:10:37,259
+whether destination address is the cluster IP address,
+
+00:10:37,259 --> 00:10:42,259
+and if it's destination address of a service,
+
+00:10:42,540 --> 00:10:46,210
+then it does service selection based on p-random
+
+00:10:46,210 --> 00:10:49,020
+and once we have selected the service
+
+00:10:49,020 --> 00:10:51,994
+it creates conntrack entry for that service,
+
+00:10:51,994 --> 00:10:55,270
+for that flow in the BPF conntrack map
+
+00:10:55,270 --> 00:10:58,330
+and also it does DNAT translation,
+
+00:10:58,330 --> 00:11:01,106
+and finally it creates the egress entry
+
+00:11:01,106 --> 00:11:06,106
+so that the reply could be reverse NAT translated.
+
+00:11:07,230 --> 00:11:10,380
+And another program is attached on the native device,
+
+00:11:10,380 --> 00:11:12,110
+again on the TC-ingress,
+
+00:11:12,110 --> 00:11:15,680
+and that one is for handling the replies
+
+00:11:15,680 --> 00:11:20,680
+so that the reverse translation could happen.
+
+00:11:20,760 --> 00:11:24,310
+So for services we have a map
+
+00:11:24,310 --> 00:11:26,940
+so it's a simplified version of it,
+
+00:11:26,940 --> 00:11:28,890
+so we have a placeholder
+
+00:11:28,890 --> 00:11:31,670
+like frontend entry which basically
+
+00:11:31,670 --> 00:11:33,910
+has this number set to zero
+
+00:11:34,787 --> 00:11:37,520
+and by looking up this entry we can know
+
+00:11:37,520 --> 00:11:40,300
+how many endpoints we have for the service
+
+00:11:40,300 --> 00:11:42,400
+and after reading the count
+
+00:11:42,400 --> 00:11:45,830
+we can do the service endpoint selection
+
+00:11:45,830 --> 00:11:48,670
+with the actual number being set.
+
+00:11:48,670 --> 00:11:51,650
+And for the conntrack, we have another map
+
+00:11:51,650 --> 00:11:54,530
+an LRU based one, and we have three types.
+
+00:11:54,530 --> 00:11:58,030
+So one is for service flow so that we can
+
+00:11:58,030 --> 00:12:01,670
+for subsequent requests we could select the same endpoint
+
+00:12:01,670 --> 00:12:05,520
+and one type is egress which is used
+
+00:12:05,520 --> 00:12:07,780
+for reverse NAT translation
+
+00:12:07,780 --> 00:12:10,193
+and then ingress, mostly for accounting.
+
+00:12:12,678 --> 00:12:15,520
+So I mentioned that this implementation was partial,
+
+00:12:15,520 --> 00:12:19,300
+so it didn't cover the case where host application,
+
+00:12:19,300 --> 00:12:21,120
+running in the host network name space
+
+00:12:21,120 --> 00:12:24,560
+is talking to a cluster API service,
+
+00:12:24,560 --> 00:12:26,200
+so for that before 1.6
+
+00:12:27,720 --> 00:12:31,140
+we were relying on kube-proxy iptables rules
+
+00:12:31,140 --> 00:12:33,420
+and also for NodePort
+
+00:12:33,420 --> 00:12:36,490
+we also relied on kube-proxy iptables.
+
+00:12:36,490 --> 00:12:39,170
+But in latest release we have implemented
+
+00:12:39,170 --> 00:12:42,133
+all the missing points with BPF.
+
+00:12:43,600 --> 00:12:48,320
+So the ClusterIP from host network name space.
+
+00:12:48,320 --> 00:12:53,050
+So we had a few considerations how to implement that.
+
+00:12:53,050 --> 00:12:57,220
+One would have been to attach a program
+
+00:12:57,220 --> 00:13:00,880
+to TC-ingress of cilium-host device
+
+00:13:02,399 --> 00:13:04,270
+and do the service look up from there,
+
+00:13:04,270 --> 00:13:09,270
+but instead of complicating the code base of that program,
+
+00:13:09,560 --> 00:13:13,670
+we decided to take an advantage of C-grip hooks.
+
+00:13:13,670 --> 00:13:18,670
+So for the ClusterIP we attach sock address program
+
+00:13:22,000 --> 00:13:25,978
+to the connect and send CIS calls,
+
+00:13:25,978 --> 00:13:28,050
+so this program gets executed
+
+00:13:28,050 --> 00:13:30,000
+just before the protocol handler
+
+00:13:30,000 --> 00:13:34,160
+starts to handle those CIS calls.
+
+00:13:34,160 --> 00:13:37,540
+In the case of TCP or connected to UDP
+
+00:13:39,900 --> 00:13:41,940
+we run the following program,
+
+00:13:41,940 --> 00:13:46,550
+which again, does the BPF map look up,
+
+00:13:46,550 --> 00:13:48,740
+it tries to find the service.
+
+00:13:48,740 --> 00:13:52,870
+And once, if it's found the service,
+
+00:13:52,870 --> 00:13:56,440
+basically it changes the destination of the sock address
+
+00:13:57,501 --> 00:14:01,160
+to the actual end point IP and the endpoint port.
+
+00:14:01,160 --> 00:14:03,570
+And one nice thing about this,
+
+00:14:03,570 --> 00:14:05,570
+we don't need conntrack anymore,
+
+00:14:05,570 --> 00:14:07,630
+and also we don't have to change,
+
+00:14:07,630 --> 00:14:09,260
+we don't have to mangle packets,
+
+00:14:09,260 --> 00:14:11,394
+so it means that also we don't have
+
+00:14:11,394 --> 00:14:14,073
+to recalculate the checkums for packets.
+
+00:14:14,980 --> 00:14:16,745
+Additionally there's a benefit that
+
+00:14:16,745 --> 00:14:19,960
+load balancing cost is paid only once
+
+00:14:19,960 --> 00:14:22,450
+for TCP and connected to UDP.
+
+00:14:22,450 --> 00:14:26,253
+So just when want to establish a connection,
+
+00:14:27,190 --> 00:14:29,520
+again it works in both cases.
+
+00:14:29,520 --> 00:14:33,973
+From host network name space and pod network name space.
+
+00:14:35,610 --> 00:14:36,960
+Maybe luckily or unluckily
+
+00:14:36,960 --> 00:14:40,970
+it didn't work with some UDP applications
+
+00:14:40,970 --> 00:14:42,850
+because some UDP applications
+
+00:14:42,850 --> 00:14:46,953
+are checking the source address of a packet,
+
+00:14:48,291 --> 00:14:51,270
+the receive message system call.
+
+00:14:51,270 --> 00:14:56,270
+So for that we have introduced a new attachment type
+
+00:14:56,600 --> 00:15:00,380
+for the receive message for the UDP 4 and 6
+
+00:15:00,380 --> 00:15:04,093
+and also we had to introduce the UDP map,
+
+00:15:05,170 --> 00:15:09,310
+reverse NAT for the UDP for the reverse NAT translation.
+
+00:15:09,310 --> 00:15:12,460
+So in that map, one of the fields in the key
+
+00:15:12,460 --> 00:15:15,880
+is the socket cookie, so it's used to prevent
+
+00:15:15,880 --> 00:15:19,699
+from accidentally reverse NAT translating
+
+00:15:19,699 --> 00:15:23,600
+unrelated flows which has connected directly
+
+00:15:23,600 --> 00:15:28,550
+to a pod IP without using the service IP.
+
+00:15:28,550 --> 00:15:31,200
+And again so we populate this map
+
+00:15:33,080 --> 00:15:35,010
+in the program which is attached
+
+00:15:35,010 --> 00:15:36,900
+to connect and send message
+
+00:15:36,900 --> 00:15:38,890
+and we do the reverse NAT translation
+
+00:15:38,890 --> 00:15:40,443
+from the received message.
+
+00:15:41,460 --> 00:15:43,720
+So next one is the NodePort,
+
+00:15:43,720 --> 00:15:45,770
+so it was a bit more complicated,
+
+00:15:45,770 --> 00:15:49,403
+so let's start with the simplest example.
+
+00:15:50,290 --> 00:15:55,290
+So in the case when the endpoint is running
+
+00:15:55,970 --> 00:15:59,770
+on the same node as the request came to,
+
+00:15:59,770 --> 00:16:03,190
+it's fairly simple because we can attach
+
+00:16:04,194 --> 00:16:07,723
+to a TC-ingress of zero device on the host,
+
+00:16:08,650 --> 00:16:11,540
+this similar program where we do the again,
+
+00:16:11,540 --> 00:16:14,360
+the service look up, DNAT,
+
+00:16:14,360 --> 00:16:18,600
+and then we check whether that destination pod
+
+00:16:18,600 --> 00:16:21,270
+is local or not, and if it's local,
+
+00:16:21,270 --> 00:16:24,700
+we basically just do the skb direct to this lxc0.
+
+00:16:25,940 --> 00:16:29,740
+And for the reply, the lxc0,
+
+00:16:29,740 --> 00:16:31,860
+like the program running on lxc0
+
+00:16:31,860 --> 00:16:35,770
+can via tail call can do the reverse NAT translation
+
+00:16:35,770 --> 00:16:38,900
+and then it has to do the fib look up
+
+00:16:38,900 --> 00:16:41,640
+because we need to know the L2 addresses,
+
+00:16:41,640 --> 00:16:44,810
+we need to set the valid L2 addresses for the packet,
+
+00:16:44,810 --> 00:16:48,220
+for the reply packet, otherwise it couldn't be dropped,
+
+00:16:48,220 --> 00:16:51,323
+and then again, we do the redirect to a client.
+
+00:16:52,340 --> 00:16:57,340
+So in the case of a pod running on the remote node,
+
+00:16:58,630 --> 00:17:01,610
+it becomes a bit more complicated.
+
+00:17:01,610 --> 00:17:06,410
+Because once we get a request on the node,
+
+00:17:06,410 --> 00:17:09,410
+it has to be forwarded to another node
+
+00:17:09,410 --> 00:17:12,160
+and we have to do the SNAT from BPF
+
+00:17:12,160 --> 00:17:15,820
+because otherwise node two will send back a reply
+
+00:17:15,820 --> 00:17:18,000
+directly to a client,
+
+00:17:18,000 --> 00:17:20,180
+and because we don't distribute,
+
+00:17:20,180 --> 00:17:23,110
+we do not distribute a connection tracking
+
+00:17:23,110 --> 00:17:28,110
+tables among nodes, we need to do the,
+
+00:17:28,280 --> 00:17:31,680
+we need to send a reply back to node one
+
+00:17:31,680 --> 00:17:35,060
+so that it could do the reverse DNAT translation.
+
+00:17:35,060 --> 00:17:39,000
+So in this case we have a program on the TC-ingress,
+
+00:17:39,000 --> 00:17:40,870
+again doing the look up, DNAT,
+
+00:17:40,870 --> 00:17:43,210
+and checking whether endpoint is remote,
+
+00:17:43,210 --> 00:17:44,620
+and depending on the node,
+
+00:17:44,620 --> 00:17:46,740
+direct routing node, indirect node,
+
+00:17:46,740 --> 00:17:51,007
+it picks which interface to use for the SNAT
+
+00:17:52,100 --> 00:17:54,410
+and then we do the BPF SNAT
+
+00:17:54,410 --> 00:17:57,260
+and again, fib look up and redirect
+
+00:17:57,260 --> 00:18:00,930
+to the actual node running that pod.
+
+00:18:00,930 --> 00:18:03,800
+And once it has received the request
+
+00:18:03,800 --> 00:18:07,600
+it sends to the target pod.
+
+00:18:07,600 --> 00:18:10,150
+And for the reply it's much more simple,
+
+00:18:10,150 --> 00:18:13,880
+because the request was SNAT'd
+
+00:18:13,880 --> 00:18:18,880
+so node two sends back the reply to node one
+
+00:18:19,800 --> 00:18:23,360
+and the TC-ingress program is doing
+
+00:18:23,360 --> 00:18:25,590
+first reverse SNAT translation,
+
+00:18:25,590 --> 00:18:28,370
+reverse DNAT translation and FIB look up
+
+00:18:28,370 --> 00:18:32,500
+and it finally sends the packet back to the client.
+
+00:18:32,500 --> 00:18:33,393
+So, yeah.
+
+00:18:35,780 --> 00:18:37,180
+- And one more note on that,
+
+00:18:38,430 --> 00:18:41,310
+so we're doing the SNAT but in future work
+
+00:18:41,310 --> 00:18:44,430
+we're looking into doing DSR as well,
+
+00:18:44,430 --> 00:18:46,900
+because I mean, it would require tunneling,
+
+00:18:46,900 --> 00:18:48,730
+for example, IB and IP
+
+00:18:48,730 --> 00:18:51,610
+but it would allow basically for the node
+
+00:18:51,610 --> 00:18:53,660
+where the actual backend is located
+
+00:18:53,660 --> 00:18:55,210
+to directly send a reply
+
+00:18:55,210 --> 00:18:58,210
+to the original client that requested it.
+
+00:18:58,210 --> 00:19:03,210
+And the other thing is, you mentioned TC-ingress,
+
+00:19:04,210 --> 00:19:08,220
+like all this hunting back all the packet
+
+00:19:08,220 --> 00:19:10,320
+could also be done in XCP as well,
+
+00:19:10,320 --> 00:19:13,443
+so that would be like a nice application of it.
+
+00:19:16,010 --> 00:19:18,670
+So the way we do the SNAT is basically
+
+00:19:18,670 --> 00:19:23,160
+right now we have a BPF map
+
+00:19:23,160 --> 00:19:25,860
+an LRU map actually for the mappings
+
+00:19:25,860 --> 00:19:27,420
+so it looks for example like this
+
+00:19:27,420 --> 00:19:30,290
+then we have a double the direction
+
+00:19:30,290 --> 00:19:33,323
+and basically the destination address and port
+
+00:19:33,323 --> 00:19:35,100
+that we are translating into
+
+00:19:35,100 --> 00:19:38,220
+and depending on which direction we are doing the look up
+
+00:19:38,220 --> 00:19:43,050
+it will either, it will then do the restore
+
+00:19:43,050 --> 00:19:48,050
+or the original remapping of the request.
+
+00:19:49,440 --> 00:19:51,643
+We also do the source port,
+
+00:19:53,340 --> 00:19:54,860
+so if there are collisions in the map
+
+00:19:54,860 --> 00:19:57,330
+we have to try to resolve it.
+
+00:19:57,330 --> 00:20:01,770
+So now we are doing a hash base and if that fails
+
+00:20:01,770 --> 00:20:05,483
+for some times then we do the prandom one.
+
+00:20:07,720 --> 00:20:11,060
+The hash for example could be potentially
+
+00:20:11,060 --> 00:20:12,420
+have fluence in corner cases
+
+00:20:12,420 --> 00:20:14,930
+when the entry would get evicted from the LRU
+
+00:20:14,930 --> 00:20:18,980
+and then later on it's still like free,
+
+00:20:18,980 --> 00:20:20,733
+it would try to re-use it.
+
+00:20:21,660 --> 00:20:24,890
+And we also have to track local flows
+
+00:20:24,890 --> 00:20:28,570
+so we have to cilium BPF connection tracker
+
+00:20:29,640 --> 00:20:32,350
+that is on the main physical device
+
+00:20:32,350 --> 00:20:35,960
+and it also would NAT connections from applications
+
+00:20:35,960 --> 00:20:38,920
+in the host itself in case there would be collisions
+
+00:20:38,920 --> 00:20:42,043
+in that they're re-using the source ports.
+
+00:20:45,110 --> 00:20:47,630
+So all of this was for the NodePort case
+
+00:20:47,630 --> 00:20:50,050
+was like when the external traffic hits the node
+
+00:20:51,880 --> 00:20:53,210
+and then we're handling the request,
+
+00:20:53,210 --> 00:20:54,630
+but there's also the case
+
+00:20:54,630 --> 00:20:57,870
+when applications of pods on the node itself
+
+00:20:57,870 --> 00:21:00,313
+would make a request to a NodePort service.
+
+00:21:01,160 --> 00:21:03,810
+And the way they can do that is basically that
+
+00:21:04,930 --> 00:21:06,230
+in the NodePort range,
+
+00:21:06,230 --> 00:21:09,900
+which is I think by default 30,200-something
+
+00:21:11,890 --> 00:21:12,998
+that can basically collect,
+
+00:21:12,998 --> 00:21:16,673
+connect to the loop back address to the port
+
+00:21:16,673 --> 00:21:20,090
+and then basically just would get rerouted to the backend
+
+00:21:20,090 --> 00:21:22,270
+whether it's local or in some other node,
+
+00:21:22,270 --> 00:21:25,400
+I mean it would be transparent to the application,
+
+00:21:25,400 --> 00:21:29,310
+and for that we use the ClusterIP,
+
+00:21:29,310 --> 00:21:33,270
+the BPF based ClusterIP that Martinus presented earlier
+
+00:21:33,270 --> 00:21:34,570
+and extended it a bit
+
+00:21:34,570 --> 00:21:36,610
+so that it can handle the case when you connect
+
+00:21:36,610 --> 00:21:39,723
+to loop back address or to any other address
+
+00:21:39,723 --> 00:21:43,130
+that is local and on that node.
+
+00:21:43,130 --> 00:21:47,350
+So it would just have to connect to that specific port.
+
+00:21:47,350 --> 00:21:48,290
+And the nice thing is,
+
+00:21:48,290 --> 00:21:50,483
+because it's like based in C groups,
+
+00:21:51,420 --> 00:21:53,860
+it's actually network name space independent,
+
+00:21:53,860 --> 00:21:55,763
+so that means that even like the pods
+
+00:21:55,763 --> 00:21:59,840
+that can connect to the loop back address
+
+00:21:59,840 --> 00:22:01,120
+out of their name space
+
+00:22:01,120 --> 00:22:03,440
+and it would transparently get translated
+
+00:22:03,440 --> 00:22:05,830
+without us having to set up and go into
+
+00:22:05,830 --> 00:22:07,973
+every single network name space.
+
+00:22:10,974 --> 00:22:12,830
+And with that basically
+
+00:22:12,830 --> 00:22:17,140
+we can get rid of all the per service rules
+
+00:22:17,140 --> 00:22:19,710
+that kube-proxy would insert
+
+00:22:19,710 --> 00:22:22,641
+and there are just a small number of rules left
+
+00:22:22,641 --> 00:22:26,170
+which are installed by Kubernetes themselves,
+
+00:22:26,170 --> 00:22:30,100
+I think some skb marked based drub rules,
+
+00:22:30,100 --> 00:22:33,980
+so potentially in future it might be possible
+
+00:22:33,980 --> 00:22:35,963
+to even run it without Netfilter.
+
+00:22:39,870 --> 00:22:42,960
+So some initial benchmarking that we did
+
+00:22:42,960 --> 00:22:44,980
+because most of the services or micro-services
+
+00:22:44,980 --> 00:22:48,603
+are should be based request responses and short-lived,
+
+00:22:52,017 --> 00:22:55,350
+we try to create some number of services
+
+00:22:57,170 --> 00:23:02,170
+up to like the default range that is the maximum for it
+
+00:23:02,452 --> 00:23:05,171
+and we compare that to the eBPF one
+
+00:23:05,171 --> 00:23:08,120
+and the requests are going over the wire
+
+00:23:08,120 --> 00:23:11,870
+so yes, you can see the BPF based approach
+
+00:23:11,870 --> 00:23:14,170
+with the service look up that we have there
+
+00:23:14,170 --> 00:23:17,970
+is pretty much constant as opposed to
+
+00:23:18,830 --> 00:23:21,013
+the latency increase that you would notice
+
+00:23:21,013 --> 00:23:25,223
+over the kube-proxy or the native kube-proxy implementation.
+
+00:23:26,450 --> 00:23:30,160
+So some of the improvements that we did along the way
+
+00:23:30,160 --> 00:23:33,290
+and some of the potential future outlook ones
+
+00:23:33,290 --> 00:23:36,160
+that we are doing in this context
+
+00:23:37,210 --> 00:23:40,590
+one of them is the UDP recvmsg hook
+
+00:23:40,590 --> 00:23:42,030
+so because it broke DNS
+
+00:23:42,030 --> 00:23:44,910
+here's a example where NS look up
+
+00:23:44,910 --> 00:23:47,480
+or also deak and other tools they would basically check
+
+00:23:47,480 --> 00:23:51,220
+that one the IP address that they are connecting to
+
+00:23:51,220 --> 00:23:53,877
+whether the reply is actually the real one
+
+00:23:53,877 --> 00:23:57,940
+based on the sock message as the sock addresses
+
+00:23:59,240 --> 00:24:01,070
+that they are getting from the recvmsg call
+
+00:24:01,070 --> 00:24:04,700
+so we basically added the BPF hook to that
+
+00:24:04,700 --> 00:24:08,870
+to do the reverse mapping and with that
+
+00:24:08,870 --> 00:24:10,883
+it basically resolves just fine.
+
+00:24:13,980 --> 00:24:16,330
+The other thing was that sock had cookies
+
+00:24:17,470 --> 00:24:20,180
+where per network name space that it was like a cone
+
+00:24:20,180 --> 00:24:21,900
+that would be increasing whenever you would call
+
+00:24:21,900 --> 00:24:25,320
+the BPF cookie helper then it would basically
+
+00:24:26,570 --> 00:24:30,420
+bump the counter and store the cookie into the socket
+
+00:24:32,624 --> 00:24:34,160
+and there were some corner cases
+
+00:24:34,160 --> 00:24:36,290
+where you could create collisions
+
+00:24:36,290 --> 00:24:37,870
+from different network name spaces
+
+00:24:37,870 --> 00:24:41,823
+but so we changed it to be global instead to resolve this.
+
+00:24:44,688 --> 00:24:47,380
+The other thing that right now we are doing from
+
+00:24:47,380 --> 00:24:51,520
+the cilium orchestration layer is basically
+
+00:24:51,520 --> 00:24:55,920
+when we get the Kubernetes event for new services
+
+00:24:55,920 --> 00:24:59,640
+we basically push the services entry in the backend
+
+00:24:59,640 --> 00:25:02,323
+that are related to that BPF data path.
+
+00:25:03,520 --> 00:25:05,470
+And in the case of the NodePort service
+
+00:25:05,470 --> 00:25:07,490
+when the backend is remote,
+
+00:25:07,490 --> 00:25:08,903
+we have to do the SNAT.
+
+00:25:16,196 --> 00:25:17,560
+And in some cases in the direct routing one
+
+00:25:17,560 --> 00:25:19,740
+we notice that fib look up was failing
+
+00:25:20,800 --> 00:25:23,500
+simply because it doesn't have a neighbor entry
+
+00:25:23,500 --> 00:25:25,890
+for the remote backend.
+
+00:25:25,890 --> 00:25:29,910
+We notice that by testing on AWS
+
+00:25:29,910 --> 00:25:32,670
+because they all have like a flat L2 network
+
+00:25:32,670 --> 00:25:33,870
+that they provide to you
+
+00:25:35,187 --> 00:25:36,020
+so that was failing
+
+00:25:36,020 --> 00:25:39,540
+and basically in case of tunneling we don't really care
+
+00:25:39,540 --> 00:25:43,950
+because we just zero the source mac address
+
+00:25:43,950 --> 00:25:46,590
+and on the remote end where
+
+00:25:46,590 --> 00:25:50,670
+the cilium node is handling the incoming packets
+
+00:25:50,670 --> 00:25:54,050
+on the xlan device we have another BPF program
+
+00:25:54,050 --> 00:25:58,460
+to just send the forwarding so it's more like L3 based
+
+00:25:58,460 --> 00:26:00,710
+and it sends but yeah,
+
+00:26:00,710 --> 00:26:04,860
+like the narrow look up also doesn't do like an R probe
+
+00:26:04,860 --> 00:26:06,523
+so we had to work around it.
+
+00:26:07,760 --> 00:26:08,630
+It's a bit ugly.
+
+00:26:09,830 --> 00:26:13,477
+Not from the daemon it's basically doing the op request
+
+00:26:13,477 --> 00:26:17,500
+and then pushing down a permanent neighbor entry
+
+00:26:17,500 --> 00:26:20,120
+into the neighbor table so that it would basically
+
+00:26:20,120 --> 00:26:21,600
+resolve just fine.
+
+00:26:21,600 --> 00:26:26,600
+After that, one thing we're looking into
+
+00:26:27,179 --> 00:26:28,804
+is to potentially tell the kernel,
+
+00:26:28,804 --> 00:26:31,430
+because kernel can do this best anyway,
+
+00:26:31,430 --> 00:26:34,300
+to introduce a new type where you would just
+
+00:26:34,300 --> 00:26:36,240
+paste the L3 address and kernel would
+
+00:26:36,240 --> 00:26:38,490
+resolve it by itself and keep maintaining it.
+
+00:26:39,660 --> 00:26:42,350
+I haven't seen that it's possible today
+
+00:26:42,350 --> 00:26:46,690
+so might be good extension to not having to deal
+
+00:26:46,690 --> 00:26:48,803
+with L2 on the daemon itself.
+
+00:26:50,810 --> 00:26:53,800
+And we have also like a similar issue
+
+00:26:53,800 --> 00:26:56,270
+for NodePort requests that are coming
+
+00:26:56,270 --> 00:26:57,713
+from external to the node.
+
+00:26:58,750 --> 00:26:59,900
+Because in the end we have to
+
+00:26:59,900 --> 00:27:02,313
+send back the reply to the client.
+
+00:27:03,810 --> 00:27:05,250
+And in that case we are basically
+
+00:27:05,250 --> 00:27:10,250
+keeping track of the mac addresses in a small BPF LRU map
+
+00:27:11,010 --> 00:27:14,260
+and because that's basically the main path
+
+00:27:14,260 --> 00:27:15,120
+where you could also hit,
+
+00:27:15,120 --> 00:27:17,113
+where you also have high income,
+
+00:27:19,080 --> 00:27:22,800
+it's probably better to leave it at the BPF LRU
+
+00:27:22,800 --> 00:27:24,950
+so you don't get a neighbor table overflow.
+
+00:27:26,838 --> 00:27:29,473
+So that should be as we have it today.
+
+00:27:31,820 --> 00:27:32,990
+The other thing we are thinking about
+
+00:27:32,990 --> 00:27:35,860
+is it would be nice to have a callback
+
+00:27:35,860 --> 00:27:38,723
+on LRU entry eviction.
+
+00:27:40,560 --> 00:27:41,640
+The reason why that is,
+
+00:27:41,640 --> 00:27:43,530
+so right now in cilium agent we have
+
+00:27:43,530 --> 00:27:45,530
+a connection tracking table in BPF
+
+00:27:46,370 --> 00:27:49,970
+and we support down to quite old kernels,
+
+00:27:49,970 --> 00:27:51,793
+like really old kernels like 4.9.
+
+00:27:53,560 --> 00:27:56,220
+And based on the kernel type either we choose LRU
+
+00:27:56,220 --> 00:27:59,747
+or hash table and in case of a normal hash table
+
+00:27:59,747 --> 00:28:02,090
+the thing has to be garbage collected
+
+00:28:02,090 --> 00:28:04,590
+so that's being done out of the cilium agent
+
+00:28:07,287 --> 00:28:10,950
+and the reason why we didn't integrate the NAT mapping
+
+00:28:10,950 --> 00:28:13,280
+into the connection tracking itself
+
+00:28:13,280 --> 00:28:17,470
+is that in the cilium case there's a requirement
+
+00:28:17,470 --> 00:28:19,700
+that whenever you up or down grade
+
+00:28:19,700 --> 00:28:21,230
+it shouldn't break existing connections
+
+00:28:21,230 --> 00:28:23,170
+that are currently ongoing.
+
+00:28:23,170 --> 00:28:25,519
+So like all the BPF programs have to stay intact
+
+00:28:25,519 --> 00:28:29,830
+and if you would change for example
+
+00:28:29,830 --> 00:28:33,300
+like too big of changes in the connection tracking table
+
+00:28:33,300 --> 00:28:34,820
+other things you would have to remove it
+
+00:28:34,820 --> 00:28:37,210
+or some way to transfer it temporarily
+
+00:28:37,210 --> 00:28:40,620
+which just creates, it's just a bit of an annoyance
+
+00:28:40,620 --> 00:28:44,413
+and hard to get right, I would say.
+
+00:28:45,461 --> 00:28:46,790
+So that's why we have it separate
+
+00:28:46,790 --> 00:28:48,633
+which was the easier path.
+
+00:28:50,380 --> 00:28:53,930
+And basically the garbage collection also cleans up,
+
+00:28:53,930 --> 00:28:56,793
+along with the connection tracking entry, the NAT entry.
+
+00:28:59,280 --> 00:29:02,170
+One thing that we noticed was that,
+
+00:29:02,170 --> 00:29:05,600
+whenever we worked the map from user space,
+
+00:29:05,600 --> 00:29:10,600
+it's basically quite, it messes with the LRU your stick,
+
+00:29:10,870 --> 00:29:14,920
+so basically we fixed that and
+
+00:29:18,610 --> 00:29:20,110
+but it could be a avoided entirely
+
+00:29:20,110 --> 00:29:21,870
+to have a garbage collector in the first place
+
+00:29:21,870 --> 00:29:23,610
+if we would maybe have like a callback
+
+00:29:23,610 --> 00:29:26,390
+whenever like CT entry is evicted
+
+00:29:26,390 --> 00:29:27,630
+that we could at the same time
+
+00:29:27,630 --> 00:29:29,740
+clean up the NAT mapping as well
+
+00:29:29,740 --> 00:29:31,483
+so something we are looking into.
+
+00:29:34,330 --> 00:29:37,220
+The other thing that might also be interesting is
+
+00:29:37,220 --> 00:29:40,263
+if we could somehow like partition the
+
+00:29:43,195 --> 00:29:45,080
+LRU eviction into zones,
+
+00:29:45,080 --> 00:29:48,571
+for example, since we have the single
+
+00:29:48,571 --> 00:29:51,640
+connection table in cilium
+
+00:29:51,640 --> 00:29:55,260
+it gets basically hit by traffic that is more east west
+
+00:29:55,260 --> 00:29:57,390
+and also like so this would be a cluster
+
+00:29:57,390 --> 00:30:00,250
+like the normal ClusterIP services
+
+00:30:00,250 --> 00:30:04,620
+are like direct connections from pod to host or pod to pod
+
+00:30:04,620 --> 00:30:08,350
+and at the same time get hit by north south
+
+00:30:08,350 --> 00:30:12,940
+so NodePort services is the example that we talked here
+
+00:30:12,940 --> 00:30:16,780
+and one thing that we would like to avoid is
+
+00:30:16,780 --> 00:30:21,780
+that there would be too much turn on the NodePort services
+
+00:30:23,790 --> 00:30:26,330
+for example and they would,
+
+00:30:26,330 --> 00:30:30,613
+and then ClusterIP or other traffic couldn't really,
+
+00:30:32,640 --> 00:30:34,490
+would be interrupted because of that.
+
+00:30:35,840 --> 00:30:39,780
+So it would be nice to have some sort of guarantee
+
+00:30:39,780 --> 00:30:42,240
+that okay I'm only evicting from the zone
+
+00:30:42,240 --> 00:30:44,730
+that I'm supposed to
+
+00:30:44,730 --> 00:30:46,370
+but like the other traffic
+
+00:30:46,370 --> 00:30:48,850
+can still be ongoing at the same time
+
+00:30:48,850 --> 00:30:50,270
+and that we only have
+
+00:30:50,270 --> 00:30:53,360
+like the single method to do the lookup on the first path.
+
+00:30:53,360 --> 00:30:55,900
+So and that could probably be realized
+
+00:30:55,900 --> 00:31:00,220
+through a map update to pass in the zone itself,
+
+00:31:00,220 --> 00:31:03,240
+the question is a little less clear
+
+00:31:03,240 --> 00:31:05,360
+is like how we would specify
+
+00:31:05,360 --> 00:31:09,383
+like how this should be partitioned on map creation.
+
+00:31:17,240 --> 00:31:18,110
+The other thing
+
+00:31:21,530 --> 00:31:24,393
+we'll be looking into is atomic operations,
+
+00:31:26,668 --> 00:31:27,523
+it would be great to
+
+00:31:27,523 --> 00:31:32,523
+have a faster re-use of those NAT entries.
+
+00:31:33,070 --> 00:31:35,970
+So one thing was the garbage collection that I mentioned
+
+00:31:35,970 --> 00:31:37,500
+and if we would get rid of it
+
+00:31:37,500 --> 00:31:40,260
+which would be great of course,
+
+00:31:40,260 --> 00:31:43,840
+then there was the issue that from the connection tracking,
+
+00:31:43,840 --> 00:31:46,450
+once we notice that the connection is tearing down
+
+00:31:46,450 --> 00:31:50,610
+that we can basically set like a state in the NAT table
+
+00:31:50,610 --> 00:31:52,740
+that this is stale and potentially like
+
+00:31:52,740 --> 00:31:57,740
+if the one who selects the new mapping
+
+00:31:58,060 --> 00:31:59,480
+would find that they could basically
+
+00:31:59,480 --> 00:32:01,360
+just re-use it and go on with it
+
+00:32:01,360 --> 00:32:05,350
+instead of like having to search further for example.
+
+00:32:05,350 --> 00:32:07,400
+So right now it would be BPF spinlock
+
+00:32:07,400 --> 00:32:10,720
+but I think this could be optimized
+
+00:32:10,720 --> 00:32:12,360
+because this would be two helper calls
+
+00:32:12,360 --> 00:32:14,140
+just for updating a state.
+
+00:32:14,140 --> 00:32:16,990
+And the other thing is also that it would create,
+
+00:32:16,990 --> 00:32:18,820
+it would have to be,
+
+00:32:18,820 --> 00:32:21,860
+it would create more space in the map values themselves
+
+00:32:21,860 --> 00:32:24,150
+because you have to store the spinlock
+
+00:32:24,150 --> 00:32:27,750
+and this would also create up and down grade issues
+
+00:32:27,750 --> 00:32:32,640
+because the map would have different structure itself.
+
+00:32:32,640 --> 00:32:37,640
+So we have to BPF xadd instruction which is I think
+
+00:32:38,920 --> 00:32:40,930
+mostly only good for counting
+
+00:32:40,930 --> 00:32:43,690
+because it doesn't actually return a value
+
+00:32:43,690 --> 00:32:47,883
+like an atomic ink return for example would do.
+
+00:32:49,670 --> 00:32:50,520
+And there's a spinlock
+
+00:32:50,520 --> 00:32:53,570
+but I think in future we would be good to have
+
+00:32:55,340 --> 00:32:59,720
+the guarantee that we have read once write once semantics
+
+00:32:59,720 --> 00:33:02,860
+which I think is pretty much the case today
+
+00:33:02,860 --> 00:33:05,850
+just that we would have to force
+
+00:33:05,850 --> 00:33:09,330
+like specify that everyone needs to implement it
+
+00:33:09,330 --> 00:33:12,610
+also like all digits to make sure that this is the case
+
+00:33:12,610 --> 00:33:13,950
+and would be nice to have
+
+00:33:13,950 --> 00:33:15,860
+some compare exchange instruction instead
+
+00:33:15,860 --> 00:33:17,010
+that we could then use.
+
+00:33:18,137 --> 00:33:20,490
+And then we could also integrate it into the
+
+00:33:20,490 --> 00:33:23,700
+we talked about it I think with Paul and Will
+
+00:33:23,700 --> 00:33:26,250
+Deacon to the klitmus suite
+
+00:33:26,250 --> 00:33:29,930
+so that people can try different access patterns
+
+00:33:29,930 --> 00:33:34,930
+with those instructions and then it will give you some
+
+00:33:35,540 --> 00:33:37,640
+an output where that is guaranteed or not.
+
+00:33:40,990 --> 00:33:44,350
+Then there's one hook which is not covered,
+
+00:33:44,350 --> 00:33:48,570
+for example in case of connected TCP or UDP
+
+00:33:48,570 --> 00:33:53,103
+where it would not be transparent to the application itself.
+
+00:33:55,818 --> 00:33:57,810
+So basically the idea is to always send back
+
+00:33:57,810 --> 00:33:59,500
+the service IP so that the application
+
+00:33:59,500 --> 00:34:01,120
+which you don't change of course
+
+00:34:01,120 --> 00:34:02,730
+thinks it's connecting to the service
+
+00:34:02,730 --> 00:34:04,810
+but actually it's connecting to the backend.
+
+00:34:04,810 --> 00:34:07,590
+And if it would do getpeername today it would still
+
+00:34:07,590 --> 00:34:09,121
+find out that it's not connected to
+
+00:34:09,121 --> 00:34:10,823
+what it thinks it's connected to.
+
+00:34:15,994 --> 00:34:18,083
+That would basically resolve
+
+00:34:18,083 --> 00:34:20,143
+the getpeername pod as well here.
+
+00:34:23,500 --> 00:34:27,790
+In terms of the non-kernel change,
+
+00:34:27,790 --> 00:34:29,040
+in the cilium case right now
+
+00:34:29,040 --> 00:34:34,040
+we don't make use of the increased instruction limit
+
+00:34:35,760 --> 00:34:37,930
+or complexity limit at this point
+
+00:34:37,930 --> 00:34:41,160
+so most of the thing they are
+
+00:34:41,160 --> 00:34:43,760
+basically outsourced into a tail call
+
+00:34:43,760 --> 00:34:47,380
+because otherwise it would explode like the 4k instructions
+
+00:34:47,380 --> 00:34:50,080
+with all the NAT engine and all this integration
+
+00:34:52,600 --> 00:34:55,350
+and because we're using tail calls anyway
+
+00:34:55,350 --> 00:34:56,970
+but not BPF to BPF calls
+
+00:34:56,970 --> 00:35:00,833
+because it's not combinable together,
+
+00:35:03,300 --> 00:35:06,480
+so yeah, it would be good that the agent
+
+00:35:06,480 --> 00:35:08,130
+would probe like for a new kernel
+
+00:35:09,600 --> 00:35:12,260
+where this 4k limit is not the case
+
+00:35:12,260 --> 00:35:16,770
+and we can also do more complex collision resolution
+
+00:35:16,770 --> 00:35:21,770
+and making use of bounded loops for finding NAT mappings.
+
+00:35:26,560 --> 00:35:27,803
+So you can try it out.
+
+00:35:28,860 --> 00:35:31,210
+In Kubernetes there's a tool
+
+00:35:31,210 --> 00:35:32,540
+which is called kube-admin,
+
+00:35:32,540 --> 00:35:34,890
+it's used for spinning up a Kubernetes cluster.
+
+00:35:36,480 --> 00:35:40,190
+And there's a new option that we recently introduced
+
+00:35:40,190 --> 00:35:43,090
+so it's called skip-phases where you can basically
+
+00:35:43,090 --> 00:35:46,090
+skip the kube-proxy set up,
+
+00:35:46,090 --> 00:35:50,580
+this will be part of I think 116 in Kubernetes release.
+
+00:35:50,580 --> 00:35:54,200
+And then once that is bootstrapped
+
+00:35:54,200 --> 00:35:56,698
+you can add any other working notes
+
+00:35:56,698 --> 00:35:58,630
+to the kube-admin drawing to it
+
+00:35:58,630 --> 00:36:03,300
+and then can create a cilium deployment yaml
+
+00:36:03,300 --> 00:36:05,600
+'cause everything is deployed through yaml in Kubernetes
+
+00:36:05,600 --> 00:36:08,730
+and with the option NodePort enabled
+
+00:36:08,730 --> 00:36:09,563
+then you can apply it
+
+00:36:09,563 --> 00:36:12,980
+and then it will basically spin up the Kubernetes cluster
+
+00:36:12,980 --> 00:36:17,980
+with the BPF based kube-proxy replacement.
+
+00:36:20,160 --> 00:36:21,560
+Yeah, that's pretty much it.
+
+00:36:23,040 --> 00:36:25,610
+There are, just to give a note,
+
+00:36:25,610 --> 00:36:27,622
+there are two more talks on cilium
+
+00:36:27,622 --> 00:36:28,940
+one is on transparent encryption
+
+00:36:28,940 --> 00:36:30,510
+which will be today later on,
+
+00:36:30,510 --> 00:36:34,293
+and the other one on policy tomorrow morning.
+
+00:36:35,170 --> 00:36:38,193
+So yeah, with that, do you have any questions?
+
+00:36:40,940 --> 00:36:43,603
+- So your neighbor problem,
+
+00:36:44,670 --> 00:36:46,083
+I've thought about that one
+
+00:36:46,083 --> 00:36:48,330
+and specifically for the skb case.
+
+00:36:48,330 --> 00:36:52,170
+If you look at yaml xw for off loading routes,
+
+00:36:52,170 --> 00:36:53,340
+they have to resolve a gateway
+
+00:36:53,340 --> 00:36:54,920
+before they can off load the next op
+
+00:36:54,920 --> 00:36:56,670
+before the prefix can get off loaded
+
+00:36:56,670 --> 00:37:01,210
+so yaml xw has code already to track entries of interest
+
+00:37:01,210 --> 00:37:04,903
+and to keep that neighbor entry in a valid state,
+
+00:37:06,600 --> 00:37:07,750
+I have thought about bringing that
+
+00:37:07,750 --> 00:37:10,420
+into either the core code and making it an option
+
+00:37:10,420 --> 00:37:12,540
+so that when routes are pushed down,
+
+00:37:12,540 --> 00:37:14,750
+the kernel automatically kicks off the neighbor discovery
+
+00:37:14,750 --> 00:37:16,680
+and keeps those entries refreshed,
+
+00:37:16,680 --> 00:37:19,060
+you could easily do that in a kernel module as well,
+
+00:37:19,060 --> 00:37:20,520
+I guess the question here though is
+
+00:37:20,520 --> 00:37:22,350
+you have not gateway entries
+
+00:37:22,350 --> 00:37:25,713
+but random host entries that are of interest, so.
+
+00:37:26,700 --> 00:37:28,710
+That's where maybe an external kernel module
+
+00:37:28,710 --> 00:37:31,458
+could use the notifier hooks
+
+00:37:31,458 --> 00:37:33,573
+and easily kick off that state machine.
+
+00:37:37,410 --> 00:37:38,770
+- Are you saying that like by default
+
+00:37:38,770 --> 00:37:41,520
+when we create an ipv6 route it would do the neighbor thing?
+
+00:37:41,520 --> 00:37:43,810
+- You add a flag, opt in.
+
+00:37:43,810 --> 00:37:45,620
+- Like a netlink thing?
+
+00:37:45,620 --> 00:37:47,480
+- So when you do a route add,
+
+00:37:47,480 --> 00:37:50,080
+you would add a flag on that gateway that says
+
+00:37:50,080 --> 00:37:52,580
+I want the neighbor to kick off neighbor discovery
+
+00:37:52,580 --> 00:37:54,820
+and to manage that entry.
+
+00:37:54,820 --> 00:37:56,400
+- He would use that bit.
+
+00:37:56,400 --> 00:37:58,760
+- Well there'd have to be an extension
+
+00:37:58,760 --> 00:38:00,990
+to make that available for any host
+
+00:38:00,990 --> 00:38:02,293
+as opposed to a gateway.
+
+00:38:04,470 --> 00:38:06,030
+So gateways are super important
+
+00:38:06,030 --> 00:38:07,510
+because you can't off load the routes
+
+00:38:07,510 --> 00:38:09,000
+until the gateways been resolved.
+
+00:38:09,000 --> 00:38:10,900
+- You have to get the x out information.
+
+00:38:10,900 --> 00:38:14,430
+- Yep, you got to turn that gateway into a neighbor entry.
+
+00:38:14,430 --> 00:38:15,263
+- Okay.
+
+00:38:16,550 --> 00:38:18,930
+- Yeah, I think such a feature would be reusable
+
+00:38:18,930 --> 00:38:21,330
+for the obs or for the tunnels,
+
+00:38:21,330 --> 00:38:23,100
+I can't remember what workaround we have
+
+00:38:23,100 --> 00:38:25,363
+but probably it could be disposed of.
+
+00:38:29,250 --> 00:38:30,890
+- So I think we had a similar problem
+
+00:38:30,890 --> 00:38:33,200
+in something we were doing where we had that situation
+
+00:38:33,200 --> 00:38:34,670
+where the ark table didn't have an entry
+
+00:38:34,670 --> 00:38:36,570
+for our destination on egress,
+
+00:38:36,570 --> 00:38:39,030
+so there's one hack you can do and its kind of ugly
+
+00:38:39,030 --> 00:38:41,480
+but you can pass the packet back upstream
+
+00:38:41,480 --> 00:38:43,480
+and if forwarding is enabled what we do is
+
+00:38:43,480 --> 00:38:45,420
+we just make the source and destination mac address
+
+00:38:45,420 --> 00:38:46,995
+the same, like your local mac address,
+
+00:38:46,995 --> 00:38:48,400
+pass it back upstream and then
+
+00:38:48,400 --> 00:38:51,000
+the OS will actually do the ark pluck up for you.
+
+00:38:51,000 --> 00:38:52,955
+So it's kind of a hack but it saves you
+
+00:38:52,955 --> 00:38:56,955
+having to maintain the state in the BPF program.
+
+00:38:57,884 --> 00:38:58,717
+- Yeah, I agree.
+
+00:38:58,717 --> 00:39:01,120
+On the other hand if you want to
+
+00:39:01,120 --> 00:39:02,790
+point it to xdb for example,
+
+00:39:02,790 --> 00:39:05,613
+I mean, I don't really want to make the detour, right.
+
+00:39:15,090 --> 00:39:16,660
+- You talked about the use case of being TCP
+
+00:39:16,660 --> 00:39:19,960
+and connected UDP, what about disconnected UDP?
+
+00:39:19,960 --> 00:39:22,163
+Let's say a DNS server.
+
+00:39:23,558 --> 00:39:25,980
+- So what I mentioned basically
+
+00:39:27,265 --> 00:39:29,690
+the connected UDP and connected TCP
+
+00:39:29,690 --> 00:39:30,970
+is handled through the connect hook
+
+00:39:30,970 --> 00:39:32,600
+but the unconnected stuff is handled
+
+00:39:32,600 --> 00:39:34,500
+through send message and receive message
+
+00:39:34,500 --> 00:39:36,230
+so you have to do the translation.
+
+00:39:36,230 --> 00:39:37,527
+For the connected stuff you don't have to do it
+
+00:39:37,527 --> 00:39:40,027
+you just select it once and that's pretty much it.
+
+00:39:41,072 --> 00:39:42,236
+- Is that gonna be able to scale
+
+00:39:42,236 --> 00:39:43,580
+with a large number of clients?
+
+00:39:43,580 --> 00:39:44,413
+- Say again?
+
+00:39:44,413 --> 00:39:45,246
+- Is that gonna be able to scale
+
+00:39:45,246 --> 00:39:46,620
+with a large number of clients?
+
+00:39:48,640 --> 00:39:49,473
+- Yeah.
+
+00:39:50,730 --> 00:39:51,655
+- Okay
+
+00:39:51,655 --> 00:39:53,930
+- I mean, those entries they're really only needed
+
+00:39:53,930 --> 00:39:57,160
+for the case where their connection's actually still active
+
+00:39:57,160 --> 00:40:00,373
+otherwise they would get LRU evicted and it's just fine.
+
+00:40:06,470 --> 00:40:07,340
+- A couple of questions,
+
+00:40:07,340 --> 00:40:10,350
+I think I heard Martinus mention that there
+
+00:40:10,350 --> 00:40:11,890
+you have a IP VLAN support,
+
+00:40:11,890 --> 00:40:14,373
+do you have a diagram or something like that?
+
+00:40:15,940 --> 00:40:19,430
+- Yeah, not on this slide but basically like
+
+00:40:19,430 --> 00:40:21,630
+when IP VLAN mode is enabled in cilium agent
+
+00:40:22,480 --> 00:40:24,570
+we create an IP VLAN slave
+
+00:40:24,570 --> 00:40:27,163
+and so we support L3 and L3s
+
+00:40:27,163 --> 00:40:30,677
+and then we move that slave into network name space
+
+00:40:30,677 --> 00:40:32,350
+where the pod is created
+
+00:40:34,654 --> 00:40:36,210
+and the ugly part there is that
+
+00:40:36,210 --> 00:40:39,200
+we would have to attach the BPF programs
+
+00:40:39,200 --> 00:40:42,690
+that you saw earlier like the BPF lxc
+
+00:40:42,690 --> 00:40:46,810
+on the device that is host facing
+
+00:40:46,810 --> 00:40:49,080
+in the reef case you would have to attach them
+
+00:40:49,080 --> 00:40:53,453
+inside the network name space so basically here,
+
+00:40:54,610 --> 00:40:58,460
+so you cannot really allow workloads
+
+00:40:58,460 --> 00:41:01,003
+that are untrusted in that sense, right.
+
+00:41:02,479 --> 00:41:03,880
+But we're looking in overcoming
+
+00:41:03,880 --> 00:41:05,453
+that limitation in the future.
+
+00:41:07,250 --> 00:41:09,323
+- And then how do you operate?
+
+00:41:11,200 --> 00:41:12,173
+- What do you mean?
+
+00:41:12,173 --> 00:41:14,940
+- Like for existing Kubernetes,
+
+00:41:14,940 --> 00:41:18,800
+if you use cilium, how do you upgrade to the next system?
+
+00:41:18,800 --> 00:41:23,800
+- Okay yeah, if there's a new version of cilium for example,
+
+00:41:24,270 --> 00:41:29,270
+then the BPF data path is basically still operational
+
+00:41:29,558 --> 00:41:34,558
+while the application itself is like restarted in that sense
+
+00:41:36,030 --> 00:41:41,030
+and then basically when we recreate the BPF programs
+
+00:41:42,790 --> 00:41:44,770
+and re-push them to the kernel
+
+00:41:44,770 --> 00:41:49,140
+then we check the maps from the BPF file system,
+
+00:41:49,140 --> 00:41:52,510
+we retrieve them and then we continue using them.
+
+00:41:52,510 --> 00:41:54,880
+So that's how it basically
+
+00:41:55,800 --> 00:41:58,593
+retains the state without disruption.
+
+00:42:00,900 --> 00:42:01,960
+- I think we have time for one more question
+
+00:42:01,960 --> 00:42:03,210
+if anyone has a question.
+
+00:42:04,750 --> 00:42:09,160
+- I have one more question about the xtp xadd,
+
+00:42:09,160 --> 00:42:12,850
+how hard would it be to add an easy b return,
+
+00:42:12,850 --> 00:42:14,430
+like automatic add return?
+
+00:42:14,430 --> 00:42:17,593
+Because we hit this issue and
+
+00:42:19,420 --> 00:42:22,100
+that's a really missing feature for us.
+
+00:42:22,100 --> 00:42:25,663
+- Yeah, right, I think it should not be that hard,
+
+00:42:26,570 --> 00:42:28,210
+I'm not sure if there are some bits
+
+00:42:28,210 --> 00:42:31,380
+we could still re-use inside BPF xadd.
+
+00:42:35,610 --> 00:42:39,280
+But yeah, I don't think there's a blocker in any way.
+
+00:42:39,280 --> 00:42:42,360
+- Was it some architecture which prevented that
+
+00:42:42,360 --> 00:42:44,810
+or no, it should be doable?
+
+00:42:44,810 --> 00:42:45,643
+- Yeah.
+
+00:42:48,100 --> 00:42:49,931
+- Okay, thank you very much.
+
+00:42:49,931 --> 00:42:52,181
+
+YouTube URL: https://www.youtube.com/watch?v=AD-h-irG8V8
+
+

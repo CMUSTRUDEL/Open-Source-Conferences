@@ -1,0 +1,2753 @@
+Title: LPC2019 - Moving the Linux ABI to userspace
+Publication date: 2019-11-18
+Playlist: LPC2019 - Kernel Summit Track
+Description: 
+	The ABI between Linux and user software mostly sits at the user/privileged boundary, although many architectures extend this with a small amount of special-case code that sits in userspace, such as in special pages or shared libraries (vDSOs) mapped into each user process [1] that user code can call into.
+
+The reasons for this are a bit arbitrary: system interface libraries such as glibc and Bionic are maintained as separate projects from the kernel, by different people. The privileged/unprivileged boundary is the de facto demarcation point between projects, because by design only kernel code can run privileged.
+
+Because Linux's user/privileged boundary and ABI are welded together in this way though, the Linux ABI is forced to evolve (or prevented from doing so) for reasons that have little to do with functionality, such as backwards compatibility for superseded interfaces, and optimisations (e.g., vDSO gettimeofday(), getcpu() etc.).
+
+Moving implementation of pieces of kernel functionality between privileged space and userspace is currently hard due to the resulting ABI breaks, yet moving functionality into userspace (e.g., into the vDSO) has some interesting potential use cases, such as:
+
+Allowing the user/privileged boundary to evolve independently of the kernel ABI.
+
+Providing a way to push obsolete, deprecated, redundant and/or regrettable syscalls out of the kernel proper.
+
+Making it easier for userspace to refine its own ABI personality: so things like libc, fakeroot etc., can catch and reimplement syscalls in a transparent way.
+
+Migrating to a unified library-style ABI instead of relying on a patchwork of bare syscalls, vDSO etc., but without the risk of competing or incompatible implementations.
+
+Migrating a vDSO function to be implemented in privileged space is straightforward: a stub function can be left in the vDSO for old userspace callers to use: the stub just makes the appropriate syscall.
+
+The converse is harder, and requires syscall trapping or filtering mechanisms such as BPF or ptrace.
+
+This presentation will describe some approaches to reflecting syscalls back to userspace, and how feasible they look.
+
+Things I aim to cover:
+
+What mechanisms can be used?
+
+How expensive are they, and what breaks?
+
+What's the likely overhead of doing all syscalls through a vDSO or similar?
+
+[1] e.g.,
+Documentation/ABI/stable/vdso
+Documentation/arm/kernel_user_helpers.txtThe ABI between Linux and user software mostly sits at the user/privileged boundary, although many architectures extend this with a small amount of special-case code that sits in userspace, such as in special pages or shared libraries (vDSOs) mapped into each user process [1] that user code can call into.
+
+The reasons for this are a bit arbitrary: system interface libraries such as glibc and Bionic are maintained as separate projects from the kernel, by different people. The privileged/unprivileged boundary is the de facto demarcation point between projects, because by design only kernel code can run privileged.
+
+Because Linux's user/privileged boundary and ABI are welded together in this way though, the Linux ABI is forced to evolve (or prevented from doing so) for reasons that have little to do with functionality, such as backwards compatibility for superseded interfaces, and optimisations (e.g., vDSO gettimeofday(), getcpu() etc.).
+
+Moving implementation of pieces of kernel functionality between privileged space and userspace is currently hard due to the resulting ABI breaks, yet moving functionality into userspace (e.g., into the vDSO) has some interesting potential use cases, such as:
+
+Allowing the user/privileged boundary to evolve independently of the kernel ABI.
+
+Providing a way to push obsolete, deprecated, redundant and/or regrettable syscalls out of the kernel proper.
+
+Making it easier for userspace to refine its own ABI personality: so things like libc, fakeroot etc., can catch and reimplement syscalls in a transparent way.
+
+Migrating to a unified library-style ABI instead of relying on a patchwork of bare syscalls, vDSO etc., but without the risk of competing or incompatible implementations.
+
+Migrating a vDSO function to be implemented in privileged space is straightforward: a stub function can be left in the vDSO for old userspace callers to use: the stub just makes the appropriate syscall.
+
+The converse is harder, and requires syscall trapping or filtering mechanisms such as BPF or ptrace.
+
+This presentation will describe some approaches to reflecting syscalls back to userspace, and how feasible they look.
+
+Things I aim to cover:
+
+What mechanisms can be used?
+
+How expensive are they, and what breaks?
+
+What's the likely overhead of doing all syscalls through a vDSO or similar?
+
+Dave Martin (ARM Limited)
+
+[1] e.g.,
+Documentation/ABI/stable/vdso
+Documentation/arm/kernel_user_helpers.txt
+Captions: 
+	00:00:00,060 --> 00:00:03,560
+so I was wondering whether there is a
+
+00:00:01,530 --> 00:00:06,359
+way that we could move over from using
+
+00:00:03,560 --> 00:00:08,550
+their machine level system calls and
+
+00:00:06,359 --> 00:00:10,679
+provide something that looks more like a
+
+00:00:08,550 --> 00:00:14,280
+library interface the user space can
+
+00:00:10,679 --> 00:00:16,730
+call there's been some recent
+
+00:00:14,280 --> 00:00:21,090
+discussions and work that suggests that
+
+00:00:16,730 --> 00:00:24,480
+this is an interface that may work so
+
+00:00:21,090 --> 00:00:28,740
+the generic BDS I work for example has
+
+00:00:24,480 --> 00:00:29,970
+looked at deploying deploying the BDS
+
+00:00:28,740 --> 00:00:33,540
+own interface across multiple
+
+00:00:29,970 --> 00:00:35,670
+architectures and basically my work
+
+00:00:33,540 --> 00:00:42,649
+explores some ideas about how we might
+
+00:00:35,670 --> 00:00:45,180
+make use of that for all system calls so
+
+00:00:42,649 --> 00:00:48,930
+I'll just take a moment to explain what
+
+00:00:45,180 --> 00:00:51,539
+I mean by ABI you all know what this
+
+00:00:48,930 --> 00:00:54,120
+means of course application binary
+
+00:00:51,539 --> 00:00:56,219
+interface is the machine level or
+
+00:00:54,120 --> 00:01:00,210
+assembler level interface between user
+
+00:00:56,219 --> 00:01:02,699
+space and the kernel but there are some
+
+00:01:00,210 --> 00:01:06,960
+different ways we could interpret the
+
+00:01:02,699 --> 00:01:09,150
+notion of what the kernel is so Linux is
+
+00:01:06,960 --> 00:01:11,610
+a project it has get free it's
+
+00:01:09,150 --> 00:01:16,590
+maintained by a community of people some
+
+00:01:11,610 --> 00:01:18,450
+of whom here it's also might be viewed
+
+00:01:16,590 --> 00:01:20,009
+as the binary blob that the bootloader
+
+00:01:18,450 --> 00:01:22,890
+loads and that runs in privileged mode
+
+00:01:20,009 --> 00:01:24,810
+or you can view it as an API or an
+
+00:01:22,890 --> 00:01:31,079
+interface where you don't necessarily
+
+00:01:24,810 --> 00:01:34,680
+care about how it's implemented in Linux
+
+00:01:31,079 --> 00:01:37,229
+land what tends to happen in practice is
+
+00:01:34,680 --> 00:01:40,579
+we have the Linux kernel project and we
+
+00:01:37,229 --> 00:01:44,490
+develop the blob that runs privileged
+
+00:01:40,579 --> 00:01:49,259
+and that blob has access to the
+
+00:01:44,490 --> 00:01:51,810
+privileged features of the CPU and user
+
+00:01:49,259 --> 00:01:54,509
+space is mostly the other stuff it's not
+
+00:01:51,810 --> 00:01:56,250
+developed specifically by this community
+
+00:01:54,509 --> 00:01:59,670
+and it doesn't have access to privileged
+
+00:01:56,250 --> 00:02:01,590
+CPU features and the ABI is the
+
+00:01:59,670 --> 00:02:03,810
+interface that those two things use to
+
+00:02:01,590 --> 00:02:06,030
+talk to each other mostly where I say
+
+00:02:03,810 --> 00:02:08,789
+kernel in this talk I'll mean the thing
+
+00:02:06,030 --> 00:02:10,800
+that runs privileged though obviously
+
+00:02:08,789 --> 00:02:14,120
+not everything that's part of the kernel
+
+00:02:10,800 --> 00:02:14,120
+or part of this project runs pretty
+
+00:02:15,170 --> 00:02:19,890
+so what's the impact of that well in
+
+00:02:18,180 --> 00:02:22,650
+practice a lot of the stuff that we
+
+00:02:19,890 --> 00:02:25,260
+develop ends up in the privileged code
+
+00:02:22,650 --> 00:02:27,570
+base of the kernel which means we tend
+
+00:02:25,260 --> 00:02:31,860
+to accumulate in privilege mode some
+
+00:02:27,570 --> 00:02:33,450
+glue and legacy stuff features that are
+
+00:02:31,860 --> 00:02:35,510
+valuable that have been superseded by
+
+00:02:33,450 --> 00:02:39,930
+more flexible interfaces over time
+
+00:02:35,510 --> 00:02:41,610
+backwards compatibility stuff and some
+
+00:02:39,930 --> 00:02:43,410
+things that seem like a good idea when
+
+00:02:41,610 --> 00:02:46,290
+we originally added them but may not
+
+00:02:43,410 --> 00:02:49,230
+seem like such a good idea now but
+
+00:02:46,290 --> 00:02:52,650
+because these are exposed by this
+
+00:02:49,230 --> 00:02:54,600
+low-level interface they tend to be
+
+00:02:52,650 --> 00:02:56,340
+stuck running in privileged mode forever
+
+00:02:54,600 --> 00:02:58,680
+and we can never get rid of them unless
+
+00:02:56,340 --> 00:03:04,290
+we are happy to break that quints
+
+00:02:58,680 --> 00:03:06,990
+compatibility so just to give some
+
+00:03:04,290 --> 00:03:09,870
+simple examples of some odd cases there
+
+00:03:06,990 --> 00:03:12,660
+are some calls light personality and set
+
+00:03:09,870 --> 00:03:14,460
+robots lists which really do nothing
+
+00:03:12,660 --> 00:03:18,630
+more than access a variable on behalf of
+
+00:03:14,460 --> 00:03:20,790
+user space some of the signal related
+
+00:03:18,630 --> 00:03:22,380
+Siskel's also don't do much more than
+
+00:03:20,790 --> 00:03:25,709
+that although they can be a little bit
+
+00:03:22,380 --> 00:03:28,230
+more involved but the impact of exposing
+
+00:03:25,709 --> 00:03:30,060
+these in the Cisco ABI is that we have
+
+00:03:28,230 --> 00:03:32,400
+an inevitable trap into the kernel every
+
+00:03:30,060 --> 00:03:34,590
+time we call them do they really require
+
+00:03:32,400 --> 00:03:36,270
+privilege could we just if they're just
+
+00:03:34,590 --> 00:03:37,980
+accessing a variable on behalf of user
+
+00:03:36,270 --> 00:03:42,060
+space can we just put that variable in
+
+00:03:37,980 --> 00:03:45,390
+user memory instead sometimes there are
+
+00:03:42,060 --> 00:03:48,090
+the concerns for example there may be an
+
+00:03:45,390 --> 00:03:52,290
+expectation that the whole call is
+
+00:03:48,090 --> 00:03:54,030
+atomic new architectures provide some
+
+00:03:52,290 --> 00:03:55,709
+ways of ensuring that that didn't
+
+00:03:54,030 --> 00:03:59,010
+necessarily exist when these interfaces
+
+00:03:55,709 --> 00:04:02,160
+were invented so sometimes things that
+
+00:03:59,010 --> 00:04:04,020
+couldn't have executed in userspace when
+
+00:04:02,160 --> 00:04:06,980
+they originally introduced might be more
+
+00:04:04,020 --> 00:04:06,980
+feasible to do now
+
+00:04:09,180 --> 00:04:17,590
+so is there anything we can do to change
+
+00:04:12,370 --> 00:04:19,959
+this situation well the alternative
+
+00:04:17,590 --> 00:04:21,370
+there cares to me is that we use some
+
+00:04:19,959 --> 00:04:25,000
+kind of user space library interface
+
+00:04:21,370 --> 00:04:27,100
+instead but if it's a separate library
+
+00:04:25,000 --> 00:04:30,250
+then we have to ask the question of who
+
+00:04:27,100 --> 00:04:33,190
+maintains it it's either going to be may
+
+00:04:30,250 --> 00:04:36,280
+be done in a user space see library say
+
+00:04:33,190 --> 00:04:38,710
+gee lipstick gypsy or Bionic or
+
+00:04:36,280 --> 00:04:41,500
+something else but those are developed
+
+00:04:38,710 --> 00:04:43,150
+by different communities they may do
+
+00:04:41,500 --> 00:04:44,800
+different things from each other they
+
+00:04:43,150 --> 00:04:49,240
+may not be completely in sync with what
+
+00:04:44,800 --> 00:04:51,690
+the kernels doing another option is that
+
+00:04:49,240 --> 00:04:54,610
+it's just a separate standalone library
+
+00:04:51,690 --> 00:04:56,620
+but again we can't force people to use
+
+00:04:54,610 --> 00:04:58,090
+it different people may invent their own
+
+00:04:56,620 --> 00:05:01,000
+and again there's a risk of
+
+00:04:58,090 --> 00:05:02,590
+fragmentation so it would be nice if we
+
+00:05:01,000 --> 00:05:04,180
+could maintain this thing as part of the
+
+00:05:02,590 --> 00:05:09,010
+kernel project but not have it run
+
+00:05:04,180 --> 00:05:10,810
+privileged and if we do that we have the
+
+00:05:09,010 --> 00:05:12,940
+option to keep it tightly coupled to the
+
+00:05:10,810 --> 00:05:15,220
+kernel version which gives us more
+
+00:05:12,940 --> 00:05:18,460
+flexibility to refactor and we implement
+
+00:05:15,220 --> 00:05:20,620
+how things work over time and we all
+
+00:05:18,460 --> 00:05:22,780
+have we already have something that that
+
+00:05:20,620 --> 00:05:26,200
+takes a lot of these boxes the VDS a
+
+00:05:22,780 --> 00:05:28,150
+which is this fake shared library that
+
+00:05:26,200 --> 00:05:31,360
+the kernel can map into user space for
+
+00:05:28,150 --> 00:05:32,950
+user space to call it's not deployed on
+
+00:05:31,360 --> 00:05:40,030
+all architectures today but it is on
+
+00:05:32,950 --> 00:05:41,800
+several yes first of all the VBS so has
+
+00:05:40,030 --> 00:05:47,140
+problems when it comes to checkpoint
+
+00:05:41,800 --> 00:05:52,870
+restart so relying on that alone is
+
+00:05:47,140 --> 00:05:55,510
+probably not a good idea the idea of
+
+00:05:52,870 --> 00:05:58,120
+having a Lib kernel is something I
+
+00:05:55,510 --> 00:06:03,640
+personally have proposed for quite a
+
+00:05:58,120 --> 00:06:05,950
+long time if if that is you know
+
+00:06:03,640 --> 00:06:12,730
+something that people think is a good
+
+00:06:05,950 --> 00:06:15,490
+idea I am more than happy to take the
+
+00:06:12,730 --> 00:06:18,130
+infrastructure I wrote for Caleb C which
+
+00:06:15,490 --> 00:06:22,940
+provides very very thin layer system
+
+00:06:18,130 --> 00:06:29,510
+calls and just do that for
+
+00:06:22,940 --> 00:06:35,450
+system calls that do not require that do
+
+00:06:29,510 --> 00:06:39,650
+not have wrappers for you know for
+
+00:06:35,450 --> 00:06:44,780
+example gilepsy has its own structure my
+
+00:06:39,650 --> 00:06:49,700
+OS you can't you can't implement those
+
+00:06:44,780 --> 00:06:51,650
+things in library because you will you
+
+00:06:49,700 --> 00:06:53,330
+know in the kernel specific library
+
+00:06:51,650 --> 00:06:55,760
+because we will do the wrong things
+
+00:06:53,330 --> 00:06:58,760
+yeah right gilepsy that defines that in
+
+00:06:55,760 --> 00:07:03,740
+touch there is a lot of things in our
+
+00:06:58,760 --> 00:07:05,780
+ABI that we're all all that happens is
+
+00:07:03,740 --> 00:07:09,410
+we just pass things straight through
+
+00:07:05,780 --> 00:07:13,490
+yeah and that is something that we could
+
+00:07:09,410 --> 00:07:16,280
+do very very easily in a lib kernel and
+
+00:07:13,490 --> 00:07:17,900
+I focused on using the video so as a
+
+00:07:16,280 --> 00:07:19,430
+mechanism but there are probably other
+
+00:07:17,900 --> 00:07:22,130
+ways you could do this you could maybe
+
+00:07:19,430 --> 00:07:26,480
+ship a library in the kernel or some
+
+00:07:22,130 --> 00:07:28,370
+other things you might want to state why
+
+00:07:26,480 --> 00:07:30,050
+you're concerned about VDS oh and
+
+00:07:28,370 --> 00:07:33,940
+checkpoint restart I assume it's because
+
+00:07:30,050 --> 00:07:37,400
+of state being held in the VDS Oh page
+
+00:07:33,940 --> 00:07:41,600
+right because when you do a checkpoint
+
+00:07:37,400 --> 00:07:45,830
+to restart if you are pulling out you
+
+00:07:41,600 --> 00:07:48,080
+know you are now having a potentially
+
+00:07:45,830 --> 00:07:53,300
+actually most likely very different
+
+00:07:48,080 --> 00:07:57,080
+video so if your instruction pointer or
+
+00:07:53,300 --> 00:08:00,260
+is inside the video so or you have
+
+00:07:57,080 --> 00:08:05,600
+issues with your radius with your video
+
+00:08:00,260 --> 00:08:09,380
+so data you could end up in quite the
+
+00:08:05,600 --> 00:08:11,960
+mess yeah and and as a result most of
+
+00:08:09,380 --> 00:08:14,620
+the checkpoint restarts implementation
+
+00:08:11,960 --> 00:08:18,350
+these they simply unmapped the video so
+
+00:08:14,620 --> 00:08:21,800
+yeah there were some discussions on this
+
+00:08:18,350 --> 00:08:23,750
+yesterday as well and yes this yeah so
+
+00:08:21,800 --> 00:08:26,060
+this doesn't create new problems with
+
+00:08:23,750 --> 00:08:28,570
+the video so of that sort but as you say
+
+00:08:26,060 --> 00:08:34,240
+that problems already exist right but a
+
+00:08:28,570 --> 00:08:37,450
+library user space library
+
+00:08:34,240 --> 00:08:40,630
+can be maintained forward compatible so
+
+00:08:37,450 --> 00:08:42,490
+that so that it so that when the
+
+00:08:40,630 --> 00:08:44,410
+checkpoint restarted also checkpoint
+
+00:08:42,490 --> 00:08:49,029
+restarts a library together with all the
+
+00:08:44,410 --> 00:08:51,820
+other use of space stuff and yes you're
+
+00:08:49,029 --> 00:08:54,700
+only providing a subset of the
+
+00:08:51,820 --> 00:08:55,899
+functionality that you would in an in a
+
+00:08:54,700 --> 00:08:58,839
+newer kernel but you're doing that
+
+00:08:55,899 --> 00:09:02,589
+anyway that old application can only use
+
+00:08:58,839 --> 00:09:05,950
+that subset anyhow so in that sense
+
+00:09:02,589 --> 00:09:12,310
+having it as a standalone library in
+
+00:09:05,950 --> 00:09:16,839
+user space will you know inherently
+
+00:09:12,310 --> 00:09:18,820
+resolve that problem so the big problem
+
+00:09:16,839 --> 00:09:20,350
+you're trying to solve is legacy right
+
+00:09:18,820 --> 00:09:22,690
+we have a lot of not just nestled
+
+00:09:20,350 --> 00:09:24,940
+Agassiz but you have a behalf
+
+00:09:22,690 --> 00:09:27,399
+accumulated offices calls already that
+
+00:09:24,940 --> 00:09:28,870
+you pretty much want to just move from
+
+00:09:27,399 --> 00:09:30,930
+kernel space to somewhere else but it's
+
+00:09:28,870 --> 00:09:33,250
+less privileged which is attentionally
+
+00:09:30,930 --> 00:09:35,200
+use case there are some things which
+
+00:09:33,250 --> 00:09:36,850
+don't necessarily need to go into the
+
+00:09:35,200 --> 00:09:38,529
+kernel at all if we're flexible to
+
+00:09:36,850 --> 00:09:40,540
+change how they're implemented correct
+
+00:09:38,529 --> 00:09:43,750
+so the problem is that if there already
+
+00:09:40,540 --> 00:09:46,180
+exists we cannot move them to a Lib
+
+00:09:43,750 --> 00:09:48,670
+kernel because we still have to adhere
+
+00:09:46,180 --> 00:09:51,279
+to old user space that calls those his
+
+00:09:48,670 --> 00:09:53,050
+calls right so that's something I
+
+00:09:51,279 --> 00:09:55,270
+explore here one way of working around
+
+00:09:53,050 --> 00:09:57,040
+that there it does use the B DSO as a
+
+00:09:55,270 --> 00:09:59,140
+platform so there may be issues with
+
+00:09:57,040 --> 00:10:03,580
+that but this is really a bag of ideas
+
+00:09:59,140 --> 00:10:07,589
+and I want to see what people think okay
+
+00:10:03,580 --> 00:10:07,589
+so thank you for that I will carry on
+
+00:10:08,700 --> 00:10:14,470
+so you right you make the point about
+
+00:10:10,750 --> 00:10:16,779
+backwards compatibility we can update
+
+00:10:14,470 --> 00:10:19,480
+users based software to call some
+
+00:10:16,779 --> 00:10:20,800
+library but all the binaries are
+
+00:10:19,480 --> 00:10:22,779
+obviously still going to make direct
+
+00:10:20,800 --> 00:10:25,480
+Siskel's and we have to still make that
+
+00:10:22,779 --> 00:10:26,980
+work somehow we could keep all the
+
+00:10:25,480 --> 00:10:29,350
+backwards compatibility clear in the
+
+00:10:26,980 --> 00:10:31,120
+kernel but if part of the object of the
+
+00:10:29,350 --> 00:10:32,950
+exercise was to move that stuff out of
+
+00:10:31,120 --> 00:10:36,190
+the kernel then it makes the exercise
+
+00:10:32,950 --> 00:10:38,800
+maybe a bit pointless so I wondered if
+
+00:10:36,190 --> 00:10:41,320
+there is some feasible way to bounce
+
+00:10:38,800 --> 00:10:43,150
+old-style system calls back out into
+
+00:10:41,320 --> 00:10:46,990
+user space and have user space handle
+
+00:10:43,150 --> 00:10:47,850
+that somehow so mentioning this to
+
+00:10:46,990 --> 00:10:51,250
+people
+
+00:10:47,850 --> 00:10:54,010
+first thing they tended to say was well
+
+00:10:51,250 --> 00:10:57,010
+doesn't seccomp do that sort of thing so
+
+00:10:54,010 --> 00:11:00,850
+I thought I would experiment and see
+
+00:10:57,010 --> 00:11:04,360
+what I could build on top of that so SEK
+
+00:11:00,850 --> 00:11:07,660
+gives us the ability to filter system
+
+00:11:04,360 --> 00:11:09,850
+calls and decide whether to allow the
+
+00:11:07,660 --> 00:11:13,320
+kernel to execute them or just trap them
+
+00:11:09,850 --> 00:11:16,510
+back out to use a space using a signal
+
+00:11:13,320 --> 00:11:18,310
+so if we want to filter Siskel's based
+
+00:11:16,510 --> 00:11:20,790
+on where and use a space they came from
+
+00:11:18,310 --> 00:11:23,080
+then we need some information about
+
+00:11:20,790 --> 00:11:25,350
+what's sitting in the user space address
+
+00:11:23,080 --> 00:11:28,300
+space to keep things simple I just
+
+00:11:25,350 --> 00:11:30,339
+extended the set called data structure
+
+00:11:28,300 --> 00:11:32,020
+that's passed the filter with some
+
+00:11:30,339 --> 00:11:35,589
+bounds information to tell us where the
+
+00:11:32,020 --> 00:11:38,260
+VDS areas at the moment and I envisage
+
+00:11:35,589 --> 00:11:40,360
+that to make use of this the C library
+
+00:11:38,260 --> 00:11:41,770
+would install a suitable filter and a
+
+00:11:40,360 --> 00:11:43,720
+handler for this signal on process
+
+00:11:41,770 --> 00:11:45,640
+startup now that has a world of issues
+
+00:11:43,720 --> 00:11:49,060
+but it was just this was just hack to
+
+00:11:45,640 --> 00:11:51,610
+see what we could get working so I have
+
+00:11:49,060 --> 00:11:53,050
+some hacks in a tree that's there's some
+
+00:11:51,610 --> 00:11:54,670
+references at the end of this slide deck
+
+00:11:53,050 --> 00:11:59,140
+which you can follow up later if you
+
+00:11:54,670 --> 00:12:03,130
+want but just to illustrate so I tacked
+
+00:11:59,140 --> 00:12:05,260
+a lower and upper bound for the
+
+00:12:03,130 --> 00:12:10,600
+instruction pointer that say whether
+
+00:12:05,260 --> 00:12:19,450
+it's in the BSO or not just onto the end
+
+00:12:10,600 --> 00:12:22,089
+of the existing set comm data and then I
+
+00:12:19,450 --> 00:12:23,440
+cooked up a set comm filter you don't
+
+00:12:22,089 --> 00:12:25,209
+really need to read this but just to
+
+00:12:23,440 --> 00:12:26,950
+give an indication of how much code
+
+00:12:25,209 --> 00:12:28,930
+there was it's just checking the
+
+00:12:26,950 --> 00:12:31,060
+instruction pointer against two bounds
+
+00:12:28,930 --> 00:12:33,339
+if if it's within bounds we allow this
+
+00:12:31,060 --> 00:12:35,829
+call if it came from some other user
+
+00:12:33,339 --> 00:12:39,430
+space address then we trap the Sisko
+
+00:12:35,829 --> 00:12:40,839
+using a signal this is using classic BPF
+
+00:12:39,430 --> 00:12:43,209
+because I hadn't got my head fully
+
+00:12:40,839 --> 00:12:44,529
+around EBP F at the time so he probably
+
+00:12:43,209 --> 00:12:46,540
+could do a bit better than this but
+
+00:12:44,529 --> 00:12:53,079
+anyway that's that's the rough scale of
+
+00:12:46,540 --> 00:12:55,300
+it so when we trap a siskel out into
+
+00:12:53,079 --> 00:12:58,959
+user space then we need to handle that
+
+00:12:55,300 --> 00:13:01,540
+and the skeleton handler might look
+
+00:12:58,959 --> 00:13:04,600
+something like this
+
+00:13:01,540 --> 00:13:06,100
+the details of how to extract the system
+
+00:13:04,600 --> 00:13:08,069
+call number and arguments is obviously
+
+00:13:06,100 --> 00:13:10,420
+going to be architecture-specific
+
+00:13:08,069 --> 00:13:12,850
+but once we've extracted that
+
+00:13:10,420 --> 00:13:15,730
+information we could handle things in a
+
+00:13:12,850 --> 00:13:18,249
+generic way much as they're handled in
+
+00:13:15,730 --> 00:13:20,529
+the kernel so we might have a switch on
+
+00:13:18,249 --> 00:13:21,790
+the Siskel number to catch any system
+
+00:13:20,529 --> 00:13:26,470
+calls that we want to do something
+
+00:13:21,790 --> 00:13:30,480
+special with and then for other system
+
+00:13:26,470 --> 00:13:33,220
+calls we can fall through and call some
+
+00:13:30,480 --> 00:13:35,529
+stub for getting this working I added a
+
+00:13:33,220 --> 00:13:38,939
+stub in the VDS au which will just make
+
+00:13:35,529 --> 00:13:41,620
+a sis call using the arguments supplied
+
+00:13:38,939 --> 00:13:43,269
+because that comes from the video so now
+
+00:13:41,620 --> 00:13:47,709
+it won't be bounced again the system
+
+00:13:43,269 --> 00:13:51,100
+call will just be executed so does this
+
+00:13:47,709 --> 00:13:53,649
+work well signals are a recipe for
+
+00:13:51,100 --> 00:13:57,129
+invasiveness and interacting badly with
+
+00:13:53,649 --> 00:14:01,689
+things in general so I didn't expect
+
+00:13:57,129 --> 00:14:04,110
+this to be entirely foolproof one
+
+00:14:01,689 --> 00:14:07,509
+obvious thing here the signal frame is
+
+00:14:04,110 --> 00:14:09,490
+generally pretty big so we're adding
+
+00:14:07,509 --> 00:14:10,839
+quite lots the stack footprint of a
+
+00:14:09,490 --> 00:14:15,999
+thread compared with what it would
+
+00:14:10,839 --> 00:14:17,709
+otherwise have required and to be honest
+
+00:14:15,999 --> 00:14:19,029
+I didn't attend to Winkle all the seg
+
+00:14:17,709 --> 00:14:20,679
+falls out of this because there are
+
+00:14:19,029 --> 00:14:24,670
+things that you probably can't make work
+
+00:14:20,679 --> 00:14:26,589
+anyway it was good enough to run LS it
+
+00:14:24,670 --> 00:14:30,429
+wasn't quite good enough to run Emacs
+
+00:14:26,589 --> 00:14:33,009
+but somewhere in between there was
+
+00:14:30,429 --> 00:14:34,179
+probably his sweet spot the fact that
+
+00:14:33,009 --> 00:14:38,319
+things worked at all I was quite
+
+00:14:34,179 --> 00:14:40,899
+surprised by there are some other things
+
+00:14:38,319 --> 00:14:42,610
+you obviously can't fix like if if the
+
+00:14:40,899 --> 00:14:44,319
+user thread is already trying to use set
+
+00:14:42,610 --> 00:14:47,800
+comm for something else it's not going
+
+00:14:44,319 --> 00:14:51,519
+to interact well with this as a hack I
+
+00:14:47,800 --> 00:14:53,470
+intercept the PR CTL siskel in my tree
+
+00:14:51,519 --> 00:14:55,540
+and catch the set comp commands in there
+
+00:14:53,470 --> 00:14:59,559
+so we can prevent user space from
+
+00:14:55,540 --> 00:15:01,149
+installing any new filters but user
+
+00:14:59,559 --> 00:15:03,309
+space probably wants to install filters
+
+00:15:01,149 --> 00:15:05,290
+sometimes so that's not really a proper
+
+00:15:03,309 --> 00:15:07,360
+solution
+
+00:15:05,290 --> 00:15:09,190
+and of course this is pretty slow and
+
+00:15:07,360 --> 00:15:12,399
+that shouldn't come as a surprise we're
+
+00:15:09,190 --> 00:15:14,589
+now turning every syscall into a Cisco
+
+00:15:12,399 --> 00:15:20,110
+plus a signal delivery plus another
+
+00:15:14,589 --> 00:15:24,870
+siskel and even the BPF jet can't rescue
+
+00:15:20,110 --> 00:15:24,870
+us from that but it's kind of fun
+
+00:15:25,170 --> 00:15:30,279
+probably not the right way to do things
+
+00:15:27,009 --> 00:15:32,500
+so I had to think about if we were to do
+
+00:15:30,279 --> 00:15:35,079
+this in a more tightly integrated way
+
+00:15:32,500 --> 00:15:42,970
+how might we do it and the approach that
+
+00:15:35,079 --> 00:15:47,190
+I took was to basically hook into the
+
+00:15:42,970 --> 00:15:47,190
+the front end of system call handling
+
+00:15:47,790 --> 00:15:51,579
+which because the way the code is
+
+00:15:50,050 --> 00:15:53,440
+structured in the kernel probably has to
+
+00:15:51,579 --> 00:15:56,259
+be an architecture specific code today
+
+00:15:53,440 --> 00:16:00,040
+and currently only wide this up for arm
+
+00:15:56,259 --> 00:16:04,839
+64 but the concepts at least and not
+
+00:16:00,040 --> 00:16:08,139
+architecture specific and what I
+
+00:16:04,839 --> 00:16:09,519
+currently did was I bounced system calls
+
+00:16:08,139 --> 00:16:11,949
+by doing something that looks a little
+
+00:16:09,519 --> 00:16:16,120
+bit like signal delivery but it's much
+
+00:16:11,949 --> 00:16:18,010
+more minimalistic there's been some
+
+00:16:16,120 --> 00:16:20,319
+controversy about introducing new
+
+00:16:18,010 --> 00:16:23,290
+mechanisms for trapping into user space
+
+00:16:20,319 --> 00:16:25,660
+but I should stress that this is not
+
+00:16:23,290 --> 00:16:27,339
+general-purpose thing and I wouldn't
+
+00:16:25,660 --> 00:16:29,470
+propose that there's any API for user
+
+00:16:27,339 --> 00:16:31,750
+space to control this it's kind of a
+
+00:16:29,470 --> 00:16:34,740
+private interface between the VDS a or
+
+00:16:31,750 --> 00:16:36,699
+whatever library you have in the kernel
+
+00:16:34,740 --> 00:16:38,800
+so in theory we have a lot more
+
+00:16:36,699 --> 00:16:44,500
+flexibility to change the way this works
+
+00:16:38,800 --> 00:16:47,050
+between kernel versions and so on so
+
+00:16:44,500 --> 00:16:52,029
+there's some code showing how I did this
+
+00:16:47,050 --> 00:16:54,480
+in that referenced guitry and similarly
+
+00:16:52,029 --> 00:16:56,949
+to the the set comm signal handler case
+
+00:16:54,480 --> 00:17:00,399
+the handler which we now put in the
+
+00:16:56,949 --> 00:17:04,030
+video so can it can catch certain system
+
+00:17:00,399 --> 00:17:06,010
+calls and do special things it can make
+
+00:17:04,030 --> 00:17:07,540
+one or more real Siskel's in response to
+
+00:17:06,010 --> 00:17:09,400
+that or it can do something that doesn't
+
+00:17:07,540 --> 00:17:11,260
+involve entering the kernel at all if
+
+00:17:09,400 --> 00:17:13,559
+that's feasible or a mixture of those
+
+00:17:11,260 --> 00:17:13,559
+things
+
+00:17:13,660 --> 00:17:21,940
+so in common with delivering a signal we
+
+00:17:19,390 --> 00:17:26,800
+need to get back to the original call
+
+00:17:21,940 --> 00:17:28,660
+site where we came from somehow so for
+
+00:17:26,800 --> 00:17:31,060
+now I push a frame onto the user stack
+
+00:17:28,660 --> 00:17:33,250
+but this time it contains only those
+
+00:17:31,060 --> 00:17:36,460
+things that are absolutely required from
+
+00:17:33,250 --> 00:17:38,410
+64 this turns out to be the SIS call
+
+00:17:36,460 --> 00:17:40,360
+number register the stack pointer
+
+00:17:38,410 --> 00:17:43,510
+because we may need to realign the stack
+
+00:17:40,360 --> 00:17:46,200
+when bouncing that the system call and
+
+00:17:43,510 --> 00:17:49,120
+the PC to jump back to obviously and
+
+00:17:46,200 --> 00:17:51,130
+alarm 64 it turns out to be convenient
+
+00:17:49,120 --> 00:17:53,620
+to save and restore the condition flags
+
+00:17:51,130 --> 00:17:55,120
+in the same place but exactly what this
+
+00:17:53,620 --> 00:18:00,700
+looks like on different architectures
+
+00:17:55,120 --> 00:18:03,580
+could vary once we're done handling that
+
+00:18:00,700 --> 00:18:06,520
+siskel in the video so then we need to
+
+00:18:03,580 --> 00:18:10,780
+jump back where we started and hopefully
+
+00:18:06,520 --> 00:18:13,720
+that you can do that directly what you
+
+00:18:10,780 --> 00:18:15,340
+need to do there is to jump back
+
+00:18:13,720 --> 00:18:17,140
+somewhere and get the registers back
+
+00:18:15,340 --> 00:18:20,110
+into their original state with a single
+
+00:18:17,140 --> 00:18:21,190
+instruction and/or restore the registers
+
+00:18:20,110 --> 00:18:24,400
+and then jump back with a single
+
+00:18:21,190 --> 00:18:28,090
+instruction on x86 return will do that
+
+00:18:24,400 --> 00:18:29,980
+or and IRET interestingly on 32-bit on
+
+00:18:28,090 --> 00:18:33,760
+we can do this but on 64-bit arm it
+
+00:18:29,980 --> 00:18:35,290
+turns out not to be possible we need
+
+00:18:33,760 --> 00:18:37,180
+something that looks like an exception
+
+00:18:35,290 --> 00:18:40,960
+return and user space can't do that and
+
+00:18:37,180 --> 00:18:42,670
+so for this case and possibly on some
+
+00:18:40,960 --> 00:18:44,590
+other architectures we need to do a sis
+
+00:18:42,670 --> 00:18:49,320
+call in order to do that return which is
+
+00:18:44,590 --> 00:18:52,600
+slightly annoying but in the cases where
+
+00:18:49,320 --> 00:18:54,070
+where the the be DSO handling of the sis
+
+00:18:52,600 --> 00:18:58,420
+called is going to do a real Cisco
+
+00:18:54,070 --> 00:19:00,640
+anyway we can piggyback on that so what
+
+00:18:58,420 --> 00:19:02,080
+I did was add an extra flag to the
+
+00:19:00,640 --> 00:19:04,450
+system call number which tells the
+
+00:19:02,080 --> 00:19:06,430
+kernel to after executing that the real
+
+00:19:04,450 --> 00:19:10,350
+system call it will also pop this frame
+
+00:19:06,430 --> 00:19:10,350
+and jump back to the original location
+
+00:19:12,940 --> 00:19:18,789
+so just to give an idea of the
+
+00:19:16,509 --> 00:19:21,849
+complexity this is what I added in the
+
+00:19:18,789 --> 00:19:23,259
+system called front-end non-armed 64 we
+
+00:19:21,849 --> 00:19:26,590
+just do a bounced check on the user
+
+00:19:23,259 --> 00:19:29,259
+space PC if it comes from outside the
+
+00:19:26,590 --> 00:19:31,690
+video so then we push this frame I just
+
+00:19:29,259 --> 00:19:33,519
+described onto the stack and if we've
+
+00:19:31,690 --> 00:19:35,049
+run out of stuff we'll have to kill the
+
+00:19:33,519 --> 00:19:39,700
+user Tosca but that's similar to
+
+00:19:35,049 --> 00:19:41,559
+delivering a signal assuming
+
+00:19:39,700 --> 00:19:44,580
+everything's fine then reset the user
+
+00:19:41,559 --> 00:19:47,259
+space PC to that new entry point and
+
+00:19:44,580 --> 00:19:49,989
+then we just return to use the space
+
+00:19:47,259 --> 00:19:52,029
+after this if we were within bounds then
+
+00:19:49,989 --> 00:19:59,049
+we execute the system call if for real
+
+00:19:52,029 --> 00:20:01,119
+as we usually would so in effect this is
+
+00:19:59,049 --> 00:20:05,489
+doing basically the same thing as that
+
+00:20:01,119 --> 00:20:05,489
+second filter that is rated earlier a
+
+00:20:05,909 --> 00:20:12,099
+minimalistic no op handler in the video
+
+00:20:09,159 --> 00:20:13,539
+so would look something like this I
+
+00:20:12,099 --> 00:20:15,700
+should stress I thought I should stress
+
+00:20:13,539 --> 00:20:18,970
+that this is not trying to be a C
+
+00:20:15,700 --> 00:20:23,559
+language entry point so you would have
+
+00:20:18,970 --> 00:20:25,210
+some architecture specific glue here but
+
+00:20:23,559 --> 00:20:27,549
+if you do anything interesting with
+
+00:20:25,210 --> 00:20:29,590
+generic code you can call out to see
+
+00:20:27,549 --> 00:20:33,359
+obviously having saved any registers
+
+00:20:29,590 --> 00:20:35,859
+that you need to but to do nothing and
+
+00:20:33,359 --> 00:20:38,139
+basically reflect all system calls back
+
+00:20:35,859 --> 00:20:40,299
+into the kernel I just set this flag to
+
+00:20:38,139 --> 00:20:41,830
+make the kernel do the necessary return
+
+00:20:40,299 --> 00:20:45,759
+after the system call and then I just
+
+00:20:41,830 --> 00:20:49,450
+trap into the kernel and we stick unwind
+
+00:20:45,759 --> 00:20:52,059
+directives in in here so that user space
+
+00:20:49,450 --> 00:20:53,499
+tracing and debug tools can unwind
+
+00:20:52,059 --> 00:20:55,450
+through this frame without needing to
+
+00:20:53,499 --> 00:20:57,659
+have hard-coded knowledge about its
+
+00:20:55,450 --> 00:20:57,659
+layout
+
+00:21:00,490 --> 00:21:06,400
+so how does this compare well from the
+
+00:21:03,820 --> 00:21:08,920
+point of view of what userspace sees in
+
+00:21:06,400 --> 00:21:11,200
+terms of behavior it's much more much
+
+00:21:08,920 --> 00:21:14,260
+closer to a bear system call than the
+
+00:21:11,200 --> 00:21:17,020
+the second case was the stack overhead
+
+00:21:14,260 --> 00:21:19,650
+is much reduced and it's worth observing
+
+00:21:17,020 --> 00:21:23,290
+although I didn't try to make this work
+
+00:21:19,650 --> 00:21:24,730
+because system comes from the VDS ou are
+
+00:21:23,290 --> 00:21:27,580
+never bounced there's no actual
+
+00:21:24,730 --> 00:21:29,290
+recursive bouncing here so we don't
+
+00:21:27,580 --> 00:21:32,500
+strictly speaking need to put this data
+
+00:21:29,290 --> 00:21:36,790
+on the stack if we allocated a per task
+
+00:21:32,500 --> 00:21:38,890
+user space page then we could we could
+
+00:21:36,790 --> 00:21:40,630
+store the return information statically
+
+00:21:38,890 --> 00:21:42,490
+in there and then we don't need to have
+
+00:21:40,630 --> 00:21:45,850
+multiple copies of it so we might be
+
+00:21:42,490 --> 00:21:48,610
+able to reduce the stack usage to zero a
+
+00:21:45,850 --> 00:21:50,350
+page seems expensive for that but if we
+
+00:21:48,610 --> 00:21:54,040
+have enough other things for which a
+
+00:21:50,350 --> 00:21:57,850
+pert ask page becomes useful then it
+
+00:21:54,040 --> 00:22:01,300
+might start to look less of a luxury and
+
+00:21:57,850 --> 00:22:03,130
+this does actually seem to work and the
+
+00:22:01,300 --> 00:22:05,760
+ideal test would do all kinds of
+
+00:22:03,130 --> 00:22:08,560
+horrible low-level non-portable things
+
+00:22:05,760 --> 00:22:10,270
+I'll leave it to people for people to
+
+00:22:08,560 --> 00:22:13,720
+decide where the system D takes that box
+
+00:22:10,270 --> 00:22:15,880
+or not so far I haven't seen anything
+
+00:22:13,720 --> 00:22:19,150
+I've run in user space go wrong with
+
+00:22:15,880 --> 00:22:21,100
+this mechanism enabled and the overhead
+
+00:22:19,150 --> 00:22:24,700
+is much reduced compared with the second
+
+00:22:21,100 --> 00:22:28,120
+case the base overhead of getting in and
+
+00:22:24,700 --> 00:22:31,300
+out of the kernel increases by something
+
+00:22:28,120 --> 00:22:33,580
+like theoretically it should increase by
+
+00:22:31,300 --> 00:22:36,250
+two times because we trap into the
+
+00:22:33,580 --> 00:22:38,650
+kernel we trap we leave again to get to
+
+00:22:36,250 --> 00:22:40,570
+the video so and then we enter the video
+
+00:22:38,650 --> 00:22:43,050
+so a second time to return which we
+
+00:22:40,570 --> 00:22:45,790
+might not need them all architectures
+
+00:22:43,050 --> 00:22:47,290
+when I tested this I actually saw the
+
+00:22:45,790 --> 00:22:50,820
+overhead quadrupling and I haven't got
+
+00:22:47,290 --> 00:22:54,820
+the bottom of that yet that may be some
+
+00:22:50,820 --> 00:22:57,040
+platform specific issue but either way
+
+00:22:54,820 --> 00:22:58,360
+that's just the overhead of the system
+
+00:22:57,040 --> 00:23:02,140
+call and doesn't include any of the
+
+00:22:58,360 --> 00:23:05,020
+actual system call implementation so if
+
+00:23:02,140 --> 00:23:06,760
+your killer use case is calling get paid
+
+00:23:05,020 --> 00:23:08,800
+in a tight loop then you'll see some
+
+00:23:06,760 --> 00:23:11,730
+increase in cost but otherwise it
+
+00:23:08,800 --> 00:23:11,730
+shouldn't be quite as bad
+
+00:23:11,880 --> 00:23:19,000
+this doesn't mean that adding cost to
+
+00:23:15,029 --> 00:23:21,190
+any hot path is a great idea but the
+
+00:23:19,000 --> 00:23:22,960
+important point here is that only legacy
+
+00:23:21,190 --> 00:23:25,860
+binaries that are making Siskel's
+
+00:23:22,960 --> 00:23:28,210
+direction would experience these bounces
+
+00:23:25,860 --> 00:23:30,010
+so those would make the SIS call it
+
+00:23:28,210 --> 00:23:31,570
+bounce to userspace the BDI so does
+
+00:23:30,010 --> 00:23:35,799
+something and then we call back into the
+
+00:23:31,570 --> 00:23:37,270
+kernel to avoid that happening you need
+
+00:23:35,799 --> 00:23:39,610
+to port software that makes direct
+
+00:23:37,270 --> 00:23:42,340
+system calls but that's not all software
+
+00:23:39,610 --> 00:23:44,649
+it's typically just C libraries and
+
+00:23:42,340 --> 00:23:46,120
+compiler support stuff language runtimes
+
+00:23:44,649 --> 00:23:48,399
+and that sort of thing I didn't try to
+
+00:23:46,120 --> 00:23:50,140
+enumerate all the cases but it's it's
+
+00:23:48,399 --> 00:23:55,149
+certainly much less than all software
+
+00:23:50,140 --> 00:23:57,490
+and software that's been ported would
+
+00:23:55,149 --> 00:24:00,940
+then avoid that extra overhead they just
+
+00:23:57,490 --> 00:24:04,330
+call the video so and then that might do
+
+00:24:00,940 --> 00:24:05,710
+a real system call or it possibly won't
+
+00:24:04,330 --> 00:24:08,350
+enter the kernel at all if that's
+
+00:24:05,710 --> 00:24:11,020
+feasible in which case it would be
+
+00:24:08,350 --> 00:24:19,720
+cheaper still unported software should
+
+00:24:11,020 --> 00:24:21,580
+still work though it seems to me that
+
+00:24:19,720 --> 00:24:23,230
+there's a way to avoid it to avoid the
+
+00:24:21,580 --> 00:24:26,289
+need to port as well which is simply to
+
+00:24:23,230 --> 00:24:28,120
+have the SIS call entry code arranged to
+
+00:24:26,289 --> 00:24:30,730
+call the bounced page only if this is a
+
+00:24:28,120 --> 00:24:34,179
+sis call would otherwise return a return
+
+00:24:30,730 --> 00:24:36,340
+you know sis so only there so you'd say
+
+00:24:34,179 --> 00:24:37,779
+to make one of them want to move one of
+
+00:24:36,340 --> 00:24:39,340
+these latest easiest calls out you'd rip
+
+00:24:37,779 --> 00:24:41,140
+it out become out of the kernels this
+
+00:24:39,340 --> 00:24:43,390
+call page which would cause it to bounce
+
+00:24:41,140 --> 00:24:45,940
+and then have the video so check is this
+
+00:24:43,390 --> 00:24:48,850
+one of the SIS calls we implement and if
+
+00:24:45,940 --> 00:24:50,799
+it and if it and if it doesn't it would
+
+00:24:48,850 --> 00:24:52,899
+throw in the throw Nino sis back out
+
+00:24:50,799 --> 00:24:54,640
+that way you'd only bounce with obscure
+
+00:24:52,899 --> 00:24:56,020
+things like personality which I hardly
+
+00:24:54,640 --> 00:24:58,770
+ever called anyway so who cares if it
+
+00:24:56,020 --> 00:25:01,450
+takes four times longer so the first
+
+00:24:58,770 --> 00:25:03,399
+path by which we get into the BDI so at
+
+00:25:01,450 --> 00:25:04,809
+all that's that's a bounce and that
+
+00:25:03,399 --> 00:25:07,149
+involves going through the kernel and
+
+00:25:04,809 --> 00:25:11,649
+it's not obvious to me how we avoid that
+
+00:25:07,149 --> 00:25:14,020
+these as soon as you go into the kernel
+
+00:25:11,649 --> 00:25:16,899
+I'm assuming here that legit that's the
+
+00:25:14,020 --> 00:25:18,580
+normal raw syscall entry path form for
+
+00:25:16,899 --> 00:25:21,039
+Siskel's we're not planning to rip out
+
+00:25:18,580 --> 00:25:24,630
+would remain yeah it wouldn't bounce
+
+00:25:21,039 --> 00:25:29,370
+everything back every Cisco yes yes
+
+00:25:24,630 --> 00:25:43,170
+I well is anyone big mouth checker so
+
+00:25:29,370 --> 00:25:46,530
+the way of all you would need to do in
+
+00:25:43,170 --> 00:25:49,430
+that case is for the you know the debt
+
+00:25:46,530 --> 00:25:53,310
+entry in the syscall table to to bet to
+
+00:25:49,430 --> 00:25:55,040
+point to the deflection routine so you
+
+00:25:53,310 --> 00:26:00,570
+actually end up with zero overhead
+
+00:25:55,040 --> 00:26:02,490
+however yeah I'm gonna be at a later
+
+00:26:00,570 --> 00:26:09,510
+point I'm gonna throw some more cold
+
+00:26:02,490 --> 00:26:10,530
+water that was kind of the points yes
+
+00:26:09,510 --> 00:26:13,200
+you're quite right the way I've
+
+00:26:10,530 --> 00:26:14,790
+currently done things all direct system
+
+00:26:13,200 --> 00:26:17,040
+calls that don't come from the media so
+
+00:26:14,790 --> 00:26:18,210
+our bounce back out so then you can do
+
+00:26:17,040 --> 00:26:18,720
+absolutely anything you like in
+
+00:26:18,210 --> 00:26:21,600
+userspace
+
+00:26:18,720 --> 00:26:23,400
+but that does add extra cost and yes
+
+00:26:21,600 --> 00:26:24,930
+another option would be that's actually
+
+00:26:23,400 --> 00:26:26,370
+selective in the kernel rather than
+
+00:26:24,930 --> 00:26:34,440
+being done for all the system cool
+
+00:26:26,370 --> 00:26:38,520
+numbers so there are still some things
+
+00:26:34,440 --> 00:26:40,320
+they can go wrong it's difficult to hide
+
+00:26:38,520 --> 00:26:43,350
+this mechanism completely from user
+
+00:26:40,320 --> 00:26:45,510
+space so creative user space software
+
+00:26:43,350 --> 00:26:48,600
+writers might find ways of depending on
+
+00:26:45,510 --> 00:26:50,490
+the details of this certainly we
+
+00:26:48,600 --> 00:26:54,660
+wouldn't encourage it but it's not clear
+
+00:26:50,490 --> 00:26:56,850
+how much this matters user space can do
+
+00:26:54,660 --> 00:26:58,650
+other things which would may mess this
+
+00:26:56,850 --> 00:27:02,700
+up like I'm mapping or moving the video
+
+00:26:58,650 --> 00:27:03,810
+so and another yeah some interesting
+
+00:27:02,700 --> 00:27:05,130
+things that can happen there if you're
+
+00:27:03,810 --> 00:27:06,750
+in the middle of one of these bounces
+
+00:27:05,130 --> 00:27:10,470
+and another threat I match the BTS or
+
+00:27:06,750 --> 00:27:11,910
+moves it perhaps that's just user space
+
+00:27:10,470 --> 00:27:14,130
+shooting yourself in the foot and maybe
+
+00:27:11,910 --> 00:27:17,250
+it doesn't matter but it certainly needs
+
+00:27:14,130 --> 00:27:20,360
+thinking about static binaries is
+
+00:27:17,250 --> 00:27:20,360
+another case that came up
+
+00:27:20,450 --> 00:27:24,120
+classically static binaries don't use
+
+00:27:22,740 --> 00:27:26,250
+shared libraries that's sort of the
+
+00:27:24,120 --> 00:27:28,530
+point there's no underlying technical
+
+00:27:26,250 --> 00:27:31,230
+reason why static binary can't pause the
+
+00:27:28,530 --> 00:27:33,420
+video so and find entry points in there
+
+00:27:31,230 --> 00:27:35,040
+and call them but it's it's not
+
+00:27:33,420 --> 00:27:35,870
+something that everybody should
+
+00:27:35,040 --> 00:27:40,750
+implement long
+
+00:27:35,870 --> 00:27:45,530
+and and he posts the microphone like so
+
+00:27:40,750 --> 00:27:48,410
+on 386 we actually have a specifically
+
+00:27:45,530 --> 00:27:51,800
+on the 32-bit we actually have a
+
+00:27:48,410 --> 00:27:54,770
+solution for this which is that there is
+
+00:27:51,800 --> 00:27:58,940
+a generic entry point that is equivalent
+
+00:27:54,770 --> 00:28:03,140
+to a system call that is exposed through
+
+00:27:58,940 --> 00:28:05,860
+a different it exposed it's solicited
+
+00:28:03,140 --> 00:28:09,590
+entry for that isn't it yeah it yeah so
+
+00:28:05,860 --> 00:28:12,200
+you you don't need to you don't need to
+
+00:28:09,590 --> 00:28:14,809
+do a full parsing of the dynamic
+
+00:28:12,200 --> 00:28:19,520
+structure you can you can you can just
+
+00:28:14,809 --> 00:28:21,800
+call that entry point and have you know
+
+00:28:19,520 --> 00:28:25,490
+instead of executing in India tea
+
+00:28:21,800 --> 00:28:28,360
+instruction yeah obviously if you wanted
+
+00:28:25,490 --> 00:28:30,470
+to move in the direction of having say a
+
+00:28:28,360 --> 00:28:33,679
+persistent call entry point in the video
+
+00:28:30,470 --> 00:28:35,540
+so that doesn't work directly because
+
+00:28:33,679 --> 00:28:39,140
+then you might have a separate entry
+
+00:28:35,540 --> 00:28:41,390
+point for reverb right you could do you
+
+00:28:39,140 --> 00:28:43,960
+know you could equivalently point to a
+
+00:28:41,390 --> 00:28:47,120
+table yeah you could obviously do that
+
+00:28:43,960 --> 00:28:49,340
+so there's different options here you
+
+00:28:47,120 --> 00:28:51,620
+could even just have a generic like in
+
+00:28:49,340 --> 00:28:53,120
+that video or have some code that simply
+
+00:28:51,620 --> 00:28:54,740
+just checks for your number and comes to
+
+00:28:53,120 --> 00:28:56,090
+the right thing I mean yeah you don't
+
+00:28:54,740 --> 00:28:58,160
+have to the follow us when you when you
+
+00:28:56,090 --> 00:29:00,170
+expose tables as data structures to the
+
+00:28:58,160 --> 00:29:00,770
+outside you always kept yourself in two
+
+00:29:00,170 --> 00:29:03,800
+boxes
+
+00:29:00,770 --> 00:29:06,890
+yeah sizes that's right the other option
+
+00:29:03,800 --> 00:29:08,420
+is that you simply pause the elf object
+
+00:29:06,890 --> 00:29:10,220
+and look up the symbols which is a
+
+00:29:08,420 --> 00:29:12,590
+slightly painful to do yourself
+
+00:29:10,220 --> 00:29:15,650
+I hang something up it's like unknown 50
+
+00:29:12,590 --> 00:29:17,240
+to 100 lines of code I probably don't
+
+00:29:15,650 --> 00:29:18,710
+handle all the cases I should handle
+
+00:29:17,240 --> 00:29:20,210
+well that's actually what that's
+
+00:29:18,710 --> 00:29:23,780
+actually what we do you know that's
+
+00:29:20,210 --> 00:29:26,360
+actually you know what we do now yeah we
+
+00:29:23,780 --> 00:29:28,130
+you know you you know you have to get
+
+00:29:26,360 --> 00:29:31,280
+your symbols out of the dynamic section
+
+00:29:28,130 --> 00:29:33,140
+yeah ideally the C library does that and
+
+00:29:31,280 --> 00:29:35,570
+you don't have to care but however it
+
+00:29:33,140 --> 00:29:38,690
+works but it is you don't need a
+
+00:29:35,570 --> 00:29:41,540
+full-blown you know you don't need a
+
+00:29:38,690 --> 00:29:44,880
+full-blown linker to do that sure and
+
+00:29:41,540 --> 00:29:48,940
+that that was kind of my point here
+
+00:29:44,880 --> 00:29:53,980
+to make it clear that this doesn't break
+
+00:29:48,940 --> 00:29:56,290
+static binaries there are other places
+
+00:29:53,980 --> 00:30:00,210
+where this baby will be observable like
+
+00:29:56,290 --> 00:30:02,650
+P trace where the way I hope this in
+
+00:30:00,210 --> 00:30:06,700
+system calls that we bounce don't appear
+
+00:30:02,650 --> 00:30:09,220
+in P trace at all so it looks like user
+
+00:30:06,700 --> 00:30:12,610
+space has jumped to another location and
+
+00:30:09,220 --> 00:30:16,090
+then P trace sees the siskel made by the
+
+00:30:12,610 --> 00:30:17,800
+video so instead that's certainly
+
+00:30:16,090 --> 00:30:21,940
+different it's not obvious whether
+
+00:30:17,800 --> 00:30:23,890
+that's wrong behavior or not there may
+
+00:30:21,940 --> 00:30:27,430
+be other policies we could have used
+
+00:30:23,890 --> 00:30:28,960
+there some other things in expose this
+
+00:30:27,430 --> 00:30:30,580
+called internals as well so they've been
+
+00:30:28,960 --> 00:30:34,960
+a number of discussions about sit comp
+
+00:30:30,580 --> 00:30:39,160
+this week F trace also exposes what
+
+00:30:34,960 --> 00:30:40,960
+system calls are happening and so on the
+
+00:30:39,160 --> 00:30:44,380
+syscall interface does evolve over time
+
+00:30:40,960 --> 00:30:47,320
+so any software using those does have to
+
+00:30:44,380 --> 00:30:48,970
+cope with things changing but exactly
+
+00:30:47,320 --> 00:30:51,010
+where you draw the line between what's
+
+00:30:48,970 --> 00:30:54,400
+an acceptable rate of change and what's
+
+00:30:51,010 --> 00:30:57,270
+gratuitous I don't know that would be
+
+00:30:54,400 --> 00:30:57,270
+interesting to discuss
+
+00:30:59,130 --> 00:31:05,669
+if this can all be made to work though
+
+00:31:01,530 --> 00:31:08,100
+what might we be able to do well there
+
+00:31:05,669 --> 00:31:09,750
+are certainly some things that might be
+
+00:31:08,100 --> 00:31:13,320
+removable from the kernel all together
+
+00:31:09,750 --> 00:31:16,110
+so personality and set get robust list
+
+00:31:13,320 --> 00:31:17,850
+do little more than access a variable if
+
+00:31:16,110 --> 00:31:19,890
+we have a suitable use a page to store
+
+00:31:17,850 --> 00:31:21,929
+that in we might just have the user
+
+00:31:19,890 --> 00:31:26,039
+library do those directly with no entry
+
+00:31:21,929 --> 00:31:29,340
+into the kernel some PLC ETL commands
+
+00:31:26,039 --> 00:31:30,270
+might be amenable to a similar
+
+00:31:29,340 --> 00:31:32,190
+implementation
+
+00:31:30,270 --> 00:31:37,470
+I haven't investigated that in detail
+
+00:31:32,190 --> 00:31:39,450
+yet we might need different pages for
+
+00:31:37,470 --> 00:31:42,240
+things that are shared between different
+
+00:31:39,450 --> 00:31:46,140
+groups of tasks so you mask the umass
+
+00:31:42,240 --> 00:31:48,950
+for example is a property of the group
+
+00:31:46,140 --> 00:31:51,000
+of threads sharing a filesystem context
+
+00:31:48,950 --> 00:31:52,409
+having a whole page for that would
+
+00:31:51,000 --> 00:31:54,330
+obviously be kind of expensive
+
+00:31:52,409 --> 00:31:55,559
+Oshin depends on whether there are other
+
+00:31:54,330 --> 00:32:00,120
+things that we can put in there whether
+
+00:31:55,559 --> 00:32:02,039
+it it seems reasonable the filesystem
+
+00:32:00,120 --> 00:32:04,049
+context at least there's generally only
+
+00:32:02,039 --> 00:32:07,610
+one per user space process so it's not
+
+00:32:04,049 --> 00:32:07,610
+quite as bad as having one per thread
+
+00:32:08,030 --> 00:32:12,929
+where system calls in the kernel have
+
+00:32:10,860 --> 00:32:14,909
+been superseded by newer ones that
+
+00:32:12,929 --> 00:32:16,919
+provide richer functionality we might be
+
+00:32:14,909 --> 00:32:19,260
+able to just move all the glue for those
+
+00:32:16,919 --> 00:32:21,900
+out of the the privileged kernel and
+
+00:32:19,260 --> 00:32:27,030
+have those done through users based
+
+00:32:21,900 --> 00:32:28,470
+wrappers instead another thing I thought
+
+00:32:27,030 --> 00:32:29,940
+would be fun to investigate is whether
+
+00:32:28,470 --> 00:32:31,590
+you could move some of the signal
+
+00:32:29,940 --> 00:32:34,400
+delivery machinery and maybe the signal
+
+00:32:31,590 --> 00:32:37,080
+mask out to be stored in user space and
+
+00:32:34,400 --> 00:32:39,750
+that's certainly not trivial in all
+
+00:32:37,080 --> 00:32:42,570
+aspects and it might be impossible in
+
+00:32:39,750 --> 00:32:50,010
+some areas but yeah it could be
+
+00:32:42,570 --> 00:32:52,260
+interesting to hack on and ultimately we
+
+00:32:50,010 --> 00:32:54,630
+could maybe define the kernel interface
+
+00:32:52,260 --> 00:32:56,610
+as a set of functions which we expose
+
+00:32:54,630 --> 00:32:59,909
+through a library instead of a binary
+
+00:32:56,610 --> 00:33:03,240
+interface and that potentially gives us
+
+00:32:59,909 --> 00:33:04,740
+a lot more freedom to redesign how those
+
+00:33:03,240 --> 00:33:06,390
+calls work across the unprivileged
+
+00:33:04,740 --> 00:33:08,780
+privilege boundary between kernel
+
+00:33:06,390 --> 00:33:08,780
+versions
+
+00:33:09,860 --> 00:33:15,610
+another thing that we don't currently we
+
+00:33:12,049 --> 00:33:20,240
+manage in a sort of ad hoc way is
+
+00:33:15,610 --> 00:33:22,010
+versioning of this interface and binary
+
+00:33:20,240 --> 00:33:23,720
+formats such as elf do provide some
+
+00:33:22,010 --> 00:33:27,830
+facilities to describe different
+
+00:33:23,720 --> 00:33:29,870
+versions of functions and so on so you
+
+00:33:27,830 --> 00:33:31,490
+can for example with elf symbol
+
+00:33:29,870 --> 00:33:33,649
+versioning you can make incompatible
+
+00:33:31,490 --> 00:33:36,100
+changes to functions without the need to
+
+00:33:33,649 --> 00:33:38,090
+define new function names all the time
+
+00:33:36,100 --> 00:33:39,860
+software linked against an older version
+
+00:33:38,090 --> 00:33:41,269
+of the library will carry on using the
+
+00:33:39,860 --> 00:33:45,139
+old version of that function which
+
+00:33:41,269 --> 00:33:47,899
+supports the old interface and this
+
+00:33:45,139 --> 00:33:51,110
+isn't that we can do the same thing in
+
+00:33:47,899 --> 00:33:53,870
+an ad hoc way of course but yeah this
+
+00:33:51,110 --> 00:33:54,889
+might create different possibilities to
+
+00:33:53,870 --> 00:33:57,080
+do all of that would obviously be a
+
+00:33:54,889 --> 00:33:58,340
+pretty pretty big project but you could
+
+00:33:57,080 --> 00:34:03,289
+do parts of it you could do things
+
+00:33:58,340 --> 00:34:06,649
+incrementally and that is about as far
+
+00:34:03,289 --> 00:34:08,419
+as I got so yeah if somebody wants to
+
+00:34:06,649 --> 00:34:13,510
+shoot down the idea as I think they okay
+
+00:34:08,419 --> 00:34:19,240
+so I am going to throw something really
+
+00:34:13,510 --> 00:34:22,040
+you know really ugly at you and that is
+
+00:34:19,240 --> 00:34:26,179
+in some ways you've solved the easy part
+
+00:34:22,040 --> 00:34:28,280
+of the problem or you know attempted so
+
+00:34:26,179 --> 00:34:31,490
+the easy part of the problem the part
+
+00:34:28,280 --> 00:34:35,179
+where we have real issues with backward
+
+00:34:31,490 --> 00:34:40,190
+compatibility are things like IOC TLS
+
+00:34:35,179 --> 00:34:42,849
+and first of all you literally can't
+
+00:34:40,190 --> 00:34:47,510
+know what an ioctl
+
+00:34:42,849 --> 00:34:50,800
+we're now a CTL is destined although in
+
+00:34:47,510 --> 00:34:57,139
+Linux we try to not reuse ioctl numbers
+
+00:34:50,800 --> 00:35:03,440
+in yeah in in practice they you know
+
+00:34:57,139 --> 00:35:05,869
+they are driver specific and so and and
+
+00:35:03,440 --> 00:35:08,450
+so the real issue there is the
+
+00:35:05,869 --> 00:35:13,490
+marshalling of data structures in the
+
+00:35:08,450 --> 00:35:16,400
+memory and that can require an unbounded
+
+00:35:13,490 --> 00:35:19,819
+amount of memory so you would have to
+
+00:35:16,400 --> 00:35:23,570
+have basically you either have to have
+
+00:35:19,819 --> 00:35:26,230
+an unlimited stack which we generally do
+
+00:35:23,570 --> 00:35:31,160
+have especially not in multi-threaded
+
+00:35:26,230 --> 00:35:35,380
+application and or you would have to
+
+00:35:31,160 --> 00:35:39,230
+have your fallback code calm a lot and
+
+00:35:35,380 --> 00:35:45,760
+that you know all of that has some very
+
+00:35:39,230 --> 00:35:50,930
+very messy consequences the other thing
+
+00:35:45,760 --> 00:35:54,280
+now you know to the good part is I like
+
+00:35:50,930 --> 00:35:57,560
+your I like the idea that you have about
+
+00:35:54,280 --> 00:35:59,780
+about me you know being able to do more
+
+00:35:57,560 --> 00:36:02,780
+things than we currently do in user
+
+00:35:59,780 --> 00:36:05,660
+space like right now we do a few system
+
+00:36:02,780 --> 00:36:08,330
+calls we most architectures can do a
+
+00:36:05,660 --> 00:36:11,450
+handful of system calls entirely in user
+
+00:36:08,330 --> 00:36:14,620
+space but as you said there might be
+
+00:36:11,450 --> 00:36:19,310
+additional things that we could do by
+
+00:36:14,620 --> 00:36:20,930
+having non global data in in user space
+
+00:36:19,310 --> 00:36:27,860
+and that that's very that's very
+
+00:36:20,930 --> 00:36:31,280
+interesting now a user space library
+
+00:36:27,860 --> 00:36:37,550
+that is just a user space library not a
+
+00:36:31,280 --> 00:36:41,330
+VDSL could reduce this problem without
+
+00:36:37,550 --> 00:36:43,910
+with you know without complete you know
+
+00:36:41,330 --> 00:36:47,090
+without completely turning it upside
+
+00:36:43,910 --> 00:36:50,300
+down and the way could reduce that
+
+00:36:47,090 --> 00:36:54,130
+problem is that we already have
+
+00:36:50,300 --> 00:36:58,160
+configuration options in the kernel to
+
+00:36:54,130 --> 00:37:04,360
+to cut out certain amount you know a
+
+00:36:58,160 --> 00:37:08,240
+certain legacy code and if you don't do
+
+00:37:04,360 --> 00:37:10,430
+checkpoint restore then you you know or
+
+00:37:08,240 --> 00:37:14,750
+even if you do checkpoint restore you
+
+00:37:10,430 --> 00:37:17,420
+have you know you can you can you know
+
+00:37:14,750 --> 00:37:20,480
+it can be a user option or a or a
+
+00:37:17,420 --> 00:37:24,230
+distribution option to gradually remove
+
+00:37:20,480 --> 00:37:26,300
+these to gradually remove these legacy
+
+00:37:24,230 --> 00:37:28,220
+calls and and have them go through you
+
+00:37:26,300 --> 00:37:31,040
+and and but then you have to go through
+
+00:37:28,220 --> 00:37:34,120
+user space library yeah so your view is
+
+00:37:31,040 --> 00:37:34,120
+that library words
+
+00:37:34,450 --> 00:37:38,890
+if you say migrate using crying to
+
+00:37:37,390 --> 00:37:40,420
+another host you have migrated the
+
+00:37:38,890 --> 00:37:43,119
+library you wouldn't attempt to use a
+
+00:37:40,420 --> 00:37:44,920
+different library yes so we already have
+
+00:37:43,119 --> 00:37:47,740
+I think four other questions queued up
+
+00:37:44,920 --> 00:37:50,109
+and we don't have that much time so if
+
+00:37:47,740 --> 00:37:53,319
+questioners keep their questions a bit
+
+00:37:50,109 --> 00:37:56,049
+six inked that'd be nice for everyone so
+
+00:37:53,319 --> 00:38:00,099
+it's about the signal mask in userspace
+
+00:37:56,049 --> 00:38:01,690
+part that you said come to talk to me if
+
+00:38:00,099 --> 00:38:03,819
+you want to do this because restartable
+
+00:38:01,690 --> 00:38:05,829
+sequences registers at red local storage
+
+00:38:03,819 --> 00:38:09,400
+and I have ideas on how to do it on a
+
+00:38:05,829 --> 00:38:11,230
+per trade basis okay yeah what about
+
+00:38:09,400 --> 00:38:12,880
+restartable secrets is with something
+
+00:38:11,230 --> 00:38:17,200
+somebody else asked me previously and I
+
+00:38:12,880 --> 00:38:21,040
+haven't fully darkened to it another big
+
+00:38:17,200 --> 00:38:24,220
+roadblock for this is POSIX
+
+00:38:21,040 --> 00:38:27,960
+internet consolation I don't think you
+
+00:38:24,220 --> 00:38:30,670
+can reliably implement it over this skin
+
+00:38:27,960 --> 00:38:31,660
+at all if the thread is canceled while
+
+00:38:30,670 --> 00:38:34,660
+we're in the middle of one of these
+
+00:38:31,660 --> 00:38:37,589
+things or yeah especially if this vid is
+
+00:38:34,660 --> 00:38:41,920
+so code invokes several syscalls
+
+00:38:37,589 --> 00:38:44,349
+you wouldn't be able to tell but some
+
+00:38:41,920 --> 00:38:48,160
+resources have been actually located or
+
+00:38:44,349 --> 00:38:49,690
+not so that kind of problems arise yeah
+
+00:38:48,160 --> 00:38:51,369
+I guess that would place some
+
+00:38:49,690 --> 00:38:54,309
+constraints on how you implanted these
+
+00:38:51,369 --> 00:38:55,900
+things and some things you might be able
+
+00:38:54,309 --> 00:38:57,910
+to implement in the cancellation safe
+
+00:38:55,900 --> 00:38:59,859
+way so that it doesn't matter if there
+
+00:38:57,910 --> 00:39:00,970
+were multiple system calls involved yeah
+
+00:38:59,859 --> 00:39:03,400
+I guess you're right that could be
+
+00:39:00,970 --> 00:39:05,319
+difficult and even if it was a just a
+
+00:39:03,400 --> 00:39:09,250
+single assist call how would you know
+
+00:39:05,319 --> 00:39:12,520
+whether it has allocated some resources
+
+00:39:09,250 --> 00:39:17,020
+or not if you good point can't control
+
+00:39:12,520 --> 00:39:20,170
+this I don't have an answer how would
+
+00:39:17,020 --> 00:39:24,069
+you handle no amuse where you might not
+
+00:39:20,170 --> 00:39:27,130
+be able to have a video serve so the
+
+00:39:24,069 --> 00:39:29,950
+video so is a thing that's visible in
+
+00:39:27,130 --> 00:39:32,680
+memory somewhere doesn't know any new
+
+00:39:29,950 --> 00:39:34,599
+prevent that I don't really so well
+
+00:39:32,680 --> 00:39:36,790
+you'd have to have endless copies of it
+
+00:39:34,599 --> 00:39:41,799
+well a copy of it per task potentially
+
+00:39:36,790 --> 00:39:44,680
+and if you've got a static binary you
+
+00:39:41,799 --> 00:39:46,819
+may not be able to relocate it so I
+
+00:39:44,680 --> 00:39:49,579
+don't have experience with knowing
+
+00:39:46,819 --> 00:39:51,319
+but is there anything to stop well if
+
+00:39:49,579 --> 00:39:52,519
+he's got data in there because you to
+
+00:39:51,319 --> 00:39:54,619
+pass knowing the umass can eat or
+
+00:39:52,519 --> 00:39:57,410
+something you'd have too many copies of
+
+00:39:54,619 --> 00:40:00,529
+it but you could probably do it with FD
+
+00:39:57,410 --> 00:40:02,419
+pick but I'm not you could do it flat so
+
+00:40:00,529 --> 00:40:06,349
+for handling things like the per task
+
+00:40:02,419 --> 00:40:07,969
+data page to avoid having a separate mm
+
+00:40:06,349 --> 00:40:11,299
+for every thread which you really don't
+
+00:40:07,969 --> 00:40:13,309
+want you could pass the point to that
+
+00:40:11,299 --> 00:40:14,989
+page into the handler in the video so
+
+00:40:13,309 --> 00:40:16,880
+and I guess that should work with no mm
+
+00:40:14,989 --> 00:40:18,229
+you as well so you you passed a
+
+00:40:16,880 --> 00:40:23,660
+different address in depending on which
+
+00:40:18,229 --> 00:40:26,059
+tasks are running so one thing that
+
+00:40:23,660 --> 00:40:27,439
+strikes me is that a compact layer the
+
+00:40:26,059 --> 00:40:29,119
+compare system call there we have in
+
+00:40:27,439 --> 00:40:30,589
+Linux does just a lot of argument
+
+00:40:29,119 --> 00:40:33,349
+shuffling and it sometimes does it on
+
+00:40:30,589 --> 00:40:34,519
+the user space stack anyway how much of
+
+00:40:33,349 --> 00:40:35,989
+the compact layer do you think you could
+
+00:40:34,519 --> 00:40:39,999
+implement with this and would it solve
+
+00:40:35,989 --> 00:40:39,999
+IRP 32 for 64
+
+00:40:43,449 --> 00:40:50,059
+part of the problem with the compact
+
+00:40:45,469 --> 00:40:52,429
+layer is it requires you to comfort like
+
+00:40:50,059 --> 00:40:54,650
+32 bit arguments or 64 bits and so on
+
+00:40:52,429 --> 00:40:59,659
+and we can't do that in 32 bit user
+
+00:40:54,650 --> 00:41:01,069
+space because we're 32-bit there there
+
+00:40:59,659 --> 00:41:02,749
+are probably some things you can do but
+
+00:41:01,069 --> 00:41:06,559
+you haven't completely thought about it
+
+00:41:02,749 --> 00:41:10,699
+other types of ABI kludge layer where
+
+00:41:06,559 --> 00:41:12,499
+you're at least using the same eisah may
+
+00:41:10,699 --> 00:41:19,339
+be doable but you would need information
+
+00:41:12,499 --> 00:41:21,409
+about argument types and so on so I
+
+00:41:19,339 --> 00:41:25,369
+think we're about to run out of time so
+
+00:41:21,409 --> 00:41:31,339
+so I'm gonna make a comment on the last
+
+00:41:25,369 --> 00:41:35,989
+thing the there is one single reason why
+
+00:41:31,339 --> 00:41:39,199
+we added a why we added a bit in the x32
+
+00:41:35,989 --> 00:41:43,939
+B a B is to know that you're using an
+
+00:41:39,199 --> 00:41:49,069
+extra two system call and that was that
+
+00:41:43,939 --> 00:41:53,989
+the there's a file in in this in
+
+00:41:49,069 --> 00:41:57,949
+sisyphus in the input layer the out the
+
+00:41:53,989 --> 00:42:00,560
+format of which depends on if you are on
+
+00:41:57,949 --> 00:42:04,330
+it depends on if you are in the third
+
+00:42:00,560 --> 00:42:11,660
+or a 64-bit process it will literally
+
+00:42:04,330 --> 00:42:15,350
+print out in ASCII text text versions of
+
+00:42:11,660 --> 00:42:19,760
+numbers that that are the size of long
+
+00:42:15,350 --> 00:42:22,550
+in user space and this is exposed
+
+00:42:19,760 --> 00:42:28,490
+through the normal file i/o system calls
+
+00:42:22,550 --> 00:42:32,420
+is not an ioctl this is this was the one
+
+00:42:28,490 --> 00:42:40,070
+reason we had to track that into the
+
+00:42:32,420 --> 00:42:42,380
+deep layers that sounds fun alright
+
+00:42:40,070 --> 00:42:49,640
+thank you everyone yeah we're about out
+
+00:42:42,380 --> 00:42:51,260
+of time thanks for that yeah I'm sure
+
+00:42:49,640 --> 00:42:54,770
+we're gonna have lots more discussions
+
+00:42:51,260 --> 00:42:57,410
+about this on mailing lists so alright
+
+00:42:54,770 --> 00:42:58,730
+thanks again and download the slide deck
+
+00:42:57,410 --> 00:43:02,200
+and follow the links if you want to have
+
+00:42:58,730 --> 00:43:02,200
+
+YouTube URL: https://www.youtube.com/watch?v=ZIcrT4dw1QE
+
+

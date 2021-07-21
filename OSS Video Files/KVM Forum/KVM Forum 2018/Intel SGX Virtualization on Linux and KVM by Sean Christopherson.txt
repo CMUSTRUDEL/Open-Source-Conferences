@@ -1,0 +1,1836 @@
+Title: Intel SGX Virtualization on Linux and KVM by Sean Christopherson
+Publication date: 2018-11-14
+Playlist: KVM Forum 2018
+Description: 
+	Intel Software Guard Extensions (SGX) provides new hardware-based capabilities to software developers to protect an application's secrets. SGX allows for the creation of a trusted environment without drawing any dependencies on the integrity of code elsewhere in the software stack, which in modern cloud environments may be millions of lines of code across the application, kernel and VMM.
+
+This talk will provide a brief overview of SGX and its (nefarious) history with respect to Linux, followed by an in-depth analysis of the design and status of SGX virtualization support in KVM.
+
+---
+
+Sean Christopherson
+Software Engineer
+Intel
+
+Sean Christopherson is a software engineer in Intel's Open Source Technology Center primarily focused on enabling hardware features in KVM. Sean is well-versed in x86/Intel ISA, having spent 10+ years developing internal software used to validate the functional behavior of Intel processors, but is relatively inexperienced in making said hardware do anything useful.
+Captions: 
+	00:00:00,350 --> 00:00:02,710
+[Music]
+
+00:00:05,420 --> 00:00:10,559
+I'm Shawn Kristofferson I'm from Intel
+
+00:00:08,730 --> 00:00:13,320
+gonna talk about Intel SGX
+
+00:00:10,559 --> 00:00:14,759
+virtualization a little bit about myself
+
+00:00:13,320 --> 00:00:16,859
+before I get going
+
+00:00:14,759 --> 00:00:19,590
+software engineer at Intel primarily
+
+00:00:16,859 --> 00:00:21,869
+working on kbm I sadly do not have a
+
+00:00:19,590 --> 00:00:24,060
+fancy title at this time I've been
+
+00:00:21,869 --> 00:00:27,119
+working on x86 low-level stuff for about
+
+00:00:24,060 --> 00:00:32,099
+14 years and vmx specifically for about
+
+00:00:27,119 --> 00:00:35,760
+10 years I did a random instruction test
+
+00:00:32,099 --> 00:00:40,379
+tool for pretty much all Intel ISA for
+
+00:00:35,760 --> 00:00:42,989
+about a little under a decade and I've
+
+00:00:40,379 --> 00:00:44,910
+been working on SGX itself for about two
+
+00:00:42,989 --> 00:00:47,730
+plus years been working on Linux for
+
+00:00:44,910 --> 00:00:50,070
+about two years and working on KVM for a
+
+00:00:47,730 --> 00:00:53,789
+little under a year and a half so if you
+
+00:00:50,070 --> 00:00:56,760
+want esoteric x86 knowledge I'm your guy
+
+00:00:53,789 --> 00:00:59,940
+virtualization not so much actually
+
+00:00:56,760 --> 00:01:04,580
+using vm x the hardware capabilities to
+
+00:00:59,940 --> 00:01:08,430
+do something useful not quite there yet
+
+00:01:04,580 --> 00:01:11,040
+so if you're ever get to a point where
+
+00:01:08,430 --> 00:01:12,960
+you're wondering what am i doing or you
+
+00:01:11,040 --> 00:01:20,820
+know what's he thinking it's probably
+
+00:01:12,960 --> 00:01:23,430
+just ignorance so what is SGX trying to
+
+00:01:20,820 --> 00:01:25,740
+do in the traditional virtual machine
+
+00:01:23,430 --> 00:01:28,860
+landscape where you've got your tack
+
+00:01:25,740 --> 00:01:31,070
+surface that you have secrets in your
+
+00:01:28,860 --> 00:01:33,540
+application out and ring three that are
+
+00:01:31,070 --> 00:01:35,939
+accessible by any privileged entity so
+
+00:01:33,540 --> 00:01:40,799
+your EMM your hypervisor your OS
+
+00:01:35,939 --> 00:01:44,460
+Hardware firmware or any malicious app
+
+00:01:40,799 --> 00:01:46,430
+that manages to escape some privilege
+
+00:01:44,460 --> 00:01:50,280
+levels exploit some flaws to get there
+
+00:01:46,430 --> 00:01:52,950
+and even in this traditional landscape
+
+00:01:50,280 --> 00:01:57,899
+if you encrypt your VM so like MKT Emmy
+
+00:01:52,950 --> 00:02:00,509
+or SME even a CBS CBS it doesn't
+
+00:01:57,899 --> 00:02:03,240
+necessarily take the operating system or
+
+00:02:00,509 --> 00:02:05,790
+the VM em out of the TCB same with firm
+
+00:02:03,240 --> 00:02:07,680
+worth a lot of the firmware pieces can
+
+00:02:05,790 --> 00:02:10,440
+still get access to your application
+
+00:02:07,680 --> 00:02:12,569
+secrets and that's not a knock
+
+00:02:10,440 --> 00:02:13,590
+necessarily on things like total memory
+
+00:02:12,569 --> 00:02:16,920
+encryption
+
+00:02:13,590 --> 00:02:20,670
+of your VM they'd still definitely have
+
+00:02:16,920 --> 00:02:23,760
+their place STX isn't necessarily it's
+
+00:02:20,670 --> 00:02:26,610
+not going to replace those it's not
+
+00:02:23,760 --> 00:02:32,550
+completely orthogonal but they do have
+
+00:02:26,610 --> 00:02:34,590
+different applications the kind of main
+
+00:02:32,550 --> 00:02:37,410
+goal of SGX is to reduce the attack
+
+00:02:34,590 --> 00:02:40,260
+surface so shrink it down to just your
+
+00:02:37,410 --> 00:02:44,849
+application and some of the hardware and
+
+00:02:40,260 --> 00:02:48,180
+firmware the idea being even if you
+
+00:02:44,849 --> 00:02:50,430
+managed to subvert the DMM or the OS or
+
+00:02:48,180 --> 00:02:52,260
+even bios you can still have some
+
+00:02:50,430 --> 00:02:57,569
+protections and still protect your
+
+00:02:52,260 --> 00:03:00,360
+secrets from leaking or from attack the
+
+00:02:57,569 --> 00:03:01,819
+other big piece of SGX I'm actually not
+
+00:03:00,360 --> 00:03:04,140
+really going to touch on it all today
+
+00:03:01,819 --> 00:03:05,880
+but it is worth mentioning because it's
+
+00:03:04,140 --> 00:03:10,410
+a large part of the architecture is
+
+00:03:05,880 --> 00:03:13,590
+attestation so SGX has a root of trust
+
+00:03:10,410 --> 00:03:16,440
+in the hardware and this means that it
+
+00:03:13,590 --> 00:03:18,900
+can attest your application can attest
+
+00:03:16,440 --> 00:03:21,709
+itself to a third party with that
+
+00:03:18,900 --> 00:03:24,120
+hardware root of trust and that
+
+00:03:21,709 --> 00:03:26,880
+attestation includes information about
+
+00:03:24,120 --> 00:03:29,609
+what's running in the Enclave what the
+
+00:03:26,880 --> 00:03:32,220
+execution environment is so this is like
+
+00:03:29,609 --> 00:03:36,410
+the hardware execution environment the
+
+00:03:32,220 --> 00:03:39,750
+CPU security properties so whether the
+
+00:03:36,410 --> 00:03:41,160
+Enclave is protected from replay attacks
+
+00:03:39,750 --> 00:03:44,250
+what type of integrity guarantees that
+
+00:03:41,160 --> 00:03:47,250
+can provide etc and lots of other stuff
+
+00:03:44,250 --> 00:03:51,410
+that get included in that attestation
+
+00:03:47,250 --> 00:03:54,540
+report the kind of high-level view of
+
+00:03:51,410 --> 00:03:56,549
+what an enclave looks like starts with a
+
+00:03:54,540 --> 00:03:58,530
+standard user space process so you have
+
+00:03:56,549 --> 00:04:01,950
+your data yet your code and then you
+
+00:03:58,530 --> 00:04:05,579
+have the OS bits that are exposed to
+
+00:04:01,950 --> 00:04:08,130
+user space an Enclave is a trusted
+
+00:04:05,579 --> 00:04:12,620
+execution piece that's embedded in that
+
+00:04:08,130 --> 00:04:16,289
+ring three process so enclaves run in a
+
+00:04:12,620 --> 00:04:21,269
+kind of special new architectural ring
+
+00:04:16,289 --> 00:04:24,330
+three only mode they have controlled
+
+00:04:21,269 --> 00:04:27,030
+entry points so you can't just jump in
+
+00:04:24,330 --> 00:04:27,570
+to this Enclave willy-nilly and try and
+
+00:04:27,030 --> 00:04:30,720
+do
+
+00:04:27,570 --> 00:04:32,670
+execution attacks by executing code
+
+00:04:30,720 --> 00:04:35,160
+you're not supposed to so you can only
+
+00:04:32,670 --> 00:04:38,820
+enter this code at points that the
+
+00:04:35,160 --> 00:04:43,620
+Enclave has specifically allowed entry
+
+00:04:38,820 --> 00:04:47,670
+yet on close-support multi-threading
+
+00:04:43,620 --> 00:04:49,590
+it's a little not cumbersome it's
+
+00:04:47,670 --> 00:04:51,810
+complex to set up and get working
+
+00:04:49,590 --> 00:04:55,620
+correctly but it is supported via things
+
+00:04:51,810 --> 00:04:56,730
+called thread control structures so kind
+
+00:04:55,620 --> 00:05:00,120
+of within that Enclave and it's
+
+00:04:56,730 --> 00:05:02,520
+protected memory the CPU stores
+
+00:05:00,120 --> 00:05:04,640
+information about where the thread was
+
+00:05:02,520 --> 00:05:07,440
+running all of its relevant State and
+
+00:05:04,640 --> 00:05:11,420
+that allows you to run multiple threads
+
+00:05:07,440 --> 00:05:14,940
+within a single Enclave an Enclave has
+
+00:05:11,420 --> 00:05:19,380
+readwrite access to its kind of owning
+
+00:05:14,940 --> 00:05:20,730
+process virtual memory so it's not like
+
+00:05:19,380 --> 00:05:22,260
+a full page table switch when you're
+
+00:05:20,730 --> 00:05:24,330
+going over to an enclave you still have
+
+00:05:22,260 --> 00:05:27,510
+access to everything that you had access
+
+00:05:24,330 --> 00:05:29,820
+into your user process so in terms of if
+
+00:05:27,510 --> 00:05:32,300
+you want to rewrite to the exterior or
+
+00:05:29,820 --> 00:05:34,410
+world you can get back to user process
+
+00:05:32,300 --> 00:05:36,930
+the exception here is that you cannot
+
+00:05:34,410 --> 00:05:39,660
+execute outside of the Enclave so once
+
+00:05:36,930 --> 00:05:42,630
+you're in the Enclave to prevent an
+
+00:05:39,660 --> 00:05:44,580
+attack or a buggy Enclave from exposing
+
+00:05:42,630 --> 00:05:46,770
+itself if you ever try to execute
+
+00:05:44,580 --> 00:05:48,900
+outside that so you jump to code that's
+
+00:05:46,770 --> 00:05:52,170
+not in the Enclave you'll get a general
+
+00:05:48,900 --> 00:05:54,150
+protection Bowl what it doesn't work the
+
+00:05:52,170 --> 00:05:56,910
+other way around so the users brought
+
+00:05:54,150 --> 00:06:00,060
+user process the operating system can't
+
+00:05:56,910 --> 00:06:01,830
+peek into the Enclave and it's not just
+
+00:06:00,060 --> 00:06:05,250
+memory encryption I'll get into that a
+
+00:06:01,830 --> 00:06:10,470
+little bit later the user process can't
+
+00:06:05,250 --> 00:06:13,550
+see anything into the Enclave starting
+
+00:06:10,470 --> 00:06:16,080
+at the kind of hardware level there's
+
+00:06:13,550 --> 00:06:19,050
+what's called processor reserve memory
+
+00:06:16,080 --> 00:06:20,940
+and this is in the heartburn from the
+
+00:06:19,050 --> 00:06:23,550
+hardware implementation for us Jack's
+
+00:06:20,940 --> 00:06:27,450
+not necessarily the more Hardware
+
+00:06:23,550 --> 00:06:29,420
+agnostic architecture but realistically
+
+00:06:27,450 --> 00:06:31,980
+what you're going to see in in practice
+
+00:06:29,420 --> 00:06:36,270
+is this chunk and it's carved out by a
+
+00:06:31,980 --> 00:06:39,090
+range register and so within that PRM
+
+00:06:36,270 --> 00:06:39,970
+there's what's called the Enclave page
+
+00:06:39,090 --> 00:06:43,680
+cache
+
+00:06:39,970 --> 00:06:46,750
+and the unclaimed page cache is
+
+00:06:43,680 --> 00:06:48,900
+essentially what's usable for building
+
+00:06:46,750 --> 00:06:52,360
+on clays so just kind of specialized
+
+00:06:48,900 --> 00:06:54,760
+memory that user space actually gets to
+
+00:06:52,360 --> 00:06:58,270
+use to build these enclaves and then
+
+00:06:54,760 --> 00:07:00,580
+there's the EPC map and the EPC map is
+
+00:06:58,270 --> 00:07:03,400
+not exposed to software it's managed
+
+00:07:00,580 --> 00:07:06,220
+purely by the hardware and it exists so
+
+00:07:03,400 --> 00:07:09,700
+that hardware has a place to store bits
+
+00:07:06,220 --> 00:07:12,580
+and metadata about enclaves to do a lot
+
+00:07:09,700 --> 00:07:16,000
+of tracking to implement the various
+
+00:07:12,580 --> 00:07:21,220
+enforcement's with SGX bumping one level
+
+00:07:16,000 --> 00:07:23,290
+up into kernel space sjx exposes a
+
+00:07:21,220 --> 00:07:27,820
+variety of instructions they're all
+
+00:07:23,290 --> 00:07:30,040
+under one opcode uncle s with a bunch of
+
+00:07:27,820 --> 00:07:32,110
+leaves for implementing various
+
+00:07:30,040 --> 00:07:34,630
+capabilities so you can create an
+
+00:07:32,110 --> 00:07:38,770
+enclave add pages to it initialize the
+
+00:07:34,630 --> 00:07:40,270
+Enclave and at this level is where you
+
+00:07:38,770 --> 00:07:43,060
+manage all of that
+
+00:07:40,270 --> 00:07:46,270
+EPC memory so the kernel still has full
+
+00:07:43,060 --> 00:07:48,700
+control over the EPC as in normal memory
+
+00:07:46,270 --> 00:07:51,430
+so it can
+
+00:07:48,700 --> 00:07:53,950
+there's mechanisms to evict pages from
+
+00:07:51,430 --> 00:07:59,080
+the EPC so do page out and page those
+
+00:07:53,950 --> 00:08:02,950
+back in and the existing i-32 page
+
+00:07:59,080 --> 00:08:05,020
+tables else are in play here so all of
+
+00:08:02,950 --> 00:08:08,260
+your normal memory management that you
+
+00:08:05,020 --> 00:08:11,290
+do through page tables still exists with
+
+00:08:08,260 --> 00:08:14,380
+SGX so part of the SGX module and Linux
+
+00:08:11,290 --> 00:08:19,120
+is configuring the page tables for
+
+00:08:14,380 --> 00:08:22,750
+access to the EPC at the user space
+
+00:08:19,120 --> 00:08:24,760
+level there's another instruction uncle
+
+00:08:22,750 --> 00:08:27,700
+you in this case that has a collection
+
+00:08:24,760 --> 00:08:30,460
+of leaves and this is where the
+
+00:08:27,700 --> 00:08:32,650
+untrusted portion of the user space
+
+00:08:30,460 --> 00:08:34,900
+process that wants to run it Enclave can
+
+00:08:32,650 --> 00:08:37,000
+do things like enter into the Enclave
+
+00:08:34,900 --> 00:08:40,360
+resume and running Enclave after it
+
+00:08:37,000 --> 00:08:41,860
+exited for an interrupt and then on the
+
+00:08:40,360 --> 00:08:44,080
+Enclave side there's instructions that
+
+00:08:41,860 --> 00:08:46,690
+are runnable only within an enclave so
+
+00:08:44,080 --> 00:08:49,089
+things like exited an explicit
+
+00:08:46,690 --> 00:08:53,339
+synchronous exit there's some reporting
+
+00:08:49,089 --> 00:08:53,339
+stuff for attestation etc
+
+00:08:54,340 --> 00:08:59,780
+for access control start out with a
+
+00:08:56,900 --> 00:09:01,040
+normal virtual address go through the
+
+00:08:59,780 --> 00:09:02,960
+page tables like normal
+
+00:09:01,040 --> 00:09:05,270
+assuming everything works out with the
+
+00:09:02,960 --> 00:09:07,820
+page tables so all the normal permission
+
+00:09:05,270 --> 00:09:09,920
+restrictions exist here all the normal
+
+00:09:07,820 --> 00:09:12,860
+faults for existing I third two page
+
+00:09:09,920 --> 00:09:14,540
+tables are in play assuming that was
+
+00:09:12,860 --> 00:09:17,330
+check out we get to a point where we
+
+00:09:14,540 --> 00:09:19,220
+have a physical address in the CPU at
+
+00:09:17,330 --> 00:09:21,430
+that time we check whether or not it's
+
+00:09:19,220 --> 00:09:25,610
+an enclave access and this doesn't mean
+
+00:09:21,430 --> 00:09:28,730
+only accesses from within an enclave and
+
+00:09:25,610 --> 00:09:31,400
+in fact because you can access memory
+
+00:09:28,730 --> 00:09:33,140
+outside of the Enclave even accesses
+
+00:09:31,400 --> 00:09:35,570
+that originated from an enclave may not
+
+00:09:33,140 --> 00:09:38,530
+be considered an enclave access rather
+
+00:09:35,570 --> 00:09:43,730
+an enclave access is something that
+
+00:09:38,530 --> 00:09:45,850
+falls into the virtual range of that
+
+00:09:43,730 --> 00:09:49,070
+Enclave so when you create an enclave
+
+00:09:45,850 --> 00:09:51,800
+the processor part of the information
+
+00:09:49,070 --> 00:09:54,980
+that's provided is a base in size of
+
+00:09:51,800 --> 00:09:56,780
+that Enclave and so the new Enclave when
+
+00:09:54,980 --> 00:09:58,730
+you're running in that mode the CPU
+
+00:09:56,780 --> 00:10:01,670
+keeps track of what Enclave it's running
+
+00:09:58,730 --> 00:10:04,970
+and as well as once it's running what
+
+00:10:01,670 --> 00:10:08,060
+the linear address or virtual address in
+
+00:10:04,970 --> 00:10:10,280
+next terms what that range of is the
+
+00:10:08,060 --> 00:10:12,350
+Enclave so if an access falls within
+
+00:10:10,280 --> 00:10:15,640
+that range it's considered an enclave
+
+00:10:12,350 --> 00:10:17,960
+access and then there are a variety of
+
+00:10:15,640 --> 00:10:20,150
+uncle you and uncle s instructions that
+
+00:10:17,960 --> 00:10:21,830
+explicitly access the e PC and then
+
+00:10:20,150 --> 00:10:25,370
+those are also considered Enclave
+
+00:10:21,830 --> 00:10:27,160
+accesses if it's not an enclave access
+
+00:10:25,370 --> 00:10:29,270
+so this is just a normal memory access
+
+00:10:27,160 --> 00:10:32,660
+we're gonna check the range registers
+
+00:10:29,270 --> 00:10:35,480
+see if it hits the epc if it doesn't hit
+
+00:10:32,660 --> 00:10:38,870
+the he PC it's allowed normal memory
+
+00:10:35,480 --> 00:10:40,760
+access if it does and in this case it's
+
+00:10:38,870 --> 00:10:42,740
+not supposed to be accessing that we get
+
+00:10:40,760 --> 00:10:45,220
+redirected to the abort page a board
+
+00:10:42,740 --> 00:10:48,080
+page behavior is not a fault in case
+
+00:10:45,220 --> 00:10:49,790
+abort page if you try to write to the
+
+00:10:48,080 --> 00:10:52,550
+abort page it just gets dropped and then
+
+00:10:49,790 --> 00:10:55,190
+loads return all ones so the access gets
+
+00:10:52,550 --> 00:10:56,990
+allowed through but you get junk data
+
+00:10:55,190 --> 00:11:00,680
+back and if you try to write too it just
+
+00:10:56,990 --> 00:11:02,450
+gets dropped if this was an enclave
+
+00:11:00,680 --> 00:11:05,240
+access we again check whether or not we
+
+00:11:02,450 --> 00:11:07,279
+hit the e PC because these are so
+
+00:11:05,240 --> 00:11:12,290
+to hit the epc if they don't you get a
+
+00:11:07,279 --> 00:11:14,270
+fault if they do hit the epc so this
+
+00:11:12,290 --> 00:11:15,890
+looks like a correct access there
+
+00:11:14,270 --> 00:11:19,250
+additional checks made so this is where
+
+00:11:15,890 --> 00:11:20,930
+we go to the EPC map and this is the
+
+00:11:19,250 --> 00:11:23,390
+hardware managed portion that's not
+
+00:11:20,930 --> 00:11:26,390
+visible to software that does additional
+
+00:11:23,390 --> 00:11:29,390
+checks so this prevents the kernel or
+
+00:11:26,390 --> 00:11:32,149
+vmm from trying to attack the Enclave by
+
+00:11:29,390 --> 00:11:37,250
+changing page permissions or trying to
+
+00:11:32,149 --> 00:11:40,370
+remap attacks and so the EPC M enforces
+
+00:11:37,250 --> 00:11:43,459
+the permissions desired by the Enclave
+
+00:11:40,370 --> 00:11:46,070
+if the EPC M is happy we allow the
+
+00:11:43,459 --> 00:11:50,899
+access and if it's not so happy and
+
+00:11:46,070 --> 00:11:52,640
+we're gonna get that fault again one
+
+00:11:50,899 --> 00:11:55,310
+weird thing to note with the EPC M
+
+00:11:52,640 --> 00:11:57,020
+faults the exact fault you're going to
+
+00:11:55,310 --> 00:12:00,080
+get depends on which hardware you have
+
+00:11:57,020 --> 00:12:05,180
+early iterations of SGX delivered GP
+
+00:12:00,080 --> 00:12:07,760
+faults and then it's marked as an errata
+
+00:12:05,180 --> 00:12:12,220
+the SDM will tell you that you get a
+
+00:12:07,760 --> 00:12:12,220
+page fault with an SGX specific bits set
+
+00:12:12,579 --> 00:12:19,610
+on bare metal the PRM is carved out of
+
+00:12:16,760 --> 00:12:22,310
+RAM with range registers this is
+
+00:12:19,610 --> 00:12:23,660
+statically partitioned so it's not
+
+00:12:22,310 --> 00:12:28,070
+something that you can change on the fly
+
+00:12:23,660 --> 00:12:32,390
+it has to be locked at boot so similar
+
+00:12:28,070 --> 00:12:35,600
+to like the feature control MSR the pr m
+
+00:12:32,390 --> 00:12:37,220
+r RS have to be locked because their
+
+00:12:35,600 --> 00:12:38,930
+range registers this means it has to be
+
+00:12:37,220 --> 00:12:42,050
+powerfully sized and naturally a lot
+
+00:12:38,930 --> 00:12:47,660
+naturally aligned so you can't do like
+
+00:12:42,050 --> 00:12:50,240
+page granularity sizing within the PRM
+
+00:12:47,660 --> 00:12:54,529
+again part of that is given over to the
+
+00:12:50,240 --> 00:12:57,529
+EPC map so for instance on skylight
+
+00:12:54,529 --> 00:13:02,029
+Hardware the largest PRM size you can
+
+00:12:57,529 --> 00:13:05,630
+configure is 128 Meg's but what you
+
+00:13:02,029 --> 00:13:09,110
+actually see for software is only 92
+
+00:13:05,630 --> 00:13:12,649
+Meg's of EPC because the rest of that
+
+00:13:09,110 --> 00:13:17,630
+chunk is to the EPC map or doing all
+
+00:13:12,649 --> 00:13:18,990
+that metadata tracking the PRM is
+
+00:13:17,630 --> 00:13:22,080
+encrypted with a
+
+00:13:18,990 --> 00:13:25,170
+Merl key and this is a single key that
+
+00:13:22,080 --> 00:13:27,899
+is generated randomly at boot so it's a
+
+00:13:25,170 --> 00:13:31,709
+per CPU key and it's thrown away every
+
+00:13:27,899 --> 00:13:33,630
+time we reset and one thing to note here
+
+00:13:31,709 --> 00:13:35,610
+is that enclaves are not isolated from
+
+00:13:33,630 --> 00:13:38,610
+each other through encryption it's a
+
+00:13:35,610 --> 00:13:40,860
+single key for the EPC regardless of
+
+00:13:38,610 --> 00:13:42,750
+which Enclave you're running on clays
+
+00:13:40,860 --> 00:13:46,260
+themselves are isolated through all of
+
+00:13:42,750 --> 00:13:49,320
+the other Hardware checks the range
+
+00:13:46,260 --> 00:13:51,980
+checks similar things coming in through
+
+00:13:49,320 --> 00:13:54,050
+the IOM and you things like that so the
+
+00:13:51,980 --> 00:13:55,170
+encryption is kind of a dump
+
+00:13:54,050 --> 00:13:57,720
+defense-in-depth
+
+00:13:55,170 --> 00:14:03,899
+mechanism not the primary way of
+
+00:13:57,720 --> 00:14:06,000
+protecting the EPC from software's
+
+00:14:03,899 --> 00:14:08,850
+perspective when you're accessing EPC
+
+00:14:06,000 --> 00:14:12,000
+legitimately it's transparently
+
+00:14:08,850 --> 00:14:15,420
+decrypted or encrypted when you're
+
+00:14:12,000 --> 00:14:18,089
+reading writing from from DRAM so it's
+
+00:14:15,420 --> 00:14:19,680
+unencrypted in the CPU cache and that's
+
+00:14:18,089 --> 00:14:22,730
+all levels of the CPU cache that it's
+
+00:14:19,680 --> 00:14:26,720
+unencrypted this means that if you can
+
+00:14:22,730 --> 00:14:29,130
+keep your workload within the cache
+
+00:14:26,720 --> 00:14:30,660
+you're going to see basically native
+
+00:14:29,130 --> 00:14:32,220
+speeds as long as you can stay within
+
+00:14:30,660 --> 00:14:33,930
+the Enclave keep running out of the
+
+00:14:32,220 --> 00:14:36,870
+cache you're not going to see any
+
+00:14:33,930 --> 00:14:39,120
+performance it's and even if you're
+
+00:14:36,870 --> 00:14:43,740
+going out to a PC which is effectively
+
+00:14:39,120 --> 00:14:45,930
+main memory plus the encryption it's not
+
+00:14:43,740 --> 00:14:51,329
+going to be a massive performance
+
+00:14:45,930 --> 00:14:54,450
+difference again that key is generated
+
+00:14:51,329 --> 00:14:57,089
+at CPU risa this has some unfortunate
+
+00:14:54,450 --> 00:15:01,050
+side effects this means if the CPU
+
+00:14:57,089 --> 00:15:04,410
+powers down so we go into s3 or you just
+
+00:15:01,050 --> 00:15:09,779
+restart your machine the a PC and the C
+
+00:15:04,410 --> 00:15:11,910
+map go away and that has noticeable side
+
+00:15:09,779 --> 00:15:14,540
+effects because the EPC map if you
+
+00:15:11,910 --> 00:15:17,430
+remember back to the access permissions
+
+00:15:14,540 --> 00:15:19,589
+does checks on the page permissions so
+
+00:15:17,430 --> 00:15:23,010
+if you lose your EPC map suddenly all of
+
+00:15:19,589 --> 00:15:25,800
+your accesses start faulting and part of
+
+00:15:23,010 --> 00:15:29,070
+the SDX architecture states that this is
+
+00:15:25,800 --> 00:15:30,600
+expected it's going to happen and if you
+
+00:15:29,070 --> 00:15:31,690
+are developing an enclave you have to
+
+00:15:30,600 --> 00:15:34,450
+prepare for it so
+
+00:15:31,690 --> 00:15:38,200
+users based processes that run enclaves
+
+00:15:34,450 --> 00:15:42,360
+are designed to detect these faults and
+
+00:15:38,200 --> 00:15:42,360
+restart their own clothes when necessary
+
+00:15:45,150 --> 00:15:49,990
+from a VM perspective we don't have the
+
+00:15:47,890 --> 00:15:52,750
+same restrictions we're not limited to
+
+00:15:49,990 --> 00:15:55,570
+range registers we don't have to deal
+
+00:15:52,750 --> 00:15:57,130
+with the PRM we don't have the EPC M
+
+00:15:55,570 --> 00:16:01,420
+because that's just sitting below us in
+
+00:15:57,130 --> 00:16:05,140
+hardware so we can do 4k you know
+
+00:16:01,420 --> 00:16:07,270
+standard page size page aligned we don't
+
+00:16:05,140 --> 00:16:11,340
+have to overlay it on top of guest Ram
+
+00:16:07,270 --> 00:16:11,340
+it can be something completely separate
+
+00:16:11,880 --> 00:16:19,120
+that EPC M behavior where hardware will
+
+00:16:16,060 --> 00:16:20,980
+blast away the PCM and suddenly
+
+00:16:19,120 --> 00:16:25,450
+everything starts faulting can be
+
+00:16:20,980 --> 00:16:29,320
+exploited by the VM m to support certain
+
+00:16:25,450 --> 00:16:30,370
+features migration live migration being
+
+00:16:29,320 --> 00:16:34,930
+the big one
+
+00:16:30,370 --> 00:16:36,840
+so because the key is per CPU and it's
+
+00:16:34,930 --> 00:16:40,240
+ephemeral it's generated a reset
+
+00:16:36,840 --> 00:16:42,850
+migration as is today is not supported
+
+00:16:40,240 --> 00:16:47,320
+of the EPC but because software is
+
+00:16:42,850 --> 00:16:50,020
+conditioned to respond gracefully to
+
+00:16:47,320 --> 00:16:53,260
+faults to the EPC being lost online
+
+00:16:50,020 --> 00:16:55,720
+migration we can just migrate the page
+
+00:16:53,260 --> 00:16:56,560
+tables as normal but when you get to
+
+00:16:55,720 --> 00:16:58,390
+your destination
+
+00:16:56,560 --> 00:16:59,980
+everything starts faulting but user
+
+00:16:58,390 --> 00:17:01,450
+space doesn't care they just think that
+
+00:16:59,980 --> 00:17:05,620
+we went into a suspense date or
+
+00:17:01,450 --> 00:17:07,720
+something you can also do kind of a
+
+00:17:05,620 --> 00:17:12,730
+pseudo reclaim reclaim I'll get into
+
+00:17:07,720 --> 00:17:14,860
+this a little bit later sudo in this
+
+00:17:12,730 --> 00:17:17,590
+sense because it's really a facsimile of
+
+00:17:14,860 --> 00:17:20,170
+of reclaim you can temporarily reclaim
+
+00:17:17,590 --> 00:17:22,810
+pages again user space in the Gus could
+
+00:17:20,170 --> 00:17:23,980
+fault but at some point if you want to
+
+00:17:22,810 --> 00:17:26,530
+keep running the guest you need to give
+
+00:17:23,980 --> 00:17:30,330
+those back in a timely fashion
+
+00:17:26,530 --> 00:17:30,330
+and possibly other tricks down the road
+
+00:17:30,960 --> 00:17:38,710
+so non virtualization page out a PC is
+
+00:17:35,800 --> 00:17:40,450
+very limited especially on current
+
+00:17:38,710 --> 00:17:42,940
+processors so what's available today is
+
+00:17:40,450 --> 00:17:47,890
+all client hardware will get a lot more
+
+00:17:42,940 --> 00:17:50,980
+EPC up in gigabyte ranges for server but
+
+00:17:47,890 --> 00:17:54,370
+for now you effectively have 92 Meg's as
+
+00:17:50,980 --> 00:17:57,670
+your max but EPC is really just
+
+00:17:54,370 --> 00:18:00,400
+specializing memory it has very strict
+
+00:17:57,670 --> 00:18:03,820
+access permissions but at the end of the
+
+00:18:00,400 --> 00:18:08,590
+day it's still memory there's an
+
+00:18:03,820 --> 00:18:11,290
+instruction that is Alice leaf for
+
+00:18:08,590 --> 00:18:12,880
+running back a page there's some other
+
+00:18:11,290 --> 00:18:15,190
+instructions that you have to execute up
+
+00:18:12,880 --> 00:18:17,020
+to this point to do some tracking but
+
+00:18:15,190 --> 00:18:21,160
+when you actually want to evict it from
+
+00:18:17,020 --> 00:18:24,370
+the EPC out into for example Ram you do
+
+00:18:21,160 --> 00:18:26,470
+this II write back that writes the
+
+00:18:24,370 --> 00:18:28,390
+encrypted data out to ram it doesn't
+
+00:18:26,470 --> 00:18:30,910
+necessarily have to be RAM it just has
+
+00:18:28,390 --> 00:18:33,820
+to be accessible memory so you could
+
+00:18:30,910 --> 00:18:37,450
+have this back by persistent memory for
+
+00:18:33,820 --> 00:18:42,130
+example the other aspect of page out is
+
+00:18:37,450 --> 00:18:43,960
+that the CPU writes an ID to what's
+
+00:18:42,130 --> 00:18:47,100
+called a version array and this version
+
+00:18:43,960 --> 00:18:51,460
+array is a another type of EPC page and
+
+00:18:47,100 --> 00:18:54,100
+that gives the hardware way of tracking
+
+00:18:51,460 --> 00:18:57,280
+what pages were actually evicted from
+
+00:18:54,100 --> 00:19:02,170
+this processor so that you can't craft
+
+00:18:57,280 --> 00:19:04,990
+an attack to have a page line in RAM and
+
+00:19:02,170 --> 00:19:07,570
+try and make it look like a page that
+
+00:19:04,990 --> 00:19:09,100
+belongs in the EPC or by capturing a
+
+00:19:07,570 --> 00:19:11,950
+page that was evicted on some prior
+
+00:19:09,100 --> 00:19:15,970
+reset or from a previous Enclave and try
+
+00:19:11,950 --> 00:19:18,520
+and feed that back in and then there's a
+
+00:19:15,970 --> 00:19:21,580
+another structure that resides outside
+
+00:19:18,520 --> 00:19:26,410
+of the EPC called the paging crypto
+
+00:19:21,580 --> 00:19:28,840
+metadata block and the right back
+
+00:19:26,410 --> 00:19:31,390
+instruction also jam some data in here
+
+00:19:28,840 --> 00:19:33,490
+it's just metadata about the page and
+
+00:19:31,390 --> 00:19:35,680
+about the tying it to the version array
+
+00:19:33,490 --> 00:19:39,610
+so that when you want to bring it back
+
+00:19:35,680 --> 00:19:42,280
+in all of that the metadata for the page
+
+00:19:39,610 --> 00:19:43,840
+resides there so you can correctly
+
+00:19:42,280 --> 00:19:49,080
+verify that yeah this is the page for
+
+00:19:43,840 --> 00:19:49,080
+this Enclave and it's data is intact etc
+
+00:19:49,140 --> 00:19:56,650
+the other aspect of page out and this is
+
+00:19:52,540 --> 00:19:57,520
+a pain point for virtualization is that
+
+00:19:56,650 --> 00:20:00,370
+the
+
+00:19:57,520 --> 00:20:03,160
+sec s which is a secure Enclave control
+
+00:20:00,370 --> 00:20:07,080
+structure and it's the kind of parent
+
+00:20:03,160 --> 00:20:10,630
+page for all the pages in an enclave
+
+00:20:07,080 --> 00:20:13,179
+when you create an enclave the first
+
+00:20:10,630 --> 00:20:16,090
+thing you do is give it this sec s this
+
+00:20:13,179 --> 00:20:19,270
+holds the base the size and we're also
+
+00:20:16,090 --> 00:20:22,390
+rough county in here sec s children
+
+00:20:19,270 --> 00:20:26,380
+can't be a victim sec s is with children
+
+00:20:22,390 --> 00:20:30,670
+can't be evicted and we'll get into that
+
+00:20:26,380 --> 00:20:32,740
+later of why that's a pain point page in
+
+00:20:30,670 --> 00:20:35,500
+we're just reversing there is an e load
+
+00:20:32,740 --> 00:20:38,020
+instruction so we're loading back the
+
+00:20:35,500 --> 00:20:42,550
+encrypted data from ram poland data from
+
+00:20:38,020 --> 00:20:44,610
+the crypto metadata pulling the ID from
+
+00:20:42,550 --> 00:20:47,350
+the version array check everything out
+
+00:20:44,610 --> 00:20:48,820
+update the ref crown and we're good to
+
+00:20:47,350 --> 00:20:51,280
+go
+
+00:20:48,820 --> 00:20:53,260
+the last piece of SGX that's kind of
+
+00:20:51,280 --> 00:20:57,990
+relevant to virtualization is launch
+
+00:20:53,260 --> 00:21:01,390
+control so there's this whole mechanism
+
+00:20:57,990 --> 00:21:05,860
+for better or worse where you need this
+
+00:21:01,390 --> 00:21:07,360
+token to initialize an enclave a token
+
+00:21:05,860 --> 00:21:09,640
+can only be generated by a special
+
+00:21:07,360 --> 00:21:11,140
+Enclave called a launch Enclave and a
+
+00:21:09,640 --> 00:21:12,580
+launch Enclave itself doesn't require a
+
+00:21:11,140 --> 00:21:16,059
+token but it has to be signed by a
+
+00:21:12,580 --> 00:21:18,550
+special key and on initial hardware so
+
+00:21:16,059 --> 00:21:21,130
+skylake this key was hard-coded to an
+
+00:21:18,550 --> 00:21:23,020
+intel key obviously this did not go over
+
+00:21:21,130 --> 00:21:24,640
+well with open-source community because
+
+00:21:23,020 --> 00:21:27,250
+it meant that Intel basically had to
+
+00:21:24,640 --> 00:21:31,000
+bless all of all of the enclaves that
+
+00:21:27,250 --> 00:21:32,920
+you wanted to run so in comes launch
+
+00:21:31,000 --> 00:21:34,510
+control and this allows you to create on
+
+00:21:32,920 --> 00:21:36,910
+clays without first having to get
+
+00:21:34,510 --> 00:21:39,340
+whitelisted by Intel provides a set of
+
+00:21:36,910 --> 00:21:41,740
+MSRs that you can use to specify your
+
+00:21:39,340 --> 00:21:43,090
+own hash of a public key so essentially
+
+00:21:41,740 --> 00:21:47,080
+allows you to kind of define your own
+
+00:21:43,090 --> 00:21:49,059
+route of trust and then it's just a
+
+00:21:47,080 --> 00:21:53,230
+feature that's normally enumerated via
+
+00:21:49,059 --> 00:21:55,990
+cpuid so on that line the virtualization
+
+00:21:53,230 --> 00:21:58,000
+touch points CP ID kind of your standard
+
+00:21:55,990 --> 00:22:01,000
+okay we have to manage all the future
+
+00:21:58,000 --> 00:22:04,360
+bits there's an S Jack specific leaf
+
+00:22:01,000 --> 00:22:07,179
+with a bunch of Li bits and numerating
+
+00:22:04,360 --> 00:22:08,340
+capabilities what instruction sets are
+
+00:22:07,179 --> 00:22:11,580
+reported its
+
+00:22:08,340 --> 00:22:13,850
+and it also sub leaves for the EPC
+
+00:22:11,580 --> 00:22:16,230
+sections
+
+00:22:13,850 --> 00:22:18,270
+Emma's our perspectives there's a couple
+
+00:22:16,230 --> 00:22:22,880
+new bits and feature control and then
+
+00:22:18,270 --> 00:22:22,880
+the after mention public key hashes
+
+00:22:23,810 --> 00:22:31,050
+virtualization specific or BMX specific
+
+00:22:26,460 --> 00:22:33,660
+there are controls to intercept the
+
+00:22:31,050 --> 00:22:37,410
+uncle s leaves because their leaf based
+
+00:22:33,660 --> 00:22:39,420
+its a bitmap field so you can trap on
+
+00:22:37,410 --> 00:22:42,120
+specific leaves and allow their leaves
+
+00:22:39,420 --> 00:22:46,980
+to execute cleanly you get a new VM exit
+
+00:22:42,120 --> 00:22:48,900
+reason to handle those intercepts and
+
+00:22:46,980 --> 00:22:51,570
+then the Enclave page cache is the big
+
+00:22:48,900 --> 00:22:53,430
+piece so we want to expose a virtual epc
+
+00:22:51,570 --> 00:22:55,590
+region to the guests manage the physical
+
+00:22:53,430 --> 00:22:58,740
+packing and do some reclaiming over
+
+00:22:55,590 --> 00:23:01,170
+subscription but that has a lot of
+
+00:22:58,740 --> 00:23:07,290
+pitfalls and caveats to it in a VM M
+
+00:23:01,170 --> 00:23:09,870
+world for oculus intercept the leaves as
+
+00:23:07,290 --> 00:23:12,480
+necessary to inject false
+
+00:23:09,870 --> 00:23:14,280
+there's no enable bit for us Jax largely
+
+00:23:12,480 --> 00:23:17,280
+because it has so many different leaves
+
+00:23:14,280 --> 00:23:20,670
+that and there are multiple instruction
+
+00:23:17,280 --> 00:23:23,130
+sets depending on your hardware so if SJ
+
+00:23:20,670 --> 00:23:24,900
+x is enabled and the host to prevent the
+
+00:23:23,130 --> 00:23:27,060
+guests from using it you can't just
+
+00:23:24,900 --> 00:23:29,430
+toggle OCR for bit you have to actively
+
+00:23:27,060 --> 00:23:31,500
+intercept and inject faults at least can
+
+00:23:29,430 --> 00:23:36,000
+be disabled vscp ID bits so you have to
+
+00:23:31,500 --> 00:23:38,220
+trap to inject you DS etc for the most
+
+00:23:36,000 --> 00:23:42,300
+part we just passed the release there's
+
+00:23:38,220 --> 00:23:47,760
+no reason in base SGX support to
+
+00:23:42,300 --> 00:23:50,430
+intercept any of the x1 and SJ x2 leaf
+
+00:23:47,760 --> 00:23:53,120
+functions unless you have launch control
+
+00:23:50,430 --> 00:23:56,580
+enabled in the host and this is because
+
+00:23:53,120 --> 00:23:59,270
+when you're knitting an enclave you have
+
+00:23:56,580 --> 00:24:03,030
+to have a matching public key hash
+
+00:23:59,270 --> 00:24:06,060
+writing the MSRs is extremely slow even
+
+00:24:03,030 --> 00:24:08,670
+for MSR standards and Ian it is even
+
+00:24:06,060 --> 00:24:11,280
+slower unit is so slow and it's actually
+
+00:24:08,670 --> 00:24:13,440
+an that it's actually interruptible but
+
+00:24:11,280 --> 00:24:16,560
+what this means is that trapping the MSR
+
+00:24:13,440 --> 00:24:20,370
+s and then intercepting unit on behalf
+
+00:24:16,560 --> 00:24:21,840
+of the guests it's actually basically
+
+00:24:20,370 --> 00:24:28,580
+unnoticeable form of
+
+00:24:21,840 --> 00:24:30,870
+performance perspective for the epc
+
+00:24:28,580 --> 00:24:34,500
+virtualizing that it's kind of the same
+
+00:24:30,870 --> 00:24:38,309
+approach as normal ram allocate on fault
+
+00:24:34,500 --> 00:24:41,370
+access i to actually set things up we
+
+00:24:38,309 --> 00:24:44,700
+have to attach the VMA to put on our own
+
+00:24:41,370 --> 00:24:47,100
+hop fault handler because EPC memory is
+
+00:24:44,700 --> 00:24:49,289
+not not stored on standard normal memory
+
+00:24:47,100 --> 00:24:53,190
+in the host so we have to tweet flags
+
+00:24:49,289 --> 00:24:59,720
+point out the right pfm allocate the
+
+00:24:53,190 --> 00:25:05,520
+pages from the SGX subsystem optionally
+
+00:24:59,720 --> 00:25:07,830
+we could reserve EPC fvm creation there
+
+00:25:05,520 --> 00:25:11,070
+is notice meant no dependency on the
+
+00:25:07,830 --> 00:25:13,590
+user space driver so this means that
+
+00:25:11,070 --> 00:25:16,320
+we're only dependent on basically the
+
+00:25:13,590 --> 00:25:18,779
+EPC portions of the SGX subsystem and
+
+00:25:16,320 --> 00:25:21,960
+this is a deliberate design thing so
+
+00:25:18,779 --> 00:25:27,029
+that you don't have to load that user
+
+00:25:21,960 --> 00:25:29,190
+space facing driver the user space api
+
+00:25:27,029 --> 00:25:30,480
+there's basically two options that i can
+
+00:25:29,190 --> 00:25:32,610
+that i've come up with
+
+00:25:30,480 --> 00:25:35,940
+i've implemented both playing around
+
+00:25:32,610 --> 00:25:38,279
+with them one option is to just extend
+
+00:25:35,940 --> 00:25:41,820
+the set user memory region with a new
+
+00:25:38,279 --> 00:25:43,919
+flag to say this is CPC requires minimal
+
+00:25:41,820 --> 00:25:46,220
+changes to KBM kind of fits in nicely
+
+00:25:43,919 --> 00:25:49,529
+again EPC is just really specialized
+
+00:25:46,220 --> 00:25:52,799
+memory and then alternatively you could
+
+00:25:49,529 --> 00:25:54,990
+also do a new i/o control pro is there
+
+00:25:52,799 --> 00:25:59,010
+being that it's easier to extend in the
+
+00:25:54,990 --> 00:26:01,679
+future if you want to do some specific
+
+00:25:59,010 --> 00:26:03,539
+EPC stuff that doesn't necessarily fit
+
+00:26:01,679 --> 00:26:09,029
+well with the existing memory version
+
+00:26:03,539 --> 00:26:13,200
+stuff qmu it's a lot about the CPU ID
+
+00:26:09,029 --> 00:26:18,990
+bits for time I'll skip over some of the
+
+00:26:13,200 --> 00:26:21,149
+other stuff MSRs
+
+00:26:18,990 --> 00:26:23,600
+expose stuff when you can is the basic
+
+00:26:21,149 --> 00:26:23,600
+concept
+
+00:26:25,080 --> 00:26:32,129
+run long time so I'll skip past the qmu
+
+00:26:27,360 --> 00:26:35,460
+stuff get into oversubscription real
+
+00:26:32,129 --> 00:26:38,210
+quick the hardware enforces strict rules
+
+00:26:35,460 --> 00:26:40,879
+about how you do over subscription and
+
+00:26:38,210 --> 00:26:43,529
+avoiding conflicts is very painful and
+
+00:26:40,879 --> 00:26:45,830
+the real big downside is because of all
+
+00:26:43,529 --> 00:26:48,749
+the SE c-- s rough County and the
+
+00:26:45,830 --> 00:26:51,960
+concurrency rules conflicts are visible
+
+00:26:48,749 --> 00:26:54,419
+to the guests and then the ref counting
+
+00:26:51,960 --> 00:26:56,759
+means the vmm can't evict the SEC s if
+
+00:26:54,419 --> 00:26:59,399
+it has children that a resident EPC and
+
+00:26:56,759 --> 00:27:02,039
+in vice versa it can't reload evicted
+
+00:26:59,399 --> 00:27:04,169
+pages so the big danger there is from
+
+00:27:02,039 --> 00:27:05,909
+the vmm perspective you Vic tall the
+
+00:27:04,169 --> 00:27:08,309
+pages and then the guest manages to
+
+00:27:05,909 --> 00:27:09,749
+evict the SEC s from out from under you
+
+00:27:08,309 --> 00:27:14,369
+you can't pull back in the rest of the
+
+00:27:09,749 --> 00:27:15,659
+enclaves pages so the EPC
+
+00:27:14,369 --> 00:27:19,950
+oversubscription without hardware
+
+00:27:15,659 --> 00:27:25,580
+support is beyond complex even by SGX
+
+00:27:19,950 --> 00:27:25,580
+standards so not supported in KBM yet
+
+00:27:26,059 --> 00:27:31,110
+down the road there is hardware support
+
+00:27:29,850 --> 00:27:34,080
+for oversubscription
+
+00:27:31,110 --> 00:27:38,369
+it's in the SDM now it adds new leaves
+
+00:27:34,080 --> 00:27:41,279
+to help you either avoid conflicts or to
+
+00:27:38,369 --> 00:27:47,070
+handle them cleanly gives the amend some
+
+00:27:41,279 --> 00:27:51,619
+new instructions to manage the manage
+
+00:27:47,070 --> 00:27:56,190
+the virtualization of page now TPC and
+
+00:27:51,619 --> 00:27:59,850
+then some new VM exit reasons to handle
+
+00:27:56,190 --> 00:28:03,389
+those conflicts the other thing in the
+
+00:27:59,850 --> 00:28:05,850
+works is an EPC C group main motivation
+
+00:28:03,389 --> 00:28:08,249
+here is EPC is very limited and it's a
+
+00:28:05,850 --> 00:28:10,289
+shared resource so for example a
+
+00:28:08,249 --> 00:28:12,840
+misbehaving or poorly written Enclave
+
+00:28:10,289 --> 00:28:15,869
+can basically do a whole denial of
+
+00:28:12,840 --> 00:28:17,970
+service for all of us GX and also
+
+00:28:15,869 --> 00:28:21,779
+because getting stuff in and out of the
+
+00:28:17,970 --> 00:28:25,710
+EP store is extremely slow real quick on
+
+00:28:21,779 --> 00:28:27,299
+that one it's loosely modeled after if
+
+00:28:25,710 --> 00:28:32,190
+you're familiar c groups with the
+
+00:28:27,299 --> 00:28:34,740
+version 2 memory c groups and just
+
+00:28:32,190 --> 00:28:37,999
+accounts everything so that's the other
+
+00:28:34,740 --> 00:28:40,379
+piece of virtualization that's in the
+
+00:28:37,999 --> 00:28:42,840
+as far as upstreaming it's been a very
+
+00:28:40,379 --> 00:28:45,480
+bumpy road I could spend an hour talking
+
+00:28:42,840 --> 00:28:49,200
+about why it's taken so long to get SGX
+
+00:28:45,480 --> 00:28:51,450
+base support upstream and because of the
+
+00:28:49,200 --> 00:28:53,549
+EPC management KVM is dependent on that
+
+00:28:51,450 --> 00:28:56,700
+there's an outside chance I'll make for
+
+00:28:53,549 --> 00:29:01,590
+21 but at this point that's not working
+
+00:28:56,700 --> 00:29:05,100
+very likely so from a kbm perspective
+
+00:29:01,590 --> 00:29:07,440
+we're waiting on the STX sub system but
+
+00:29:05,100 --> 00:29:09,869
+while we're waiting I'll be getting some
+
+00:29:07,440 --> 00:29:12,059
+RFC's out very soon hopefully I was
+
+00:29:09,869 --> 00:29:14,850
+hoping to get him out before this talk
+
+00:29:12,059 --> 00:29:17,700
+but that didn't happen as far as the C
+
+00:29:14,850 --> 00:29:22,440
+group likely it'll defer until well
+
+00:29:17,700 --> 00:29:24,749
+after KVM its land upstream and if you
+
+00:29:22,440 --> 00:29:27,179
+want to play around with things there's
+
+00:29:24,749 --> 00:29:29,820
+links here for both the Kim you and
+
+00:29:27,179 --> 00:29:32,220
+camión bits and the KPM site also has
+
+00:29:29,820 --> 00:29:36,179
+the C group code and the user space
+
+00:29:32,220 --> 00:29:40,249
+driver I have no idea if we have time
+
+00:29:36,179 --> 00:29:44,269
+for questions no time for questions but
+
+00:29:40,249 --> 00:29:44,269
+I'm here all day
+
+00:29:44,360 --> 00:29:51,259
+[Applause]
+
+00:29:45,400 --> 00:29:51,259
+
+YouTube URL: https://www.youtube.com/watch?v=nJk8b25AJd8
+
+

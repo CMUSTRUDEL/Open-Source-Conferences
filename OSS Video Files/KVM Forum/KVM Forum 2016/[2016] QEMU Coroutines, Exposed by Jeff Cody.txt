@@ -1,0 +1,2271 @@
+Title: [2016] QEMU Coroutines, Exposed by Jeff Cody
+Publication date: 2016-09-06
+Playlist: KVM Forum 2016
+Description: 
+	Coroutines are an integral part of the QEMU block layer, providing a cooperative multi-tasking framework that largely obviates the need for callback functions. This allows the QEMU block layer to implemented a sequential, multi-threaded workflow, without the added complexity of preemption. This presentation will go over the QEMU coroutine implementation, how coroutines are used in the block layer, and the advantages of coroutines. And -- despite these advantages -- coroutines are not without their drawbacks, such as their own code complexity and unique debugging challenges. These drawbacks will also be discussed in the presentation.
+
+Jeff Cody
+Sr. Software Engineer, Red Hat
+
+Jeff is a Senior Software Engineer with Red Hat, currently working in the virtualization group. He currently works on the QEMU block layer, with a focus on live block job operations, and block image formats. Jeff was a presenter at the 2012, 2013, and 2014 KVM Forums. He works remotely from his home in Fort Wayne, Indiana.
+
+Slides: http://qemu.rocks/jtc-kvm2016/#/print-never
+Captions: 
+	00:00:09,530 --> 00:00:15,599
+okay hi everybody I'm my name is Jeff
+
+00:00:12,630 --> 00:00:17,550
+Cody I'm a software engineer with red
+
+00:00:15,599 --> 00:00:21,779
+hat and I'm here to talk to you about
+
+00:00:17,550 --> 00:00:28,890
+qmu co routines today so we'll get into
+
+00:00:21,779 --> 00:00:32,489
+co routines what they are how how qmu
+
+00:00:28,890 --> 00:00:33,870
+uses co routines as well so it will go
+
+00:00:32,489 --> 00:00:35,370
+over a little bit just a general concept
+
+00:00:33,870 --> 00:00:42,660
+to cover routines and how they differ
+
+00:00:35,370 --> 00:00:44,309
+from something like threads and then
+
+00:00:42,660 --> 00:00:47,670
+we'll talk about how qmu implements co
+
+00:00:44,309 --> 00:00:51,180
+routines and how qmu does all the
+
+00:00:47,670 --> 00:00:52,350
+context switching what will cover one of
+
+00:00:51,180 --> 00:00:54,300
+the ways in which game you does it
+
+00:00:52,350 --> 00:00:58,140
+there's multiple implementations of it
+
+00:00:54,300 --> 00:00:59,850
+but we'll focus on one for this talk the
+
+00:00:58,140 --> 00:01:02,910
+other ones are conceptually very similar
+
+00:00:59,850 --> 00:01:04,890
+to that and then we'll discuss some of
+
+00:01:02,910 --> 00:01:08,220
+the problems or maybe the perceived
+
+00:01:04,890 --> 00:01:10,530
+problems of co routines not that they're
+
+00:01:08,220 --> 00:01:14,880
+perfect but they work pretty well for
+
+00:01:10,530 --> 00:01:18,240
+our requirements and perhaps there's
+
+00:01:14,880 --> 00:01:23,880
+some alternatives so any any
+
+00:01:18,240 --> 00:01:25,290
+alternatives are obviously welcome so if
+
+00:01:23,880 --> 00:01:29,840
+we start at the very high level view
+
+00:01:25,290 --> 00:01:32,430
+here and we discuss what our co routines
+
+00:01:29,840 --> 00:01:34,560
+well Co workings are away from you or
+
+00:01:32,430 --> 00:01:37,500
+any other user space application to do
+
+00:01:34,560 --> 00:01:40,829
+multitasking but to do this multiply
+
+00:01:37,500 --> 00:01:46,970
+tasking cooperatively rather than in a
+
+00:01:40,829 --> 00:01:49,110
+pre-emptive matter so if we look at
+
+00:01:46,970 --> 00:01:52,759
+comparing that against threads which
+
+00:01:49,110 --> 00:01:52,759
+obviously allows to do a similar thing
+
+00:01:53,149 --> 00:01:58,049
+threads however are managed typically x
+
+00:01:56,040 --> 00:02:00,750
+VOS so your lists you have a you know
+
+00:01:58,049 --> 00:02:03,450
+colonel has a scheduler will run and
+
+00:02:00,750 --> 00:02:06,180
+schedule your thread make sure that your
+
+00:02:03,450 --> 00:02:10,950
+thread gets adequate time and will
+
+00:02:06,180 --> 00:02:11,940
+preempt other running threads so this
+
+00:02:10,950 --> 00:02:13,290
+requires a bit more sophisticated
+
+00:02:11,940 --> 00:02:15,930
+locking
+
+00:02:13,290 --> 00:02:17,879
+when you have something that has
+
+00:02:15,930 --> 00:02:19,519
+preemption going on that's going to be
+
+00:02:17,879 --> 00:02:21,540
+interrupting other workers and
+
+00:02:19,519 --> 00:02:24,859
+particularly if you're responding a lot
+
+00:02:21,540 --> 00:02:30,810
+of io heavy threads that are constantly
+
+00:02:24,859 --> 00:02:33,019
+accessing common resources so then we
+
+00:02:30,810 --> 00:02:35,720
+look at contrasted against co routines
+
+00:02:33,019 --> 00:02:39,269
+these are completely userspace managed
+
+00:02:35,720 --> 00:02:41,819
+there's there's nothing that scheduling
+
+00:02:39,269 --> 00:02:43,739
+co routines there's no cover team
+
+00:02:41,819 --> 00:02:48,510
+manager running behind the scenes that
+
+00:02:43,739 --> 00:02:50,549
+make sure that your color team runs it's
+
+00:02:48,510 --> 00:02:54,989
+really just a function call with a
+
+00:02:50,549 --> 00:02:58,769
+linear execution it has a bunch of go
+
+00:02:54,989 --> 00:03:01,470
+tues that jump around to enable
+
+00:02:58,769 --> 00:03:04,769
+multitasking for that threat of
+
+00:03:01,470 --> 00:03:06,720
+operation and so by its very nature
+
+00:03:04,769 --> 00:03:10,439
+being in user space and jumping around
+
+00:03:06,720 --> 00:03:16,560
+with non-local go tues it is cooperative
+
+00:03:10,439 --> 00:03:18,150
+so you have to play nice if you don't do
+
+00:03:16,560 --> 00:03:20,609
+anything with your co routine to yield
+
+00:03:18,150 --> 00:03:22,440
+your time all you really are as a
+
+00:03:20,609 --> 00:03:26,069
+function call which is really the point
+
+00:03:22,440 --> 00:03:27,930
+and the whole idea of the co routines so
+
+00:03:26,069 --> 00:03:30,900
+that's really designed feature not a not
+
+00:03:27,930 --> 00:03:35,489
+a flaw and of course with the co
+
+00:03:30,900 --> 00:03:40,739
+routines since we have a relatively
+
+00:03:35,489 --> 00:03:43,109
+small amount of stuff we need to say for
+
+00:03:40,739 --> 00:03:46,319
+a contact switch since we're jumping
+
+00:03:43,109 --> 00:03:48,329
+around on in its on the stack space it's
+
+00:03:46,319 --> 00:03:51,389
+got its lower transactional overhead
+
+00:03:48,329 --> 00:03:56,489
+it's less less friction for our multi
+
+00:03:51,389 --> 00:03:58,199
+tasking so what does cuum you use well
+
+00:03:56,489 --> 00:04:00,989
+I'm sure everyone here knows q mu is a
+
+00:03:58,199 --> 00:04:04,290
+hybrid architecture we use both threads
+
+00:04:00,989 --> 00:04:06,209
+and co routines right so we have worker
+
+00:04:04,290 --> 00:04:08,519
+threads and threads for other tasks run
+
+00:04:06,209 --> 00:04:12,530
+but we use cartoons a lot in to block
+
+00:04:08,519 --> 00:04:15,419
+layer we don't want to spawn lots of
+
+00:04:12,530 --> 00:04:18,269
+threads for every task will you do for a
+
+00:04:15,419 --> 00:04:23,159
+covert team so we will use color canes
+
+00:04:18,269 --> 00:04:26,150
+within io fred's to perform our multi
+
+00:04:23,159 --> 00:04:26,150
+tasking without blocking
+
+00:04:26,470 --> 00:04:32,320
+so if we look a little bit at the
+
+00:04:28,340 --> 00:04:36,910
+history of Q mu + yq uses co routines
+
+00:04:32,320 --> 00:04:39,320
+instead of some other architecture
+
+00:04:36,910 --> 00:04:44,960
+keenya has an event loop or respond to
+
+00:04:39,320 --> 00:04:47,180
+events and in the past for tasks that we
+
+00:04:44,960 --> 00:04:49,540
+wouldn't use Kohler teens for now we
+
+00:04:47,180 --> 00:04:52,880
+would have to have callback functions
+
+00:04:49,540 --> 00:04:55,880
+and obviously with a bunch of callback
+
+00:04:52,880 --> 00:04:58,430
+functions it's a lot more cumbersome it
+
+00:04:55,880 --> 00:05:00,740
+can be difficult to debug it difficult
+
+00:04:58,430 --> 00:05:02,270
+to follow what's going on when
+
+00:05:00,740 --> 00:05:05,870
+everything is completely asynchronous
+
+00:05:02,270 --> 00:05:08,330
+like that the co routines offer a little
+
+00:05:05,870 --> 00:05:10,910
+bit more linear function flow I mean you
+
+00:05:08,330 --> 00:05:14,750
+have a function that you are entering
+
+00:05:10,910 --> 00:05:17,150
+just like any other function and so you
+
+00:05:14,750 --> 00:05:23,480
+can logically follow the flow of your
+
+00:05:17,150 --> 00:05:25,880
+code execution so where does cuum you
+
+00:05:23,480 --> 00:05:28,550
+use co routines well right now it's
+
+00:05:25,880 --> 00:05:30,050
+mainly into block layer there's nothing
+
+00:05:28,550 --> 00:05:32,450
+about co routines specifically that
+
+00:05:30,050 --> 00:05:33,770
+would prohibit it from being used
+
+00:05:32,450 --> 00:05:36,400
+somewhere else but it's not really used
+
+00:05:33,770 --> 00:05:40,880
+anywhere else but it's a general concept
+
+00:05:36,400 --> 00:05:44,870
+not something that is tied exclusively
+
+00:05:40,880 --> 00:05:47,330
+to the block layer all the block i/o
+
+00:05:44,870 --> 00:05:49,550
+functions are more or less co routines
+
+00:05:47,330 --> 00:05:52,100
+so you know you're doing a read or a
+
+00:05:49,550 --> 00:05:54,620
+ride or a flush those get implemented
+
+00:05:52,100 --> 00:06:00,110
+does co routines that switch over
+
+00:05:54,620 --> 00:06:02,090
+happened a few years ago we also have
+
+00:06:00,110 --> 00:06:03,800
+some qmp commands that are implemented
+
+00:06:02,090 --> 00:06:05,900
+does co routines and so these are some
+
+00:06:03,800 --> 00:06:08,030
+long running tasks that happen over TMP
+
+00:06:05,900 --> 00:06:11,090
+so you have something like liberabit
+
+00:06:08,030 --> 00:06:13,070
+double request or a user they'll request
+
+00:06:11,090 --> 00:06:16,490
+an operation like a block job like a
+
+00:06:13,070 --> 00:06:21,200
+block commit or a mirror or or any of
+
+00:06:16,490 --> 00:06:23,720
+the other block jobs those since they
+
+00:06:21,200 --> 00:06:26,210
+take a long time to run even by block
+
+00:06:23,720 --> 00:06:31,220
+i/o standards are implemented as a co
+
+00:06:26,210 --> 00:06:33,670
+routine that can be even paused by qmp
+
+00:06:31,220 --> 00:06:39,970
+command as well
+
+00:06:33,670 --> 00:06:44,850
+and resumed all right so if we looked in
+
+00:06:39,970 --> 00:06:48,490
+a little bit closer here at our actual
+
+00:06:44,850 --> 00:06:51,520
+co routine and let's look at the states
+
+00:06:48,490 --> 00:06:54,670
+of a color clean that we have as we use
+
+00:06:51,520 --> 00:06:57,340
+them here in q mu so when we start off
+
+00:06:54,670 --> 00:06:58,330
+with the co routine the first thing
+
+00:06:57,340 --> 00:07:00,490
+we're going to do obviously is we're
+
+00:06:58,330 --> 00:07:02,890
+going to create that cover team so when
+
+00:07:00,490 --> 00:07:06,010
+we create a co routine the color T now
+
+00:07:02,890 --> 00:07:08,290
+exists in a pod state and immediately
+
+00:07:06,010 --> 00:07:12,250
+after this creation the first time you
+
+00:07:08,290 --> 00:07:15,580
+create a co routine we set up the stack
+
+00:07:12,250 --> 00:07:17,770
+buffers and our context buffers and then
+
+00:07:15,580 --> 00:07:19,510
+we immediately jump back out of that
+
+00:07:17,770 --> 00:07:22,360
+cover team to the collar of the color
+
+00:07:19,510 --> 00:07:25,150
+teen create function so we're pause
+
+00:07:22,360 --> 00:07:28,410
+right above the function call as I said
+
+00:07:25,150 --> 00:07:30,490
+before a cub routine is a function call
+
+00:07:28,410 --> 00:07:32,230
+so when we're pause right about that
+
+00:07:30,490 --> 00:07:33,400
+function call you can kind of think that
+
+00:07:32,230 --> 00:07:34,930
+you're dangling right above that
+
+00:07:33,400 --> 00:07:36,910
+function calls on the next time we will
+
+00:07:34,930 --> 00:07:38,530
+resume we're going to enter into that
+
+00:07:36,910 --> 00:07:40,510
+function call and this is only
+
+00:07:38,530 --> 00:07:44,140
+applicable at the very first time you
+
+00:07:40,510 --> 00:07:47,970
+give your pill routine creation so once
+
+00:07:44,140 --> 00:07:51,400
+we're in the pause state if we resume
+
+00:07:47,970 --> 00:07:54,040
+that is done with the qumu co routine
+
+00:07:51,400 --> 00:07:57,100
+enter command we're now in the running
+
+00:07:54,040 --> 00:07:59,050
+state so the running state is just like
+
+00:07:57,100 --> 00:08:02,110
+a function call so you're executing
+
+00:07:59,050 --> 00:08:04,570
+through you're doing whatever I owe you
+
+00:08:02,110 --> 00:08:08,490
+need to do like any other function call
+
+00:08:04,570 --> 00:08:10,750
+and from this point you have two options
+
+00:08:08,490 --> 00:08:14,530
+of what this function is going to do one
+
+00:08:10,750 --> 00:08:17,740
+is you can do you can just exit that's
+
+00:08:14,530 --> 00:08:19,330
+not as interesting if you just create
+
+00:08:17,740 --> 00:08:22,060
+the co routine and then enter it and
+
+00:08:19,330 --> 00:08:25,120
+execute your code your code runs just
+
+00:08:22,060 --> 00:08:28,210
+like any other function call with just a
+
+00:08:25,120 --> 00:08:31,270
+little more obtuse method of starting it
+
+00:08:28,210 --> 00:08:32,979
+but it's just a function call the runs
+
+00:08:31,270 --> 00:08:34,600
+and then exits so a little more
+
+00:08:32,979 --> 00:08:36,580
+interesting is if we have our co routine
+
+00:08:34,600 --> 00:08:40,090
+and we actually do something like a
+
+00:08:36,580 --> 00:08:44,260
+yield and a yield is how we pause to co
+
+00:08:40,090 --> 00:08:46,200
+routine so once you perform a yield
+
+00:08:44,260 --> 00:08:50,220
+inside your co routine
+
+00:08:46,200 --> 00:08:57,690
+we will then return control back to
+
+00:08:50,220 --> 00:08:58,980
+whoever entered that color team so I
+
+00:08:57,690 --> 00:09:01,920
+walk through the covert team structure
+
+00:08:58,980 --> 00:09:03,630
+here just a little bit because it's it's
+
+00:09:01,920 --> 00:09:06,630
+useful to think of what a co routine
+
+00:09:03,630 --> 00:09:08,310
+actually is since it's not a threat
+
+00:09:06,630 --> 00:09:09,750
+that's really running is just a function
+
+00:09:08,310 --> 00:09:12,210
+call we do have a little bit of
+
+00:09:09,750 --> 00:09:15,000
+structure around that co routine and so
+
+00:09:12,210 --> 00:09:16,950
+this is the co routine structure the
+
+00:09:15,000 --> 00:09:19,380
+entry pointer that's just your function
+
+00:09:16,950 --> 00:09:24,080
+pointer that gets called when a co
+
+00:09:19,380 --> 00:09:26,550
+routine is goes into the interstate and
+
+00:09:24,080 --> 00:09:29,790
+then you have your function argument
+
+00:09:26,550 --> 00:09:33,180
+which is an opaque pointer you know you
+
+00:09:29,790 --> 00:09:35,610
+see in the block block later we have
+
+00:09:33,180 --> 00:09:37,680
+function called an opaque pointer it's a
+
+00:09:35,610 --> 00:09:39,810
+similar concept it's just a void pointer
+
+00:09:37,680 --> 00:09:45,570
+can be whatever data that is appropriate
+
+00:09:39,810 --> 00:09:47,100
+for your recovery team the next thing we
+
+00:09:45,570 --> 00:09:49,860
+have and this is very important is the
+
+00:09:47,100 --> 00:09:52,440
+caller so if you're just a normal
+
+00:09:49,860 --> 00:09:55,710
+function running in q mu and you create
+
+00:09:52,440 --> 00:09:57,240
+a coder team and you go and you call the
+
+00:09:55,710 --> 00:09:59,790
+cubicle working enters you actually
+
+00:09:57,240 --> 00:10:02,550
+start executing a co routine a reference
+
+00:09:59,790 --> 00:10:05,910
+gets made for you that you never see
+
+00:10:02,550 --> 00:10:07,920
+that references you even though you're
+
+00:10:05,910 --> 00:10:11,550
+not a covert team as a co-working so
+
+00:10:07,920 --> 00:10:16,170
+conceptually everything's a pseudocode
+
+00:10:11,550 --> 00:10:18,780
+routine however you don't have all the
+
+00:10:16,170 --> 00:10:21,120
+other things like a stack space set up
+
+00:10:18,780 --> 00:10:23,280
+so that you can't you can't for instance
+
+00:10:21,120 --> 00:10:26,910
+yield something that was never create as
+
+00:10:23,280 --> 00:10:31,430
+a co-working to begin with however this
+
+00:10:26,910 --> 00:10:36,390
+is how we control is returned back to
+
+00:10:31,430 --> 00:10:39,510
+whoever enters the cover team we also
+
+00:10:36,390 --> 00:10:42,060
+have covert team pools which all the
+
+00:10:39,510 --> 00:10:45,030
+covert team pool is its as a global free
+
+00:10:42,060 --> 00:10:48,240
+list of co routines so when we create co
+
+00:10:45,030 --> 00:10:52,350
+routines if you're using it to go if the
+
+00:10:48,240 --> 00:10:53,880
+free list pool is enabled we are not d
+
+00:10:52,350 --> 00:10:56,280
+allocating and destroying that clever
+
+00:10:53,880 --> 00:10:57,130
+teen at the exit we're just returning it
+
+00:10:56,280 --> 00:11:00,520
+to
+
+00:10:57,130 --> 00:11:03,820
+cover teen free list pool this way you
+
+00:11:00,520 --> 00:11:07,090
+reduce a little bit of the overhead of
+
+00:11:03,820 --> 00:11:13,540
+allocating all the co routine stuff and
+
+00:11:07,090 --> 00:11:16,660
+memory we also each codeine has a queue
+
+00:11:13,540 --> 00:11:20,790
+of other co routines that may be
+
+00:11:16,660 --> 00:11:24,090
+executed if they are in the wake of Q so
+
+00:11:20,790 --> 00:11:27,820
+if there's co routines in to wake up Q
+
+00:11:24,090 --> 00:11:30,820
+when we go and do a yield or a terminate
+
+00:11:27,820 --> 00:11:33,490
+on the co routine for the associated co
+
+00:11:30,820 --> 00:11:35,950
+routine it will go through all the next
+
+00:11:33,490 --> 00:11:38,050
+cover teams in the wake up Q and enter
+
+00:11:35,950 --> 00:11:40,300
+into each one of those before you
+
+00:11:38,050 --> 00:11:44,140
+finally return control back to the
+
+00:11:40,300 --> 00:11:48,550
+original collar of the coworking enter
+
+00:11:44,140 --> 00:11:50,530
+function so if we look a little bit some
+
+00:11:48,550 --> 00:11:53,740
+of the api's i broke these out into a
+
+00:11:50,530 --> 00:11:56,950
+couple sections here this is the core
+
+00:11:53,740 --> 00:11:59,110
+API functions we have a way to create co
+
+00:11:56,950 --> 00:12:02,110
+routines to enter the code routines as i
+
+00:11:59,110 --> 00:12:03,520
+mentioned yield the co routine then
+
+00:12:02,110 --> 00:12:06,070
+another one i didn't talk about nets
+
+00:12:03,520 --> 00:12:09,340
+sleep and all asleep really is it's a
+
+00:12:06,070 --> 00:12:15,970
+it's a way to yield with a timer to then
+
+00:12:09,340 --> 00:12:18,610
+call the covert team enter function so
+
+00:12:15,970 --> 00:12:20,470
+to create we create a new color kin and
+
+00:12:18,610 --> 00:12:22,540
+then we pause before the function call
+
+00:12:20,470 --> 00:12:26,140
+as we talked about you can see there's
+
+00:12:22,540 --> 00:12:29,020
+to the prototype for the function pulled
+
+00:12:26,140 --> 00:12:32,620
+from the header file there these are all
+
+00:12:29,020 --> 00:12:38,220
+available in the team you include
+
+00:12:32,620 --> 00:12:43,090
+directory or they include EMU directory
+
+00:12:38,220 --> 00:12:44,650
+and for our enter 2 enter resume to
+
+00:12:43,090 --> 00:12:47,920
+whatever the last pause point is which
+
+00:12:44,650 --> 00:12:50,650
+is going to be where you did a yield the
+
+00:12:47,920 --> 00:12:52,990
+last time you did a team you coding
+
+00:12:50,650 --> 00:12:54,850
+yield whether it's called directly or
+
+00:12:52,990 --> 00:12:56,620
+through a helper function or macro or
+
+00:12:54,850 --> 00:13:03,250
+whatever that's going to be your paws
+
+00:12:56,620 --> 00:13:06,390
+point and once you eat yeah okay all
+
+00:13:03,250 --> 00:13:08,860
+right so once we call it Q mu entered so
+
+00:13:06,390 --> 00:13:09,769
+it's important to keep in mind that
+
+00:13:08,860 --> 00:13:11,959
+control will not
+
+00:13:09,769 --> 00:13:17,720
+return back to your function until that
+
+00:13:11,959 --> 00:13:20,480
+co routine pauses so if you want to and
+
+00:13:17,720 --> 00:13:21,800
+if you're calling a qm yuko routine you
+
+00:13:20,480 --> 00:13:24,559
+need to make sure that you have a method
+
+00:13:21,800 --> 00:13:26,629
+not only deposit but then to resume it
+
+00:13:24,559 --> 00:13:30,439
+as well because once you call the Cotto
+
+00:13:26,629 --> 00:13:32,149
+teen yield there's no automatic
+
+00:13:30,439 --> 00:13:34,189
+rescheduling of your color keen it's
+
+00:13:32,149 --> 00:13:38,779
+done running until you do something with
+
+00:13:34,189 --> 00:13:40,759
+it so you can have a covert team you do
+
+00:13:38,779 --> 00:13:42,379
+a yield of no one ever does anything to
+
+00:13:40,759 --> 00:13:44,569
+resume that Co routine it's just going
+
+00:13:42,379 --> 00:13:48,619
+to sit there and is going to have done
+
+00:13:44,569 --> 00:13:54,079
+nothing and that's where the co routines
+
+00:13:48,619 --> 00:13:58,040
+sleep is useful it does a yield and then
+
+00:13:54,079 --> 00:14:00,920
+it schedules a timer in the AL context
+
+00:13:58,040 --> 00:14:03,879
+bottom have to wake up that cover team
+
+00:14:00,920 --> 00:14:07,549
+by calling human killer king enter again
+
+00:14:03,879 --> 00:14:08,989
+and this is used one places as uses in
+
+00:14:07,549 --> 00:14:11,509
+some of the block job loops where we
+
+00:14:08,989 --> 00:14:13,069
+have a lube for instance and commit or
+
+00:14:11,509 --> 00:14:15,470
+mayor where we're going through and
+
+00:14:13,069 --> 00:14:17,209
+doing iteration of copying data and then
+
+00:14:15,470 --> 00:14:21,470
+we'll sleep for a certain duration of
+
+00:14:17,209 --> 00:14:23,749
+time in each iteration to allow other co
+
+00:14:21,470 --> 00:14:27,889
+routines and the main control to to
+
+00:14:23,749 --> 00:14:31,369
+execute so let's look a little bit at
+
+00:14:27,889 --> 00:14:33,199
+some co routine queues the covert in
+
+00:14:31,369 --> 00:14:37,100
+hues are a simple cube just of co
+
+00:14:33,199 --> 00:14:39,589
+routines to be run you can create disco
+
+00:14:37,100 --> 00:14:42,619
+routine queue and you can do some things
+
+00:14:39,589 --> 00:14:45,889
+where you if you have multiple tasks and
+
+00:14:42,619 --> 00:14:47,240
+related like the block driver flush
+
+00:14:45,889 --> 00:14:48,980
+where you want to queue up multiple
+
+00:14:47,240 --> 00:14:54,019
+flushes but you want to make sure they
+
+00:14:48,980 --> 00:14:55,549
+all get done at the same time are they
+
+00:14:54,019 --> 00:14:57,410
+all in to control flows all the way
+
+00:14:55,549 --> 00:15:00,110
+through to the last one you can have the
+
+00:14:57,410 --> 00:15:02,779
+queue entries that you can schedule them
+
+00:15:00,110 --> 00:15:06,889
+to wake up and awoke and entries will
+
+00:15:02,779 --> 00:15:09,879
+run after a yield or a terminate so when
+
+00:15:06,889 --> 00:15:13,189
+we when you do a key mu co routine yield
+
+00:15:09,879 --> 00:15:15,019
+that control goes back to the team you
+
+00:15:13,189 --> 00:15:18,860
+collecting enter function where we
+
+00:15:15,019 --> 00:15:21,079
+originally did our switch and then we'll
+
+00:15:18,860 --> 00:15:22,170
+go through that queue and each Co team
+
+00:15:21,079 --> 00:15:32,130
+that's been moved to
+
+00:15:22,170 --> 00:15:33,389
+the awake you will then be run I'll go
+
+00:15:32,130 --> 00:15:35,970
+through these real quick I won't spend a
+
+00:15:33,389 --> 00:15:39,690
+lot of time on the coding queue API
+
+00:15:35,970 --> 00:15:43,110
+functions and we have a Nanette function
+
+00:15:39,690 --> 00:15:45,839
+nothing real exciting about that we also
+
+00:15:43,110 --> 00:15:49,350
+have a weight function so in the queue
+
+00:15:45,839 --> 00:15:52,610
+muq weight function what that do is what
+
+00:15:49,350 --> 00:16:02,130
+that will do is add the caller q routine
+
+00:15:52,610 --> 00:16:04,889
+to the coding q & 0 next time that is
+
+00:16:02,130 --> 00:16:06,990
+moved into the White q it'll be executed
+
+00:16:04,889 --> 00:16:10,639
+I should take a moment here to point out
+
+00:16:06,990 --> 00:16:13,709
+if you see this here the co routine
+
+00:16:10,639 --> 00:16:16,170
+function that doesn't actually do
+
+00:16:13,709 --> 00:16:21,110
+anything it's just a some syntactic
+
+00:16:16,170 --> 00:16:23,850
+sugar but it's used to indicate where
+
+00:16:21,110 --> 00:16:27,510
+these functions are expecting to be run
+
+00:16:23,850 --> 00:16:29,970
+in a quel routine context so if you call
+
+00:16:27,510 --> 00:16:31,680
+a function inspect that expects to be
+
+00:16:29,970 --> 00:16:33,000
+running covert in context and you're not
+
+00:16:31,680 --> 00:16:36,180
+a co routine or in the co-working
+
+00:16:33,000 --> 00:16:39,930
+context then you'll most likely get an
+
+00:16:36,180 --> 00:16:44,760
+abort because you don't have all the
+
+00:16:39,930 --> 00:16:52,740
+associated memory stack created for
+
+00:16:44,760 --> 00:16:56,459
+yourself and comb we also q next where
+
+00:16:52,740 --> 00:16:58,440
+we can move that coati nuts on the q to
+
+00:16:56,459 --> 00:17:03,480
+the wake up q which will allow it to
+
+00:16:58,440 --> 00:17:05,579
+then be run after the yield and restart
+
+00:17:03,480 --> 00:17:09,600
+all will restart all the co routines in
+
+00:17:05,579 --> 00:17:11,660
+your queue well we'll move them all to
+
+00:17:09,600 --> 00:17:16,410
+the Wakefield which will then run
+
+00:17:11,660 --> 00:17:17,970
+sequentially in the end in the next then
+
+00:17:16,410 --> 00:17:20,100
+you also have a way to directly enter
+
+00:17:17,970 --> 00:17:22,650
+your code working and the next
+
+00:17:20,100 --> 00:17:24,689
+co-working and Q if you want and then a
+
+00:17:22,650 --> 00:17:32,010
+way to query if your covert in queue is
+
+00:17:24,689 --> 00:17:34,029
+empty or not so now we also have Co team
+
+00:17:32,010 --> 00:17:36,230
+you Texas which
+
+00:17:34,029 --> 00:17:38,809
+you know we're doing cooperative
+
+00:17:36,230 --> 00:17:40,399
+multitasking so it may seem like we
+
+00:17:38,809 --> 00:17:42,919
+don't need to worry about any sort of
+
+00:17:40,399 --> 00:17:46,370
+access control or anything like that but
+
+00:17:42,919 --> 00:17:52,520
+we do it just it's a little bit easier
+
+00:17:46,370 --> 00:17:54,289
+to manage so given how we use co
+
+00:17:52,520 --> 00:17:56,149
+routines especially in block layer
+
+00:17:54,289 --> 00:17:59,899
+within an image format driver or
+
+00:17:56,149 --> 00:18:02,419
+anywhere else really if we're going
+
+00:17:59,899 --> 00:18:04,460
+through and writing data to a file like
+
+00:18:02,419 --> 00:18:07,970
+an image file header or image file
+
+00:18:04,460 --> 00:18:10,640
+contents or anything like that since
+
+00:18:07,970 --> 00:18:12,590
+we're doing long-running i/o obviously
+
+00:18:10,640 --> 00:18:16,220
+we're running a CO routine for a reason
+
+00:18:12,590 --> 00:18:19,700
+so we're going to pause and yield and at
+
+00:18:16,220 --> 00:18:21,649
+that point other iOS or other co-working
+
+00:18:19,700 --> 00:18:24,559
+may go in and expect to be able to go in
+
+00:18:21,649 --> 00:18:26,270
+and access that same section so we need
+
+00:18:24,559 --> 00:18:29,539
+a way to protect that section and that's
+
+00:18:26,270 --> 00:18:34,730
+what the Cote mutex does we can obtain a
+
+00:18:29,539 --> 00:18:36,529
+lock and if we fail to the table lock it
+
+00:18:34,730 --> 00:18:39,440
+will put the call in co routine at the
+
+00:18:36,529 --> 00:18:42,429
+end of the queue and then ill yield and
+
+00:18:39,440 --> 00:18:46,820
+wait until that lock is available
+
+00:18:42,429 --> 00:18:49,279
+similarly on a mutex unlock will release
+
+00:18:46,820 --> 00:18:52,970
+the lock and then it will wake up the
+
+00:18:49,279 --> 00:18:56,169
+next color keen on the cube which will
+
+00:18:52,970 --> 00:18:56,169
+likely be one of those
+
+00:18:58,960 --> 00:19:08,470
+we also have some read locks for keys so
+
+00:19:06,039 --> 00:19:11,799
+we have a read locked will wait for no
+
+00:19:08,470 --> 00:19:14,140
+riders to be writing to the lock section
+
+00:19:11,799 --> 00:19:17,710
+and again well its way and we will go on
+
+00:19:14,140 --> 00:19:21,850
+the end of the cube we also have a write
+
+00:19:17,710 --> 00:19:27,399
+lock that waits until there are no
+
+00:19:21,850 --> 00:19:29,049
+writers or readers and again we'll put
+
+00:19:27,399 --> 00:19:32,140
+up in a queue while waiting and of
+
+00:19:29,049 --> 00:19:34,929
+course the unlock to release those locks
+
+00:19:32,140 --> 00:19:36,370
+will wake up all the readers or if
+
+00:19:34,929 --> 00:19:42,789
+there's a writer writing it will wake up
+
+00:19:36,370 --> 00:19:45,279
+one writer at Time alright so if we look
+
+00:19:42,789 --> 00:19:49,919
+a little bit closer at how the co
+
+00:19:45,279 --> 00:19:54,640
+routines are implemented in queue qemu
+
+00:19:49,919 --> 00:19:58,020
+we actually have form implementations we
+
+00:19:54,640 --> 00:20:00,429
+have you context which is the default
+
+00:19:58,020 --> 00:20:04,179
+the problem with it is not available as
+
+00:20:00,429 --> 00:20:05,919
+an many as many platforms but it's the
+
+00:20:04,179 --> 00:20:10,090
+preferred method it's pretty
+
+00:20:05,919 --> 00:20:12,730
+straightforward there's also sick alt
+
+00:20:10,090 --> 00:20:14,649
+stack which is a little bit newer and it
+
+00:20:12,730 --> 00:20:18,429
+should be available in all posix
+
+00:20:14,649 --> 00:20:21,390
+platforms I believe I'm not going to go
+
+00:20:18,429 --> 00:20:24,880
+into sigil stack as much here but
+
+00:20:21,390 --> 00:20:29,740
+there's a paper that introduces the
+
+00:20:24,880 --> 00:20:32,590
+concept of using a single stack for co
+
+00:20:29,740 --> 00:20:34,330
+routines and that's the paper there I
+
+00:20:32,590 --> 00:20:38,880
+pulled a reference to that paper out of
+
+00:20:34,330 --> 00:20:41,950
+the new portable threads library pth
+
+00:20:38,880 --> 00:20:45,130
+which is I believe where this
+
+00:20:41,950 --> 00:20:50,529
+implementation sigil stack was derived
+
+00:20:45,130 --> 00:20:55,990
+from and it's not the default yet in q
+
+00:20:50,529 --> 00:20:58,149
+mu I'm actually not sure all the reasons
+
+00:20:55,990 --> 00:21:00,880
+why yet my guess is most likely it's
+
+00:20:58,149 --> 00:21:05,890
+just got less time being beyond it to be
+
+00:21:00,880 --> 00:21:11,320
+confident of it running some of the perf
+
+00:21:05,890 --> 00:21:12,150
+tests it seems to run more or less equal
+
+00:21:11,320 --> 00:21:14,880
+to
+
+00:21:12,150 --> 00:21:16,160
+you context as far as time which makes
+
+00:21:14,880 --> 00:21:19,470
+sense so if you look at the underlying
+
+00:21:16,160 --> 00:21:21,750
+implementations they are very similar
+
+00:21:19,470 --> 00:21:23,970
+between you context and signaled stack
+
+00:21:21,750 --> 00:21:26,520
+the main difference is just how the
+
+00:21:23,970 --> 00:21:31,590
+initial context is created but when we
+
+00:21:26,520 --> 00:21:35,310
+do our core team switching and the
+
+00:21:31,590 --> 00:21:37,350
+yields and it enters that code is very
+
+00:21:35,310 --> 00:21:39,240
+similar between you context and sigil
+
+00:21:37,350 --> 00:21:41,160
+stack and that's going to be wearing a
+
+00:21:39,240 --> 00:21:45,960
+bulk of your your time is going to be
+
+00:21:41,160 --> 00:21:47,730
+spent and when you're running so some of
+
+00:21:45,960 --> 00:21:51,150
+the less common implementations that we
+
+00:21:47,730 --> 00:21:54,180
+have we have a win32 implementation for
+
+00:21:51,150 --> 00:21:57,390
+windows it uses windows fibers and
+
+00:21:54,180 --> 00:22:02,640
+obviously it's windows only and there's
+
+00:21:57,390 --> 00:22:04,290
+also a G threads implementation you know
+
+00:22:02,640 --> 00:22:07,310
+if we go back and look at the initial
+
+00:22:04,290 --> 00:22:11,160
+discussion between using co routines
+
+00:22:07,310 --> 00:22:14,640
+versus using threads now one idea could
+
+00:22:11,160 --> 00:22:21,530
+be well why don't we use threads instead
+
+00:22:14,640 --> 00:22:24,720
+of co routines and G threads is a way of
+
+00:22:21,530 --> 00:22:26,040
+using threads as co routines and masking
+
+00:22:24,720 --> 00:22:31,590
+the factor you're using thread so it
+
+00:22:26,040 --> 00:22:34,230
+does all the thread specific locking and
+
+00:22:31,590 --> 00:22:37,080
+management behind the scenes in co
+
+00:22:34,230 --> 00:22:38,100
+routine unfortunately it's really slow I
+
+00:22:37,080 --> 00:22:40,020
+don't know if it's just our
+
+00:22:38,100 --> 00:22:43,110
+implementation if it could be cleaned up
+
+00:22:40,020 --> 00:22:44,970
+or not but it also has some bugs in it
+
+00:22:43,110 --> 00:22:48,210
+because it's not really used and it's
+
+00:22:44,970 --> 00:22:49,680
+not really functional so it's still
+
+00:22:48,210 --> 00:22:51,630
+there for debug only but i'm not sure if
+
+00:22:49,680 --> 00:22:57,990
+anyone's actually ever using it so it
+
+00:22:51,630 --> 00:23:00,180
+would you use it ok what por el ok
+
+00:22:57,990 --> 00:23:02,370
+alright well we'll get into that a
+
+00:23:00,180 --> 00:23:04,230
+little bit here as well so you're not
+
+00:23:02,370 --> 00:23:08,040
+going gets you see the trampoline at
+
+00:23:04,230 --> 00:23:10,380
+your stack and yeah so yeah I can be
+
+00:23:08,040 --> 00:23:13,730
+used for for debug so I guess we
+
+00:23:10,380 --> 00:23:13,730
+shouldn't get rid of it for four damn
+
+00:23:15,890 --> 00:23:20,940
+alright so if we look a little bit at
+
+00:23:18,600 --> 00:23:22,289
+the you context because we're beginning
+
+00:23:20,940 --> 00:23:25,679
+for the trampoline stuff that makes it a
+
+00:23:22,289 --> 00:23:27,779
+little bit more difficult to debug but
+
+00:23:25,679 --> 00:23:31,289
+we use to get contacts and make context
+
+00:23:27,779 --> 00:23:33,390
+and allocate and initialize our initial
+
+00:23:31,289 --> 00:23:36,390
+stack that we're going to be switching
+
+00:23:33,390 --> 00:23:38,070
+to and from and we're doing the the the
+
+00:23:36,390 --> 00:23:41,010
+jumping around with the non-local go
+
+00:23:38,070 --> 00:23:43,740
+tues and then we go and jump on the
+
+00:23:41,010 --> 00:23:48,659
+trampoline so when you call the create
+
+00:23:43,740 --> 00:23:51,510
+function Q mu co-working create after we
+
+00:23:48,659 --> 00:23:55,950
+set up our stack we're going to go and
+
+00:23:51,510 --> 00:23:59,929
+do a swap contacts to do that jump to
+
+00:23:55,950 --> 00:24:04,169
+the beginning of the function and then
+
+00:23:59,929 --> 00:24:06,179
+our jump up will be saved right before
+
+00:24:04,169 --> 00:24:07,620
+the co routine function call and then
+
+00:24:06,179 --> 00:24:12,740
+we'll jump back to the collar of Kim you
+
+00:24:07,620 --> 00:24:16,649
+can create so the cumulate will return
+
+00:24:12,740 --> 00:24:19,890
+shortly after creating a cobra teen with
+
+00:24:16,649 --> 00:24:21,870
+a co-working pointer that has de
+
+00:24:19,890 --> 00:24:25,260
+jumpluff saves so it'll start executing
+
+00:24:21,870 --> 00:24:28,770
+right above the right where you go into
+
+00:24:25,260 --> 00:24:31,950
+the covert team function call and so
+
+00:24:28,770 --> 00:24:37,289
+then the next cig long jump and the
+
+00:24:31,950 --> 00:24:39,570
+cover team switch will go to the save
+
+00:24:37,289 --> 00:24:41,820
+jump off back co-working and encoder
+
+00:24:39,570 --> 00:24:45,720
+teen structure and it will start to
+
+00:24:41,820 --> 00:24:49,640
+function or resume the function so I
+
+00:24:45,720 --> 00:24:49,640
+don't know if that's actually read blood
+
+00:24:50,539 --> 00:25:02,600
+that might be more readable there so if
+
+00:24:54,539 --> 00:25:02,600
+we look here at um yes
+
+00:25:09,560 --> 00:25:19,670
+we can look at the code team creation
+
+00:25:12,020 --> 00:25:21,860
+where we set up our current stack that
+
+00:25:19,670 --> 00:25:26,350
+gets allocated we get our current
+
+00:25:21,860 --> 00:25:29,780
+context and then we use make context to
+
+00:25:26,350 --> 00:25:36,290
+set the function to enter as coaching
+
+00:25:29,780 --> 00:25:39,950
+trampling and then we pass it the the
+
+00:25:36,290 --> 00:25:42,590
+old jump up that we we put in the entry
+
+00:25:39,950 --> 00:25:45,170
+argument here and we were using the
+
+00:25:42,590 --> 00:25:47,000
+entry argument that will be used later
+
+00:25:45,170 --> 00:25:49,670
+at the inter but no one's using it yet
+
+00:25:47,000 --> 00:25:52,160
+so we can use it for the environment and
+
+00:25:49,670 --> 00:25:56,480
+then sig set jump here saves the old
+
+00:25:52,160 --> 00:25:59,450
+environment and swap context will now
+
+00:25:56,480 --> 00:26:03,550
+make the jump here to the trampoline
+
+00:25:59,450 --> 00:26:13,040
+function and return the old context here
+
+00:26:03,550 --> 00:26:14,870
+so if we look up at at back this is the
+
+00:26:13,040 --> 00:26:17,600
+trampoline function so when we come in
+
+00:26:14,870 --> 00:26:28,460
+initially on to create into the codeine
+
+00:26:17,600 --> 00:26:31,760
+trampoline we have our where we we saved
+
+00:26:28,460 --> 00:26:33,770
+the jump up here and then right here is
+
+00:26:31,760 --> 00:26:36,770
+where we'll jump back we bounce back out
+
+00:26:33,770 --> 00:26:38,900
+the trampoline to the end of the
+
+00:26:36,770 --> 00:26:40,880
+co-working new function so effectively
+
+00:26:38,900 --> 00:26:42,680
+what happens is we this comes back to
+
+00:26:40,880 --> 00:26:46,160
+return and we end up back at whoever
+
+00:26:42,680 --> 00:26:48,110
+called Hume you cover tinker gate so the
+
+00:26:46,160 --> 00:26:51,590
+next time that you call him you kill
+
+00:26:48,110 --> 00:26:53,600
+routine enter this were right here and
+
+00:26:51,590 --> 00:26:55,310
+so control falls down through here what
+
+00:26:53,600 --> 00:27:00,200
+we call the actual Kyoko routine
+
+00:26:55,310 --> 00:27:01,520
+function and then once nothing as you
+
+00:27:00,200 --> 00:27:03,230
+see here to keep the co-working function
+
+00:27:01,520 --> 00:27:07,100
+here is just going to run until it exits
+
+00:27:03,230 --> 00:27:09,110
+and then we'll do a switch with and gain
+
+00:27:07,100 --> 00:27:13,070
+at the core team terminated so it can be
+
+00:27:09,110 --> 00:27:14,990
+cleaned up later so if you never do a
+
+00:27:13,070 --> 00:27:16,250
+yield that's just going to execute and
+
+00:27:14,990 --> 00:27:18,460
+then fall through and then clean itself
+
+00:27:16,250 --> 00:27:18,460
+up
+
+00:27:26,630 --> 00:27:31,550
+alright so let's talk a little bit about
+
+00:27:28,400 --> 00:27:35,980
+some problems we might have with co
+
+00:27:31,550 --> 00:27:42,680
+routines all right so this is probably
+
+00:27:35,980 --> 00:27:45,440
+what Dan was talking about here where
+
+00:27:42,680 --> 00:27:51,620
+hmm that's actually not when i went to
+
+00:27:45,440 --> 00:27:55,040
+show anyways i'll bring it up here in a
+
+00:27:51,620 --> 00:27:56,570
+demo here quickly but the issue is it
+
+00:27:55,040 --> 00:27:58,310
+can make there we go that's why I went
+
+00:27:56,570 --> 00:28:03,610
+to show it can make debugging painful at
+
+00:27:58,310 --> 00:28:03,610
+times so when we entered the trampoline
+
+00:28:05,170 --> 00:28:09,410
+when you're debugging with gdb you'll
+
+00:28:08,030 --> 00:28:12,320
+you'll stop maybe you have a break point
+
+00:28:09,410 --> 00:28:15,050
+that's set or whatever and you do a back
+
+00:28:12,320 --> 00:28:17,450
+trace and you go down and all you see is
+
+00:28:15,050 --> 00:28:20,450
+the trampoline there and you don't know
+
+00:28:17,450 --> 00:28:23,050
+the context from where you came and it
+
+00:28:20,450 --> 00:28:26,450
+can be a little bit frustrating right
+
+00:28:23,050 --> 00:28:27,740
+but there are some gb helper functions
+
+00:28:26,450 --> 00:28:30,050
+that Keem you has in scripts directory
+
+00:28:27,740 --> 00:28:34,040
+to do a little probing to figure some of
+
+00:28:30,050 --> 00:28:36,470
+that out that can be useful matter of
+
+00:28:34,040 --> 00:28:43,400
+fact i'll go ahead and do a see if this
+
+00:28:36,470 --> 00:28:47,840
+works a quick quick demo here so i have
+
+00:28:43,400 --> 00:28:52,100
+right here where we have a breakpoint
+
+00:28:47,840 --> 00:28:56,060
+set on cue cow to the cover teen read
+
+00:28:52,100 --> 00:28:58,100
+inside cuke out to driver I island run a
+
+00:28:56,060 --> 00:28:59,450
+QM you get so once I had run what will
+
+00:28:58,100 --> 00:29:02,920
+hit that right away but will be in a
+
+00:28:59,450 --> 00:29:02,920
+quarantine context
+
+00:29:09,420 --> 00:29:16,930
+alright so yeah this is more difficult
+
+00:29:13,120 --> 00:29:23,710
+to type this one so we can see here that
+
+00:29:16,930 --> 00:29:25,000
+um if I do a back trace unfortunately it
+
+00:29:23,710 --> 00:29:28,060
+falls off on the screen a little bit
+
+00:29:25,000 --> 00:29:31,620
+down there at the bottom maybe I can
+
+00:29:28,060 --> 00:29:31,620
+move the screen up a little bit
+
+00:29:41,330 --> 00:29:46,630
+or maybe not there we go okay
+
+00:29:51,430 --> 00:29:55,420
+alright let's see if that works a little
+
+00:29:52,960 --> 00:29:58,780
+bit better so as we can see with our
+
+00:29:55,420 --> 00:30:01,330
+back-trace there we get down we get to
+
+00:29:58,780 --> 00:30:04,870
+the trampoline and it's it's it's not
+
+00:30:01,330 --> 00:30:08,290
+very informative to the source of the
+
+00:30:04,870 --> 00:30:10,180
+the read call but since we know we're in
+
+00:30:08,290 --> 00:30:11,680
+the cover team context because of the
+
+00:30:10,180 --> 00:30:14,320
+the fact that we see the trampoline
+
+00:30:11,680 --> 00:30:16,180
+there there's a comer team variable
+
+00:30:14,320 --> 00:30:18,910
+called current that it points to the
+
+00:30:16,180 --> 00:30:23,860
+current cover team so if we we look at
+
+00:30:18,910 --> 00:30:27,970
+current that's a co routine pointer and
+
+00:30:23,860 --> 00:30:34,930
+we'll just look inside that core team
+
+00:30:27,970 --> 00:30:37,330
+player and I there should be a collar
+
+00:30:34,930 --> 00:30:40,000
+yeah so we see the collar here this is
+
+00:30:37,330 --> 00:30:41,710
+that sutoko retain pointer and I
+
+00:30:40,000 --> 00:30:49,350
+mentioned before that gets created when
+
+00:30:41,710 --> 00:30:49,350
+you enter into a co routine so if we
+
+00:30:49,830 --> 00:31:00,490
+source the G degrees team ugtb script
+
+00:30:54,690 --> 00:31:02,740
+there's now a function we can use a
+
+00:31:00,490 --> 00:31:09,850
+helper here we can use to do query that
+
+00:31:02,740 --> 00:31:11,260
+so if we look at current collar the know
+
+00:31:09,850 --> 00:31:15,100
+she give us a back trace of where we
+
+00:31:11,260 --> 00:31:16,630
+came from here so now you can see we
+
+00:31:15,100 --> 00:31:20,470
+have a normal deck trace of what called
+
+00:31:16,630 --> 00:31:23,850
+and entered this disco routine before we
+
+00:31:20,470 --> 00:31:23,850
+went and did a switch
+
+00:31:29,320 --> 00:31:33,210
+alright so that's not
+
+00:31:38,460 --> 00:31:43,540
+alright yes we just covered that that
+
+00:31:40,720 --> 00:31:45,370
+they're so other issues with the co
+
+00:31:43,540 --> 00:31:47,020
+routines is as you saw there were four
+
+00:31:45,370 --> 00:31:51,820
+different implementations underlying to
+
+00:31:47,020 --> 00:31:54,370
+co routine itself and that's a little
+
+00:31:51,820 --> 00:31:56,890
+bit of an issue because while the Cobra
+
+00:31:54,370 --> 00:32:01,930
+team code isn't a lot of code as far as
+
+00:31:56,890 --> 00:32:03,730
+lines of code it's conceptually a little
+
+00:32:01,930 --> 00:32:06,520
+messy and so there's a lot of potential
+
+00:32:03,730 --> 00:32:08,500
+for bugs to be Layton or working in
+
+00:32:06,520 --> 00:32:10,300
+there and it's also difficult to make
+
+00:32:08,500 --> 00:32:13,540
+sure that you support all the platforms
+
+00:32:10,300 --> 00:32:14,830
+that Hume you should run on because you
+
+00:32:13,540 --> 00:32:19,810
+might not know whether or not a
+
+00:32:14,830 --> 00:32:21,250
+co-working is broken in some odd way and
+
+00:32:19,810 --> 00:32:23,740
+the co-working temptation is a little
+
+00:32:21,250 --> 00:32:26,320
+bit complex so you're basically trading
+
+00:32:23,740 --> 00:32:29,770
+off some complexity here the co routines
+
+00:32:26,320 --> 00:32:33,010
+themselves make it easier to write your
+
+00:32:29,770 --> 00:32:35,140
+code at the expense of being a little
+
+00:32:33,010 --> 00:32:38,050
+bit uglier underneath the covers then
+
+00:32:35,140 --> 00:32:42,070
+maybe if you used a normal threads that
+
+00:32:38,050 --> 00:32:47,680
+are a little bit more standard but
+
+00:32:42,070 --> 00:32:49,150
+that's probably okay because there's
+
+00:32:47,680 --> 00:32:50,440
+more development going on at that layer
+
+00:32:49,150 --> 00:32:55,810
+then it's going to be going on at the
+
+00:32:50,440 --> 00:32:58,060
+decoder team there another concern is it
+
+00:32:55,810 --> 00:33:00,820
+can rely on some compiler orgy Lib C
+
+00:32:58,060 --> 00:33:02,770
+specific behavior and maybe this is why
+
+00:33:00,820 --> 00:33:05,950
+maybe it's not an issue but it's
+
+00:33:02,770 --> 00:33:07,420
+something to be aware of the one thing
+
+00:33:05,950 --> 00:33:09,280
+and I didn't even realize this until
+
+00:33:07,420 --> 00:33:13,270
+it's preparing for this talk looking
+
+00:33:09,280 --> 00:33:15,490
+through some decor teen stuff but if you
+
+00:33:13,270 --> 00:33:18,940
+look at the for instance the the open
+
+00:33:15,490 --> 00:33:23,560
+group page on sig long jump which is how
+
+00:33:18,940 --> 00:33:25,090
+we do our Co routine switching I'm at
+
+00:33:23,560 --> 00:33:26,740
+the bottom it calls out the effect of a
+
+00:33:25,090 --> 00:33:28,450
+call of a cig long jump where
+
+00:33:26,740 --> 00:33:30,370
+initialization of the jump up structure
+
+00:33:28,450 --> 00:33:34,750
+was not performed in the calling thread
+
+00:33:30,370 --> 00:33:37,840
+is undefined and initially that seems
+
+00:33:34,750 --> 00:33:39,700
+like it's not a problem but Stefan
+
+00:33:37,840 --> 00:33:43,140
+actually pointed out to me that we do
+
+00:33:39,700 --> 00:33:43,140
+indeed do this in threads
+
+00:33:45,190 --> 00:33:48,549
+so we have
+
+00:33:55,240 --> 00:34:01,800
+so if we if we see here in in the 9p
+
+00:33:58,720 --> 00:34:08,230
+directory we we specifically have a
+
+00:34:01,800 --> 00:34:10,419
+macro that's run where we sleep a thread
+
+00:34:08,230 --> 00:34:15,520
+so that we can then enter it in another
+
+00:34:10,419 --> 00:34:20,470
+thread now I on I look through all the G
+
+00:34:15,520 --> 00:34:22,480
+Lib C specific documentation on you
+
+00:34:20,470 --> 00:34:25,210
+context and sig long jump and I didn't
+
+00:34:22,480 --> 00:34:27,700
+see anything particularly referencing
+
+00:34:25,210 --> 00:34:29,500
+threads one way or another so maybe it's
+
+00:34:27,700 --> 00:34:31,419
+fine I don't know I'm not saying it's
+
+00:34:29,500 --> 00:34:34,270
+necessarily a problem just that it's an
+
+00:34:31,419 --> 00:34:35,919
+example of how there can be some things
+
+00:34:34,270 --> 00:34:38,409
+that might behave differently from one
+
+00:34:35,919 --> 00:34:42,220
+system to a next based off of some
+
+00:34:38,409 --> 00:34:45,550
+undefined behavior that's not called out
+
+00:34:42,220 --> 00:34:47,860
+one way or the other so in the original
+
+00:34:45,550 --> 00:34:50,350
+concept of co routines it would be a way
+
+00:34:47,860 --> 00:34:57,160
+to do co-op multitasking on a single
+
+00:34:50,350 --> 00:34:59,200
+thread rather than a cross thread all
+
+00:34:57,160 --> 00:35:06,490
+right I think that's it
+
+00:34:59,200 --> 00:35:08,349
+any questions yeah yes you said
+
+00:35:06,490 --> 00:35:10,510
+something which I was trying to
+
+00:35:08,349 --> 00:35:13,630
+understand you said that you don't do
+
+00:35:10,510 --> 00:35:15,070
+original intent was that it was not to
+
+00:35:13,630 --> 00:35:17,770
+cross thread so that means within the
+
+00:35:15,070 --> 00:35:20,230
+thread you do corrosion rate generally I
+
+00:35:17,770 --> 00:35:22,869
+mean co routines as a concept is
+
+00:35:20,230 --> 00:35:25,540
+generally done within a singular thread
+
+00:35:22,869 --> 00:35:27,450
+but as you see in the 90s stuff we could
+
+00:35:25,540 --> 00:35:30,430
+use a little orthogonal to threading
+
+00:35:27,450 --> 00:35:33,869
+itself where it's ideas it's a function
+
+00:35:30,430 --> 00:35:36,520
+that the function itself will execute
+
+00:35:33,869 --> 00:35:39,369
+without regards to where it runs from
+
+00:35:36,520 --> 00:35:41,890
+I'm just not sure how cross above
+
+00:35:39,369 --> 00:35:43,630
+example a use case i'll give you if i
+
+00:35:41,890 --> 00:35:46,450
+have a live migration i know that i
+
+00:35:43,630 --> 00:35:48,609
+cannot do it in five seconds let's say
+
+00:35:46,450 --> 00:35:51,760
+but i want to initiate something on a
+
+00:35:48,609 --> 00:35:56,440
+task and use another task which will
+
+00:35:51,760 --> 00:36:00,190
+wait for that to complete from say node
+
+00:35:56,440 --> 00:36:04,690
+1 to node 2 for the migration and when
+
+00:36:00,190 --> 00:36:08,500
+it reaches ninety percent then I want to
+
+00:36:04,690 --> 00:36:11,140
+really say that okay let's now jump from
+
+00:36:08,500 --> 00:36:13,990
+this Co routine to it from one task to
+
+00:36:11,140 --> 00:36:16,630
+another to initiate our complete that by
+
+00:36:13,990 --> 00:36:19,359
+committing the whole thing right well I
+
+00:36:16,630 --> 00:36:20,890
+mean you should oh sorry go yeah so here
+
+00:36:19,359 --> 00:36:22,930
+is what I want to know you said you
+
+00:36:20,890 --> 00:36:25,420
+cannot cross the threads in is it not a
+
+00:36:22,930 --> 00:36:26,440
+problem for us well I don't know if it's
+
+00:36:25,420 --> 00:36:28,780
+a problem for us I mean we're obviously
+
+00:36:26,440 --> 00:36:34,599
+doing it now so I'm gonna assume it's
+
+00:36:28,780 --> 00:36:36,550
+not a problem but I I don't know um but
+
+00:36:34,599 --> 00:36:38,589
+you know you can still use co routines
+
+00:36:36,550 --> 00:36:40,480
+within the thread to do the multi task
+
+00:36:38,589 --> 00:36:43,690
+and the answer idea that you'll sleep so
+
+00:36:40,480 --> 00:36:47,020
+you can do other things as well even
+
+00:36:43,690 --> 00:36:48,160
+within a singular thread but I don't
+
+00:36:47,020 --> 00:36:50,050
+know if it's a problem right now for us
+
+00:36:48,160 --> 00:36:52,329
+going coordination between the third
+
+00:36:50,050 --> 00:36:55,060
+season problem this is what I understand
+
+00:36:52,329 --> 00:36:58,030
+from this well it's not so much a
+
+00:36:55,060 --> 00:37:03,119
+coordination from it's a pre-empting
+
+00:36:58,030 --> 00:37:03,119
+problem and priam support well
+
+00:37:05,160 --> 00:37:09,599
+the co routine is you're not have that
+
+00:37:07,829 --> 00:37:12,240
+same color team running multiple times
+
+00:37:09,599 --> 00:37:13,799
+three different threads so it's not so
+
+00:37:12,240 --> 00:37:19,319
+much a problem of that as it is a
+
+00:37:13,799 --> 00:37:22,079
+problem if you're your sig Set jump and
+
+00:37:19,319 --> 00:37:26,069
+your sig long jump saved everything you
+
+00:37:22,079 --> 00:37:27,690
+need for that I mean if you think
+
+00:37:26,069 --> 00:37:29,970
+there's a go-to statement right so you
+
+00:37:27,690 --> 00:37:34,289
+do this go to not just somewhere else in
+
+00:37:29,970 --> 00:37:35,849
+the thread but to another thread it's
+
+00:37:34,289 --> 00:37:38,099
+your stack and are all your signal
+
+00:37:35,849 --> 00:37:40,920
+masking everything okay or not I don't
+
+00:37:38,099 --> 00:37:42,780
+know so he's indifferent yeah yeah well
+
+00:37:40,920 --> 00:37:46,910
+the spec is undefined I don't know what
+
+00:37:42,780 --> 00:37:50,309
+the eclipse ii implementation is
+
+00:37:46,910 --> 00:37:53,579
+speaking about bug behavior i think that
+
+00:37:50,309 --> 00:37:55,829
+there is one more important thing it
+
+00:37:53,579 --> 00:37:58,859
+should be able somehow to list all
+
+00:37:55,829 --> 00:38:03,150
+broken coral teens in the process
+
+00:37:58,859 --> 00:38:05,569
+because if they have some Hank in
+
+00:38:03,150 --> 00:38:11,180
+conventional debugging we can look to
+
+00:38:05,569 --> 00:38:17,250
+all threads are stuck but there is no
+
+00:38:11,180 --> 00:38:20,250
+such way for corrosion and in on the top
+
+00:38:17,250 --> 00:38:25,410
+of this we similarly in for bottom house
+
+00:38:20,250 --> 00:38:27,869
+you should somehow list all bottom
+
+00:38:25,410 --> 00:38:32,730
+halves to understand where the
+
+00:38:27,869 --> 00:38:40,650
+completion of the corrosion stuck okay
+
+00:38:32,730 --> 00:38:44,279
+yeah so if we're going to release all co
+
+00:38:40,650 --> 00:38:46,770
+routines are you talking for me just
+
+00:38:44,279 --> 00:38:49,380
+from a debugging perspective yes I'm
+
+00:38:46,770 --> 00:38:52,589
+talking about debugging perspective it's
+
+00:38:49,380 --> 00:38:56,670
+a pain for me to understand where they
+
+00:38:52,589 --> 00:38:58,440
+really hand yeah and that is one of the
+
+00:38:56,670 --> 00:39:00,270
+downfalls of hurricanes is that it does
+
+00:38:58,440 --> 00:39:03,569
+introduce an additional debugging pain
+
+00:39:00,270 --> 00:39:06,690
+like that so yeah there could be some
+
+00:39:03,569 --> 00:39:08,400
+things we could do to ease that yes very
+
+00:39:06,690 --> 00:39:11,160
+symmetric wet they should think about
+
+00:39:08,400 --> 00:39:16,289
+yeah okay another question actually
+
+00:39:11,160 --> 00:39:18,360
+about Carlton locking i would like to
+
+00:39:16,289 --> 00:39:24,120
+erase all discussion
+
+00:39:18,360 --> 00:39:27,300
+from a previous year I think that they
+
+00:39:24,120 --> 00:39:33,420
+do need primitive which will ensure that
+
+00:39:27,300 --> 00:39:39,360
+Carlton log is really locked to provide
+
+00:39:33,420 --> 00:39:42,210
+useful results to Luke where the local
+
+00:39:39,360 --> 00:39:51,750
+news mist is definitely to the other two
+
+00:39:42,210 --> 00:39:57,330
+scope yeah I won't argue that anything
+
+00:39:51,750 --> 00:39:58,980
+else all right well that's it of course
+
+00:39:57,330 --> 00:40:00,960
+one last thing I'm sure you're all been
+
+00:39:58,980 --> 00:40:03,330
+but multiple times about this already
+
+00:40:00,960 --> 00:40:08,310
+but I went and put this at the end and I
+
+00:40:03,330 --> 00:40:12,120
+stole Alex's QR code here so if you want
+
+00:40:08,310 --> 00:40:15,300
+to complete the kvm forum survey that
+
+00:40:12,120 --> 00:40:20,060
+would be great it'll help the future kvm
+
+00:40:15,300 --> 00:40:20,060
+
+YouTube URL: https://www.youtube.com/watch?v=2gNszk7OjIY
+
+

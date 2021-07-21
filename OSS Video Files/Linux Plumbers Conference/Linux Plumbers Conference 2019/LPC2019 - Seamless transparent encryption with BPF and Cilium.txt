@@ -1,0 +1,2775 @@
+Title: LPC2019 - Seamless transparent encryption with BPF and Cilium
+Publication date: 2019-09-17
+Playlist: Linux Plumbers Conference 2019
+Description: 
+	Seamless transparent encryption with BPF and Cilium
+
+Speaker
+Mr John Fastabend (Isovalent)
+
+Description
+Providing encryption in dynamic environments where nodes are added and removed on-the-fly and services spin-up and are then torn-down frequently, such as Kubernetes, has numerous challenges. Cilium, an open source software package for providing and transparently securing network connectivity, leverages BPF and the Linux encryption capabilities to provide L3/L7 encryption and authentication at the node and service layers. Giving users the ability to apply encryption either to entire nodes or on specified services. Once configured through a high level feature flag (--enable-encrypt-l3, --enable-encrypt-l7) the management is transparent to the user. Cilium will manage and ensure traffic is encrypted allowing for auditing of encrypted/unencrypted flows via a monitoring interface to ensure compliance.
+
+In this talk we will show how Cilium accomplishes this in the Linux datapath and control plane. As well as discuss how Cilium with Linux and BPF fits into the evolving encryption standards and frameworks such as IPsec, mTLS, Secure Production Identity Framework For Everyone (SPIFFE), and Istio. Looking forward we propose a set of extensions to the Linux kernel, specifically to the BPF infrastructure, to ease the adoption and improve the efficiency of these protocols. Specifically, we will look at a series of BPF helpers, possible hardware support, scaling to thousands of nodes, and transparently enforcing policy on encrypted sessions.
+
+Finally to show this is not mere slide-ware we will show a demo Cilium implementing transparent encryption.
+Captions: 
+	00:00:00,230 --> 00:00:01,860
+- Our next speaker has been involved
+
+00:00:01,860 --> 00:00:03,380
+in Linux kernel development
+
+00:00:03,380 --> 00:00:05,120
+with networking for quite some time,
+
+00:00:05,120 --> 00:00:07,410
+used to work more directly on nick-based stuff,
+
+00:00:07,410 --> 00:00:10,320
+but now he's been concentrating on BPF and Cilium
+
+00:00:10,320 --> 00:00:12,920
+and compiler technology and stuff like that.
+
+00:00:12,920 --> 00:00:14,460
+And today he's gonna talk to us
+
+00:00:14,460 --> 00:00:17,750
+about transparent encryption using BPF and Cilium,
+
+00:00:17,750 --> 00:00:19,610
+and I'm really looking forward to this presentation.
+
+00:00:19,610 --> 00:00:22,492
+So please give John a warm welcome.
+
+00:00:22,492 --> 00:00:26,340
+(audience applauding)
+
+00:00:26,340 --> 00:00:28,970
+- Okay, thanks for comin'.
+
+00:00:28,970 --> 00:00:30,620
+I'm gonna talk about seamless transparent
+
+00:00:30,620 --> 00:00:33,150
+encryption with BPF and Cilium,
+
+00:00:33,150 --> 00:00:36,360
+and have a quick agenda here.
+
+00:00:36,360 --> 00:00:39,910
+So first we'll just talk about what I mean by that phrase.
+
+00:00:39,910 --> 00:00:42,130
+So why do we want transparent encryption?
+
+00:00:42,130 --> 00:00:43,210
+What is it?
+
+00:00:43,210 --> 00:00:48,090
+And then a brief Cilium Kubernetes overview.
+
+00:00:48,090 --> 00:00:50,800
+Just barely enough that we can explain
+
+00:00:50,800 --> 00:00:54,600
+the rest of the pieces and how this works in Cilium.
+
+00:00:54,600 --> 00:00:56,000
+Cilium actually has two options.
+
+00:00:56,000 --> 00:00:58,453
+We can do L3 encryption or L7 encryption.
+
+00:01:00,087 --> 00:01:01,970
+For L3 we use Ipsec.
+
+00:01:01,970 --> 00:01:03,360
+So we'll go through that.
+
+00:01:03,360 --> 00:01:05,830
+And for L7 we have mTLS.
+
+00:01:05,830 --> 00:01:08,870
+And so another interesting piece here to look at is
+
+00:01:08,870 --> 00:01:10,870
+L3 is part of Cilium today.
+
+00:01:10,870 --> 00:01:15,140
+You can go to Cilium and download the product and deploy it.
+
+00:01:15,140 --> 00:01:16,810
+And L7 is also part of Cilium.
+
+00:01:16,810 --> 00:01:18,840
+So we'll kind of, as we go through I'll try to highlight
+
+00:01:18,840 --> 00:01:21,434
+what is released and in production now,
+
+00:01:21,434 --> 00:01:23,913
+what is a prototype, and then what is even further out
+
+00:01:23,913 --> 00:01:27,960
+is just stuff that exists in my systems that I'm working on
+
+00:01:27,960 --> 00:01:30,110
+and hacking on and hoping to have working
+
+00:01:30,110 --> 00:01:31,610
+in the next handful of months.
+
+00:01:32,504 --> 00:01:35,240
+So what is transparent, what do we mean by transparent?
+
+00:01:35,240 --> 00:01:38,420
+So first off, we want to make sure
+
+00:01:38,420 --> 00:01:41,720
+that we don't trust applications.
+
+00:01:41,720 --> 00:01:46,230
+So because we are the agent running around
+
+00:01:46,230 --> 00:01:47,400
+with a bunch of pods,
+
+00:01:47,400 --> 00:01:49,890
+we don't necessarily trust the pods themselves
+
+00:01:49,890 --> 00:01:50,723
+to do encryption.
+
+00:01:50,723 --> 00:01:53,300
+So it's not good enough to say, pod,
+
+00:01:53,300 --> 00:01:54,820
+please do some encryption
+
+00:01:54,820 --> 00:01:58,260
+because we don't necessarily control that pod.
+
+00:01:58,260 --> 00:02:00,960
+And even more to the point,
+
+00:02:00,960 --> 00:02:02,720
+it's not really feasible to add
+
+00:02:02,720 --> 00:02:04,180
+encryption to every application.
+
+00:02:04,180 --> 00:02:05,300
+So we want it to be transparent,
+
+00:02:05,300 --> 00:02:07,300
+so you turn it on and then everything
+
+00:02:07,300 --> 00:02:09,130
+in the node is encrypted.
+
+00:02:09,130 --> 00:02:10,700
+The next piece is it needs to be sort of usable.
+
+00:02:10,700 --> 00:02:14,150
+So you can't expect, and this'll be on the next slide,
+
+00:02:14,150 --> 00:02:15,960
+about the scale and how things are dynamic,
+
+00:02:15,960 --> 00:02:18,850
+but we can't expect users every time a new node comes online
+
+00:02:18,850 --> 00:02:21,330
+to do some sort of action to make this happen.
+
+00:02:21,330 --> 00:02:24,260
+And the next piece is we want it to be auditable
+
+00:02:24,260 --> 00:02:29,090
+so that you can verify that encryption is actually working,
+
+00:02:29,090 --> 00:02:31,900
+and if encryption for some reason stops working,
+
+00:02:31,900 --> 00:02:36,610
+that you have a hard break so you can cut off the traffic,
+
+00:02:36,610 --> 00:02:40,130
+block it, drop it, make sure that you don't put data
+
+00:02:40,130 --> 00:02:41,780
+on the wire that's not encrypted.
+
+00:02:43,530 --> 00:02:46,710
+So to start with I do this inside Cilium.
+
+00:02:46,710 --> 00:02:50,740
+Cilium is a CNI that works with Kubernetes or Docker.
+
+00:02:50,740 --> 00:02:53,680
+It leverages BPF for all of its policies.
+
+00:02:53,680 --> 00:02:56,010
+And in this case, if you were here earlier,
+
+00:02:56,010 --> 00:02:58,810
+we talked a bit about Cilium earlier.
+
+00:02:58,810 --> 00:03:00,962
+But in this talk we're gonna talk
+
+00:03:00,962 --> 00:03:02,604
+primarily about the transparent encryption,
+
+00:03:02,604 --> 00:03:05,140
+not about the policy or how we do load balance
+
+00:03:05,140 --> 00:03:06,390
+and various other things.
+
+00:03:07,310 --> 00:03:08,460
+Here's a quick picture.
+
+00:03:09,400 --> 00:03:10,810
+So on every worker node,
+
+00:03:10,810 --> 00:03:13,010
+which is just a node inside your cluster,
+
+00:03:13,010 --> 00:03:14,970
+we run the Cilium agent.
+
+00:03:14,970 --> 00:03:18,190
+In Kubernetes environments there's a set of pods.
+
+00:03:18,190 --> 00:03:22,510
+Each one of those pods has a veth device or IPvlan device
+
+00:03:22,510 --> 00:03:25,020
+into the host networking space.
+
+00:03:25,020 --> 00:03:27,490
+We run BPF programs on ingress and egress
+
+00:03:27,490 --> 00:03:30,410
+of each one of those pods where we can apply policy.
+
+00:03:30,410 --> 00:03:32,980
+And in this context one of the policies is
+
+00:03:32,980 --> 00:03:34,243
+going to be encryption.
+
+00:03:35,400 --> 00:03:36,840
+And then eventually there's a routing table
+
+00:03:36,840 --> 00:03:38,980
+and you can go out on the network.
+
+00:03:38,980 --> 00:03:40,640
+There's also a tunnel mode where
+
+00:03:40,640 --> 00:03:42,050
+we support VXLAN and Geneve,
+
+00:03:42,050 --> 00:03:43,410
+and there's a few other modes that we'll mention,
+
+00:03:43,410 --> 00:03:47,540
+but the primary, most of the description in this talk
+
+00:03:47,540 --> 00:03:49,850
+will refer to the sort of native routing mode
+
+00:03:49,850 --> 00:03:52,433
+where you use the host networking's routing table.
+
+00:03:53,814 --> 00:03:56,223
+So why is this interesting at all?
+
+00:03:57,790 --> 00:03:59,830
+And sort of why is it different than doing like a VPN,
+
+00:03:59,830 --> 00:04:01,760
+a point-to-point VPN with IPsec.
+
+00:04:01,760 --> 00:04:04,740
+So first of all, because it's a Kubernetes environment,
+
+00:04:04,740 --> 00:04:06,360
+everything is more or less dynamic,
+
+00:04:06,360 --> 00:04:08,960
+so clusters can be added and deleted on the fly,
+
+00:04:08,960 --> 00:04:11,100
+nodes come and go, pods come and go.
+
+00:04:11,100 --> 00:04:13,729
+As we saw earlier services can be added and removed.
+
+00:04:13,729 --> 00:04:15,770
+Thousands of them at a time.
+
+00:04:15,770 --> 00:04:17,680
+And we also have policies
+
+00:04:17,680 --> 00:04:19,000
+that are applied dynamically.
+
+00:04:19,000 --> 00:04:20,240
+And while all this is happening
+
+00:04:20,240 --> 00:04:22,690
+we need to ensure that there are no packets on the wire
+
+00:04:22,690 --> 00:04:25,080
+that are not encrypted.
+
+00:04:25,080 --> 00:04:28,700
+And the other problem is not only is it dynamic,
+
+00:04:28,700 --> 00:04:31,350
+but we have to deal with these sort of larger scales.
+
+00:04:32,640 --> 00:04:34,990
+So Cilium, for example, there was a blog post,
+
+00:04:34,990 --> 00:04:36,367
+and they talked about 5,000 nodes,
+
+00:04:36,367 --> 00:04:39,480
+100,000 pods, thousands of services.
+
+00:04:39,480 --> 00:04:41,600
+So at this scale we need to make sure
+
+00:04:41,600 --> 00:04:43,723
+that everything is efficient as well.
+
+00:04:46,063 --> 00:04:49,270
+So this is a brief sort of overview
+
+00:04:49,270 --> 00:04:50,240
+of what we're gonna talk about.
+
+00:04:50,240 --> 00:04:53,000
+So at the L3 encryption layer we use IPsec,
+
+00:04:53,000 --> 00:04:55,225
+and that's been available in Cilium.
+
+00:04:55,225 --> 00:04:57,680
+Version 1.4 had an initial release,
+
+00:04:57,680 --> 00:04:58,980
+1.5 was better.
+
+00:04:58,980 --> 00:05:00,870
+The recent 1.6 release has
+
+00:05:00,870 --> 00:05:03,130
+even more features that we support.
+
+00:05:03,130 --> 00:05:06,860
+On mTLS we've been supporting
+
+00:05:06,860 --> 00:05:09,012
+Istio and Envoy for quite a while.
+
+00:05:09,012 --> 00:05:11,970
+1.4 has a few of these things we'll talk about,
+
+00:05:11,970 --> 00:05:15,330
+and kTLS is scheduled for probably the next release.
+
+00:05:15,330 --> 00:05:16,580
+So we can, as we go through
+
+00:05:16,580 --> 00:05:17,650
+I'll just sort of reference this.
+
+00:05:17,650 --> 00:05:19,522
+And the point I'm trying to make here
+
+00:05:19,522 --> 00:05:21,483
+is that some of this is actually real and deployed,
+
+00:05:21,483 --> 00:05:22,430
+and then some of the pieces are prototype work
+
+00:05:22,430 --> 00:05:24,833
+that's going on, so we'll call that out as we go.
+
+00:05:26,220 --> 00:05:28,640
+So, primer on IPsec.
+
+00:05:28,640 --> 00:05:29,473
+There's two modes.
+
+00:05:29,473 --> 00:05:31,540
+You can run in transport mode and tunnel mode.
+
+00:05:31,540 --> 00:05:33,080
+The difference is basically
+
+00:05:33,080 --> 00:05:37,043
+one puts an IP header on the top and one does not.
+
+00:05:38,350 --> 00:05:40,429
+For our case we can actually support both.
+
+00:05:40,429 --> 00:05:41,940
+We'll talk a lot about,
+
+00:05:41,940 --> 00:05:45,090
+usually (voice muffled) has to do with your routing tables.
+
+00:05:45,090 --> 00:05:46,920
+So one advantage you get in doing tunnels
+
+00:05:46,920 --> 00:05:49,670
+if you had thousands of pods that all have IPs.
+
+00:05:49,670 --> 00:05:51,460
+If you do tunnel now you have an IP per node.
+
+00:05:51,460 --> 00:05:53,711
+So your routing tables may scale slightly better.
+
+00:05:53,711 --> 00:05:54,620
+On the other hand,
+
+00:05:54,620 --> 00:05:56,230
+you may not want the extra overhead of a tunnel,
+
+00:05:56,230 --> 00:05:58,360
+in which case you can use transport mode.
+
+00:05:59,878 --> 00:06:02,310
+So that's the sort of basic modes.
+
+00:06:02,310 --> 00:06:04,160
+If we look at the actual packets of these,
+
+00:06:04,160 --> 00:06:07,100
+this is the sort of condensed version of what it looks like.
+
+00:06:07,100 --> 00:06:09,340
+On the top you have just an original packet
+
+00:06:09,340 --> 00:06:11,500
+that we would get in Cilium with a payload,
+
+00:06:11,500 --> 00:06:15,100
+a TCP, maybe some IP options and maybe an IP header.
+
+00:06:15,100 --> 00:06:18,180
+We then tack on an encapsulating security payload, ESP.
+
+00:06:19,470 --> 00:06:21,203
+This is the IPsec part.
+
+00:06:22,720 --> 00:06:24,140
+It contains a lot of,
+
+00:06:24,140 --> 00:06:26,203
+some IDs for your encryption and so on.
+
+00:06:27,222 --> 00:06:30,150
+And then you also tack on a trailer and some authentication.
+
+00:06:30,150 --> 00:06:33,390
+If you're doing in tunnel mode then you have the ESP
+
+00:06:33,390 --> 00:06:34,900
+on the outside of the IP header
+
+00:06:34,900 --> 00:06:36,870
+and you encapsulate the inner IP header.
+
+00:06:36,870 --> 00:06:39,880
+So from security point of view,
+
+00:06:39,880 --> 00:06:41,740
+one, you're encapsulating your IP headers
+
+00:06:41,740 --> 00:06:43,240
+and all your IP options,
+
+00:06:43,240 --> 00:06:46,440
+and on the other one your IP options and stuff
+
+00:06:46,440 --> 00:06:47,273
+will be in plain text.
+
+00:06:47,273 --> 00:06:48,540
+So that's kind of a decision
+
+00:06:48,540 --> 00:06:50,740
+you need to make when you're deploying this.
+
+00:06:52,860 --> 00:06:54,833
+So how is this deployed in Linux?
+
+00:06:56,069 --> 00:06:58,970
+I don't know, how many people have used IPsec in Linux?
+
+00:06:58,970 --> 00:07:00,323
+Do we have anybody?
+
+00:07:00,323 --> 00:07:01,156
+We had a handful.
+
+00:07:01,156 --> 00:07:03,220
+Quite a few people actually, so this is good.
+
+00:07:03,220 --> 00:07:04,570
+So you have the policy piece,
+
+00:07:04,570 --> 00:07:08,270
+which tells you how you want, what you would like to encrypt
+
+00:07:08,270 --> 00:07:11,940
+so here's an example with a source and (voice muffled) IP,
+
+00:07:11,940 --> 00:07:14,230
+direction, priority, and a mark field.
+
+00:07:14,230 --> 00:07:15,670
+So the mark field's important for us
+
+00:07:15,670 --> 00:07:18,460
+'cause we'll also use the mark field pretty heavily.
+
+00:07:18,460 --> 00:07:19,920
+And then you have a state which gives you
+
+00:07:19,920 --> 00:07:21,120
+sort of the encryption state.
+
+00:07:21,120 --> 00:07:21,980
+The keys that you're going
+
+00:07:21,980 --> 00:07:25,203
+to use for that encryption context.
+
+00:07:27,050 --> 00:07:28,637
+And this is a sort of an iChart.
+
+00:07:28,637 --> 00:07:30,748
+But the one thing that I wanna just take away is that
+
+00:07:30,748 --> 00:07:34,560
+IPsec is happening kind of above the routing tables here.
+
+00:07:34,560 --> 00:07:37,830
+And so what that means is when
+
+00:07:37,830 --> 00:07:40,630
+you're trying to deploy into a customer (voice muffled)
+
+00:07:40,630 --> 00:07:42,470
+you also have to be aware of all the routes
+
+00:07:42,470 --> 00:07:46,090
+that are in the system and how that is being managed.
+
+00:07:46,090 --> 00:07:49,540
+All right, so that is IPsec in four slides.
+
+00:07:49,540 --> 00:07:51,490
+All good? (audience laughing)
+
+00:07:51,490 --> 00:07:54,949
+There's only 50 or so RFCs to cover this.
+
+00:07:54,949 --> 00:07:57,370
+So if you want we can do that later in the hallway.
+
+00:07:57,370 --> 00:07:59,270
+That's the hallway track.
+
+00:07:59,270 --> 00:08:03,240
+Okay, so, how does L3 encryption work in Cilium?
+
+00:08:03,240 --> 00:08:04,530
+So we'll start with the control plane
+
+00:08:04,530 --> 00:08:06,211
+and then we'll go to the data path.
+
+00:08:06,211 --> 00:08:08,560
+The control plane side,
+
+00:08:08,560 --> 00:08:10,720
+basically you get a Kubernetes event,
+
+00:08:10,720 --> 00:08:12,100
+so either a node's been added
+
+00:08:12,100 --> 00:08:13,950
+or a pod's been added to the cluster.
+
+00:08:13,950 --> 00:08:16,060
+And that event is handled by our Cilium agent
+
+00:08:16,060 --> 00:08:18,460
+that is running on all the nodes in the cluster.
+
+00:08:19,351 --> 00:08:22,600
+That calls into some node updating logic
+
+00:08:22,600 --> 00:08:25,228
+that will update some of the Cilium IPCache
+
+00:08:25,228 --> 00:08:28,610
+that then causes you to add a route for IPsec
+
+00:08:28,610 --> 00:08:30,850
+and eventually update the IPsec stack.
+
+00:08:30,850 --> 00:08:33,230
+Once that has all been done,
+
+00:08:33,230 --> 00:08:34,880
+this is what we get.
+
+00:08:34,880 --> 00:08:37,150
+So on the far left we have a BPF map
+
+00:08:37,150 --> 00:08:40,392
+that is populated with all the IP addresses on the node.
+
+00:08:40,392 --> 00:08:44,090
+Inside that the key here, which is three,
+
+00:08:44,090 --> 00:08:49,090
+is a reference to the IPsec's key actually in the data path.
+
+00:08:50,410 --> 00:08:52,210
+And the reason we have this is because
+
+00:08:52,210 --> 00:08:55,640
+we need to support multiple keys at any given time.
+
+00:08:55,640 --> 00:08:57,210
+And that's important because
+
+00:08:57,210 --> 00:08:59,220
+if you only support a single key you have no way
+
+00:08:59,220 --> 00:09:02,003
+to do a rolling update, for example.
+
+00:09:03,830 --> 00:09:05,990
+When you're deploying a Kubernetes environment
+
+00:09:05,990 --> 00:09:09,730
+and you have 5,000 nodes you can't
+
+00:09:09,730 --> 00:09:11,860
+update all of your nodes at the same time.
+
+00:09:11,860 --> 00:09:14,960
+So if you were, when you turn on IPsec
+
+00:09:14,960 --> 00:09:16,530
+they don't all know that they're doing
+
+00:09:16,530 --> 00:09:17,550
+IPsec instantaneously.
+
+00:09:17,550 --> 00:09:20,330
+There's some time that this roll out happens.
+
+00:09:20,330 --> 00:09:21,830
+And you don't want to lose connection
+
+00:09:21,830 --> 00:09:23,590
+during this roll out phase.
+
+00:09:23,590 --> 00:09:25,670
+And then the next time that this becomes very important
+
+00:09:25,670 --> 00:09:27,740
+is when you want to update your keys.
+
+00:09:27,740 --> 00:09:30,330
+So, at any given time there could be
+
+00:09:30,330 --> 00:09:31,920
+many IP addresses in this table,
+
+00:09:31,920 --> 00:09:34,730
+and they'll each have their own key ID,
+
+00:09:34,730 --> 00:09:36,500
+and they may not all be the same.
+
+00:09:36,500 --> 00:09:38,300
+So when we do a lookup on the data path,
+
+00:09:38,300 --> 00:09:39,620
+which we'll talk about later,
+
+00:09:39,620 --> 00:09:41,670
+this is how we know what key to send out.
+
+00:09:43,020 --> 00:09:45,570
+Next, because we're using the routing table,
+
+00:09:45,570 --> 00:09:48,630
+we need to add some routes into the routing table,
+
+00:09:48,630 --> 00:09:49,900
+and we point them at cilium_host,
+
+00:09:49,900 --> 00:09:53,010
+and cilium_host is the network device
+
+00:09:53,010 --> 00:09:56,053
+associated with Cilium where we run our policy.
+
+00:09:57,294 --> 00:10:01,110
+And what we'll see here is that when this IP address is sent
+
+00:10:01,110 --> 00:10:03,130
+it will be then rented to Cilium host,
+
+00:10:03,130 --> 00:10:04,920
+when we have to be careful about MTUs here
+
+00:10:04,920 --> 00:10:07,845
+because we're gonna add a tunnel header
+
+00:10:07,845 --> 00:10:08,760
+in this specific case.
+
+00:10:08,760 --> 00:10:10,110
+And this is a bit tricky because
+
+00:10:10,110 --> 00:10:12,090
+you need to make sure you get all the MTUs correct
+
+00:10:12,090 --> 00:10:14,460
+or else you'll have a packet that's larger than MTU out,
+
+00:10:14,460 --> 00:10:16,233
+and it'll be dropped.
+
+00:10:17,160 --> 00:10:20,240
+And finally, we then add the state
+
+00:10:20,240 --> 00:10:22,943
+into the IPsec state table.
+
+00:10:23,980 --> 00:10:26,330
+And again, you'll see the couple pieces here.
+
+00:10:26,330 --> 00:10:28,330
+We have a mark value.
+
+00:10:28,330 --> 00:10:29,857
+The mark value will be set by the data path.
+
+00:10:29,857 --> 00:10:31,210
+And the reason we want to do this
+
+00:10:31,210 --> 00:10:33,450
+is because we want to make sure that we are
+
+00:10:34,570 --> 00:10:37,550
+isolating our configuration from the rest of the system,
+
+00:10:37,550 --> 00:10:40,440
+meaning if some other configuration exists on the system
+
+00:10:40,440 --> 00:10:42,070
+that we're not aware of because Cilium agent
+
+00:10:42,070 --> 00:10:46,970
+is coexisting with another, possibly another control plane,
+
+00:10:46,970 --> 00:10:49,003
+we wanna make sure that we don't collide.
+
+00:10:53,190 --> 00:10:56,520
+And for that mode, on the previous mode what we were showing
+
+00:10:56,520 --> 00:10:57,810
+is that every time there's an update we're
+
+00:10:57,810 --> 00:10:59,950
+adding entry to the IPCache and setting up the rules.
+
+00:10:59,950 --> 00:11:02,010
+There's also another mode that some customers use
+
+00:11:02,010 --> 00:11:03,650
+that I'll just mention briefly
+
+00:11:03,650 --> 00:11:05,460
+where they know sort of a priority
+
+00:11:05,460 --> 00:11:07,840
+of all the subnets they're gonna have.
+
+00:11:07,840 --> 00:11:10,330
+And we can set that up at initialization time.
+
+00:11:10,330 --> 00:11:13,390
+So the distinction is Cilium, when it's running,
+
+00:11:13,390 --> 00:11:15,150
+doesn't always know all the IP addresses
+
+00:11:15,150 --> 00:11:17,070
+that are going to be used in the network.
+
+00:11:17,070 --> 00:11:19,100
+So we have to do it sort of dynamically.
+
+00:11:19,100 --> 00:11:21,330
+But if you're in a situation where you can,
+
+00:11:21,330 --> 00:11:23,610
+you know all the IP addresses up front.
+
+00:11:23,610 --> 00:11:26,483
+You can do sort of the setup at the beginning.
+
+00:11:27,750 --> 00:11:30,090
+This has some cons and some pros
+
+00:11:30,090 --> 00:11:32,950
+so that the advantage of doing this is
+
+00:11:32,950 --> 00:11:35,110
+instead of dynamically on every pod add
+
+00:11:35,110 --> 00:11:36,900
+and every node add, setting up new encryption rules,
+
+00:11:36,900 --> 00:11:39,100
+you can do them all up front, add init time.
+
+00:11:40,130 --> 00:11:41,190
+The downside is then you have to know
+
+00:11:41,190 --> 00:11:42,630
+all your IP addresses that are gonna
+
+00:11:42,630 --> 00:11:44,125
+be used during that time.
+
+00:11:44,125 --> 00:11:46,630
+Or you can combine the two if you want
+
+00:11:46,630 --> 00:11:49,770
+and use, I know this subnet will come online at some point,
+
+00:11:49,770 --> 00:11:52,030
+but there may be a few other IP addresses
+
+00:11:52,030 --> 00:11:53,750
+that come online later,
+
+00:11:53,750 --> 00:11:55,840
+in which case we will set up the ones that we know about
+
+00:11:55,840 --> 00:11:58,430
+at init time and then as the system evolves
+
+00:11:58,430 --> 00:12:00,760
+we'll add the other ones that are in there.
+
+00:12:00,760 --> 00:12:02,560
+So kind of a combination of the two.
+
+00:12:05,123 --> 00:12:08,430
+Okay, so that was just setting up the data path.
+
+00:12:08,430 --> 00:12:10,620
+And the next sort of obvious question is
+
+00:12:10,620 --> 00:12:12,850
+how do we get the keys in Kubernetes?
+
+00:12:12,850 --> 00:12:17,770
+So in this case we need every node to have the key,
+
+00:12:17,770 --> 00:12:19,560
+or if we have multiple keys they need to have
+
+00:12:19,560 --> 00:12:23,663
+all of the keys they need to decode or decrypt.
+
+00:12:25,300 --> 00:12:27,910
+And in Kubernetes there's something known as a secret,
+
+00:12:27,910 --> 00:12:32,740
+and the secret is something that all the nodes will learn
+
+00:12:32,740 --> 00:12:33,920
+and it will be encrypted on the disk
+
+00:12:33,920 --> 00:12:35,620
+and they'll have a way to read it.
+
+00:12:35,620 --> 00:12:39,730
+And so this sort of basic way you can do this with Cilium
+
+00:12:39,730 --> 00:12:41,866
+is you can create a new secret.
+
+00:12:41,866 --> 00:12:44,500
+You then mount the secret into the agent
+
+00:12:44,500 --> 00:12:46,050
+and the agent can read the key.
+
+00:12:48,220 --> 00:12:52,493
+And this is sort of the most common way that we see today.
+
+00:12:53,358 --> 00:12:55,690
+And we also support rolling updates
+
+00:12:55,690 --> 00:12:59,397
+so you can do a restart with a new key,
+
+00:12:59,397 --> 00:13:01,113
+and the new key will be pulled in.
+
+00:13:02,290 --> 00:13:04,850
+There's a feature out to pull in the keys automatically.
+
+00:13:04,850 --> 00:13:07,020
+So if you just update your secret
+
+00:13:07,020 --> 00:13:08,340
+then all of your agents will kind of,
+
+00:13:08,340 --> 00:13:10,230
+that secret will propagate it through the cluster
+
+00:13:10,230 --> 00:13:12,960
+and then all the keys will be updated.
+
+00:13:12,960 --> 00:13:15,060
+And the two key pieces here is we want to make sure
+
+00:13:15,060 --> 00:13:17,250
+that we do this without ever dropping any traffic.
+
+00:13:17,250 --> 00:13:20,580
+So we wanna make sure that we don't,
+
+00:13:20,580 --> 00:13:22,600
+say, for example encrypt with the wrong key
+
+00:13:22,600 --> 00:13:24,600
+to a note that doesn't know the key yet.
+
+00:13:26,000 --> 00:13:28,480
+And also we don't want to do probably the worst case
+
+00:13:28,480 --> 00:13:30,360
+would be to send traffic that's not encrypted
+
+00:13:30,360 --> 00:13:31,960
+when we believe it is encrypted.
+
+00:13:34,230 --> 00:13:37,580
+So then there's another option here.
+
+00:13:37,580 --> 00:13:39,810
+So that's the sort of shared key method.
+
+00:13:39,810 --> 00:13:41,390
+Then we have SPIFFe,
+
+00:13:41,390 --> 00:13:43,400
+which stands for Secure Production
+
+00:13:43,400 --> 00:13:45,300
+Identity Framework For Everyone.
+
+00:13:45,300 --> 00:13:50,300
+So this is basically they have an X.509 certificate
+
+00:13:50,370 --> 00:13:53,773
+and they have a way to deploy this.
+
+00:13:54,820 --> 00:13:57,590
+The runtime environment for this is called SPIRE,
+
+00:13:57,590 --> 00:13:59,780
+which is SPIFFE Runtime Environment.
+
+00:13:59,780 --> 00:14:03,230
+And if you want to, like there's a handful of specs
+
+00:14:03,230 --> 00:14:04,063
+that go along with these.
+
+00:14:04,063 --> 00:14:06,920
+So the important thing to know from Cilium standpoint
+
+00:14:06,920 --> 00:14:10,310
+is this piece will manage the key signing and certification.
+
+00:14:10,310 --> 00:14:13,380
+So if you are an agent running
+
+00:14:13,380 --> 00:14:18,380
+you can request a key pair from the SPIRE agent.
+
+00:14:18,730 --> 00:14:20,360
+And a SPIRE agent will then validate
+
+00:14:20,360 --> 00:14:22,557
+that you as the requester are
+
+00:14:25,650 --> 00:14:26,550
+a trusted
+
+00:14:28,320 --> 00:14:29,153
+agent.
+
+00:14:29,153 --> 00:14:30,280
+And it will do that.
+
+00:14:30,280 --> 00:14:31,500
+There's a couple ways it can do that.
+
+00:14:31,500 --> 00:14:33,000
+It can check,
+
+00:14:33,000 --> 00:14:34,620
+it can do a hash over the binary
+
+00:14:34,620 --> 00:14:36,680
+and see if that binary is known in it's database
+
+00:14:36,680 --> 00:14:39,180
+and then give you the proper key.
+
+00:14:39,180 --> 00:14:42,483
+You can do it based on some other methods as well.
+
+00:14:45,763 --> 00:14:47,490
+And here's a quick picture.
+
+00:14:47,490 --> 00:14:48,323
+So
+
+00:14:50,010 --> 00:14:53,990
+in this case, basically I talked about the SPIRE agent
+
+00:14:53,990 --> 00:14:55,400
+that ran on the node.
+
+00:14:55,400 --> 00:14:56,760
+There's also a Spire server.
+
+00:14:56,760 --> 00:14:58,640
+That's what does the key authentication
+
+00:14:58,640 --> 00:15:00,880
+and you can integrate with a CA that you own
+
+00:15:00,880 --> 00:15:02,130
+or you can do it on your,
+
+00:15:03,200 --> 00:15:04,033
+or you can do a sort of a
+
+00:15:04,033 --> 00:15:06,343
+self signing bootstrapping process.
+
+00:15:07,840 --> 00:15:11,650
+And then basically the other piece of this
+
+00:15:11,650 --> 00:15:14,260
+is you can open up a Unix socket
+
+00:15:14,260 --> 00:15:16,200
+and you can listen for events.
+
+00:15:16,200 --> 00:15:18,160
+And so this allows you to do sort of dynamic updates
+
+00:15:18,160 --> 00:15:20,720
+of your keys without somehow kicking the agent itself.
+
+00:15:20,720 --> 00:15:23,660
+So it'll listen and then if the SPIRE agent
+
+00:15:23,660 --> 00:15:25,050
+rotates your key for example,
+
+00:15:25,050 --> 00:15:26,450
+you'll get an event.
+
+00:15:26,450 --> 00:15:28,470
+You'll then take that key,
+
+00:15:28,470 --> 00:15:31,810
+apply it to the tables that we saw previously,
+
+00:15:31,810 --> 00:15:35,730
+and update your IPsec data path
+
+00:15:35,730 --> 00:15:37,633
+and everything should keep working.
+
+00:15:41,750 --> 00:15:42,920
+And I already mentioned this,
+
+00:15:42,920 --> 00:15:44,820
+the other piece of this is that the Cilium agent
+
+00:15:44,820 --> 00:15:47,959
+is the piece that interfaces with a SPIRE agent.
+
+00:15:47,959 --> 00:15:52,897
+So that's the control plane using shared keys, or SPIFFE.
+
+00:15:55,660 --> 00:15:57,110
+So let's talk about this.
+
+00:15:57,110 --> 00:15:59,250
+This is a picture here showing a pod
+
+00:15:59,250 --> 00:16:03,180
+with a veth pair on the left with a BPF program,
+
+00:16:03,180 --> 00:16:05,210
+which is the BPF program runs on every packet
+
+00:16:05,210 --> 00:16:06,930
+that is leaving the pod.
+
+00:16:06,930 --> 00:16:09,403
+And the BPF program is generated by Cilium agent.
+
+00:16:10,960 --> 00:16:12,383
+What we do when we see this,
+
+00:16:13,430 --> 00:16:15,110
+when we see a packet leave the pod
+
+00:16:15,110 --> 00:16:17,920
+is we run our policy agent inside Cilium agent
+
+00:16:17,920 --> 00:16:19,820
+that's being run by this BPF program.
+
+00:16:19,820 --> 00:16:21,960
+And the key piece that we look up
+
+00:16:21,960 --> 00:16:23,410
+is that IPCache from before
+
+00:16:23,410 --> 00:16:25,020
+that we populated and we look
+
+00:16:25,020 --> 00:16:26,340
+and see if there's a key in there.
+
+00:16:26,340 --> 00:16:29,680
+And that key ID will tell us how to mark the packet
+
+00:16:29,680 --> 00:16:31,730
+so the data path can do the encryption.
+
+00:16:31,730 --> 00:16:35,680
+So we mark it with an e00 code, which means encrypt.
+
+00:16:35,680 --> 00:16:39,460
+And then I don't show it here but there's bites above the e
+
+00:16:39,460 --> 00:16:40,680
+actually specify the key.
+
+00:16:40,680 --> 00:16:43,130
+So in our example we had three, it would be 3e00.
+
+00:16:44,300 --> 00:16:47,430
+So we have a key space where we can identify the key.
+
+00:16:47,430 --> 00:16:49,760
+We then, what Cilium would normally do
+
+00:16:49,760 --> 00:16:54,070
+is then redirect that traffic to either the routing table
+
+00:16:54,070 --> 00:16:56,169
+to egress the system or to
+
+00:16:56,169 --> 00:16:59,500
+another virtual device if it's a local pod.
+
+00:16:59,500 --> 00:17:00,670
+But in this case, because we want
+
+00:17:00,670 --> 00:17:03,410
+to hit the encryption stack we can't do the redirect
+
+00:17:03,410 --> 00:17:06,900
+because a redirect from BPF would bypass IPsec.
+
+00:17:06,900 --> 00:17:08,870
+So what we did was we pass it up the stack
+
+00:17:08,870 --> 00:17:10,670
+where it actually gets encrypted
+
+00:17:10,670 --> 00:17:13,310
+via a route from the routing table.
+
+00:17:13,310 --> 00:17:16,340
+After the encryption we then route it back to Cilium agent
+
+00:17:16,340 --> 00:17:17,760
+because we need to get back to Cilium agent
+
+00:17:17,760 --> 00:17:20,693
+to tell us where to redirect this packet.
+
+00:17:22,010 --> 00:17:23,270
+Once it's on the Cilium agent,
+
+00:17:23,270 --> 00:17:26,670
+at which point you can do the redirect to,
+
+00:17:26,670 --> 00:17:27,610
+in this case, eth zero,
+
+00:17:27,610 --> 00:17:28,450
+but it's possible you might
+
+00:17:28,450 --> 00:17:31,273
+have multiple interfaces outbound.
+
+00:17:32,958 --> 00:17:34,680
+And the complication here is
+
+00:17:34,680 --> 00:17:36,510
+that this case shows pod to pod,
+
+00:17:36,510 --> 00:17:39,200
+but we really have pod to node, pod to host networking,
+
+00:17:39,200 --> 00:17:40,370
+and they're all slightly different
+
+00:17:40,370 --> 00:17:42,120
+in the details of how they're done.
+
+00:17:42,990 --> 00:17:45,140
+Which complicates (voice muffled) slightly.
+
+00:17:47,630 --> 00:17:49,380
+So if we just walk through, which I just did,
+
+00:17:49,380 --> 00:17:51,330
+there's a look up key in IPCache,
+
+00:17:51,330 --> 00:17:53,633
+mark it with the key, do the encryption.
+
+00:17:55,850 --> 00:17:58,670
+And I show on the right here the key number
+
+00:17:58,670 --> 00:18:01,020
+with the mark value that we were talking about.
+
+00:18:04,740 --> 00:18:07,043
+There's one sort of subtle issue here.
+
+00:18:08,710 --> 00:18:11,310
+If you're using the subnet mode
+
+00:18:11,310 --> 00:18:13,750
+that we talked about earlier where you set it up before,
+
+00:18:13,750 --> 00:18:17,530
+generally you don't know what nodes have what IP addresses.
+
+00:18:17,530 --> 00:18:22,070
+So, because you know ahead of time your subnet of IPs
+
+00:18:22,070 --> 00:18:23,760
+that are gonna be allocated from,
+
+00:18:23,760 --> 00:18:25,580
+but you don't know exactly what node those IPs
+
+00:18:25,580 --> 00:18:27,100
+are gonna be assigned to.
+
+00:18:27,100 --> 00:18:30,590
+However, when they are assigned the data path
+
+00:18:30,590 --> 00:18:34,640
+will get an event and know where the IP to node mapping is.
+
+00:18:34,640 --> 00:18:39,040
+So what we do to sort of reduce the IPsec data path rules
+
+00:18:39,040 --> 00:18:41,240
+is we do the encryption,
+
+00:18:41,240 --> 00:18:42,750
+which will put, if it's in tunnel mode,
+
+00:18:42,750 --> 00:18:45,730
+will actually put another IP on the outer header.
+
+00:18:45,730 --> 00:18:47,680
+And then we rewrite that destination IP
+
+00:18:47,680 --> 00:18:49,600
+from the BPF data path.
+
+00:18:49,600 --> 00:18:51,930
+This way, we don't have to have a rule per node
+
+00:18:51,930 --> 00:18:53,590
+in the IPsec table.
+
+00:18:53,590 --> 00:18:56,670
+We only have a rule per subnet.
+
+00:18:56,670 --> 00:18:59,010
+So if we're concerned about scaling,
+
+00:18:59,010 --> 00:19:01,100
+what happens is we're now able to scale
+
+00:19:01,100 --> 00:19:05,140
+with the subnet IP ranges and not with the number of nodes,
+
+00:19:05,140 --> 00:19:06,883
+or worse, number of pods.
+
+00:19:08,600 --> 00:19:10,910
+The last piece that is a bit tricky here
+
+00:19:10,910 --> 00:19:13,945
+is we have to do a FIB_LOOKUP and a MAC_REWRITE
+
+00:19:13,945 --> 00:19:15,140
+and a REDIRECT in the BPF program
+
+00:19:15,140 --> 00:19:17,271
+to figure out where to send this packet.
+
+00:19:17,271 --> 00:19:19,190
+And the reason we have to do the MAC_REWRITE
+
+00:19:19,190 --> 00:19:21,500
+is because we didn't send it out the normal stack
+
+00:19:21,500 --> 00:19:23,650
+'cause we're using the BPF programs to do the redirect
+
+00:19:23,650 --> 00:19:25,777
+we have to do the normal, the FIB_LOOKUP
+
+00:19:25,777 --> 00:19:27,153
+and the REDIRECT ourselves.
+
+00:19:32,201 --> 00:19:33,950
+And just to complete
+
+00:19:33,950 --> 00:19:36,040
+all the cases that we support in Cilium,
+
+00:19:36,040 --> 00:19:38,420
+if we're doing a tunnel mode,
+
+00:19:38,420 --> 00:19:40,350
+the FIB_LOOKUP, MAC_REWRITE, and REDIRECT
+
+00:19:40,350 --> 00:19:43,050
+at the end of that is actually a redirect to a tunnel.
+
+00:19:45,970 --> 00:19:50,020
+Okay, so that is the pod to the networking site.
+
+00:19:50,020 --> 00:19:53,870
+The other case that we have is the node to a pod
+
+00:19:53,870 --> 00:19:55,870
+or a node to node or node to host working.
+
+00:19:55,870 --> 00:19:58,294
+And the difference here is that
+
+00:19:58,294 --> 00:20:01,570
+in a Kubernetes Cilium environment
+
+00:20:02,810 --> 00:20:05,670
+we have BPF programs on the veth devices attached
+
+00:20:05,670 --> 00:20:07,410
+for all the pods that are sending out their veth.
+
+00:20:07,410 --> 00:20:09,220
+But if it's a host application,
+
+00:20:09,220 --> 00:20:11,690
+something running not in a pod, just on the host,
+
+00:20:11,690 --> 00:20:14,170
+we need to ensure that that's encrypted as well.
+
+00:20:14,170 --> 00:20:16,570
+And so normally this wouldn't actually pass through
+
+00:20:16,570 --> 00:20:18,230
+any Cilium BPF programs,
+
+00:20:18,230 --> 00:20:21,580
+but what we have done is we've added a route
+
+00:20:21,580 --> 00:20:25,260
+from host networking into the Cilium agent.
+
+00:20:25,260 --> 00:20:27,300
+So all of your traffic that you send on this host
+
+00:20:27,300 --> 00:20:29,350
+will then go to the Cilium agent.
+
+00:20:29,350 --> 00:20:31,840
+Once it's on the Cilium agent we do the same sort of process
+
+00:20:31,840 --> 00:20:33,050
+that we've done before.
+
+00:20:33,050 --> 00:20:35,190
+We look up the key in the IPCache,
+
+00:20:35,190 --> 00:20:37,890
+we set the mark, we pass it back to the stack
+
+00:20:37,890 --> 00:20:39,630
+where it is encrypted once again,
+
+00:20:39,630 --> 00:20:41,693
+reroute it back to the Cilium agent,
+
+00:20:42,698 --> 00:20:45,450
+and then do this redirect thing again.
+
+00:20:45,450 --> 00:20:48,860
+And later we'll talk about pain points
+
+00:20:48,860 --> 00:20:51,260
+and the reasons that we designed this
+
+00:20:51,260 --> 00:20:54,050
+versus possibly some better implementations.
+
+00:20:54,050 --> 00:20:56,380
+But what you can see is that we end up doing lots of routes
+
+00:20:56,380 --> 00:20:58,050
+and redirects through the stack here.
+
+00:20:58,050 --> 00:21:00,640
+And that's because there's no native BPF
+
+00:21:00,640 --> 00:21:02,513
+to do encryption.
+
+00:21:03,480 --> 00:21:06,880
+You're forced, if you're trying to merge encryption and BPF,
+
+00:21:06,880 --> 00:21:08,649
+you have to pass things
+
+00:21:08,649 --> 00:21:09,553
+through the stack and then get them back.
+
+00:21:13,840 --> 00:21:15,670
+This is another case and we can just
+
+00:21:15,670 --> 00:21:16,810
+skip over that really quick.
+
+00:21:16,810 --> 00:21:20,640
+So that was, that's the basics of the L3 implementation
+
+00:21:20,640 --> 00:21:23,633
+and then we'll talk about the L7 stuff here as well.
+
+00:21:25,970 --> 00:21:26,803
+Oh this is even better.
+
+00:21:26,803 --> 00:21:27,920
+So we had three slides for IPsec,
+
+00:21:27,920 --> 00:21:29,753
+we get one slide for TLS, all right?
+
+00:21:29,753 --> 00:21:31,130
+(laughing)
+
+00:21:31,130 --> 00:21:35,063
+And TLS 1.3 because TLS 1.2 has too many arrows, right?
+
+00:21:36,022 --> 00:21:39,400
+So the key, think the key take away here is that
+
+00:21:41,350 --> 00:21:43,190
+the difference between TLS and mTLS
+
+00:21:43,190 --> 00:21:46,173
+is when you do normal TLS you give your cert to the,
+
+00:21:48,000 --> 00:21:49,723
+let's see, make sure I get this right.
+
+00:21:50,730 --> 00:21:54,170
+You'll give your cert to the server and,
+
+00:21:54,170 --> 00:21:56,170
+sorry, in mutual TLS the server
+
+00:21:56,170 --> 00:21:58,140
+will request a search from you and you will
+
+00:21:58,140 --> 00:22:01,020
+have to give the server the client cert,
+
+00:22:01,020 --> 00:22:03,950
+which doesn't happen in the normal TLS.
+
+00:22:03,950 --> 00:22:05,900
+So this is the normal flow.
+
+00:22:05,900 --> 00:22:06,733
+I'll just leave it up there.
+
+00:22:06,733 --> 00:22:09,170
+I don't think we need to walk through it specifically,
+
+00:22:09,170 --> 00:22:12,470
+but the key thing to note
+
+00:22:12,470 --> 00:22:14,370
+is that we're exchanging certificates.
+
+00:22:16,120 --> 00:22:18,190
+And then the other bit of technology we use
+
+00:22:18,190 --> 00:22:20,310
+is this kTLS sockmap.
+
+00:22:20,310 --> 00:22:24,970
+And this really means that we can use it,
+
+00:22:24,970 --> 00:22:28,310
+if we have an OpenSSL enabled application
+
+00:22:28,310 --> 00:22:30,240
+that has kTLS enabled,
+
+00:22:30,240 --> 00:22:32,930
+we then use the kernel's kTLS,
+
+00:22:32,930 --> 00:22:37,393
+which means that we can run BPF inside the kernel
+
+00:22:37,393 --> 00:22:41,093
+before it's encrypted and then we can do a,
+
+00:22:42,030 --> 00:22:44,103
+possibly do like a redirect if needed.
+
+00:22:45,080 --> 00:22:47,880
+And I'll talk about that specific case in just a moment.
+
+00:22:50,020 --> 00:22:54,550
+So the sort of standard way to do this in Cilium
+
+00:22:54,550 --> 00:22:56,533
+is to leverage Istio and Envoy.
+
+00:22:57,800 --> 00:23:00,280
+These are sort of two high-level concepts
+
+00:23:02,210 --> 00:23:03,890
+sort of architecture here,
+
+00:23:03,890 --> 00:23:08,530
+that you can deploy alongside Cilium,
+
+00:23:08,530 --> 00:23:10,780
+and there's a bunch of how-tos to do this,
+
+00:23:10,780 --> 00:23:14,130
+and basically what happens then is Envoy,
+
+00:23:14,130 --> 00:23:15,890
+which is a sidecar proxy.
+
+00:23:15,890 --> 00:23:18,520
+So all the traffic that you send will go through Envoy.
+
+00:23:18,520 --> 00:23:22,150
+We'll then use the keys that are retrieved
+
+00:23:22,150 --> 00:23:25,100
+through this infrastructure and encrypt everything for you.
+
+00:23:26,070 --> 00:23:28,450
+The traditional model to do this is to put Envoy
+
+00:23:28,450 --> 00:23:29,850
+in every pod.
+
+00:23:29,850 --> 00:23:32,270
+And what this means is that anytime
+
+00:23:32,270 --> 00:23:33,640
+you send things out of a pod
+
+00:23:33,640 --> 00:23:35,860
+you have to send it to the Envoy first
+
+00:23:35,860 --> 00:23:38,995
+and then Envoy will encrypt it and send it onto the network.
+
+00:23:38,995 --> 00:23:42,100
+The sort of problem with deploying this
+
+00:23:42,100 --> 00:23:44,190
+is now you have an Envoy instance per pod.
+
+00:23:44,190 --> 00:23:45,970
+So if you go back to how we scale
+
+00:23:45,970 --> 00:23:48,450
+you're thinking we have 5,000 nodes,
+
+00:23:48,450 --> 00:23:50,820
+100,000 pods, and now you have 100,000 instances
+
+00:23:50,820 --> 00:23:52,810
+of Envoy running in your network
+
+00:23:52,810 --> 00:23:54,560
+that only to be managed and I'll need to do
+
+00:23:54,560 --> 00:23:57,710
+key exchanges and certificates and all this kinda stuff.
+
+00:23:57,710 --> 00:23:59,560
+So the first thing that Cilium has done
+
+00:23:59,560 --> 00:24:03,030
+is that it moves Envoy out of a per mod mode
+
+00:24:03,030 --> 00:24:04,690
+where it's running as a per pod sidecar
+
+00:24:04,690 --> 00:24:08,010
+and runs it in the host.
+
+00:24:08,010 --> 00:24:11,730
+And instead of having every pod run the Envoy
+
+00:24:11,730 --> 00:24:12,563
+it's running the host,
+
+00:24:12,563 --> 00:24:14,950
+and then via some policy in our BPF programs
+
+00:24:14,950 --> 00:24:18,780
+we ensure that all of the packets pass through Envoy.
+
+00:24:18,780 --> 00:24:21,690
+And so now we've taken what was scaling out of per pod
+
+00:24:21,690 --> 00:24:24,460
+down to a per node which can be quite significant
+
+00:24:24,460 --> 00:24:27,110
+when we're looking at 5,000 nodes.
+
+00:24:27,110 --> 00:24:30,350
+So what we've done here is we reduced
+
+00:24:30,350 --> 00:24:32,513
+sidecars from per pod to per node.
+
+00:24:33,580 --> 00:24:36,020
+So then the next piece of a bit
+
+00:24:36,020 --> 00:24:37,750
+of acceleration that we provide,
+
+00:24:37,750 --> 00:24:39,710
+which is not specific to the encryption piece,
+
+00:24:39,710 --> 00:24:41,600
+but it is nice when you are doing encryption
+
+00:24:41,600 --> 00:24:44,140
+and every packet has to pass through Envoy
+
+00:24:44,140 --> 00:24:46,460
+is we have the sockmap.
+
+00:24:46,460 --> 00:24:51,460
+What sockmap does is it uses the BPF sockmap hook
+
+00:24:51,780 --> 00:24:54,210
+which intercepts every send,
+
+00:24:54,210 --> 00:24:57,180
+send message and will then do a copy
+
+00:24:57,180 --> 00:24:59,810
+into the receive buffer of Envoy.
+
+00:24:59,810 --> 00:25:01,730
+And the advantage here is you cut out two passes
+
+00:25:01,730 --> 00:25:04,130
+through the TCP stack to talk to a local socket.
+
+00:25:05,100 --> 00:25:06,633
+So we reduce latency.
+
+00:25:10,090 --> 00:25:15,090
+So those are the supported L3 and L7 modes for Cilium.
+
+00:25:15,950 --> 00:25:18,610
+So what I wanna talk about is sort of the pain points
+
+00:25:18,610 --> 00:25:21,640
+that we have from implementing these features.
+
+00:25:21,640 --> 00:25:24,490
+So everything before this is stuff that you
+
+00:25:24,490 --> 00:25:27,373
+can go and get from a Cilium 1.6 release.
+
+00:25:29,070 --> 00:25:30,910
+And what you may have noticed is I had to say
+
+00:25:30,910 --> 00:25:32,600
+like we routed through Cilium host
+
+00:25:32,600 --> 00:25:33,740
+and then we pass it up the stack
+
+00:25:33,740 --> 00:25:36,350
+and then we routed it back again multiple times.
+
+00:25:36,350 --> 00:25:39,010
+And there were some arrows that looked like circles, right?
+
+00:25:39,010 --> 00:25:40,270
+Okay, so
+
+00:25:41,300 --> 00:25:44,030
+this is sort of not ideal because
+
+00:25:44,030 --> 00:25:45,760
+we're going through the stack multiple times.
+
+00:25:45,760 --> 00:25:47,440
+It's also a bit fragile because you're
+
+00:25:47,440 --> 00:25:49,700
+inside the routing tables themselves,
+
+00:25:49,700 --> 00:25:51,160
+and what you need to do is ensure
+
+00:25:51,160 --> 00:25:53,570
+that all your MTUs are correct.
+
+00:25:53,570 --> 00:25:55,110
+If you have a customer that has route
+
+00:25:55,110 --> 00:25:57,120
+that happens to match a route that you have
+
+00:25:57,120 --> 00:26:00,010
+you can end up with conflicts that you need to resolve
+
+00:26:00,010 --> 00:26:02,591
+and so on, so it works,
+
+00:26:02,591 --> 00:26:03,883
+but it's less than ideal.
+
+00:26:04,810 --> 00:26:05,900
+The second piece
+
+00:26:07,700 --> 00:26:08,533
+which is
+
+00:26:10,800 --> 00:26:13,690
+in all of the models that we've shown so far
+
+00:26:13,690 --> 00:26:17,203
+the encryption was based off of the IP address only.
+
+00:26:18,050 --> 00:26:20,040
+So we look at the destination IP address,
+
+00:26:20,040 --> 00:26:22,040
+and then we decide if we want to encrypt it or not.
+
+00:26:22,040 --> 00:26:24,490
+And this works because pods map fairly easily, too,
+
+00:26:24,490 --> 00:26:26,980
+into IP addresses usually,
+
+00:26:26,980 --> 00:26:28,880
+but then we also have these things like services
+
+00:26:28,880 --> 00:26:30,590
+which have their own IP address
+
+00:26:30,590 --> 00:26:32,390
+that might have different back ends.
+
+00:26:33,591 --> 00:26:35,180
+And then we would also perhaps like
+
+00:26:35,180 --> 00:26:37,970
+to have even more fine grained policy.
+
+00:26:37,970 --> 00:26:41,520
+Say we only want to encrypt traffic if it's to this port
+
+00:26:41,520 --> 00:26:44,880
+because encryption is sort of expensive in software.
+
+00:26:44,880 --> 00:26:46,460
+We may not want to actually encrypt
+
+00:26:46,460 --> 00:26:48,540
+all traffic on the node but maybe a subset.
+
+00:26:48,540 --> 00:26:50,233
+All traffic to this service,
+
+00:26:51,314 --> 00:26:53,740
+all traffic to this port, and so on.
+
+00:26:53,740 --> 00:26:57,400
+Right now there's no way to do that with the IPsec stack.
+
+00:26:57,400 --> 00:27:00,523
+So it's a bit limiting in that sense.
+
+00:27:02,410 --> 00:27:06,510
+The other one is that it's always a bit tricky to decide
+
+00:27:06,510 --> 00:27:11,130
+if you could wild card your source or your desk.
+
+00:27:11,130 --> 00:27:12,803
+So there's some issues about,
+
+00:27:15,980 --> 00:27:17,229
+what's (voice muffled)
+
+00:27:17,229 --> 00:27:18,700
+there was a few bugs that were reverted
+
+00:27:18,700 --> 00:27:22,840
+in more recent kernels about routing table
+
+00:27:22,840 --> 00:27:25,561
+actually gets used after you do IPsec.
+
+00:27:25,561 --> 00:27:28,380
+And the bug was then fixed so we're all good.
+
+00:27:28,380 --> 00:27:31,570
+But it also sort of showed the pain
+
+00:27:31,570 --> 00:27:35,870
+of not having a very specific (voice muffled) criteria,
+
+00:27:35,870 --> 00:27:38,630
+depending on what's programmed in the kernel.
+
+00:27:38,630 --> 00:27:40,410
+And this fits really nicely with BPF
+
+00:27:40,410 --> 00:27:42,930
+because this is a case where we have some sort of
+
+00:27:42,930 --> 00:27:45,850
+unique requirements that may be specific
+
+00:27:45,850 --> 00:27:47,540
+to a customer environment here,
+
+00:27:47,540 --> 00:27:48,657
+a customer environment there.
+
+00:27:48,657 --> 00:27:49,940
+And we want to write our own
+
+00:27:49,940 --> 00:27:52,570
+very specific encryption policy.
+
+00:27:52,570 --> 00:27:54,683
+So if we match these fields, go here.
+
+00:27:57,310 --> 00:27:58,950
+So the question is how do we solve this?
+
+00:27:58,950 --> 00:28:00,430
+We have a few ideas but they're
+
+00:28:00,430 --> 00:28:02,030
+pretty high level at this point.
+
+00:28:03,734 --> 00:28:06,700
+There is some idea to do a BPF encryption map.
+
+00:28:06,700 --> 00:28:09,590
+Basically you could have a hash map with the values
+
+00:28:09,590 --> 00:28:10,930
+being encryption state.
+
+00:28:10,930 --> 00:28:13,350
+You pass in a key, it looks up the state
+
+00:28:13,350 --> 00:28:15,044
+and applies encryption.
+
+00:28:15,044 --> 00:28:17,730
+Encryption can both be synchronous and asynchronous.
+
+00:28:17,730 --> 00:28:20,150
+So the synchronous cases makes a lot of sense,
+
+00:28:20,150 --> 00:28:22,320
+'cause you get to jump to the encryption
+
+00:28:22,320 --> 00:28:24,930
+and then come back to wherever you were in the BPF program.
+
+00:28:24,930 --> 00:28:26,170
+If it's asynchronous now you have
+
+00:28:26,170 --> 00:28:27,040
+a slightly different problem
+
+00:28:27,040 --> 00:28:29,743
+because it's gonna go away and at some point
+
+00:28:29,743 --> 00:28:31,370
+come back and tell you it's ready to, it's been encrypted.
+
+00:28:31,370 --> 00:28:34,670
+So, some problems still there.
+
+00:28:34,670 --> 00:28:36,380
+But the goal is to both reduce
+
+00:28:36,380 --> 00:28:38,340
+complexity and implementation.
+
+00:28:38,340 --> 00:28:40,480
+So we don't have all these routes in the routing table.
+
+00:28:40,480 --> 00:28:42,940
+And we don't have a whole bunch of entries
+
+00:28:42,940 --> 00:28:46,285
+in the IPsec encryption data path,
+
+00:28:46,285 --> 00:28:49,684
+but also performance is another issue.
+
+00:28:49,684 --> 00:28:51,950
+So instead of passing multiple times through the stack
+
+00:28:51,950 --> 00:28:54,520
+we will be able to, in theory,
+
+00:28:54,520 --> 00:28:55,880
+just do the lookup directly
+
+00:28:55,880 --> 00:28:58,950
+and then do the redirect without all the intervening routes
+
+00:28:58,950 --> 00:29:00,373
+and rule look ups.
+
+00:29:01,300 --> 00:29:03,210
+The next one that is not clear is
+
+00:29:03,210 --> 00:29:05,013
+there is offload for IPsec.
+
+00:29:06,040 --> 00:29:07,790
+But because of this sort of loop
+
+00:29:07,790 --> 00:29:09,660
+that we're doing through the routing tables,
+
+00:29:09,660 --> 00:29:12,430
+it's not a clear, to me at least,
+
+00:29:12,430 --> 00:29:13,710
+to how the offload bindings
+
+00:29:13,710 --> 00:29:15,660
+are supposed to handle this sort of case
+
+00:29:15,660 --> 00:29:18,707
+where we pass it from one veth to the next veth
+
+00:29:18,707 --> 00:29:23,320
+and then pick the destination device
+
+00:29:23,320 --> 00:29:24,670
+kind of later in the stack.
+
+00:29:25,700 --> 00:29:27,940
+Because we don't actually know when we're doing encryption
+
+00:29:27,940 --> 00:29:30,570
+where that destination interface will be.
+
+00:29:30,570 --> 00:29:32,763
+We don't know if it supports encryption, so.
+
+00:29:33,830 --> 00:29:35,863
+But I think this would be nice to have.
+
+00:29:37,258 --> 00:29:38,833
+Sort of tightly integrated.
+
+00:29:40,200 --> 00:29:42,620
+So then the next one, what sort of pain points
+
+00:29:42,620 --> 00:29:44,253
+are we seeing on the L7 side.
+
+00:29:45,190 --> 00:29:48,310
+To date the L7 side on the kTLS and sockmap hooks
+
+00:29:48,310 --> 00:29:52,580
+only have transmit.
+
+00:29:52,580 --> 00:29:54,310
+So we've been looking to do some receive side.
+
+00:29:54,310 --> 00:29:56,513
+So if your policy is that you want to,
+
+00:29:58,060 --> 00:30:01,090
+you want to apply with kTLS encryption
+
+00:30:01,090 --> 00:30:03,090
+are all egress.
+
+00:30:03,090 --> 00:30:04,630
+Everything is quite good.
+
+00:30:04,630 --> 00:30:05,530
+It works out well.
+
+00:30:05,530 --> 00:30:07,240
+But if you have ingress policies as well,
+
+00:30:07,240 --> 00:30:09,950
+then we have a missing piece there.
+
+00:30:09,950 --> 00:30:12,114
+I think a couple of people have pinged me
+
+00:30:12,114 --> 00:30:12,947
+on the list and off list asking for this.
+
+00:30:12,947 --> 00:30:14,483
+So this seems important.
+
+00:30:15,490 --> 00:30:16,830
+The other one we don't have yet
+
+00:30:16,830 --> 00:30:18,820
+is (voice muffled) support in kTLS.
+
+00:30:18,820 --> 00:30:19,740
+So it's hard to get events
+
+00:30:19,740 --> 00:30:21,640
+out of the kTLS BPF infrastructure
+
+00:30:21,640 --> 00:30:24,080
+if you want to know statistics
+
+00:30:24,080 --> 00:30:27,400
+or how often am I sending to this
+
+00:30:27,400 --> 00:30:29,250
+mTLS key or something that's missing.
+
+00:30:31,890 --> 00:30:33,170
+The other one, and since there was
+
+00:30:33,170 --> 00:30:35,260
+some distribution talks earlier today,
+
+00:30:35,260 --> 00:30:37,000
+I think it was a good one to mention,
+
+00:30:37,000 --> 00:30:39,640
+the OpenSSL they want to start being distributed
+
+00:30:39,640 --> 00:30:40,853
+with kTLS enabled.
+
+00:30:42,400 --> 00:30:43,630
+So as soon as there's a release
+
+00:30:43,630 --> 00:30:47,200
+it would be good to start seeing this more easily deployed.
+
+00:30:47,200 --> 00:30:51,137
+And if you happen to be an SSL library person (laughing),
+
+00:30:52,260 --> 00:30:54,210
+not working on OpenSSL we could use some help.
+
+00:30:54,210 --> 00:30:56,308
+Because we did, some of the
+
+00:30:56,308 --> 00:30:57,170
+(voice muffled) folks did OpenSSL.
+
+00:30:57,170 --> 00:30:59,028
+It would be good to do some of the
+
+00:30:59,028 --> 00:31:00,280
+other libraries as well,
+
+00:31:00,280 --> 00:31:01,713
+BoringSSL, et cetera.
+
+00:31:03,500 --> 00:31:04,333
+All right.
+
+00:31:06,727 --> 00:31:09,370
+There is a few points on the key management.
+
+00:31:11,110 --> 00:31:15,330
+So currently, like I said, a lotta people do the,
+
+00:31:15,330 --> 00:31:17,260
+sorry, manage the secrets.
+
+00:31:17,260 --> 00:31:18,720
+Right now you have to manage it
+
+00:31:18,720 --> 00:31:22,360
+by manually updating the keys yourself.
+
+00:31:22,360 --> 00:31:24,300
+There's been a request to say, well,
+
+00:31:24,300 --> 00:31:26,640
+because you have the full insight
+
+00:31:26,640 --> 00:31:28,080
+into what the keys are doing,
+
+00:31:28,080 --> 00:31:30,910
+how the encryption's working, can't you also just
+
+00:31:30,910 --> 00:31:32,720
+give me a new key every so often
+
+00:31:32,720 --> 00:31:34,854
+to kinda make the story complete.
+
+00:31:34,854 --> 00:31:38,790
+So that's sort of not so much a kernel side pain point,
+
+00:31:38,790 --> 00:31:40,890
+but a request from the Cilium side,
+
+00:31:40,890 --> 00:31:43,890
+'cause I'm not sure we need much from the kernel to do that.
+
+00:31:45,750 --> 00:31:48,060
+The other thing that I sort of wondered is
+
+00:31:48,060 --> 00:31:49,920
+right now we also keep a lot of the keys
+
+00:31:49,920 --> 00:31:53,220
+in this kind of user space visible key ring.
+
+00:31:53,220 --> 00:31:55,560
+So if you query IPsec and we had it
+
+00:31:55,560 --> 00:31:58,650
+on some of the earlier commands,
+
+00:31:58,650 --> 00:32:01,770
+the key itself is in the output.
+
+00:32:01,770 --> 00:32:03,840
+Maybe we should put it in one of these kernel key rings
+
+00:32:03,840 --> 00:32:05,360
+so that it's locked down and just
+
+00:32:05,360 --> 00:32:07,523
+don't let users pull out the keys.
+
+00:32:10,982 --> 00:32:12,950
+I did wanna mention that for this,
+
+00:32:12,950 --> 00:32:15,370
+most part, BPF has made sort of
+
+00:32:15,370 --> 00:32:16,820
+significant progress in the last year.
+
+00:32:16,820 --> 00:32:18,690
+So I think like a year ago we might have said,
+
+00:32:18,690 --> 00:32:21,030
+well we don't have these boxes checked.
+
+00:32:21,030 --> 00:32:22,530
+But now I think BPF,
+
+00:32:22,530 --> 00:32:25,170
+for the most part, is doing what we need.
+
+00:32:25,170 --> 00:32:27,420
+And it's sort of the other subsytems
+
+00:32:27,420 --> 00:32:29,490
+are pulling in these helpers to kind of complete
+
+00:32:29,490 --> 00:32:31,193
+the networking story.
+
+00:32:32,872 --> 00:32:37,350
+And with that, those are my slides.
+
+00:32:37,350 --> 00:32:39,800
+Are there any questions? - Any questions anyone?
+
+00:32:43,863 --> 00:32:45,330
+- Not sure if you mentioned at the beginning,
+
+00:32:45,330 --> 00:32:47,030
+but why do you have two
+
+00:32:47,030 --> 00:32:48,930
+different ways to encrypt the traffic?
+
+00:32:49,880 --> 00:32:52,790
+And when do you use one and then use the other?
+
+00:32:52,790 --> 00:32:54,930
+Right, so like why do have, for the layer three,
+
+00:32:54,930 --> 00:32:56,450
+for example, why do we have...
+
+00:32:56,450 --> 00:32:58,420
+- [Audience Member] Why do you have both IPsec and TLS?
+
+00:32:58,420 --> 00:33:01,000
+- Oh, why do we have both IPsec and TLS?
+
+00:33:01,000 --> 00:33:04,040
+That's sort of more of a customer decision,
+
+00:33:04,040 --> 00:33:04,873
+what they would like to do.
+
+00:33:04,873 --> 00:33:09,873
+So TLS would be usually more L7 based encryption.
+
+00:33:10,010 --> 00:33:13,270
+Like, maybe you want to have a--
+
+00:33:13,270 --> 00:33:14,620
+- [Audience Member] That's not encrypting all the traffic--
+
+00:33:14,620 --> 00:33:15,690
+- Right exactly.
+
+00:33:15,690 --> 00:33:17,350
+So then L3 you might say I want
+
+00:33:17,350 --> 00:33:19,700
+to encrypt everything on this node
+
+00:33:19,700 --> 00:33:22,210
+and I don't care if it's UDP or it's TDCP
+
+00:33:22,210 --> 00:33:24,290
+or some other protocol that I have no idea about
+
+00:33:24,290 --> 00:33:25,510
+I want to ensure it gets encrypted.
+
+00:33:25,510 --> 00:33:26,343
+- [Audience Member] Okay, whereas TLS is
+
+00:33:27,860 --> 00:33:30,040
+if they're running an application that uses (voice muffled).
+
+00:33:30,040 --> 00:33:31,510
+- Yeah. - And the second question
+
+00:33:31,510 --> 00:33:33,737
+is are you considering (voice muffled)?
+
+00:33:36,250 --> 00:33:38,110
+- That comes up a handful of,
+
+00:33:38,110 --> 00:33:39,367
+usually when we talk about this,
+
+00:33:39,367 --> 00:33:41,810
+we've talked about a few other places,
+
+00:33:41,810 --> 00:33:43,860
+people ask, when is WireGuard coming in?
+
+00:33:43,860 --> 00:33:47,360
+And I think it's just a feature request at this point.
+
+00:33:47,360 --> 00:33:50,020
+I think I'd like to nail down some of the pain points
+
+00:33:50,020 --> 00:33:52,630
+on this implementation first, right?
+
+00:33:52,630 --> 00:33:55,180
+Get this working well and then--
+
+00:33:55,180 --> 00:33:56,840
+And then I don't see any,
+
+00:33:56,840 --> 00:33:58,090
+there's no technical reason other
+
+00:33:58,090 --> 00:34:00,300
+than it just needs to be done.
+
+00:34:00,300 --> 00:34:01,900
+- [Audience Member] And it needs to be upstreamed.
+
+00:34:01,900 --> 00:34:03,850
+- Oh that is the main, I think the main--
+
+00:34:03,850 --> 00:34:06,427
+- I realize that if they didn't use kTLS
+
+00:34:06,427 --> 00:34:08,700
+the policy would have to be done
+
+00:34:08,700 --> 00:34:10,980
+externally with a separate key.
+
+00:34:10,980 --> 00:34:13,380
+Like you'd have to use a dummy key.
+
+00:34:13,380 --> 00:34:14,940
+Then you can un-encrypt it,
+
+00:34:14,940 --> 00:34:17,390
+the policy engine somewhere else.
+
+00:34:17,390 --> 00:34:19,590
+And then re-encrypt it with real CA
+
+00:34:19,590 --> 00:34:21,730
+if you're going to GitHub or something like this.
+
+00:34:21,730 --> 00:34:24,490
+Whereas they do kTLS (voice muffled) policy,
+
+00:34:24,490 --> 00:34:27,373
+then kTLS and all locally by the app.
+
+00:34:33,720 --> 00:34:35,560
+- So you mentioned that the encryption process
+
+00:34:35,560 --> 00:34:36,892
+can be expensive.
+
+00:34:36,892 --> 00:34:40,310
+There can be multiple periodic health probes
+
+00:34:40,310 --> 00:34:42,710
+going from node to pod.
+
+00:34:42,710 --> 00:34:45,130
+Are those encrypted as well?
+
+00:34:45,130 --> 00:34:46,283
+- Oh yeah, so,
+
+00:34:47,170 --> 00:34:48,003
+in the,
+
+00:34:50,380 --> 00:34:52,740
+when you have it enabled in the L3 mode
+
+00:34:52,740 --> 00:34:55,040
+we will encrypt all node traffic.
+
+00:34:55,040 --> 00:34:58,410
+So if you have just a normal whatever,
+
+00:34:58,410 --> 00:35:01,610
+a health check message going from some node
+
+00:35:01,610 --> 00:35:03,500
+to some pod somewhere else,
+
+00:35:03,500 --> 00:35:05,477
+that'll get routed back to Cilium host.
+
+00:35:05,477 --> 00:35:09,360
+Which is sort of our main BPF program.
+
+00:35:09,360 --> 00:35:12,760
+And the BPF program will look it up in the policy,
+
+00:35:12,760 --> 00:35:15,730
+and if the policy says all traffic from this node
+
+00:35:15,730 --> 00:35:17,800
+needs to be encrypted it will
+
+00:35:17,800 --> 00:35:20,300
+apply the layer three encryption.
+
+00:35:20,300 --> 00:35:21,850
+- [Audience Member] Well the health probes
+
+00:35:21,850 --> 00:35:24,987
+are just local traffic going from node
+
+00:35:24,987 --> 00:35:25,820
+(voice muffled) to pod.
+
+00:35:25,820 --> 00:35:27,180
+- Inside the system? - Right.
+
+00:35:27,180 --> 00:35:31,400
+- Yeah, so we don't currently encrypt local traffic,
+
+00:35:31,400 --> 00:35:33,680
+so that the sort of thinking I have on this
+
+00:35:33,680 --> 00:35:35,117
+is that if a
+
+00:35:37,030 --> 00:35:40,620
+pod or even the node is sending traffic to another pod
+
+00:35:40,620 --> 00:35:43,690
+I'm not entirely clear what advantage you get
+
+00:35:43,690 --> 00:35:47,050
+by encrypting it and then turning around and decrypting it.
+
+00:35:47,050 --> 00:35:49,280
+So we basically look in the policy map and go,
+
+00:35:49,280 --> 00:35:50,700
+oh, that's a local pod.
+
+00:35:50,700 --> 00:35:52,650
+Let's just send it directly to the pod.
+
+00:35:53,864 --> 00:35:55,300
+Is that what you would expect?
+
+00:35:55,300 --> 00:35:57,282
+Do you have a preference?
+
+00:35:57,282 --> 00:36:00,080
+- [Audience Member] No I would, I would have thought that
+
+00:36:00,080 --> 00:36:01,770
+you wouldn't encrypt the local traffic
+
+00:36:01,770 --> 00:36:03,960
+because it's just too much overhead.
+
+00:36:03,960 --> 00:36:06,710
+So how do you determine whether destination pod is local,
+
+00:36:06,710 --> 00:36:09,970
+do you read sed state or?
+
+00:36:09,970 --> 00:36:10,803
+- So
+
+00:36:12,330 --> 00:36:13,500
+when
+
+00:36:13,500 --> 00:36:18,100
+basically Cilium has this list of all IPs
+
+00:36:18,100 --> 00:36:20,360
+inside the network.
+
+00:36:20,360 --> 00:36:23,150
+So in the cluster it'll know all the IPs,
+
+00:36:23,150 --> 00:36:26,300
+and what we've done is we've also added
+
+00:36:26,300 --> 00:36:29,250
+an IP to node mapping inside that map.
+
+00:36:29,250 --> 00:36:31,520
+So every IP maps back to a node.
+
+00:36:31,520 --> 00:36:35,300
+So inside BPF what we do is we pull out the destination IP
+
+00:36:35,300 --> 00:36:38,000
+from the SKB basically.
+
+00:36:38,000 --> 00:36:41,140
+And then we'd use that as a lookup key in the,
+
+00:36:41,140 --> 00:36:42,410
+with some extra metadata,
+
+00:36:42,410 --> 00:36:45,111
+but we use that as a lookup key in this map
+
+00:36:45,111 --> 00:36:45,944
+and basically we get the node IP
+
+00:36:45,944 --> 00:36:49,210
+and we go, and then we know our local node IP
+
+00:36:49,210 --> 00:36:51,400
+so we can go does this match our local node IP?
+
+00:36:51,400 --> 00:36:55,049
+And if so we just pass it along directly.
+
+00:36:55,049 --> 00:36:56,150
+- [Audience Member] All right, and second question,
+
+00:36:56,150 --> 00:36:59,323
+when you move Envoy at the load level,
+
+00:36:59,323 --> 00:37:01,963
+how does distributed tracing continue to work?
+
+00:37:03,670 --> 00:37:04,523
+- Good question.
+
+00:37:08,770 --> 00:37:11,160
+Is the concern that when you're
+
+00:37:11,160 --> 00:37:12,070
+doing the distributed tracing
+
+00:37:12,070 --> 00:37:13,400
+you also have the pod info?
+
+00:37:13,400 --> 00:37:16,197
+Is that what you're getting at?
+
+00:37:16,197 --> 00:37:19,173
+- Right, the Envoy as a sidecar insert some metadata,
+
+00:37:20,110 --> 00:37:22,743
+HTTP headers like request ID and such?
+
+00:37:25,610 --> 00:37:28,770
+- I believe that we passed some IDs through the mark value,
+
+00:37:28,770 --> 00:37:32,520
+and then those get used to kind of
+
+00:37:32,520 --> 00:37:35,740
+map the pod to Envoy, in this sense.
+
+00:37:35,740 --> 00:37:37,270
+I'm not sure if it's one to one to be honest.
+
+00:37:37,270 --> 00:37:39,540
+I didn't actually do the Envoy implementation myself.
+
+00:37:39,540 --> 00:37:42,210
+So the Envoy developer is unfortunately not here.
+
+00:37:42,210 --> 00:37:46,500
+But yeah, I'm not exactly sure if it's one to one.
+
+00:37:46,500 --> 00:37:49,300
+There's some mapping, I'm not sure exactly how it works.
+
+00:37:52,180 --> 00:37:57,180
+- Hey John, so I think if I understood you correctly,
+
+00:37:57,470 --> 00:38:00,510
+you're saying that your IPsec tunnel
+
+00:38:00,510 --> 00:38:03,410
+is managed on a per node basis?
+
+00:38:03,410 --> 00:38:05,453
+- Yes. - So,
+
+00:38:07,076 --> 00:38:09,640
+a tenant's pods are typically distributed
+
+00:38:09,640 --> 00:38:13,440
+across multiple nodes and often connected with VXLANs.
+
+00:38:13,440 --> 00:38:14,860
+How do you manage those tunnels if you
+
+00:38:14,860 --> 00:38:18,290
+have multiple virtual tunnel endpoints?
+
+00:38:18,290 --> 00:38:19,783
+- Yeah, okay, so,
+
+00:38:22,100 --> 00:38:26,020
+inside this map that has the destination IP,
+
+00:38:26,020 --> 00:38:28,160
+we also have an ID of the tunnel
+
+00:38:28,160 --> 00:38:30,400
+that it should use for VXLAN tunnel.
+
+00:38:30,400 --> 00:38:32,410
+- So you actually have an IPsec tunnel
+
+00:38:32,410 --> 00:38:34,973
+per virtual tunnel connection?
+
+00:38:36,210 --> 00:38:39,150
+- Yes, you could do that.
+
+00:38:39,150 --> 00:38:42,110
+You would probably, there's a question about how useful
+
+00:38:42,110 --> 00:38:44,800
+it is to have a VXLAN tunnel inside an IPsec tunnel.
+
+00:38:44,800 --> 00:38:47,650
+- [Audience Member] Right, sort of the implication there.
+
+00:38:48,800 --> 00:38:52,520
+- That is possible via configuration to make happen.
+
+00:38:52,520 --> 00:38:54,899
+Like, we don't block this from,
+
+00:38:54,899 --> 00:38:57,130
+from happening.
+
+00:38:57,130 --> 00:39:00,630
+I've not seen anybody actually try to deploy that.
+
+00:39:00,630 --> 00:39:01,980
+- [Audience Member] How would you normally do it?
+
+00:39:01,980 --> 00:39:04,890
+- So normally you could either do
+
+00:39:07,180 --> 00:39:08,440
+IPsec without tunnel mode.
+
+00:39:08,440 --> 00:39:12,043
+So just do the transport mode and then you have the IPsec.
+
+00:39:13,954 --> 00:39:15,140
+Sorry, then you have the VXLAN,
+
+00:39:15,140 --> 00:39:17,490
+and then you have IPsec again but not the tunnel mode,
+
+00:39:17,490 --> 00:39:19,318
+so it's just-- - Just in transport mode
+
+00:39:19,318 --> 00:39:20,220
+so you don't have the extra header.
+
+00:39:20,220 --> 00:39:22,660
+- Yeah, so that would be one way.
+
+00:39:22,660 --> 00:39:24,670
+The other way, which takes more work
+
+00:39:24,670 --> 00:39:26,890
+because it does change your sort of network a little bit.
+
+00:39:26,890 --> 00:39:31,890
+But you, one thing that happens when you use IP
+
+00:39:31,920 --> 00:39:36,890
+in IP tunnel mode is now you have an IP per node.
+
+00:39:36,890 --> 00:39:38,170
+So you could use that as your tunnel.
+
+00:39:38,170 --> 00:39:42,310
+But then you lose some of the VXLAN tenant ID
+
+00:39:42,310 --> 00:39:43,300
+and stuff like that, right?
+
+00:39:43,300 --> 00:39:46,450
+- But either way you've got basically a key pair per vtab?
+
+00:39:46,450 --> 00:39:47,363
+- Yeah, exactly.
+
+00:39:49,710 --> 00:39:52,182
+- [Moderator] Anyone else have a question?
+
+00:39:52,182 --> 00:39:53,900
+Anyone else?
+
+00:39:53,900 --> 00:39:55,351
+All right, thanks a lot, John.
+
+00:39:55,351 --> 00:40:00,351
+
+YouTube URL: https://www.youtube.com/watch?v=vHt4aSsZt7g
+
+

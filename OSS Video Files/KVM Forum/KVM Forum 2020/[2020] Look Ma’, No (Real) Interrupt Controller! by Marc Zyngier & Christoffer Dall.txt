@@ -1,0 +1,2129 @@
+Title: [2020] Look Ma’, No (Real) Interrupt Controller! by Marc Zyngier & Christoffer Dall
+Publication date: 2020-12-09
+Playlist: KVM Forum 2020
+Description: 
+	Modern interrupt controllers are very complicated constructs with complex interfaces, only matched by the complexity of the software that emulates them. In a hypervisor, this software often lives at a privileged exception level, exposing an attractive attack surface for malicious actors, and making it difficult to verify the correctness of the hypervisor. This is problematic for many hypervisor deployments, especially when aiming to provide trusted execution environments. To address these concerns, we present a paravirtualized interrupt controller architecture, which is easier to verify, provides the minimum level of service that a VM requires as well as consistent semantics, and which has the potential to be used across CPU architectures. This gives the opportunity to consider trade-offs between performance and complexity, and the applicability to being built or accelerated in hardware.
+
+---
+
+Christoffer Dall
+Arm, Principal Engineer
+
+Christoffer Dall wrote the first implementation of KVM for the Arm architecture and co-maintained KVM/Arm in Linux for several years. Christoffer currently works for Arm, doing computer architecture with a focus on security and virtualization technologies. Christoffer Dall has a PhD in computer science from Columbia University, specializing in operating systems and virtualization. Prior to working for Arm, Christoffer worked for VMware and a silicon valley startup.
+
+Marc Zyngier
+Google, Software Engineer
+
+Marc has been working on the Linux kernel since an unexpected encounter with 0.99pl13 in 1993. His first contribution was merged in 1996 in the form of the original version of the MD driver. Having played with fault tolerant systems at Bull, worked on exotic (and ultimately doomed) CPU architectures at Texas Instruments, had fun with consumer electronics at TomTom, spent the best part of a decade at ARM where he focused on the Linux kernel, maintaining KVM/arm and some parts of the IRQ subsystem as well as being involved in some aspects of the ARM architecture, Marc is now with Google to help with enabling KVM on Android. He has presented a number of talks at Linux Plumbers, ELC, and KVM Forum over the past years.
+Captions: 
+	00:00:07,279 --> 00:00:11,200
+good morning
+
+00:00:08,240 --> 00:00:12,400
+and welcome to the first virtual kvm
+
+00:00:11,200 --> 00:00:16,880
+forum
+
+00:00:12,400 --> 00:00:19,680
+um i'm mark zanzier i work for google
+
+00:00:16,880 --> 00:00:21,760
+and together with christopher dahl um
+
+00:00:19,680 --> 00:00:26,160
+we're presenting
+
+00:00:21,760 --> 00:00:29,679
+the work we have done to try and revisit
+
+00:00:26,160 --> 00:00:34,000
+the way avm 64
+
+00:00:29,679 --> 00:00:37,600
+presents interrupts to its guests
+
+00:00:34,000 --> 00:00:39,680
+and without telling too much of
+
+00:00:37,600 --> 00:00:41,040
+the content of the presentation the
+
+00:00:39,680 --> 00:00:43,920
+title is quite explicit
+
+00:00:41,040 --> 00:00:45,440
+we basically want to remove the
+
+00:00:43,920 --> 00:00:48,399
+interrupt controller from the picture
+
+00:00:45,440 --> 00:00:48,399
+or at least try to
+
+00:00:48,559 --> 00:00:54,800
+why would we be doing that
+
+00:00:51,600 --> 00:00:58,000
+well hypervisors are quite complex
+
+00:00:54,800 --> 00:01:01,440
+they are very complex piece
+
+00:00:58,000 --> 00:01:04,080
+as we said and and yet they are reliable
+
+00:01:01,440 --> 00:01:04,640
+i mean we've we're in the business of
+
+00:01:04,080 --> 00:01:08,720
+building
+
+00:01:04,640 --> 00:01:10,880
+a very reliable hypervisor
+
+00:01:08,720 --> 00:01:12,159
+but that is this thing called
+
+00:01:10,880 --> 00:01:17,439
+confidential computing
+
+00:01:12,159 --> 00:01:20,799
+or trusted computing that is becoming
+
+00:01:17,439 --> 00:01:23,439
+extremely visible
+
+00:01:20,799 --> 00:01:25,200
+and security in the hypervisor is is has
+
+00:01:23,439 --> 00:01:28,240
+always been a concern but it's now
+
+00:01:25,200 --> 00:01:28,240
+even more of a con
+
+00:01:29,040 --> 00:01:32,479
+there's things we can do to to make that
+
+00:01:32,000 --> 00:01:36,640
+better
+
+00:01:32,479 --> 00:01:36,640
+or to make us feel better about it
+
+00:01:37,040 --> 00:01:43,920
+we can review audit
+
+00:01:40,880 --> 00:01:48,159
+our code and yes
+
+00:01:43,920 --> 00:01:51,280
+for those of you who are
+
+00:01:48,159 --> 00:01:56,079
+reviewers developers this is hard
+
+00:01:51,280 --> 00:01:59,119
+it takes a lot of energy dedication to
+
+00:01:56,079 --> 00:02:02,159
+properly review code
+
+00:01:59,119 --> 00:02:03,439
+we can harden things make it more
+
+00:02:02,159 --> 00:02:08,399
+difficult for
+
+00:02:03,439 --> 00:02:11,760
+bugs or exploits to appear
+
+00:02:08,399 --> 00:02:15,200
+again uh that's very useful but
+
+00:02:11,760 --> 00:02:17,599
+it tends to be reactive
+
+00:02:15,200 --> 00:02:18,319
+ideally we would prove that our code is
+
+00:02:17,599 --> 00:02:21,840
+correct
+
+00:02:18,319 --> 00:02:24,640
+um yeah that's not practical
+
+00:02:21,840 --> 00:02:28,000
+at scale especially when you look at the
+
+00:02:24,640 --> 00:02:28,000
+size of something like linux
+
+00:02:28,160 --> 00:02:35,760
+an idea is to reduce
+
+00:02:31,760 --> 00:02:38,879
+the part of the hypervisor that we trust
+
+00:02:35,760 --> 00:02:42,319
+by de-privileging some of it and
+
+00:02:38,879 --> 00:02:44,319
+only making you know the ultimate core
+
+00:02:42,319 --> 00:02:47,440
+of the hypervisor
+
+00:02:44,319 --> 00:02:50,959
+trusted it doesn't mean throwing away
+
+00:02:47,440 --> 00:02:53,040
+kvm and deciding that we need to
+
+00:02:50,959 --> 00:02:54,720
+reinvent the hypervisor from scratch um
+
+00:02:53,040 --> 00:02:58,400
+and a good example of that
+
+00:02:54,720 --> 00:03:02,319
+um is the android protected kvm
+
+00:02:58,400 --> 00:03:04,080
+project which i'm contributing to
+
+00:03:02,319 --> 00:03:06,080
+and if you're interested in that uh
+
+00:03:04,080 --> 00:03:09,680
+please watch
+
+00:03:06,080 --> 00:03:09,680
+uh with deakin's presentation
+
+00:03:10,959 --> 00:03:17,200
+so users
+
+00:03:14,480 --> 00:03:18,959
+do care about their data and especially
+
+00:03:17,200 --> 00:03:21,920
+their secrets
+
+00:03:18,959 --> 00:03:21,920
+that private data
+
+00:03:22,800 --> 00:03:28,480
+and they can store that data in what we
+
+00:03:25,120 --> 00:03:30,959
+will call confidential vms and
+
+00:03:28,480 --> 00:03:32,400
+it's interesting because they expect
+
+00:03:30,959 --> 00:03:34,480
+that
+
+00:03:32,400 --> 00:03:38,239
+these vms will provide a stronger
+
+00:03:34,480 --> 00:03:41,519
+isolation than normal applications
+
+00:03:38,239 --> 00:03:44,799
+so what defines a confidential vm um
+
+00:03:41,519 --> 00:03:48,159
+well it's private state in general
+
+00:03:44,799 --> 00:03:51,040
+that's to sippy steak you don't disclose
+
+00:03:48,159 --> 00:03:51,040
+your registered
+
+00:03:52,239 --> 00:03:56,400
+third parties your memory is strictly
+
+00:03:54,400 --> 00:03:59,439
+private either
+
+00:03:56,400 --> 00:04:02,640
+unmapped or encrypted
+
+00:03:59,439 --> 00:04:06,000
+you rely on things like
+
+00:04:02,640 --> 00:04:09,120
+time passing monotonically
+
+00:04:06,000 --> 00:04:10,879
+it doesn't go backward that's also very
+
+00:04:09,120 --> 00:04:14,560
+important
+
+00:04:10,879 --> 00:04:17,280
+and then there are interrupts so
+
+00:04:14,560 --> 00:04:17,280
+what about them
+
+00:04:17,680 --> 00:04:24,160
+well vms need to have some guarantees
+
+00:04:21,120 --> 00:04:26,240
+about their interrupts and
+
+00:04:24,160 --> 00:04:27,440
+you can think of these interrupts are
+
+00:04:26,240 --> 00:04:30,639
+being
+
+00:04:27,440 --> 00:04:32,320
+split in two buckets
+
+00:04:30,639 --> 00:04:34,320
+on one side you have what we will call
+
+00:04:32,320 --> 00:04:36,960
+the trusted interrupts they are the
+
+00:04:34,320 --> 00:04:40,880
+interrupts that
+
+00:04:36,960 --> 00:04:44,479
+the guest needs internally or
+
+00:04:40,880 --> 00:04:48,800
+to be able to function on its own
+
+00:04:44,479 --> 00:04:50,880
+and there are things like ipis
+
+00:04:48,800 --> 00:04:52,880
+having a vcpu being able to interrupt
+
+00:04:50,880 --> 00:04:56,240
+another vcpu
+
+00:04:52,880 --> 00:04:57,680
+that's crucial linux totally relies on
+
+00:04:56,240 --> 00:05:02,160
+that for its scheduling
+
+00:04:57,680 --> 00:05:04,960
+or rcu all kind of thing um
+
+00:05:02,160 --> 00:05:06,560
+and it's really important that the guest
+
+00:05:04,960 --> 00:05:10,240
+especially
+
+00:05:06,560 --> 00:05:12,960
+a confidential guest be able to
+
+00:05:10,240 --> 00:05:15,840
+trust that when it receives an api that
+
+00:05:12,960 --> 00:05:18,720
+ipr actually has been sent
+
+00:05:15,840 --> 00:05:20,720
+from the vm itself and it doesn't come
+
+00:05:18,720 --> 00:05:23,840
+from outer space
+
+00:05:20,720 --> 00:05:26,320
+same thing goes for cpu private devices
+
+00:05:23,840 --> 00:05:30,160
+your timers
+
+00:05:26,320 --> 00:05:33,039
+you want time to be
+
+00:05:30,160 --> 00:05:34,479
+monolithically increasing at the same
+
+00:05:33,039 --> 00:05:36,000
+time you don't want your timer
+
+00:05:34,479 --> 00:05:38,479
+interrupts to be
+
+00:05:36,000 --> 00:05:39,280
+crazy or to disappear altogether so
+
+00:05:38,479 --> 00:05:41,440
+these are the
+
+00:05:39,280 --> 00:05:44,000
+type of things that you would like to
+
+00:05:41,440 --> 00:05:44,000
+rely on
+
+00:05:44,080 --> 00:05:47,840
+on the other side you have what we will
+
+00:05:46,080 --> 00:05:51,280
+call untrusted interrupts
+
+00:05:47,840 --> 00:05:53,360
+and these are interrupts that
+
+00:05:51,280 --> 00:05:55,280
+are outside of the trusted computing
+
+00:05:53,360 --> 00:05:59,039
+phase things like
+
+00:05:55,280 --> 00:06:01,120
+your network interface your mass storage
+
+00:05:59,039 --> 00:06:03,520
+uh ideally you would distrust these
+
+00:06:01,120 --> 00:06:03,520
+interrupts
+
+00:06:04,720 --> 00:06:10,000
+so having said that and having
+
+00:06:07,759 --> 00:06:11,039
+thought about you know how to separate
+
+00:06:10,000 --> 00:06:14,720
+these two
+
+00:06:11,039 --> 00:06:17,840
+buckets uh
+
+00:06:14,720 --> 00:06:20,960
+can we make that fit in the
+
+00:06:17,840 --> 00:06:24,560
+om 6400 architecture
+
+00:06:20,960 --> 00:06:27,840
+we wish so let's have a look at the geek
+
+00:06:24,560 --> 00:06:31,199
+architecture to find out and
+
+00:06:27,840 --> 00:06:34,880
+it's a five minute overview
+
+00:06:31,199 --> 00:06:38,160
+and some paracetamol
+
+00:06:34,880 --> 00:06:42,560
+so the geek architecture which is
+
+00:06:38,160 --> 00:06:45,840
+at the part of the arm 64 architecture
+
+00:06:42,560 --> 00:06:49,680
+presents not one type of
+
+00:06:45,840 --> 00:06:52,400
+interrupts but actually four
+
+00:06:49,680 --> 00:06:52,960
+we have sgis which are used to implement
+
+00:06:52,400 --> 00:06:57,199
+i
+
+00:06:52,960 --> 00:06:59,280
+ipis dpis which are
+
+00:06:57,199 --> 00:07:00,560
+interrupts that are private to a given
+
+00:06:59,280 --> 00:07:03,680
+cpu
+
+00:07:00,560 --> 00:07:05,680
+spis which are global and lpr's which
+
+00:07:03,680 --> 00:07:10,319
+are global as well but only for
+
+00:07:05,680 --> 00:07:12,720
+things like msis these four classes have
+
+00:07:10,319 --> 00:07:15,440
+different interrupt life cycles a
+
+00:07:12,720 --> 00:07:17,919
+different configuration parameter and
+
+00:07:15,440 --> 00:07:19,520
+can or cannot be directly injected
+
+00:07:17,919 --> 00:07:22,880
+depending on their class
+
+00:07:19,520 --> 00:07:24,160
+and the hardware they come with all kind
+
+00:07:22,880 --> 00:07:27,120
+of tunables
+
+00:07:24,160 --> 00:07:28,840
+their group their priority their
+
+00:07:27,120 --> 00:07:33,199
+affinity
+
+00:07:28,840 --> 00:07:36,639
+and a complicated set
+
+00:07:33,199 --> 00:07:38,880
+of effects so you have
+
+00:07:36,639 --> 00:07:40,319
+the notion of an interrupt being pending
+
+00:07:38,880 --> 00:07:43,759
+being active
+
+00:07:40,319 --> 00:07:44,560
+being enabled but you also have active
+
+00:07:43,759 --> 00:07:47,520
+priorities
+
+00:07:44,560 --> 00:07:49,680
+which are both per priority and per cp
+
+00:07:47,520 --> 00:07:53,440
+and the concept of running priority
+
+00:07:49,680 --> 00:07:58,000
+which is perceived so
+
+00:07:53,440 --> 00:08:01,039
+a lot of jargon a lot of states
+
+00:07:58,000 --> 00:08:01,039
+but that's only the beginning
+
+00:08:01,360 --> 00:08:04,560
+so these interrupt classes are actually
+
+00:08:02,960 --> 00:08:07,919
+supported by
+
+00:08:04,560 --> 00:08:11,280
+three different blocks
+
+00:08:07,919 --> 00:08:12,160
+in hardware so distributor and
+
+00:08:11,280 --> 00:08:16,000
+redistributor
+
+00:08:12,160 --> 00:08:19,360
+are extremely similar the redistributor
+
+00:08:16,000 --> 00:08:21,840
+is at the per cpu level
+
+00:08:19,360 --> 00:08:23,120
+and deals with sgis and ppi so your
+
+00:08:21,840 --> 00:08:27,120
+private interrupts and
+
+00:08:23,120 --> 00:08:27,680
+ipis the distributor deals with spis
+
+00:08:27,120 --> 00:08:30,479
+which are
+
+00:08:27,680 --> 00:08:32,719
+global interrupts so it implements the
+
+00:08:30,479 --> 00:08:36,800
+routing of these interrupts
+
+00:08:32,719 --> 00:08:40,320
+to the various cpus both of these blocks
+
+00:08:36,800 --> 00:08:43,680
+are entirely mmi based
+
+00:08:40,320 --> 00:08:47,680
+and then on the side you have
+
+00:08:43,680 --> 00:08:50,640
+the its intro translation service
+
+00:08:47,680 --> 00:08:52,800
+which deals with lpis this thing we use
+
+00:08:50,640 --> 00:08:56,000
+to implement msis
+
+00:08:52,800 --> 00:09:00,320
+and that block is partially mmio based
+
+00:08:56,000 --> 00:09:03,680
+but also uses in-memory command cues
+
+00:09:00,320 --> 00:09:06,480
+and tables the
+
+00:09:03,680 --> 00:09:08,959
+inside joke for those familiar with the
+
+00:09:06,480 --> 00:09:11,200
+gig is that the its implements page
+
+00:09:08,959 --> 00:09:14,880
+tables for interrupts
+
+00:09:11,200 --> 00:09:15,600
+and that's actually the case and the its
+
+00:09:14,880 --> 00:09:17,920
+is
+
+00:09:15,600 --> 00:09:18,720
+what is required for the architecture to
+
+00:09:17,920 --> 00:09:22,480
+provide
+
+00:09:18,720 --> 00:09:25,360
+direct injection
+
+00:09:22,480 --> 00:09:27,680
+and that was only for the physical side
+
+00:09:25,360 --> 00:09:30,240
+now on the virtual side
+
+00:09:27,680 --> 00:09:31,920
+when we implement a hypervisor what
+
+00:09:30,240 --> 00:09:35,040
+facilities do we get
+
+00:09:31,920 --> 00:09:38,959
+well the only thing we have is
+
+00:09:35,040 --> 00:09:43,040
+that the architecture virtualizes
+
+00:09:38,959 --> 00:09:43,040
+the delivery of an interrupt
+
+00:09:43,200 --> 00:09:48,320
+it's the only thing so you have two ways
+
+00:09:46,080 --> 00:09:48,320
+of
+
+00:09:48,800 --> 00:09:54,480
+ensuring that any job gets delivered a
+
+00:09:51,600 --> 00:09:56,480
+guest either by
+
+00:09:54,480 --> 00:09:58,399
+putting that interrupt in what we call a
+
+00:09:56,480 --> 00:10:02,640
+list register
+
+00:09:58,399 --> 00:10:05,839
+or a set of list registers which are
+
+00:10:02,640 --> 00:10:07,279
+registers private to a cpu but that
+
+00:10:05,839 --> 00:10:10,240
+actually represents
+
+00:10:07,279 --> 00:10:10,240
+a global state
+
+00:10:10,560 --> 00:10:15,040
+if you think that's a good idea think
+
+00:10:13,040 --> 00:10:18,480
+again
+
+00:10:15,040 --> 00:10:19,920
+then we have direct injection which
+
+00:10:18,480 --> 00:10:22,959
+we would love to have everywhere
+
+00:10:19,920 --> 00:10:26,640
+unfortunately the gig only does that for
+
+00:10:22,959 --> 00:10:29,920
+lpis if you have gig v4.1 and
+
+00:10:26,640 --> 00:10:33,360
+some form of sgis um if you have
+
+00:10:29,920 --> 00:10:36,800
+the default one so sorry lpi is ep4 0
+
+00:10:33,360 --> 00:10:36,800
+sgis gigabit 0.1
+
+00:10:37,040 --> 00:10:41,760
+and frankly setting that up is terribly
+
+00:10:40,800 --> 00:10:46,880
+complicated
+
+00:10:41,760 --> 00:10:49,920
+but exists for everything else which is
+
+00:10:46,880 --> 00:10:53,600
+the the whole infrastructure
+
+00:10:49,920 --> 00:10:56,079
+the hypervisor has to emulate it
+
+00:10:53,600 --> 00:10:56,720
+distributor redistributor and its there
+
+00:10:56,079 --> 00:10:59,600
+is
+
+00:10:56,720 --> 00:11:00,000
+zero support coming from the hardware
+
+00:10:59,600 --> 00:11:05,120
+has to
+
+00:11:00,000 --> 00:11:05,120
+be entirely done in software fun
+
+00:11:06,320 --> 00:11:11,600
+so what does kvm 64 do about the geek
+
+00:11:09,440 --> 00:11:14,800
+architecture
+
+00:11:11,600 --> 00:11:18,160
+well it's quite painful we support
+
+00:11:14,800 --> 00:11:20,000
+the whole gamut of the architecture
+
+00:11:18,160 --> 00:11:21,680
+but if you look at the way it works
+
+00:11:20,000 --> 00:11:22,720
+there's a lot of state duplication
+
+00:11:21,680 --> 00:11:26,800
+between
+
+00:11:22,720 --> 00:11:29,040
+emulation and injection so a lot
+
+00:11:26,800 --> 00:11:30,880
+of a lot of things happen behind the
+
+00:11:29,040 --> 00:11:36,320
+hypervisor's back
+
+00:11:30,880 --> 00:11:36,320
+remember this list registers if you put
+
+00:11:36,480 --> 00:11:41,600
+an interrupt in the list register and
+
+00:11:39,279 --> 00:11:44,800
+get the vcpu running
+
+00:11:41,600 --> 00:11:49,839
+and that another vcpu needs to for
+
+00:11:44,800 --> 00:11:49,839
+any reason need to introspect that state
+
+00:11:50,000 --> 00:11:54,399
+it's hard because oh wait the state is
+
+00:11:53,440 --> 00:11:57,040
+actually
+
+00:11:54,399 --> 00:11:58,480
+private to a cpu another cpu cannot
+
+00:11:57,040 --> 00:12:02,000
+observe it
+
+00:11:58,480 --> 00:12:03,760
+so you need some synchronization between
+
+00:12:02,000 --> 00:12:07,120
+the two physical cpus
+
+00:12:03,760 --> 00:12:10,000
+um to get the vcpus out of the vm
+
+00:12:07,120 --> 00:12:10,399
+so that you can synchronize the state it
+
+00:12:10,000 --> 00:12:13,519
+means
+
+00:12:10,399 --> 00:12:15,600
+physical apis it's hard to get it right
+
+00:12:13,519 --> 00:12:17,920
+and it's even harder to make it
+
+00:12:15,600 --> 00:12:19,839
+performance
+
+00:12:17,920 --> 00:12:21,680
+there's a lot to emulate you have
+
+00:12:19,839 --> 00:12:23,600
+literally hundreds of registers
+
+00:12:21,680 --> 00:12:25,760
+with complex semantics at both the
+
+00:12:23,600 --> 00:12:27,920
+distributor and the distributor level
+
+00:12:25,760 --> 00:12:29,600
+that's very complex its commands that
+
+00:12:27,920 --> 00:12:33,040
+require global synchronization
+
+00:12:29,600 --> 00:12:39,440
+and the opportunities for bugs are
+
+00:12:33,040 --> 00:12:42,000
+everywhere an interesting um
+
+00:12:39,440 --> 00:12:43,040
+thing to try and do would be to
+
+00:12:42,000 --> 00:12:46,000
+de-privilege
+
+00:12:43,040 --> 00:12:47,440
+that part of the geek emulation and
+
+00:12:46,000 --> 00:12:50,880
+let's say like on x86
+
+00:12:47,440 --> 00:12:53,200
+try and move it to user space in theory
+
+00:12:50,880 --> 00:12:55,120
+possible and if you look at the way the
+
+00:12:53,200 --> 00:12:57,040
+geek is split you'd say oh yeah we can
+
+00:12:55,120 --> 00:12:59,920
+move all these blocks to use a space
+
+00:12:57,040 --> 00:13:01,839
+and them could be independent in
+
+00:12:59,920 --> 00:13:03,680
+practice that would result in a massive
+
+00:13:01,839 --> 00:13:07,120
+state duplication
+
+00:13:03,680 --> 00:13:09,279
+which would be again hard to synchronize
+
+00:13:07,120 --> 00:13:10,959
+um and would also result in bad
+
+00:13:09,279 --> 00:13:12,240
+performance because you would just to
+
+00:13:10,959 --> 00:13:13,600
+achieve that synchronization you would
+
+00:13:12,240 --> 00:13:15,920
+have to go all the way back to user
+
+00:13:13,600 --> 00:13:15,920
+space
+
+00:13:16,959 --> 00:13:21,360
+we also have to deal with an enormous
+
+00:13:19,920 --> 00:13:22,639
+hardware variability
+
+00:13:21,360 --> 00:13:25,360
+everything is optional in the
+
+00:13:22,639 --> 00:13:27,680
+architecture really absolutely
+
+00:13:25,360 --> 00:13:28,639
+everything there are multiple ways of
+
+00:13:27,680 --> 00:13:33,120
+doing the same thing
+
+00:13:28,639 --> 00:13:35,120
+and especially around direct injection
+
+00:13:33,120 --> 00:13:36,480
+um we also have tons of architecture
+
+00:13:35,120 --> 00:13:39,440
+architectural legacy
+
+00:13:36,480 --> 00:13:41,440
+dating from 15 years ago at the very
+
+00:13:39,440 --> 00:13:44,639
+least
+
+00:13:41,440 --> 00:13:48,639
+so does the
+
+00:13:44,639 --> 00:13:51,600
+virtualization architecture the geek
+
+00:13:48,639 --> 00:13:52,240
+succeed in simplifying the hypervisor no
+
+00:13:51,600 --> 00:13:54,000
+not really
+
+00:13:52,240 --> 00:13:55,760
+i mean you just have to look at the
+
+00:13:54,000 --> 00:14:01,600
+amount of code this represents
+
+00:13:55,760 --> 00:14:05,600
+about 70 percent of the whole kvm 64
+
+00:14:01,600 --> 00:14:08,560
+good bass it's it's just enormous and
+
+00:14:05,600 --> 00:14:11,279
+we did say minimizing the trusted
+
+00:14:08,560 --> 00:14:14,079
+computing base earlier
+
+00:14:11,279 --> 00:14:14,800
+it doesn't quite cut it and that's
+
+00:14:14,079 --> 00:14:18,560
+because the
+
+00:14:14,800 --> 00:14:20,880
+geek has been designed to support
+
+00:14:18,560 --> 00:14:21,760
+extremely demanding workload you know
+
+00:14:20,880 --> 00:14:23,920
+millions of
+
+00:14:21,760 --> 00:14:25,120
+interest per second device assignment
+
+00:14:23,920 --> 00:14:28,639
+direct injection
+
+00:14:25,120 --> 00:14:30,399
+compatibility i mean the key word
+
+00:14:28,639 --> 00:14:33,040
+in the gig architecture is we want to
+
+00:14:30,399 --> 00:14:36,160
+stay compatible and that's great i mean
+
+00:14:33,040 --> 00:14:39,279
+we can run guests even 32-bit guests
+
+00:14:36,160 --> 00:14:40,959
+dating from 15 years ago they will just
+
+00:14:39,279 --> 00:14:43,519
+run
+
+00:14:40,959 --> 00:14:44,880
+but that puts the complexity in the
+
+00:14:43,519 --> 00:14:47,920
+hypervisor
+
+00:14:44,880 --> 00:14:50,639
+instead of putting it in the guest
+
+00:14:47,920 --> 00:14:52,000
+so what if we could introduce an intro
+
+00:14:50,639 --> 00:14:55,600
+controller architecture
+
+00:14:52,000 --> 00:14:59,920
+for workloads not any workload but
+
+00:14:55,600 --> 00:15:03,600
+only those who are let's say mostly
+
+00:14:59,920 --> 00:15:06,800
+compute bound not io bound and
+
+00:15:03,600 --> 00:15:09,920
+that do not do device assignment
+
+00:15:06,800 --> 00:15:10,399
+literally compiling your kernel in the
+
+00:15:09,920 --> 00:15:13,199
+vm
+
+00:15:10,399 --> 00:15:15,199
+that kind of thing only joking but yes
+
+00:15:13,199 --> 00:15:17,920
+for example
+
+00:15:15,199 --> 00:15:19,040
+can we make that hypothetical
+
+00:15:17,920 --> 00:15:21,360
+architecture
+
+00:15:19,040 --> 00:15:23,680
+as simple as possible and move the
+
+00:15:21,360 --> 00:15:25,680
+complexity
+
+00:15:23,680 --> 00:15:27,519
+to the guest instead of having it at the
+
+00:15:25,680 --> 00:15:31,440
+hypervisor level
+
+00:15:27,519 --> 00:15:33,279
+what would we gain by doing that well
+
+00:15:31,440 --> 00:15:35,680
+that's the question we asked ourselves
+
+00:15:33,279 --> 00:15:35,680
+and
+
+00:15:36,240 --> 00:15:43,360
+let's hear it from christopher with the
+
+00:15:39,680 --> 00:15:45,440
+arvik architecture hi
+
+00:15:43,360 --> 00:15:46,800
+my name is christopher dell i work for
+
+00:15:45,440 --> 00:15:47,120
+arm and i'd like to talk to you about
+
+00:15:46,800 --> 00:15:48,800
+the
+
+00:15:47,120 --> 00:15:51,680
+reduced virtual interrupt controller or
+
+00:15:48,800 --> 00:15:53,600
+arvik architecture
+
+00:15:51,680 --> 00:15:56,160
+the arabic architecture is an
+
+00:15:53,600 --> 00:15:57,839
+experimental hypervisor avi design
+
+00:15:56,160 --> 00:15:59,360
+it's publicly available in what we call
+
+00:15:57,839 --> 00:16:02,880
+an alpha state which means that it's
+
+00:15:59,360 --> 00:16:05,360
+subject to change or withdrawal
+
+00:16:02,880 --> 00:16:06,639
+the arabic architecture is a minimal set
+
+00:16:05,360 --> 00:16:08,240
+of api calls
+
+00:16:06,639 --> 00:16:10,399
+used to implement a virtual interrupt
+
+00:16:08,240 --> 00:16:12,399
+controller on rv8
+
+00:16:10,399 --> 00:16:14,240
+it seeks to have minimal impact on the
+
+00:16:12,399 --> 00:16:16,639
+hypervisor tcp
+
+00:16:14,240 --> 00:16:18,320
+and minimal impact on the nvm kernel's
+
+00:16:16,639 --> 00:16:19,759
+complexity
+
+00:16:18,320 --> 00:16:21,600
+the arbitrage is designed to support
+
+00:16:19,759 --> 00:16:24,480
+split mode hypervisors that have a
+
+00:16:21,600 --> 00:16:27,279
+trusted small tcp and a non-trusted
+
+00:16:24,480 --> 00:16:27,279
+larger code base
+
+00:16:27,839 --> 00:16:31,920
+the rvec provides per cpu interrupts and
+
+00:16:30,880 --> 00:16:34,880
+all interrupts have
+
+00:16:31,920 --> 00:16:37,440
+edge triggered semantics we do provide a
+
+00:16:34,880 --> 00:16:40,639
+resample operation to support
+
+00:16:37,440 --> 00:16:41,759
+level trigger signals the rvec provides
+
+00:16:40,639 --> 00:16:44,720
+provides routing
+
+00:16:41,759 --> 00:16:46,079
+of virtual interrupts um between virtual
+
+00:16:44,720 --> 00:16:48,959
+cpus
+
+00:16:46,079 --> 00:16:51,839
+and the arvik provides support for
+
+00:16:48,959 --> 00:16:51,839
+threaded and drop handling
+
+00:16:52,160 --> 00:16:55,680
+the arabic architecture actually
+
+00:16:53,440 --> 00:16:57,680
+describes two separate components
+
+00:16:55,680 --> 00:16:59,279
+the arvik is the pervy cpu interrupt
+
+00:16:57,680 --> 00:17:00,560
+controller implemented in the trusted
+
+00:16:59,279 --> 00:17:02,480
+hypervisor
+
+00:17:00,560 --> 00:17:03,920
+and the rvit is the per-vm virtual
+
+00:17:02,480 --> 00:17:07,039
+distributor implemented in the
+
+00:17:03,920 --> 00:17:07,039
+non-trusted hypervisor
+
+00:17:07,199 --> 00:17:10,559
+there is one arabic instance per virtual
+
+00:17:09,120 --> 00:17:12,720
+cpu
+
+00:17:10,559 --> 00:17:15,039
+and the arbi instance signals interrupts
+
+00:17:12,720 --> 00:17:16,720
+to a virtual cpu using standard rv8
+
+00:17:15,039 --> 00:17:18,640
+virtualization mechanisms such as the
+
+00:17:16,720 --> 00:17:21,760
+virtual rqbit in the
+
+00:17:18,640 --> 00:17:24,720
+hypervisor control register
+
+00:17:21,760 --> 00:17:25,839
+the arabic exposes a hypercall interface
+
+00:17:24,720 --> 00:17:27,760
+to the vm
+
+00:17:25,839 --> 00:17:29,280
+which allows the virtual cpu to receive
+
+00:17:27,760 --> 00:17:31,039
+and handle interrupts
+
+00:17:29,280 --> 00:17:33,280
+enable and disable the entire arabic
+
+00:17:31,039 --> 00:17:34,000
+instance mask and unmask individual
+
+00:17:33,280 --> 00:17:37,120
+interrupts
+
+00:17:34,000 --> 00:17:37,120
+and to send ipis
+
+00:17:37,600 --> 00:17:46,080
+the arvid has a single instance per vm
+
+00:17:42,880 --> 00:17:48,480
+is used to route interrupts to
+
+00:17:46,080 --> 00:17:49,760
+different vcpus and there arabic
+
+00:17:48,480 --> 00:17:52,000
+instances
+
+00:17:49,760 --> 00:17:53,360
+and it exposes a hypercall interface
+
+00:17:52,000 --> 00:17:55,919
+that allows the
+
+00:17:53,360 --> 00:17:58,080
+vm to map an interrupt source to a
+
+00:17:55,919 --> 00:18:01,600
+specific arabic instance with a given
+
+00:17:58,080 --> 00:18:03,200
+interrupt id
+
+00:18:01,600 --> 00:18:04,960
+the rbac introduces the concept of
+
+00:18:03,200 --> 00:18:06,720
+trusted interrupts
+
+00:18:04,960 --> 00:18:08,640
+and trusted interrupts are managed by
+
+00:18:06,720 --> 00:18:10,799
+the trusted hypervisor
+
+00:18:08,640 --> 00:18:11,679
+an example of a trusted interrupt is an
+
+00:18:10,799 --> 00:18:14,320
+ipi
+
+00:18:11,679 --> 00:18:15,679
+where the vm can trust that the ipi was
+
+00:18:14,320 --> 00:18:19,360
+actually issued from
+
+00:18:15,679 --> 00:18:22,480
+another virtual cpu within the vm
+
+00:18:19,360 --> 00:18:25,039
+another example is vcpu local interrupts
+
+00:18:22,480 --> 00:18:28,240
+for example from the generic timer
+
+00:18:25,039 --> 00:18:28,720
+which where the vm can trust that if it
+
+00:18:28,240 --> 00:18:30,960
+sees
+
+00:18:28,720 --> 00:18:32,799
+an interrupt signal from the timer that
+
+00:18:30,960 --> 00:18:35,840
+the timer actually has inserted
+
+00:18:32,799 --> 00:18:37,120
+its signal on the other hand you have
+
+00:18:35,840 --> 00:18:39,760
+non-trusted interrupts which
+
+00:18:37,120 --> 00:18:41,360
+are signals um that can be generated
+
+00:18:39,760 --> 00:18:42,000
+from outside the trusted hypervisor in
+
+00:18:41,360 --> 00:18:44,720
+the non-traffic
+
+00:18:42,000 --> 00:18:46,400
+hypervisor then an example of
+
+00:18:44,720 --> 00:18:47,600
+non-trusted interrupts would be virtual
+
+00:18:46,400 --> 00:18:49,440
+peripherals implemented in the
+
+00:18:47,600 --> 00:18:52,320
+non-trusted hypervisor such as
+
+00:18:49,440 --> 00:18:54,320
+complicated devices like bird io and all
+
+00:18:52,320 --> 00:18:55,760
+non-trusted interrupts can be spoofed by
+
+00:18:54,320 --> 00:18:58,400
+non-trusted software
+
+00:18:55,760 --> 00:18:59,840
+meaning that the vm software has to be
+
+00:18:58,400 --> 00:19:02,960
+resilient against
+
+00:18:59,840 --> 00:19:03,760
+spoofed interrupts of this kind all
+
+00:19:02,960 --> 00:19:07,039
+interrupts
+
+00:19:03,760 --> 00:19:10,480
+can trust trust their mask status on the
+
+00:19:07,039 --> 00:19:13,120
+arabic instances
+
+00:19:10,480 --> 00:19:14,400
+the arabic introduces a fairly limited
+
+00:19:13,120 --> 00:19:17,520
+set of commands
+
+00:19:14,400 --> 00:19:20,559
+you can request the api version of
+
+00:19:17,520 --> 00:19:22,440
+of the rv implementation you can
+
+00:19:20,559 --> 00:19:23,840
+use the arabic info command
+
+00:19:22,440 --> 00:19:26,000
+[Music]
+
+00:19:23,840 --> 00:19:27,679
+query how many trusted and untrusted
+
+00:19:26,000 --> 00:19:29,200
+interrupts are implemented
+
+00:19:27,679 --> 00:19:31,919
+across all the arabic instances in the
+
+00:19:29,200 --> 00:19:33,280
+system you can enable and disable entire
+
+00:19:31,919 --> 00:19:35,280
+arabic instances
+
+00:19:33,280 --> 00:19:36,720
+you can set and clear the mask status of
+
+00:19:35,280 --> 00:19:38,720
+individual introverts
+
+00:19:36,720 --> 00:19:40,000
+you can query the pending status of an
+
+00:19:38,720 --> 00:19:41,679
+individual interrupt
+
+00:19:40,000 --> 00:19:43,440
+you can acknowledge a pending interrupt
+
+00:19:41,679 --> 00:19:44,000
+and obtain whatever interrupt id is
+
+00:19:43,440 --> 00:19:46,640
+pending
+
+00:19:44,000 --> 00:19:48,160
+currently you can clear the pending
+
+00:19:46,640 --> 00:19:50,640
+state of an interrupt
+
+00:19:48,160 --> 00:19:53,440
+and you can signal an interrupt on
+
+00:19:50,640 --> 00:19:55,280
+another arctic instance
+
+00:19:53,440 --> 00:19:56,960
+finally you can also re-sample the state
+
+00:19:55,280 --> 00:20:00,080
+of an interrupt which is useful for
+
+00:19:56,960 --> 00:20:02,799
+level trigger sources and
+
+00:20:00,080 --> 00:20:05,520
+a number of these commands work across
+
+00:20:02,799 --> 00:20:08,799
+arabic instances or across virtual cpus
+
+00:20:05,520 --> 00:20:09,520
+and that is really useful for rerouting
+
+00:20:08,799 --> 00:20:13,120
+interrupts
+
+00:20:09,520 --> 00:20:13,120
+and to quiesce the system
+
+00:20:13,520 --> 00:20:17,280
+the rvid only exposes two commands
+
+00:20:16,080 --> 00:20:19,600
+mapping on map
+
+00:20:17,280 --> 00:20:20,880
+map maps an input signal to a target
+
+00:20:19,600 --> 00:20:23,600
+arbic instance
+
+00:20:20,880 --> 00:20:24,640
+with a particular interrupt id and unmap
+
+00:20:23,600 --> 00:20:27,760
+tells the orbit
+
+00:20:24,640 --> 00:20:31,120
+to not signal any interrupts at all
+
+00:20:27,760 --> 00:20:31,120
+for that for that device
+
+00:20:31,360 --> 00:20:35,120
+in terms of future direction we would
+
+00:20:33,520 --> 00:20:37,200
+like to evaluate the usefulness of the
+
+00:20:35,120 --> 00:20:39,840
+arabic architecture for
+
+00:20:37,200 --> 00:20:41,520
+things like google p kvm and also for
+
+00:20:39,840 --> 00:20:43,360
+other use cases
+
+00:20:41,520 --> 00:20:45,520
+we plan to add a priority scheme to the
+
+00:20:43,360 --> 00:20:46,400
+arabic which can be used to support
+
+00:20:45,520 --> 00:20:48,880
+pseudonymize
+
+00:20:46,400 --> 00:20:50,400
+in linux and also to support other
+
+00:20:48,880 --> 00:20:53,600
+operating systems which
+
+00:20:50,400 --> 00:20:55,760
+require priority support
+
+00:20:53,600 --> 00:20:57,280
+currently our level triggered resample
+
+00:20:55,760 --> 00:20:59,039
+operation is limited to trusted
+
+00:20:57,280 --> 00:20:59,919
+interrupts we would like to expand that
+
+00:20:59,039 --> 00:21:01,200
+to
+
+00:20:59,919 --> 00:21:03,360
+non-trusted interrupts which can be
+
+00:21:01,200 --> 00:21:06,080
+useful if you want to emulate
+
+00:21:03,360 --> 00:21:07,440
+legacy components like like uarts using
+
+00:21:06,080 --> 00:21:09,760
+level triggered interrupt signals in the
+
+00:21:07,440 --> 00:21:11,840
+non-trusted hypervisor
+
+00:21:09,760 --> 00:21:15,039
+and finally we would like to add a
+
+00:21:11,840 --> 00:21:17,120
+virtual msi support in the orbit
+
+00:21:15,039 --> 00:21:20,559
+which would be useful in the context of
+
+00:21:17,120 --> 00:21:20,559
+emulated pci for example
+
+00:21:21,039 --> 00:21:25,200
+so arm would like to welcome any
+
+00:21:22,880 --> 00:21:27,600
+feedback on use cases or
+
+00:21:25,200 --> 00:21:28,640
+on changes to the arabic orbit concepts
+
+00:21:27,600 --> 00:21:30,080
+in the
+
+00:21:28,640 --> 00:21:32,720
+orbit specification in the arabic
+
+00:21:30,080 --> 00:21:32,720
+specification
+
+00:21:32,799 --> 00:21:36,799
+and you can email me directly for any or
+
+00:21:35,600 --> 00:21:41,360
+any suggestions
+
+00:21:36,799 --> 00:21:45,360
+thank you thanks mustafa
+
+00:21:41,360 --> 00:21:48,720
+so what about the arvik and kvn
+
+00:21:45,360 --> 00:21:51,679
+so we have a full arvik
+
+00:21:48,720 --> 00:21:52,640
+and rv implementation for kvm on m64 you
+
+00:21:51,679 --> 00:21:54,000
+can see
+
+00:21:52,640 --> 00:21:55,340
+the pointer to the patches at the bottom
+
+00:21:54,000 --> 00:21:57,039
+of this slide
+
+00:21:55,340 --> 00:21:59,840
+[Music]
+
+00:21:57,039 --> 00:22:00,880
+that's tiny absolutely tiny 1100 lines
+
+00:21:59,840 --> 00:22:04,159
+of code
+
+00:22:00,880 --> 00:22:07,840
+um which is less than the tenth of the
+
+00:22:04,159 --> 00:22:08,240
+dv3 equivalent um most of the changes
+
+00:22:07,840 --> 00:22:12,480
+are
+
+00:22:08,240 --> 00:22:15,760
+about moving the v gigic which
+
+00:22:12,480 --> 00:22:19,760
+had its fingers in every pi
+
+00:22:15,760 --> 00:22:22,159
+of the m64 tree into its own box
+
+00:22:19,760 --> 00:22:24,320
+and keep it there so it's about it was
+
+00:22:22,159 --> 00:22:27,280
+about defining a clean interface
+
+00:22:24,320 --> 00:22:27,760
+always a good thing to do um we have
+
+00:22:27,280 --> 00:22:30,960
+some
+
+00:22:27,760 --> 00:22:33,919
+very very sketchy code
+
+00:22:30,960 --> 00:22:34,640
+for kvm tool uh it's basically a huge
+
+00:22:33,919 --> 00:22:37,760
+hack
+
+00:22:34,640 --> 00:22:41,039
+which is dt only doesn't deal with live
+
+00:22:37,760 --> 00:22:43,760
+migration like the rest of kpm tool
+
+00:22:41,039 --> 00:22:44,559
+it's really a way to get things started
+
+00:22:43,760 --> 00:22:48,080
+eventually
+
+00:22:44,559 --> 00:22:50,799
+that should be rewritten from scratch
+
+00:22:48,080 --> 00:22:52,480
+and we have a complete guest driver for
+
+00:22:50,799 --> 00:22:55,440
+linux
+
+00:22:52,480 --> 00:22:56,000
+it's about the same size about 900 lines
+
+00:22:55,440 --> 00:22:59,919
+of code
+
+00:22:56,000 --> 00:23:02,720
+plus a bit more for the msi support
+
+00:22:59,919 --> 00:23:04,240
+which we'll talk about later and frankly
+
+00:23:02,720 --> 00:23:07,520
+it was a good opportunity to
+
+00:23:04,240 --> 00:23:10,880
+clean the arm 64 smp code and
+
+00:23:07,520 --> 00:23:13,520
+especially the ipi code so yeah not a
+
+00:23:10,880 --> 00:23:13,520
+bad thing to do
+
+00:23:14,720 --> 00:23:18,240
+how bad is it well it's acceptable let's
+
+00:23:17,200 --> 00:23:20,240
+say
+
+00:23:18,240 --> 00:23:21,440
+i don't have any scientific measurements
+
+00:23:20,240 --> 00:23:24,880
+but
+
+00:23:21,440 --> 00:23:28,000
+early um benchmarks show that hike bench
+
+00:23:24,880 --> 00:23:31,120
+um which is extremely high ipi heavy
+
+00:23:28,000 --> 00:23:32,000
+is around five percent slower not too
+
+00:23:31,120 --> 00:23:35,360
+bad
+
+00:23:32,000 --> 00:23:36,880
+uh i mean five percent is huge but
+
+00:23:35,360 --> 00:23:39,280
+in the grand scheme of things of things
+
+00:23:36,880 --> 00:23:41,679
+given how this
+
+00:23:39,280 --> 00:23:42,880
+even drop controller is implemented it's
+
+00:23:41,679 --> 00:23:45,279
+not horrible
+
+00:23:42,880 --> 00:23:46,080
+um general corporation which is the
+
+00:23:45,279 --> 00:23:48,480
+benchmark i
+
+00:23:46,080 --> 00:23:50,080
+actually care about shows actually no
+
+00:23:48,480 --> 00:23:51,760
+significant difference which is quite
+
+00:23:50,080 --> 00:23:54,240
+amazing
+
+00:23:51,760 --> 00:23:55,120
+so it's very trap heavy but turns out
+
+00:23:54,240 --> 00:23:57,919
+that
+
+00:23:55,120 --> 00:24:00,640
+interacting with the hardware isn't free
+
+00:23:57,919 --> 00:24:02,480
+i mean it has a huge cost
+
+00:24:00,640 --> 00:24:04,750
+all these system registers or this every
+
+00:24:02,480 --> 00:24:05,919
+store we have to perform
+
+00:24:04,750 --> 00:24:08,799
+[Music]
+
+00:24:05,919 --> 00:24:10,159
+is also very expensive and not having
+
+00:24:08,799 --> 00:24:13,520
+any cross cpu
+
+00:24:10,159 --> 00:24:16,000
+interaction really helps here so
+
+00:24:13,520 --> 00:24:18,640
+definitely more analysis is required we
+
+00:24:16,000 --> 00:24:21,840
+need we want to find out
+
+00:24:18,640 --> 00:24:23,600
+whether we can improve things or maybe
+
+00:24:21,840 --> 00:24:26,640
+things are worse than we think but
+
+00:24:23,600 --> 00:24:27,279
+honestly for now it's all right and to
+
+00:24:26,640 --> 00:24:30,840
+be honest
+
+00:24:27,279 --> 00:24:34,000
+performance wasn't
+
+00:24:30,840 --> 00:24:35,760
+the the key point for the design it was
+
+00:24:34,000 --> 00:24:39,840
+the simplicity and i think for that
+
+00:24:35,760 --> 00:24:43,520
+yeah we seem to have achieved a goal
+
+00:24:39,840 --> 00:24:45,360
+and talking about simplicity um
+
+00:24:43,520 --> 00:24:47,120
+i said earlier that we wanted to move
+
+00:24:45,360 --> 00:24:47,600
+the complexity from the hypervisor into
+
+00:24:47,120 --> 00:24:51,440
+the guest
+
+00:24:47,600 --> 00:24:53,679
+so how bad is that well
+
+00:24:51,440 --> 00:24:55,600
+let's look into what is probably one of
+
+00:24:53,679 --> 00:24:56,960
+the most complicated
+
+00:24:55,600 --> 00:24:59,120
+operations that we have to implement
+
+00:24:56,960 --> 00:25:01,679
+which is to move
+
+00:24:59,120 --> 00:25:03,679
+an interrupt from targeting a cpu to
+
+00:25:01,679 --> 00:25:08,080
+another
+
+00:25:03,679 --> 00:25:08,080
+and just getting the affinity
+
+00:25:09,760 --> 00:25:13,039
+if you do that at the geek level it's
+
+00:25:11,600 --> 00:25:14,080
+quite complicated because you need to
+
+00:25:13,039 --> 00:25:17,520
+synchronize
+
+00:25:14,080 --> 00:25:19,279
+your cpus making sure that um
+
+00:25:17,520 --> 00:25:21,600
+the state cannot change from under your
+
+00:25:19,279 --> 00:25:24,400
+feet because it's it will be
+
+00:25:21,600 --> 00:25:26,159
+changed by another vcpu while you're
+
+00:25:24,400 --> 00:25:29,760
+trying to move the interrupt
+
+00:25:26,159 --> 00:25:32,080
+it's thought with danger
+
+00:25:29,760 --> 00:25:33,440
+if you implement it entirely in the
+
+00:25:32,080 --> 00:25:35,039
+guest like we do
+
+00:25:33,440 --> 00:25:37,360
+uh with the arabic and you can look at
+
+00:25:35,039 --> 00:25:40,159
+the code that is here it's extremely
+
+00:25:37,360 --> 00:25:40,960
+simple although it's logically the what
+
+00:25:40,159 --> 00:25:43,039
+you would do
+
+00:25:40,960 --> 00:25:44,480
+at the hypervisor level as well so you
+
+00:25:43,039 --> 00:25:47,919
+mask the interrupt
+
+00:25:44,480 --> 00:25:50,240
+at the old cpu level you
+
+00:25:47,919 --> 00:25:51,279
+sample the panic state you map it onto
+
+00:25:50,240 --> 00:25:54,799
+the new cpu
+
+00:25:51,279 --> 00:25:56,320
+and if it was pending you
+
+00:25:54,799 --> 00:25:58,400
+inject that interrupt you clear the
+
+00:25:56,320 --> 00:26:02,000
+pending state on the old cpu
+
+00:25:58,400 --> 00:26:05,200
+and you clear the mass state on the new
+
+00:26:02,000 --> 00:26:07,600
+vcpu and you're done
+
+00:26:05,200 --> 00:26:08,559
+the difference here well there's no
+
+00:26:07,600 --> 00:26:10,799
+locking
+
+00:26:08,559 --> 00:26:12,000
+there's no locking whatsoever because we
+
+00:26:10,799 --> 00:26:14,559
+rely
+
+00:26:12,000 --> 00:26:15,360
+on the guest doing the locking which it
+
+00:26:14,559 --> 00:26:19,279
+needs to do
+
+00:26:15,360 --> 00:26:20,720
+anyway it's a given so
+
+00:26:19,279 --> 00:26:22,880
+if we had to do that in the hypervisor
+
+00:26:20,720 --> 00:26:26,240
+it's much harder here we just
+
+00:26:22,880 --> 00:26:27,200
+reuse something that the guest has to
+
+00:26:26,240 --> 00:26:29,840
+provide
+
+00:26:27,200 --> 00:26:29,840
+and that's key
+
+00:26:30,640 --> 00:26:38,640
+now when it comes to msi support
+
+00:26:34,240 --> 00:26:40,960
+so as we said being pvd the
+
+00:26:38,640 --> 00:26:42,640
+rv spec doesn't define what an msi is
+
+00:26:40,960 --> 00:26:45,840
+because it only has abstract input
+
+00:26:42,640 --> 00:26:48,720
+no mmi oh no doorbell whatsoever
+
+00:26:45,840 --> 00:26:50,320
+just not the thing and that's a bit of a
+
+00:26:48,720 --> 00:26:50,960
+problem because we want to be able to
+
+00:26:50,320 --> 00:26:54,080
+reuse
+
+00:26:50,960 --> 00:26:56,960
+things like pci device models
+
+00:26:54,080 --> 00:26:56,960
+vertebrae or pci
+
+00:26:57,200 --> 00:27:04,400
+because we don't have level interrupts
+
+00:27:02,240 --> 00:27:06,080
+untrusted leveling drops we can't
+
+00:27:04,400 --> 00:27:10,320
+implement in tech support
+
+00:27:06,080 --> 00:27:13,760
+so far so we need to
+
+00:27:10,320 --> 00:27:17,840
+grow some form of msi support
+
+00:27:13,760 --> 00:27:20,320
+so okay we've invented it um
+
+00:27:17,840 --> 00:27:20,960
+so we just reserve a bunch of um obvious
+
+00:27:20,320 --> 00:27:23,520
+input
+
+00:27:20,960 --> 00:27:24,000
+as msi's we add a fake doorbell it's
+
+00:27:23,520 --> 00:27:27,760
+which is
+
+00:27:24,000 --> 00:27:30,240
+yet another uh terrible kvm tool hack
+
+00:27:27,760 --> 00:27:31,039
+which is based on the gig v2 emulation
+
+00:27:30,240 --> 00:27:33,679
+um
+
+00:27:31,039 --> 00:27:35,440
+that definitely needs re-working so that
+
+00:27:33,679 --> 00:27:36,480
+to be independent of the avid basically
+
+00:27:35,440 --> 00:27:40,000
+what we need to do
+
+00:27:36,480 --> 00:27:40,559
+is create a separate virtual block that
+
+00:27:40,000 --> 00:27:43,200
+is
+
+00:27:40,559 --> 00:27:46,240
+in front of the avid and which only
+
+00:27:43,200 --> 00:27:48,399
+provides input to the oven
+
+00:27:46,240 --> 00:27:50,399
+all we need to the rv to grow some msi
+
+00:27:48,399 --> 00:27:53,520
+support but
+
+00:27:50,399 --> 00:27:55,120
+anyway that needs to to be changed but
+
+00:27:53,520 --> 00:27:59,200
+as a proof of context of
+
+00:27:55,120 --> 00:27:59,200
+concept but not too bad
+
+00:27:59,760 --> 00:28:05,919
+so where do we take this
+
+00:28:03,200 --> 00:28:07,039
+so we managed to demonstrate a few
+
+00:28:05,919 --> 00:28:10,159
+things uh
+
+00:28:07,039 --> 00:28:13,600
+it's possible to pv an intro controller
+
+00:28:10,159 --> 00:28:17,279
+with actually very little all we need to
+
+00:28:13,600 --> 00:28:19,360
+be able to do is to inject
+
+00:28:17,279 --> 00:28:20,720
+signal and exception to the guest and
+
+00:28:19,360 --> 00:28:22,480
+take a hyper call
+
+00:28:20,720 --> 00:28:24,640
+yeah most architectures are capable of
+
+00:28:22,480 --> 00:28:24,640
+that
+
+00:28:24,880 --> 00:28:31,360
+guests don't always require future
+
+00:28:28,159 --> 00:28:34,960
+rich architecture which is great because
+
+00:28:31,360 --> 00:28:38,320
+the arvik provides extremely little
+
+00:28:34,960 --> 00:28:40,080
+and we manage to keep it small it's easy
+
+00:28:38,320 --> 00:28:43,600
+to review it's easy to edit
+
+00:28:40,080 --> 00:28:48,960
+and more importantly it's
+
+00:28:43,600 --> 00:28:48,960
+easy to prove properties about it
+
+00:28:50,320 --> 00:28:58,880
+and frankly the way i see it it's a very
+
+00:28:54,320 --> 00:29:02,159
+interesting tool to prototype
+
+00:28:58,880 --> 00:29:06,640
+new intro architectures try new semantic
+
+00:29:02,159 --> 00:29:09,440
+you know we have we're freed from
+
+00:29:06,640 --> 00:29:12,399
+the hardware we have both the host and
+
+00:29:09,440 --> 00:29:15,600
+the guest we can play with that we can
+
+00:29:12,399 --> 00:29:19,520
+invent new things and we can
+
+00:29:15,600 --> 00:29:21,679
+see where that takes us also
+
+00:29:19,520 --> 00:29:24,399
+as i said in the first point because it
+
+00:29:21,679 --> 00:29:26,240
+requires so little
+
+00:29:24,399 --> 00:29:27,440
+could it have a life on other
+
+00:29:26,240 --> 00:29:30,559
+architectures
+
+00:29:27,440 --> 00:29:33,760
+can we have a cross architecture
+
+00:29:30,559 --> 00:29:36,320
+in drop control architecture i guess
+
+00:29:33,760 --> 00:29:36,320
+we'll find out
+
+00:29:36,559 --> 00:29:41,840
+
+YouTube URL: https://www.youtube.com/watch?v=Gi5Qe7qBo0k
+
+

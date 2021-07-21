@@ -1,0 +1,2741 @@
+Title: [2017] OMG, NPIV! Virtualizing Fibre Channel with Linux and KVM  by Paolo Bonzini & Hannes Reinecke
+Publication date: 2017-11-02
+Playlist: KVM Forum 2017
+Description: 
+	Fibre Channel is a widely deployed SAN technology. It does provide for a native virtualization support in the form of NPIV (N_Port Id Virtualisation). Unfortunately the Linux implementation, which presents the NPIV port as a SCSI Host, does not lend itself easily to virtualisation with QEMU. Currently QEMU can only forward individual PCI devices and block devices, but no easy way exists to specify how NPIV devices can or should be forwarded. Furthermore, all devices and possibly the partitions and filesystems therein are exposed to the host, which may cause security concerns. This talk will describe the possible solutions for FC virtualization at both the Linux and QEMU levels, and their relative advantages and disadvantages. A short introduction to FC concepts will be included, covering the protocol, HBA and operating system levels.
+
+---
+
+Paolo Bonzini
+Red Hat, Inc.
+Principal Software Engineer
+Turate, Italy
+
+I have been working since 2009 on virtualization for Red Hat, where I am a Principal Software Engineer. My contributions have focused almost exclusively on QEMU and KVM since 2011, and since May 2013 I have been co-maintaining the KVM hypervisor. I first presented my work on QEMU at KVM Forum in 2011.
+
+---
+
+Hannes Reinecke
+SUSE Linux GmbH
+Teamlead Storage & Networking
+Nuernberg, Germany
+
+Studied Physics with main focus image processing in Heidelberg from 1990 until 1997, followed by a PhD in Edinburgh 's Heriot-Watt
+University in 2000.
+Working at SUSE Labs with focus on storage and mainframe. Principal contact point for storage related issues on SLES and teamlead for storage and networking.
+Currently I'm working on dusting out murky corners of the linux SCSI stack, and looking on integrating multipath better with the SCSI and block layer.
+Captions: 
+	00:00:00,390 --> 00:00:02,709
+[Music]
+
+00:00:05,750 --> 00:00:12,330
+good morning this is a joint
+
+00:00:09,059 --> 00:00:15,960
+presentation between me and Hannes I
+
+00:00:12,330 --> 00:00:18,029
+work at I'd head where I am mostly the
+
+00:00:15,960 --> 00:00:22,650
+KPI maintainer though I also do some
+
+00:00:18,029 --> 00:00:24,600
+other stuff in qmo while he's I'm Susan
+
+00:00:22,650 --> 00:00:26,760
+Hannes Reineke from Sousa I'm mainly
+
+00:00:24,600 --> 00:00:31,470
+doing storage and killing me only on
+
+00:00:26,760 --> 00:00:36,149
+there it's not me going away from you
+
+00:00:31,470 --> 00:00:38,370
+it's you mainly doing storage at Sousa
+
+00:00:36,149 --> 00:00:42,780
+but also at the occasion Qumu KVM book
+
+00:00:38,370 --> 00:00:44,930
+okay so as you can imagine this
+
+00:00:42,780 --> 00:00:47,850
+presentation is about fibre channel and
+
+00:00:44,930 --> 00:00:51,090
+fibre channel has its own weird jargon
+
+00:00:47,850 --> 00:00:54,120
+and names and things so we will start
+
+00:00:51,090 --> 00:00:55,800
+with an introduction to it and then
+
+00:00:54,120 --> 00:00:58,620
+explain how it's currently implemented
+
+00:00:55,800 --> 00:01:02,420
+in Linux and why it's not very good and
+
+00:00:58,620 --> 00:01:06,750
+then explain how to actually get a good
+
+00:01:02,420 --> 00:01:09,530
+employee interface studied specifically
+
+00:01:06,750 --> 00:01:12,930
+for virtual machines and for qmo and
+
+00:01:09,530 --> 00:01:15,570
+then how we can extend not just
+
+00:01:12,930 --> 00:01:18,390
+implementation but also the standard
+
+00:01:15,570 --> 00:01:21,330
+ability of Scotti standard in order to
+
+00:01:18,390 --> 00:01:23,390
+better support and baby so what is fibre
+
+00:01:21,330 --> 00:01:26,909
+channel it's a network interface
+
+00:01:23,390 --> 00:01:31,020
+typically using optic fibre hence the
+
+00:01:26,909 --> 00:01:33,900
+name it's a high speed it starts at one
+
+00:01:31,020 --> 00:01:36,360
+gigabit and goes up from there and it's
+
+00:01:33,900 --> 00:01:38,670
+generally used to connect only storage
+
+00:01:36,360 --> 00:01:40,560
+to servers in theory there is IP over
+
+00:01:38,670 --> 00:01:43,409
+fibre channel but it's not the most
+
+00:01:40,560 --> 00:01:48,200
+deployed technology well that's useful
+
+00:01:43,409 --> 00:01:52,770
+interconnects minute and there are
+
+00:01:48,200 --> 00:01:55,290
+layered model similar to the OSI model
+
+00:01:52,770 --> 00:01:57,509
+with five layers instead of seven but
+
+00:01:55,290 --> 00:02:00,030
+with some similarities especially at the
+
+00:01:57,509 --> 00:02:02,430
+bottom and at the top while the middle
+
+00:02:00,030 --> 00:02:06,420
+is a bit different there's signaling
+
+00:02:02,430 --> 00:02:08,920
+protocols and link services and the link
+
+00:02:06,420 --> 00:02:11,890
+services are already
+
+00:02:08,920 --> 00:02:13,810
+kind of tied to scuzzy that's where for
+
+00:02:11,890 --> 00:02:17,980
+example test management function lies
+
+00:02:13,810 --> 00:02:20,950
+and there's other things like scanning
+
+00:02:17,980 --> 00:02:25,769
+for devices for lungs it's a bit
+
+00:02:20,950 --> 00:02:31,000
+different from the usual IP networking
+
+00:02:25,769 --> 00:02:33,969
+but bigger differences are also in the
+
+00:02:31,000 --> 00:02:37,530
+bottom layers for example already at the
+
+00:02:33,969 --> 00:02:41,169
+datalink mac level there is flow control
+
+00:02:37,530 --> 00:02:44,169
+embedded which of course is not the case
+
+00:02:41,169 --> 00:02:47,709
+for Ethernet and another interesting
+
+00:02:44,169 --> 00:02:50,319
+thing is that in in an Ethernet NIC you
+
+00:02:47,709 --> 00:02:52,030
+can see the Ethernet frames and build
+
+00:02:50,319 --> 00:02:54,909
+the higher-level protocols on top while
+
+00:02:52,030 --> 00:02:56,889
+the all frames are almost always hidden
+
+00:02:54,909 --> 00:03:02,049
+from the driver in the case of fibre
+
+00:02:56,889 --> 00:03:06,370
+channel adapters another thing is that
+
+00:03:02,049 --> 00:03:11,469
+usually you talk to hosts on an IP
+
+00:03:06,370 --> 00:03:14,109
+network using the IP address hidden
+
+00:03:11,469 --> 00:03:15,819
+behind domain name but still all the
+
+00:03:14,109 --> 00:03:18,519
+routing is done using the IP address
+
+00:03:15,819 --> 00:03:22,449
+instead in fibre channel the IP address
+
+00:03:18,519 --> 00:03:24,159
+is mostly hidden in the storage fabric
+
+00:03:22,449 --> 00:03:27,459
+and what you actually use to identify
+
+00:03:24,159 --> 00:03:30,220
+the device is the world wide port name
+
+00:03:27,459 --> 00:03:33,010
+and the world wide known name which are
+
+00:03:30,220 --> 00:03:36,040
+more or less the same as an Ethernet MAC
+
+00:03:33,010 --> 00:03:40,299
+address on the other hand the network
+
+00:03:36,040 --> 00:03:44,829
+frames do not use the w w p NN w w NN
+
+00:03:40,299 --> 00:03:49,030
+they use the port ID or FC ID which is
+
+00:03:44,829 --> 00:03:51,910
+the equivalent of the IP address another
+
+00:03:49,030 --> 00:03:55,850
+place where you use
+
+00:03:51,910 --> 00:04:00,670
+WP n is for access control is to mask
+
+00:03:55,850 --> 00:04:05,480
+lands and ensure that only some device
+
+00:04:00,670 --> 00:04:07,880
+devices are seen by each VM so this is
+
+00:04:05,480 --> 00:04:10,820
+interesting because when you buy a new
+
+00:04:07,880 --> 00:04:13,550
+card you will get a new w WP N and you
+
+00:04:10,820 --> 00:04:16,489
+will have to reconfigure your access
+
+00:04:13,550 --> 00:04:18,860
+control lists or tidy access control
+
+00:04:16,489 --> 00:04:22,880
+lists to actually the port that you plug
+
+00:04:18,860 --> 00:04:25,100
+into your cable into the switch so
+
+00:04:22,880 --> 00:04:27,020
+access control lists and masking volume
+
+00:04:25,100 --> 00:04:29,840
+for fibre channel are quite complicated
+
+00:04:27,020 --> 00:04:33,650
+and as we will see later that's also
+
+00:04:29,840 --> 00:04:38,440
+where MPI becomes in the game
+
+00:04:33,650 --> 00:04:44,440
+so these are some equivalences between
+
+00:04:38,440 --> 00:04:47,540
+fibre channel and Ethernet names there's
+
+00:04:44,440 --> 00:04:49,550
+an equivalent of DHCP is called fabric
+
+00:04:47,540 --> 00:04:52,010
+login but the interesting thing is that
+
+00:04:49,550 --> 00:04:55,280
+usually it's part of a switch not really
+
+00:04:52,010 --> 00:04:57,440
+part of a router like in an IP
+
+00:04:55,280 --> 00:04:59,660
+networking likewise there is a name
+
+00:04:57,440 --> 00:05:02,990
+server to discover other active devices
+
+00:04:59,660 --> 00:05:06,490
+I guess the most similar thing you could
+
+00:05:02,990 --> 00:05:10,400
+think of in IP networking is zeroconf
+
+00:05:06,490 --> 00:05:13,610
+also known as about your Bonjour and
+
+00:05:10,400 --> 00:05:15,800
+it's also in the switch other terms are
+
+00:05:13,610 --> 00:05:18,290
+completely I need to fire channel for
+
+00:05:15,800 --> 00:05:20,570
+example when we're talking about storage
+
+00:05:18,290 --> 00:05:22,790
+the client is usually called the
+
+00:05:20,570 --> 00:05:24,830
+initiator and the server is usually
+
+00:05:22,790 --> 00:05:26,570
+called the target and two other
+
+00:05:24,830 --> 00:05:29,420
+important commands are the port login
+
+00:05:26,570 --> 00:05:35,470
+and the process token and they're kind
+
+00:05:29,420 --> 00:05:39,070
+of a discovery command where the server
+
+00:05:35,470 --> 00:05:41,750
+tells the client what it supports but
+
+00:05:39,070 --> 00:05:44,330
+they don't really have an equivalent so
+
+00:05:41,750 --> 00:05:48,080
+you could you can select the protocol
+
+00:05:44,330 --> 00:05:50,030
+when you do the process logging you
+
+00:05:48,080 --> 00:05:54,500
+don't really have an equivalent of ports
+
+00:05:50,030 --> 00:05:56,090
+with different servers each on a
+
+00:05:54,500 --> 00:05:57,800
+different port the time you do the
+
+00:05:56,090 --> 00:05:59,450
+process logging you choose how the
+
+00:05:57,800 --> 00:06:04,580
+communication will happen between that
+
+00:05:59,450 --> 00:06:05,569
+initiator and that target the common
+
+00:06:04,580 --> 00:06:09,379
+format
+
+00:06:05,569 --> 00:06:13,009
+define by building upon the frames into
+
+00:06:09,379 --> 00:06:16,219
+sequences and exchanges a sequence goes
+
+00:06:13,009 --> 00:06:19,009
+on in one direction and is it can be
+
+00:06:16,219 --> 00:06:21,349
+potentially very long such as the
+
+00:06:19,009 --> 00:06:24,499
+payload of right or very short such as
+
+00:06:21,349 --> 00:06:28,279
+the command like the skies command or
+
+00:06:24,499 --> 00:06:32,659
+the response from that command and the
+
+00:06:28,279 --> 00:06:34,729
+exchange consists of many different
+
+00:06:32,659 --> 00:06:37,520
+sequences and you can have many
+
+00:06:34,729 --> 00:06:41,959
+exchanges active at the same time but
+
+00:06:37,520 --> 00:06:43,399
+for each exchange only one sequence for
+
+00:06:41,959 --> 00:06:46,399
+example for a skies command the first
+
+00:06:43,399 --> 00:06:48,439
+exchange will be the command and if it's
+
+00:06:46,399 --> 00:06:52,399
+read you will have data coming back and
+
+00:06:48,439 --> 00:06:55,159
+then finally the response this is how
+
+00:06:52,399 --> 00:06:58,580
+the fc4 application protocols are
+
+00:06:55,159 --> 00:07:02,059
+defined but the actual boundary between
+
+00:06:58,580 --> 00:07:05,689
+the HTML and the driver depends on the
+
+00:07:02,059 --> 00:07:08,719
+hard work some vendors choose to show
+
+00:07:05,689 --> 00:07:12,580
+the exchanges and sequences others have
+
+00:07:08,719 --> 00:07:17,269
+a completely abstract structure using
+
+00:07:12,580 --> 00:07:19,939
+just sketch commands and because this
+
+00:07:17,269 --> 00:07:22,309
+boundary is variable you cannot really
+
+00:07:19,939 --> 00:07:24,800
+have an equivalent of type interfaces
+
+00:07:22,309 --> 00:07:28,129
+type interfaces are the basic ingredient
+
+00:07:24,800 --> 00:07:29,959
+for virtualizing Ethernet networks while
+
+00:07:28,129 --> 00:07:31,159
+in this case you just don't have them
+
+00:07:29,959 --> 00:07:33,099
+and you have to find out someone
+
+00:07:31,159 --> 00:07:37,969
+something else
+
+00:07:33,099 --> 00:07:40,519
+yeah and so the problem we have here is
+
+00:07:37,969 --> 00:07:42,709
+that we need to figure out their
+
+00:07:40,519 --> 00:07:46,639
+dressing so NP IV actually means
+
+00:07:42,709 --> 00:07:48,229
+endpoint ID virtualization so and this
+
+00:07:46,639 --> 00:07:51,860
+means you first have to know right what
+
+00:07:48,229 --> 00:07:54,829
+is action and IT an Edward ID here so
+
+00:07:51,860 --> 00:07:56,809
+typically as powell already said the
+
+00:07:54,829 --> 00:07:59,180
+pores are addressed by either the port
+
+00:07:56,809 --> 00:08:04,279
+name of the foundation and if slash 14
+
+00:07:59,180 --> 00:08:07,519
+and the stores erase themselves I only
+
+00:08:04,279 --> 00:08:10,249
+see these numbers the port name or the
+
+00:08:07,519 --> 00:08:12,319
+port ID they don't know anything else
+
+00:08:10,249 --> 00:08:13,390
+like what's behind that they simply have
+
+00:08:12,319 --> 00:08:15,790
+no idea about that
+
+00:08:13,390 --> 00:08:17,200
+and then they have to route this or
+
+00:08:15,790 --> 00:08:19,270
+consequently I discuss the commands are
+
+00:08:17,200 --> 00:08:21,670
+routed from the initiator to the lune on
+
+00:08:19,270 --> 00:08:23,020
+the storage of a site so the initiative
+
+00:08:21,670 --> 00:08:26,050
+this case will be the foundation report
+
+00:08:23,020 --> 00:08:27,310
+on the HB a the target is obviously too
+
+00:08:26,050 --> 00:08:30,030
+into the target port or the storage
+
+00:08:27,310 --> 00:08:32,800
+array and saloon is the relative lumber
+
+00:08:30,030 --> 00:08:34,570
+loan number on the storage array so to
+
+00:08:32,800 --> 00:08:36,640
+give you a bit a better impression what
+
+00:08:34,570 --> 00:08:38,710
+this is what this actually means there's
+
+00:08:36,640 --> 00:08:41,110
+a nice I did a nice graph here I hope I
+
+00:08:38,710 --> 00:08:43,510
+know this one so we do have two notes
+
+00:08:41,110 --> 00:08:45,520
+with a fart with each having a fabric I
+
+00:08:43,510 --> 00:08:48,700
+do a performance an adapter talking to
+
+00:08:45,520 --> 00:08:52,840
+the Sun and that box here is supposedly
+
+00:08:48,700 --> 00:08:56,350
+a storage array so as you can see and
+
+00:08:52,840 --> 00:08:59,260
+then the red lines are basically the
+
+00:08:56,350 --> 00:09:04,210
+paths the commands will take as you can
+
+00:08:59,260 --> 00:09:08,380
+see note one can only talk to wpa2 the
+
+00:09:04,210 --> 00:09:11,770
+port name 1a and 1b and note one is
+
+00:09:08,380 --> 00:09:13,870
+talking across the other line here to
+
+00:09:11,770 --> 00:09:16,480
+that support name so the little boxes
+
+00:09:13,870 --> 00:09:17,650
+here are actually the access control
+
+00:09:16,480 --> 00:09:19,990
+list a powder was talking about earlier
+
+00:09:17,650 --> 00:09:22,720
+so you can configure the storage array
+
+00:09:19,990 --> 00:09:26,080
+to present individual loans to the
+
+00:09:22,720 --> 00:09:28,090
+individual ports on the far side so not
+
+00:09:26,080 --> 00:09:29,950
+everyone sees the entire contents of his
+
+00:09:28,090 --> 00:09:31,900
+thoughts row but rather only parts of
+
+00:09:29,950 --> 00:09:33,760
+which in which parts they can see you
+
+00:09:31,900 --> 00:09:35,500
+can configure in the array so that you
+
+00:09:33,760 --> 00:09:38,790
+can expose different loans to the
+
+00:09:35,500 --> 00:09:42,520
+different devices as you also can see
+
+00:09:38,790 --> 00:09:46,180
+the port numbers are the only one the
+
+00:09:42,520 --> 00:09:47,920
+only things the storage array sees it
+
+00:09:46,180 --> 00:09:50,620
+doesn't have any other idea what's
+
+00:09:47,920 --> 00:09:54,370
+behind it so there might be running a
+
+00:09:50,620 --> 00:09:57,010
+hundred VMs on that no 2 or 50 on the
+
+00:09:54,370 --> 00:09:59,230
+node 1 but the storage array wouldn't
+
+00:09:57,010 --> 00:10:01,810
+have any clue whatsoever so you can't
+
+00:09:59,230 --> 00:10:05,050
+really do any resource allocation on the
+
+00:10:01,810 --> 00:10:07,180
+storage array depending on the VM so you
+
+00:10:05,050 --> 00:10:08,710
+have to have some sort of magic in the
+
+00:10:07,180 --> 00:10:15,610
+VM trying to figure out what's going on
+
+00:10:08,710 --> 00:10:18,550
+so and which means that you have to have
+
+00:10:15,610 --> 00:10:22,480
+some resource allocation duplication on
+
+00:10:18,550 --> 00:10:24,550
+the VM trying to avoid any cross big
+
+00:10:22,480 --> 00:10:29,050
+trying to hello
+
+00:10:24,550 --> 00:10:33,880
+resources on their own on her VM which
+
+00:10:29,050 --> 00:10:36,730
+is perceived okay but if you were trying
+
+00:10:33,880 --> 00:10:39,700
+to migrate things that means you have to
+
+00:10:36,730 --> 00:10:43,540
+actually keep this entire map consistent
+
+00:10:39,700 --> 00:10:45,550
+across the entire cluster and also each
+
+00:10:43,540 --> 00:10:48,700
+of these cluster have to be able to talk
+
+00:10:45,550 --> 00:10:51,070
+to any of these loans on the far side so
+
+00:10:48,700 --> 00:10:57,310
+the entire complication is becoming a
+
+00:10:51,070 --> 00:11:00,730
+real mess here so to get around this
+
+00:10:57,310 --> 00:11:03,850
+thing they implemented something called
+
+00:11:00,730 --> 00:11:07,810
+NP IV version n port ID virtualization
+
+00:11:03,850 --> 00:11:10,540
+so that you're no longer restricted to
+
+00:11:07,810 --> 00:11:13,420
+just the physical port name which is
+
+00:11:10,540 --> 00:11:15,220
+actually burned into the fiber channel
+
+00:11:13,420 --> 00:11:18,040
+card and cannot be changed much like the
+
+00:11:15,220 --> 00:11:21,730
+MAC address but rather you can set an
+
+00:11:18,040 --> 00:11:25,630
+additional port name which is well more
+
+00:11:21,730 --> 00:11:28,690
+or less freely freely sacked or
+
+00:11:25,630 --> 00:11:35,620
+selectable and the card will then make
+
+00:11:28,690 --> 00:11:38,709
+this port name visible on the Sun so
+
+00:11:35,620 --> 00:11:43,690
+which is it's not something which you
+
+00:11:38,709 --> 00:11:47,079
+can do on network cards so the closest
+
+00:11:43,690 --> 00:11:50,470
+you can think of our nick you have on
+
+00:11:47,079 --> 00:11:52,690
+some machines where the BMC and the
+
+00:11:50,470 --> 00:11:54,130
+actual and the computer are sharing the
+
+00:11:52,690 --> 00:11:56,829
+same NIC but having different MAC
+
+00:11:54,130 --> 00:11:58,510
+addresses so some HP boxes for example
+
+00:11:56,829 --> 00:12:01,180
+does it like that and maybe some tails -
+
+00:11:58,510 --> 00:12:02,770
+I don't know so that's the closer you
+
+00:12:01,180 --> 00:12:04,630
+can get but not something can you cannot
+
+00:12:02,770 --> 00:12:11,350
+really just add another MAC address to
+
+00:12:04,630 --> 00:12:13,029
+the network device that's so however the
+
+00:12:11,350 --> 00:12:14,860
+big problem we have in here that we
+
+00:12:13,029 --> 00:12:16,690
+don't really have a separate hardware
+
+00:12:14,860 --> 00:12:19,029
+it's just an additional address which
+
+00:12:16,690 --> 00:12:24,970
+you specify there and then things will
+
+00:12:19,029 --> 00:12:27,339
+magically work so so a bit like McVie
+
+00:12:24,970 --> 00:12:32,649
+Lemaitre tab yeah and obviously and we
+
+00:12:27,339 --> 00:12:34,449
+need hbhb support for it so and when
+
+00:12:32,649 --> 00:12:38,590
+doing so we end up with a picture like
+
+00:12:34,449 --> 00:12:41,860
+this one so the port name v in the wall
+
+00:12:38,590 --> 00:12:46,300
+it's now an MP IV ID which is being sent
+
+00:12:41,860 --> 00:12:48,460
+on that card and as you can see it's now
+
+00:12:46,300 --> 00:12:50,890
+going to completely different it ends up
+
+00:12:48,460 --> 00:12:53,560
+at some completely different set of
+
+00:12:50,890 --> 00:12:57,160
+loans here on the star jury because the
+
+00:12:53,560 --> 00:12:59,230
+source Rey again sees the new porn name
+
+00:12:57,160 --> 00:13:02,560
+for the start array this new poem is an
+
+00:12:59,230 --> 00:13:04,480
+entirely different thing so you can as
+
+00:13:02,560 --> 00:13:07,300
+you can assign different resources to it
+
+00:13:04,480 --> 00:13:11,589
+so with that you can actually assign
+
+00:13:07,300 --> 00:13:13,540
+port names to VMs and then this VMs are
+
+00:13:11,589 --> 00:13:16,779
+actually visible on the story so you can
+
+00:13:13,540 --> 00:13:19,510
+do proper storage allocation which is
+
+00:13:16,779 --> 00:13:21,610
+which was the main idea of NPR v but
+
+00:13:19,510 --> 00:13:25,060
+then as it turns out yes the idea is
+
+00:13:21,610 --> 00:13:28,380
+nice but how do we make this work I mean
+
+00:13:25,060 --> 00:13:30,970
+NPV has been around fibre channel since
+
+00:13:28,380 --> 00:13:32,710
+about 6 years now
+
+00:13:30,970 --> 00:13:37,390
+Alex would know because he implemented
+
+00:13:32,710 --> 00:13:40,900
+parts of it six years I think correct
+
+00:13:37,390 --> 00:13:42,640
+anyway quite some time and we still
+
+00:13:40,900 --> 00:13:45,900
+haven't been able to make it work
+
+00:13:42,640 --> 00:13:52,780
+properly and cumulant which is telling
+
+00:13:45,900 --> 00:13:54,670
+so and as I just said we are just adding
+
+00:13:52,780 --> 00:13:56,800
+a new address so we're not adding new
+
+00:13:54,670 --> 00:13:59,290
+hardware we don't have any anything to
+
+00:13:56,800 --> 00:14:01,360
+attach to it which also means that the
+
+00:13:59,290 --> 00:14:04,660
+implementation on the Linux layer is
+
+00:14:01,360 --> 00:14:07,030
+quite slim because essentially we're
+
+00:14:04,660 --> 00:14:09,430
+just cloning structure namely discuss a
+
+00:14:07,030 --> 00:14:11,500
+host structure and everything else the
+
+00:14:09,430 --> 00:14:14,550
+underlying working of the HPA is just I
+
+00:14:11,500 --> 00:14:17,710
+tend to confess nothing different there
+
+00:14:14,550 --> 00:14:21,820
+so which means yes we do have a separate
+
+00:14:17,710 --> 00:14:24,790
+su surface entry and from the surface ID
+
+00:14:21,820 --> 00:14:26,080
+it looks just like a normal scuzzy host
+
+00:14:24,790 --> 00:14:32,020
+though we won't be seeing a difference
+
+00:14:26,080 --> 00:14:33,490
+there so this is and so this how it
+
+00:14:32,020 --> 00:14:36,970
+looks like so we have the varnish on
+
+00:14:33,490 --> 00:14:40,000
+edge being where means the real hardware
+
+00:14:36,970 --> 00:14:43,150
+then lien is HP a driver which is then
+
+00:14:40,000 --> 00:14:45,250
+the original driver like qlae - or LPC
+
+00:14:43,150 --> 00:14:48,700
+or what you have and then we have
+
+00:14:45,250 --> 00:14:51,550
+viscosity host and discuss typically
+
+00:14:48,700 --> 00:14:51,960
+presents some discs but for NPR we we
+
+00:14:51,550 --> 00:14:54,089
+have
+
+00:14:51,960 --> 00:14:58,020
+additional scuzzy hosts presenting
+
+00:14:54,089 --> 00:15:04,940
+different discs so but the HPI driver is
+
+00:14:58,020 --> 00:15:07,740
+the same we are not changing that so and
+
+00:15:04,940 --> 00:15:09,959
+this is the big tron for killing more
+
+00:15:07,740 --> 00:15:12,839
+because the classical methods we have
+
+00:15:09,959 --> 00:15:14,820
+like PCI device assignment it doesn't
+
+00:15:12,839 --> 00:15:18,510
+really help you we don't have a PCI
+
+00:15:14,820 --> 00:15:20,670
+device which we could assign and yeah a
+
+00:15:18,510 --> 00:15:24,209
+block device emulation yeah block device
+
+00:15:20,670 --> 00:15:25,830
+exposes or emulates a single disc but as
+
+00:15:24,209 --> 00:15:29,130
+we've just seen we have potentially
+
+00:15:25,830 --> 00:15:30,990
+several disks or and then we would need
+
+00:15:29,130 --> 00:15:33,089
+to figure out right okay which belong to
+
+00:15:30,990 --> 00:15:34,050
+where and what do we actually how could
+
+00:15:33,089 --> 00:15:36,450
+we handle this properly
+
+00:15:34,050 --> 00:15:38,970
+so neither of the emulation methods we
+
+00:15:36,450 --> 00:15:42,830
+have a good match for NP a V which is
+
+00:15:38,970 --> 00:15:46,670
+well the problem we are facing here and
+
+00:15:42,830 --> 00:15:50,899
+it's you know okay all right okay so
+
+00:15:46,670 --> 00:15:59,250
+right so what can we do here so we have
+
+00:15:50,899 --> 00:16:03,089
+the H so this is basically summing up
+
+00:15:59,250 --> 00:16:07,650
+what was going on in the previous slide
+
+00:16:03,089 --> 00:16:10,290
+so we can emulate the present day the
+
+00:16:07,650 --> 00:16:14,910
+whole HP a at the PCI level using the
+
+00:16:10,290 --> 00:16:17,610
+fao you can pass a single LAN at the sky
+
+00:16:14,910 --> 00:16:21,180
+sea level using v3 of Scaasi
+
+00:16:17,610 --> 00:16:25,580
+but there's no way to do passed orally
+
+00:16:21,180 --> 00:16:28,620
+as the V port level at the AV level and
+
+00:16:25,580 --> 00:16:31,650
+you miss something on both levels you
+
+00:16:28,620 --> 00:16:35,430
+miss the peculiarities of fibre channel
+
+00:16:31,650 --> 00:16:39,990
+such as scanning the storage and getting
+
+00:16:35,430 --> 00:16:45,860
+new discs when they appear and you also
+
+00:16:39,990 --> 00:16:52,680
+miss the the port level that lets you
+
+00:16:45,860 --> 00:16:55,870
+get the the whole array down to the to
+
+00:16:52,680 --> 00:17:00,230
+the vector machine and when
+
+00:16:55,870 --> 00:17:02,120
+you have multipath for example you you
+
+00:17:00,230 --> 00:17:05,689
+want to set up the different paths and
+
+00:17:02,120 --> 00:17:08,270
+have different initiatives follow for
+
+00:17:05,689 --> 00:17:11,839
+each Foley for each virtual machine and
+
+00:17:08,270 --> 00:17:13,579
+so on so we have two ways to do the
+
+00:17:11,839 --> 00:17:18,890
+pesto but neither of them is a good
+
+00:17:13,579 --> 00:17:21,230
+match for a baby so all right so the one
+
+00:17:18,890 --> 00:17:23,929
+so one thing which we could be doing is
+
+00:17:21,230 --> 00:17:25,459
+in fact using virtual scuzzy and trying
+
+00:17:23,929 --> 00:17:30,410
+to make the whole thing work with
+
+00:17:25,459 --> 00:17:33,350
+vertigo skocy so if you do that we end
+
+00:17:30,410 --> 00:17:35,330
+up with something loan biased and baby
+
+00:17:33,350 --> 00:17:37,490
+path though which means we are just
+
+00:17:35,330 --> 00:17:40,940
+using the existing block device
+
+00:17:37,490 --> 00:17:43,820
+emulation but then add some tooling
+
+00:17:40,940 --> 00:17:46,130
+around it to figure out right which
+
+00:17:43,820 --> 00:17:50,750
+device do we have which wise would we
+
+00:17:46,130 --> 00:17:53,150
+need to move or exposed to the guest so
+
+00:17:50,750 --> 00:17:55,820
+we need to map all our device from from
+
+00:17:53,150 --> 00:17:59,660
+a specific V port and give you port to
+
+00:17:55,820 --> 00:18:02,270
+the guest which is easily done but then
+
+00:17:59,660 --> 00:18:05,720
+we don't really know if one of these
+
+00:18:02,270 --> 00:18:08,179
+device disappear or new devices will be
+
+00:18:05,720 --> 00:18:09,890
+visible on the V port which means we
+
+00:18:08,179 --> 00:18:12,590
+would have we would need to add a new
+
+00:18:09,890 --> 00:18:15,890
+command to actually scan the V port for
+
+00:18:12,590 --> 00:18:17,990
+new devices and obviously and the other
+
+00:18:15,890 --> 00:18:20,300
+probably have that on fibre channel it's
+
+00:18:17,990 --> 00:18:22,130
+quite common that devices come and go it
+
+00:18:20,300 --> 00:18:23,690
+the fiber trim might be reconfigured at
+
+00:18:22,130 --> 00:18:25,610
+the store might be reconfigured
+
+00:18:23,690 --> 00:18:27,260
+someone might be pulling out the cable
+
+00:18:25,610 --> 00:18:30,010
+the kinda came might be come forward to
+
+00:18:27,260 --> 00:18:32,480
+you name it so it's quite common or
+
+00:18:30,010 --> 00:18:35,000
+quite off one of the devices just
+
+00:18:32,480 --> 00:18:37,309
+disappear for a short time so we need to
+
+00:18:35,000 --> 00:18:39,530
+protect against these things this is the
+
+00:18:37,309 --> 00:18:41,270
+unfamous power failure scenario we have
+
+00:18:39,530 --> 00:18:44,750
+which is basically prime reason why we
+
+00:18:41,270 --> 00:18:46,970
+do have something like multipath and so
+
+00:18:44,750 --> 00:18:52,309
+how do we match that picture because
+
+00:18:46,970 --> 00:18:54,890
+virtio x basically implies that devices
+
+00:18:52,309 --> 00:18:57,260
+will be there all the time if the
+
+00:18:54,890 --> 00:18:59,450
+virtual devices is not present that
+
+00:18:57,260 --> 00:19:00,200
+means that typically your host is
+
+00:18:59,450 --> 00:19:01,850
+completely buggered
+
+00:19:00,200 --> 00:19:04,570
+and you can't continue so that really
+
+00:19:01,850 --> 00:19:07,220
+doesn't have any clue or any means to
+
+00:19:04,570 --> 00:19:07,970
+tell them right okay while the device
+
+00:19:07,220 --> 00:19:09,590
+isn't quite
+
+00:19:07,970 --> 00:19:11,750
+president at the moment just come again
+
+00:19:09,590 --> 00:19:14,120
+later it simply doesn't happen it's a
+
+00:19:11,750 --> 00:19:16,370
+reliable transport design so we will
+
+00:19:14,120 --> 00:19:19,250
+need to have some additional things to
+
+00:19:16,370 --> 00:19:22,340
+how we would manage the power failure so
+
+00:19:19,250 --> 00:19:24,950
+the bond possible scenario is to map a
+
+00:19:22,340 --> 00:19:26,450
+path failure to a hot plug event so
+
+00:19:24,950 --> 00:19:27,800
+whenever there is a power failure we
+
+00:19:26,450 --> 00:19:30,650
+would actually hot unplug the device
+
+00:19:27,800 --> 00:19:33,860
+from the guest and if the path comes
+
+00:19:30,650 --> 00:19:37,520
+back we would hot re plug it into the
+
+00:19:33,860 --> 00:19:39,170
+guest while this is possible it's quite
+
+00:19:37,520 --> 00:19:41,240
+intrusive to the guest because that's
+
+00:19:39,170 --> 00:19:45,380
+actual reconfigure a reconfiguration of
+
+00:19:41,240 --> 00:19:47,210
+the guest but actually made would
+
+00:19:45,380 --> 00:19:49,970
+actually be possible even nowadays with
+
+00:19:47,210 --> 00:19:52,310
+a two link we have the alternative would
+
+00:19:49,970 --> 00:19:53,930
+be to actually have a new vertical event
+
+00:19:52,310 --> 00:20:02,300
+telling us all right cave path went down
+
+00:19:53,930 --> 00:20:04,880
+so don't try anything here quite so the
+
+00:20:02,300 --> 00:20:07,310
+ways to do better one of them is to use
+
+00:20:04,880 --> 00:20:09,220
+the mediator device pass - this is a
+
+00:20:07,310 --> 00:20:13,670
+framework that was introduced for
+
+00:20:09,220 --> 00:20:15,410
+virtual views and based on the fao with
+
+00:20:13,670 --> 00:20:17,990
+mediated by spacer
+
+00:20:15,410 --> 00:20:21,440
+you don't have a therapy or you don't
+
+00:20:17,990 --> 00:20:23,710
+pass single PCI device other the driver
+
+00:20:21,440 --> 00:20:27,020
+biet releases the device itself and
+
+00:20:23,710 --> 00:20:29,840
+exposes the result as a PCI device to
+
+00:20:27,020 --> 00:20:31,580
+the BFI or framework so something is
+
+00:20:29,840 --> 00:20:34,660
+emulated something is passed to for
+
+00:20:31,580 --> 00:20:37,490
+performance typically for example some
+
+00:20:34,660 --> 00:20:41,720
+aspects of the common queues might be
+
+00:20:37,490 --> 00:20:44,570
+passed directly graphic cards have sort
+
+00:20:41,720 --> 00:20:47,960
+of page tables and there the driver has
+
+00:20:44,570 --> 00:20:49,460
+to do shadowing in this case the driver
+
+00:20:47,960 --> 00:20:51,290
+would really do almost everything
+
+00:20:49,460 --> 00:20:53,660
+because there is no such infrastructure
+
+00:20:51,290 --> 00:20:58,190
+such as the graphic translation table in
+
+00:20:53,660 --> 00:21:00,860
+GPUs storage doesn't really do much to
+
+00:20:58,190 --> 00:21:03,920
+help us so we would just have the whole
+
+00:21:00,860 --> 00:21:07,790
+emulation code inside the kernel instead
+
+00:21:03,920 --> 00:21:10,660
+of qmo but because it's in the driver it
+
+00:21:07,790 --> 00:21:13,910
+would be able to actually virtualize the
+
+00:21:10,660 --> 00:21:16,730
+reports more effectively typically the
+
+00:21:13,910 --> 00:21:19,490
+PCIe device looks like the pint except
+
+00:21:16,730 --> 00:21:23,150
+that you have one virtual and
+
+00:21:19,490 --> 00:21:25,010
+for its virtual device looking like the
+
+00:21:23,150 --> 00:21:26,660
+pint means that there are no new gas
+
+00:21:25,010 --> 00:21:29,690
+drivers to use the emulation just
+
+00:21:26,660 --> 00:21:32,600
+reduces the the gas drivers that you
+
+00:21:29,690 --> 00:21:34,760
+usually use on bare metal and another
+
+00:21:32,600 --> 00:21:36,110
+advantage is that it can be implemented
+
+00:21:34,760 --> 00:21:37,670
+entirely within driver
+
+00:21:36,110 --> 00:21:39,710
+this is especially an advantage for us
+
+00:21:37,670 --> 00:21:43,970
+because we don't have to do anything we
+
+00:21:39,710 --> 00:21:45,890
+just tell the storage guys to do it on
+
+00:21:43,970 --> 00:21:49,730
+the other hand there are some
+
+00:21:45,890 --> 00:21:52,580
+disadvantages too one is that the work
+
+00:21:49,730 --> 00:21:55,040
+is completely specific to which HP a
+
+00:21:52,580 --> 00:21:59,240
+driver the mediated device pasto
+
+00:21:55,040 --> 00:22:03,290
+framework is there but there is we risk
+
+00:21:59,240 --> 00:22:05,750
+having different ways to expose a fiber
+
+00:22:03,290 --> 00:22:09,050
+channel MPV through the media device
+
+00:22:05,750 --> 00:22:12,320
+past though and so there would still
+
+00:22:09,050 --> 00:22:16,700
+need to be some kind of agreement about
+
+00:22:12,320 --> 00:22:20,270
+how to do it also it it becomes harder
+
+00:22:16,700 --> 00:22:23,420
+to start and stop the guests from a
+
+00:22:20,270 --> 00:22:27,260
+niche a host that has a niche BA from
+
+00:22:23,420 --> 00:22:29,960
+vendor one and moves through another
+
+00:22:27,260 --> 00:22:31,640
+host that has an HP from a different
+
+00:22:29,960 --> 00:22:35,210
+vendor because then you have different
+
+00:22:31,640 --> 00:22:38,059
+implementations of the mediated driver
+
+00:22:35,210 --> 00:22:40,700
+and this means different quirks but
+
+00:22:38,059 --> 00:22:42,740
+especially different drivers also live
+
+00:22:40,700 --> 00:22:45,380
+migration with mediated pass to is in
+
+00:22:42,740 --> 00:22:48,340
+the works but it's not there yet so I've
+
+00:22:45,380 --> 00:22:50,750
+put put it there with a question mark
+
+00:22:48,340 --> 00:22:53,660
+but actually maybe it's not really
+
+00:22:50,750 --> 00:22:55,280
+needed this is how fibre channel looks
+
+00:22:53,660 --> 00:22:59,270
+like you have a bunch of commands on the
+
+00:22:55,280 --> 00:23:03,260
+right and some of them are exchanges we
+
+00:22:59,270 --> 00:23:06,620
+in turn have their sequences with common
+
+00:23:03,260 --> 00:23:09,200
+data response while various kasi looks
+
+00:23:06,620 --> 00:23:10,860
+like this it's not very different and in
+
+00:23:09,200 --> 00:23:13,659
+particular the
+
+00:23:10,860 --> 00:23:16,720
+request queue is handled very similarly
+
+00:23:13,659 --> 00:23:18,610
+you have a control queue that has some
+
+00:23:16,720 --> 00:23:20,529
+similarities with the fabric login
+
+00:23:18,610 --> 00:23:22,750
+portal game processed again and you have
+
+00:23:20,529 --> 00:23:25,389
+the event queue that maps also decently
+
+00:23:22,750 --> 00:23:27,429
+to the state change notifications and he
+
+00:23:25,389 --> 00:23:29,440
+also already said we might have to do
+
+00:23:27,429 --> 00:23:32,649
+changes there to make it even more
+
+00:23:29,440 --> 00:23:39,600
+similar to fibre channel so one idea is
+
+00:23:32,649 --> 00:23:45,970
+to a use Scaasi but do not implement the
+
+00:23:39,600 --> 00:23:49,149
+the the initiator in qmo but rather USB
+
+00:23:45,970 --> 00:23:51,269
+host we host lets you implement data
+
+00:23:49,149 --> 00:23:53,559
+you're using an out of process
+
+00:23:51,269 --> 00:23:55,590
+implementation it stays outside QM
+
+00:23:53,559 --> 00:23:58,179
+wither in the kernel with the host
+
+00:23:55,590 --> 00:24:00,519
+kernel the traditional one or more
+
+00:23:58,179 --> 00:24:04,570
+recently with the host user it can be in
+
+00:24:00,519 --> 00:24:07,509
+another user mode process for example we
+
+00:24:04,570 --> 00:24:11,649
+have your host casino that typically
+
+00:24:07,509 --> 00:24:15,309
+represents a scuzzy target the the host
+
+00:24:11,649 --> 00:24:17,679
+Casa provides the connection to to the
+
+00:24:15,309 --> 00:24:20,500
+storage and parses the scuzzy commands
+
+00:24:17,679 --> 00:24:24,730
+and so on the host net devices typically
+
+00:24:20,500 --> 00:24:27,850
+are connected to a tap device and the
+
+00:24:24,730 --> 00:24:31,690
+advantage of the host is that the the
+
+00:24:27,850 --> 00:24:34,899
+host server typically is nicely placed
+
+00:24:31,690 --> 00:24:37,120
+closer to the host infrastructure when
+
+00:24:34,899 --> 00:24:43,389
+you do be host user net with the PDK or
+
+00:24:37,120 --> 00:24:45,970
+either user mode networking
+
+00:24:43,389 --> 00:24:50,080
+infrastructure the networks which is a
+
+00:24:45,970 --> 00:24:53,590
+server itself and the question is
+
+00:24:50,080 --> 00:24:55,450
+whether we can use these closeness to
+
+00:24:53,590 --> 00:24:59,440
+the host infrastructure of falun PID and
+
+00:24:55,450 --> 00:25:03,370
+actually make the hosts a part of the
+
+00:24:59,440 --> 00:25:05,320
+driver the idea here is that each v host
+
+00:25:03,370 --> 00:25:07,299
+device doesn't represent the target
+
+00:25:05,320 --> 00:25:09,909
+anymore but actually represent the
+
+00:25:07,299 --> 00:25:15,299
+initiator every time you create a fiber
+
+00:25:09,909 --> 00:25:18,700
+channel deport you get a new be host
+
+00:25:15,299 --> 00:25:21,549
+device and QM you can talk to it just
+
+00:25:18,700 --> 00:25:23,640
+like it would for the existing we host
+
+00:25:21,549 --> 00:25:25,920
+kasi except that it's not
+
+00:25:23,640 --> 00:25:29,130
+more target now it's an initiative you
+
+00:25:25,920 --> 00:25:31,710
+get a privileged I octal to a new file
+
+00:25:29,130 --> 00:25:33,480
+the file descriptor in /dev that lets
+
+00:25:31,710 --> 00:25:35,400
+you create an MK report this is
+
+00:25:33,480 --> 00:25:39,300
+different from the way you create MPI
+
+00:25:35,400 --> 00:25:42,390
+reports normally using sisyphus you give
+
+00:25:39,300 --> 00:25:45,030
+them in the new wwp an end up going n
+
+00:25:42,390 --> 00:25:47,450
+and get back a new file descriptor which
+
+00:25:45,030 --> 00:25:49,800
+is a big host file descriptor and
+
+00:25:47,450 --> 00:25:51,210
+again because the report file descriptor
+
+00:25:49,800 --> 00:25:53,670
+is compatible with the host Cassie
+
+00:25:51,210 --> 00:25:56,670
+there's hardly any need to do changes in
+
+00:25:53,670 --> 00:25:58,320
+in qmo liberabit can create the report
+
+00:25:56,670 --> 00:26:03,500
+pass the file descriptor to chemo and
+
+00:25:58,320 --> 00:26:06,600
+karen can just use it the the host
+
+00:26:03,500 --> 00:26:09,270
+driver is only for birthday also this
+
+00:26:06,600 --> 00:26:11,280
+time you would have the drivers in the
+
+00:26:09,270 --> 00:26:12,720
+guest and the host driver would take
+
+00:26:11,280 --> 00:26:15,510
+care of converting the birthday or
+
+00:26:12,720 --> 00:26:19,620
+request to request on the hbae queues
+
+00:26:15,510 --> 00:26:22,650
+and devices on the report will be will
+
+00:26:19,620 --> 00:26:24,570
+not have a scuzzy host structure in the
+
+00:26:22,650 --> 00:26:26,880
+linux kernel so the devices on those
+
+00:26:24,570 --> 00:26:30,030
+vport will not be visible on the host
+
+00:26:26,880 --> 00:26:33,540
+this is nice because they won't be
+
+00:26:30,030 --> 00:26:38,790
+scanned for partitions no file system
+
+00:26:33,540 --> 00:26:46,290
+mounting will happen and it's a much
+
+00:26:38,790 --> 00:26:49,860
+more tight integration with PMO rather
+
+00:26:46,290 --> 00:26:53,730
+than with the rest of the scheduler so
+
+00:26:49,860 --> 00:26:55,680
+the advantages are that guests are not
+
+00:26:53,730 --> 00:26:57,360
+aware anymore of the host driver you can
+
+00:26:55,680 --> 00:27:01,460
+migrate between different vendors and
+
+00:26:57,360 --> 00:27:04,560
+live migration has to be thought about
+
+00:27:01,460 --> 00:27:07,170
+but at least in principle it's simpler
+
+00:27:04,560 --> 00:27:11,460
+it's just regular data migration and
+
+00:27:07,170 --> 00:27:14,450
+there's already some provisions in the B
+
+00:27:11,460 --> 00:27:17,160
+host framework to do live migration
+
+00:27:14,450 --> 00:27:18,900
+again the disadvantages that it still
+
+00:27:17,160 --> 00:27:19,320
+needs to be implemented in each horse
+
+00:27:18,900 --> 00:27:21,930
+driver
+
+00:27:19,320 --> 00:27:25,230
+unlike doing everything in queue a move
+
+00:27:21,930 --> 00:27:26,670
+as he presented in the beginning but we
+
+00:27:25,230 --> 00:27:28,890
+can still have a common bee host
+
+00:27:26,670 --> 00:27:31,170
+framework similar to how we have a
+
+00:27:28,890 --> 00:27:32,080
+common mediated device framework for
+
+00:27:31,170 --> 00:27:35,950
+multiple
+
+00:27:32,080 --> 00:27:38,559
+your vendors and there are still going
+
+00:27:35,950 --> 00:27:40,960
+to be some changes necessary to the
+
+00:27:38,559 --> 00:27:43,059
+speck of litter Scaasi and to the gas
+
+00:27:40,960 --> 00:27:44,470
+driver in order to but better handle
+
+00:27:43,059 --> 00:27:47,200
+past failure and everything else
+
+00:27:44,470 --> 00:27:49,299
+another interesting thing that is that
+
+00:27:47,200 --> 00:27:52,090
+there is actually the host users chasm
+
+00:27:49,299 --> 00:27:54,220
+and we could probably use vhosts to
+
+00:27:52,090 --> 00:27:56,470
+discuss it to prototype this without
+
+00:27:54,220 --> 00:27:59,380
+doing the kernel changes so we could
+
+00:27:56,470 --> 00:28:05,110
+have a prototype that does a fiber
+
+00:27:59,380 --> 00:28:07,419
+channel level pass through without doing
+
+00:28:05,110 --> 00:28:09,340
+any changes in the kernel and implement
+
+00:28:07,419 --> 00:28:13,539
+the two things that qmo parts and the
+
+00:28:09,340 --> 00:28:15,760
+kernel part separately this way so we
+
+00:28:13,539 --> 00:28:17,620
+spoke several time about life migration
+
+00:28:15,760 --> 00:28:21,639
+so whether it's possible that's not
+
+00:28:17,620 --> 00:28:24,130
+possible but the real problem here is
+
+00:28:21,639 --> 00:28:26,110
+not so much whether it's technically
+
+00:28:24,130 --> 00:28:27,940
+possible but rather how we can do it
+
+00:28:26,110 --> 00:28:30,700
+logically because the big problem we're
+
+00:28:27,940 --> 00:28:33,519
+having is that the port names are and
+
+00:28:30,700 --> 00:28:35,080
+the node names are unique hence the w w
+
+00:28:33,519 --> 00:28:37,840
+in front which actually stands for
+
+00:28:35,080 --> 00:28:41,919
+worldwide unique node name meaning that
+
+00:28:37,840 --> 00:28:45,490
+are supposed to be unique and to add to
+
+00:28:41,919 --> 00:28:48,429
+the thing it can log into the Sun only
+
+00:28:45,490 --> 00:28:53,529
+once so on any given Sunday can own B
+
+00:28:48,429 --> 00:28:55,929
+only be one port name one identical port
+
+00:28:53,529 --> 00:28:58,690
+them so you can't duplicate things which
+
+00:28:55,929 --> 00:29:00,370
+is a bit tricky if you want to do a live
+
+00:28:58,690 --> 00:29:03,399
+migration because the whole point of
+
+00:29:00,370 --> 00:29:07,330
+live migration is that you show that you
+
+00:29:03,399 --> 00:29:10,539
+have the same or a duplicate instance
+
+00:29:07,330 --> 00:29:13,600
+trying to access the same storage at the
+
+00:29:10,539 --> 00:29:15,880
+same time but as it's a duplicate
+
+00:29:13,600 --> 00:29:19,210
+instance it will be using most likely
+
+00:29:15,880 --> 00:29:22,299
+the same port names which doesn't really
+
+00:29:19,210 --> 00:29:24,669
+work so you can't just make it work with
+
+00:29:22,299 --> 00:29:26,799
+just one port name because well then you
+
+00:29:24,669 --> 00:29:29,440
+can only lock ones into it so either the
+
+00:29:26,799 --> 00:29:31,630
+target VM can see it or they know or the
+
+00:29:29,440 --> 00:29:38,200
+host vm can see it so not but not both
+
+00:29:31,630 --> 00:29:42,190
+so so here's basically the same thing so
+
+00:29:38,200 --> 00:29:44,250
+for the if we were to move the paw
+
+00:29:42,190 --> 00:29:48,260
+report name five
+
+00:29:44,250 --> 00:29:51,059
+- no - the path would move with it but
+
+00:29:48,260 --> 00:29:53,360
+this move has to be atomically it can't
+
+00:29:51,059 --> 00:29:55,860
+we can't just copy it over - no - and
+
+00:29:53,360 --> 00:29:57,000
+trying to lock into the same song the
+
+00:29:55,860 --> 00:29:58,500
+sound would say it's not right okay
+
+00:29:57,000 --> 00:30:02,669
+you're overlooked and you can't do it
+
+00:29:58,500 --> 00:30:04,530
+anymore so for a live migration we would
+
+00:30:02,669 --> 00:30:07,710
+just move it to the other note which is
+
+00:30:04,530 --> 00:30:11,460
+noise but as I said we can't just log in
+
+00:30:07,710 --> 00:30:11,970
+there at the second time so what can we
+
+00:30:11,460 --> 00:30:14,940
+do here
+
+00:30:11,970 --> 00:30:17,730
+so one solution is to have a generic
+
+00:30:14,940 --> 00:30:20,280
+port name which can be used for everyone
+
+00:30:17,730 --> 00:30:22,350
+for everyone then Julia migration you
+
+00:30:20,280 --> 00:30:23,610
+use the generic port name you just added
+
+00:30:22,350 --> 00:30:25,409
+because you can't add an arbiter a
+
+00:30:23,610 --> 00:30:28,080
+number of port are important aims via
+
+00:30:25,409 --> 00:30:31,440
+NPR v you just add it to that specific
+
+00:30:28,080 --> 00:30:32,850
+host then you can you can do it you can
+
+00:30:31,440 --> 00:30:34,289
+do with your life migration and once
+
+00:30:32,850 --> 00:30:37,799
+you're done with a live migration you
+
+00:30:34,289 --> 00:30:41,400
+can just remove it which is okay it
+
+00:30:37,799 --> 00:30:44,159
+surely works but it means that this
+
+00:30:41,400 --> 00:30:47,419
+temporary port name would need to have
+
+00:30:44,159 --> 00:30:50,429
+potentially access to all possible
+
+00:30:47,419 --> 00:30:52,200
+devices on the storage array so either
+
+00:30:50,429 --> 00:30:55,380
+you always reconfigure your storage
+
+00:30:52,200 --> 00:30:58,289
+array to allow this temporary port name
+
+00:30:55,380 --> 00:31:00,539
+or you have a port name which can in
+
+00:30:58,289 --> 00:31:03,000
+fact access all storage and the toric
+
+00:31:00,539 --> 00:31:05,429
+target array which again leads you back
+
+00:31:03,000 --> 00:31:06,059
+to the access control problem we spoke
+
+00:31:05,429 --> 00:31:09,710
+about earlier
+
+00:31:06,059 --> 00:31:12,929
+only this time just during migration so
+
+00:31:09,710 --> 00:31:15,030
+the scheduler in negotiation between VMs
+
+00:31:12,929 --> 00:31:18,090
+is will be very tricky with that
+
+00:31:15,030 --> 00:31:20,909
+approach the second is you could
+
+00:31:18,090 --> 00:31:23,190
+obviously have individual temporary port
+
+00:31:20,909 --> 00:31:25,260
+names so each VN could have its own port
+
+00:31:23,190 --> 00:31:29,220
+name temporary port name which then
+
+00:31:25,260 --> 00:31:32,159
+would only be required to access this
+
+00:31:29,220 --> 00:31:35,669
+specific divider targets I don't on the
+
+00:31:32,159 --> 00:31:37,260
+far side so this mode of any security
+
+00:31:35,669 --> 00:31:39,570
+implications of user because you can at
+
+00:31:37,260 --> 00:31:42,000
+the important can only see the required
+
+00:31:39,570 --> 00:31:44,010
+devices but quite a bit of management
+
+00:31:42,000 --> 00:31:46,370
+overhead because you have to create the
+
+00:31:44,010 --> 00:31:48,630
+port name every time you do a migration
+
+00:31:46,370 --> 00:31:49,919
+meaning you have to reconfigure your son
+
+00:31:48,630 --> 00:31:52,140
+you have to reconfigure your storage
+
+00:31:49,919 --> 00:31:54,470
+array which will be creating quite a bit
+
+00:31:52,140 --> 00:31:56,640
+of overhead before the administrator
+
+00:31:54,470 --> 00:31:57,669
+what we can do though is use
+
+00:31:56,640 --> 00:32:00,700
+multipathing
+
+00:31:57,669 --> 00:32:02,919
+because well as I said we can route a
+
+00:32:00,700 --> 00:32:05,769
+register an arbitrary amount of port IDs
+
+00:32:02,919 --> 00:32:10,029
+so we can register not just one part ID
+
+00:32:05,769 --> 00:32:12,759
+but rather several for each VM and gives
+
+00:32:10,029 --> 00:32:15,369
+multipathing on them and for migration
+
+00:32:12,759 --> 00:32:19,389
+we just switch off we just disabled one
+
+00:32:15,369 --> 00:32:21,999
+port ID on the source VM enable it on
+
+00:32:19,389 --> 00:32:24,759
+the target VM and voila both can see the
+
+00:32:21,999 --> 00:32:26,079
+same storage and both will continue to
+
+00:32:24,759 --> 00:32:27,940
+run so we can do the live migration
+
+00:32:26,079 --> 00:32:30,219
+there and once we're done we just dis
+
+00:32:27,940 --> 00:32:33,519
+Arabic on the disable the remaining port
+
+00:32:30,219 --> 00:32:36,159
+IDs on the sauce VM enable them on the
+
+00:32:33,519 --> 00:32:37,869
+target of a VM and we're done which i
+
+00:32:36,159 --> 00:32:45,969
+think is a very nice solution if we
+
+00:32:37,869 --> 00:32:48,129
+could if we were doing it that way the
+
+00:32:45,969 --> 00:32:49,659
+two solutions that we have both the one
+
+00:32:48,129 --> 00:32:52,209
+with the Mineta device and the one with
+
+00:32:49,659 --> 00:32:56,229
+the initiative your host cathy have
+
+00:32:52,209 --> 00:32:58,299
+advantages because they can provide the
+
+00:32:56,229 --> 00:33:03,039
+virtualization at the peoples level
+
+00:32:58,299 --> 00:33:08,919
+while holding the devices hidden from
+
+00:33:03,039 --> 00:33:11,079
+the hosts but actually maybe we now we
+
+00:33:08,919 --> 00:33:16,659
+need to look at actually showing the
+
+00:33:11,079 --> 00:33:20,139
+fiber channel Ness of of the of the
+
+00:33:16,659 --> 00:33:23,919
+storage array and hiding other things
+
+00:33:20,139 --> 00:33:28,119
+that are not really nice for example the
+
+00:33:23,919 --> 00:33:30,159
+target numbers in Linux there are just
+
+00:33:28,119 --> 00:33:33,729
+sequential numbers going up from zero
+
+00:33:30,159 --> 00:33:39,339
+that have no bearing with the actual
+
+00:33:33,729 --> 00:33:42,009
+target wwp n wnn and depending on how
+
+00:33:39,339 --> 00:33:44,889
+the scan goes different hosts can have
+
+00:33:42,009 --> 00:33:47,379
+different target IDs and this can be all
+
+00:33:44,889 --> 00:33:49,929
+supported for live migration so we're
+
+00:33:47,379 --> 00:33:52,089
+going to see now what the limitations
+
+00:33:49,929 --> 00:33:55,119
+are of virtual skies compact fibre
+
+00:33:52,089 --> 00:33:58,809
+channel and how to solve them so yeah
+
+00:33:55,119 --> 00:34:01,929
+the big tron we have is that vertigo
+
+00:33:58,809 --> 00:34:03,579
+scuzzy has only a 64-bit number field
+
+00:34:01,929 --> 00:34:07,389
+for longs for the entire command
+
+00:34:03,579 --> 00:34:09,609
+addressing as we just seen the various
+
+00:34:07,389 --> 00:34:10,760
+lines we actually need two numbers we
+
+00:34:09,609 --> 00:34:14,210
+need the port
+
+00:34:10,760 --> 00:34:16,850
+and the Loon number to get proper
+
+00:34:14,210 --> 00:34:19,220
+addressing so we need to 600 numbers
+
+00:34:16,850 --> 00:34:21,800
+which simply do not fit in one six what
+
+00:34:19,220 --> 00:34:28,190
+number field so how do we get around
+
+00:34:21,800 --> 00:34:33,200
+with these things what we could be doing
+
+00:34:28,190 --> 00:34:36,020
+is to replace the loan number there R is
+
+00:34:33,200 --> 00:34:38,929
+just an exercise evasively have an
+
+00:34:36,020 --> 00:34:43,129
+abstract number per connection raise e /
+
+00:34:38,929 --> 00:34:44,690
+redline in the slides I had and then we
+
+00:34:43,129 --> 00:34:47,119
+could have an additional command which
+
+00:34:44,690 --> 00:34:50,480
+would provide us the mapping between the
+
+00:34:47,119 --> 00:34:54,290
+target target numbers and the ITL nexus
+
+00:34:50,480 --> 00:34:56,480
+and an addition and so at some tooling
+
+00:34:54,290 --> 00:34:57,859
+around is to get the mapping right but
+
+00:34:56,480 --> 00:35:00,800
+with that we could actually use the
+
+00:34:57,859 --> 00:35:02,180
+existing vertov's gauzy structure
+
+00:35:00,800 --> 00:35:08,900
+command structure and boutonniere and
+
+00:35:02,180 --> 00:35:13,850
+not need to update it and so if we were
+
+00:35:08,900 --> 00:35:15,410
+to emulate it we would need to store the
+
+00:35:13,850 --> 00:35:16,970
+promise that we don't have the initiator
+
+00:35:15,410 --> 00:35:20,480
+port name which need to be stored
+
+00:35:16,970 --> 00:35:23,450
+somewhere and we obviously if we do that
+
+00:35:20,480 --> 00:35:26,140
+then the VMS need to be able to scan the
+
+00:35:23,450 --> 00:35:29,000
+remote devices so we need additional
+
+00:35:26,140 --> 00:35:34,310
+control commands to the host to create a
+
+00:35:29,000 --> 00:35:36,980
+V port and to scan the vport an
+
+00:35:34,310 --> 00:35:41,510
+alternative is to actually do something
+
+00:35:36,980 --> 00:35:43,640
+that is more similar to via UFC and this
+
+00:35:41,510 --> 00:35:46,190
+is because as we showed before there's
+
+00:35:43,640 --> 00:35:48,859
+actually a lot of similarity between all
+
+00:35:46,190 --> 00:35:52,580
+of the Scott's transports starting from
+
+00:35:48,859 --> 00:35:55,070
+say yes SAS or going towards Casio fibre
+
+00:35:52,580 --> 00:35:56,840
+channel or vo they all have some kind of
+
+00:35:55,070 --> 00:36:00,880
+request but for some kind of responsible
+
+00:35:56,840 --> 00:36:03,890
+for plus of course they did payload and
+
+00:36:00,880 --> 00:36:06,340
+of course if we do the key of fibre
+
+00:36:03,890 --> 00:36:09,650
+channel we still have the problem that
+
+00:36:06,340 --> 00:36:11,780
+the HBA is typically only handled the
+
+00:36:09,650 --> 00:36:14,810
+high level fibre channel commands and
+
+00:36:11,780 --> 00:36:20,600
+not their own flower china frames so
+
+00:36:14,810 --> 00:36:22,130
+just so we still need to provide an
+
+00:36:20,600 --> 00:36:23,210
+additional abstraction in terms of
+
+00:36:22,130 --> 00:36:28,339
+bacterial specific
+
+00:36:23,210 --> 00:36:32,990
+and we still have to do the conversion
+
+00:36:28,339 --> 00:36:35,270
+from this vo specification to the driver
+
+00:36:32,990 --> 00:36:38,119
+specific device specific format in each
+
+00:36:35,270 --> 00:36:40,309
+driver so this would not be to reduce
+
+00:36:38,119 --> 00:36:42,020
+the work in the drivers you would still
+
+00:36:40,309 --> 00:36:45,410
+have some kind of the host abstraction
+
+00:36:42,020 --> 00:36:47,380
+similar to before but the idea is to
+
+00:36:45,410 --> 00:36:51,890
+make the spec more future-proof and
+
+00:36:47,380 --> 00:36:53,420
+easier also to handle and smaller one of
+
+00:36:51,890 --> 00:36:55,250
+the advantages of the Vertigo sky
+
+00:36:53,420 --> 00:36:58,040
+suspect is that it's pretty small it
+
+00:36:55,250 --> 00:37:01,089
+doesn't have to define every command one
+
+00:36:58,040 --> 00:37:05,349
+by one it just piggyback on the sky see
+
+00:37:01,089 --> 00:37:08,300
+texture model on the scuzzy command
+
+00:37:05,349 --> 00:37:13,280
+specification and so on and here we
+
+00:37:08,300 --> 00:37:16,309
+could do the same in a vo FC request we
+
+00:37:13,280 --> 00:37:19,030
+could map both an FC p SOS Kazi exchange
+
+00:37:16,309 --> 00:37:21,230
+or an nvme exchange because by design
+
+00:37:19,030 --> 00:37:24,050
+discussants exchange and then the ami
+
+00:37:21,230 --> 00:37:27,020
+exchange are different but not that
+
+00:37:24,050 --> 00:37:31,160
+different and especially you can
+
+00:37:27,020 --> 00:37:33,260
+recognize whether they are if I was an
+
+00:37:31,160 --> 00:37:35,750
+exchange or an MDM exchange actually
+
+00:37:33,260 --> 00:37:39,950
+just by looking at the initial packets
+
+00:37:35,750 --> 00:37:43,160
+so the first part of the frame even
+
+00:37:39,950 --> 00:37:45,740
+though it's hidden to dsba could be
+
+00:37:43,160 --> 00:37:49,400
+visible in the velocity request as part
+
+00:37:45,740 --> 00:37:51,619
+of a request header and then later you
+
+00:37:49,400 --> 00:37:53,750
+have the either the fibre channel
+
+00:37:51,619 --> 00:37:55,730
+commanded them via me command either the
+
+00:37:53,750 --> 00:38:00,440
+fibre channel response or the engineer
+
+00:37:55,730 --> 00:38:02,980
+response so again would not be a
+
+00:38:00,440 --> 00:38:06,079
+one-to-one mapping that would still be
+
+00:38:02,980 --> 00:38:09,710
+cooked frame format which could be a
+
+00:38:06,079 --> 00:38:11,660
+little simpler compared to FTP and FCM
+
+00:38:09,710 --> 00:38:14,390
+via me because we don't have to care
+
+00:38:11,660 --> 00:38:18,109
+about for example the exchange structure
+
+00:38:14,390 --> 00:38:21,890
+we don't have to care about the flow
+
+00:38:18,109 --> 00:38:23,599
+control and all that but we can simplify
+
+00:38:21,890 --> 00:38:26,359
+because drivers anyway do not see
+
+00:38:23,599 --> 00:38:28,099
+they're there all frames there's no no
+
+00:38:26,359 --> 00:38:31,190
+reason to expose the all frames to the
+
+00:38:28,099 --> 00:38:32,750
+drivers at the D host level but the
+
+00:38:31,190 --> 00:38:35,089
+advantage would be to use as many
+
+00:38:32,750 --> 00:38:35,880
+fabrics and definitions as possible as
+
+00:38:35,089 --> 00:38:37,650
+many fabrics
+
+00:38:35,880 --> 00:38:43,080
+standards as possible to avoid
+
+00:38:37,650 --> 00:38:46,740
+obsolescence and DME discs are being
+
+00:38:43,080 --> 00:38:48,870
+proposed over fibre channel as part of
+
+00:38:46,740 --> 00:38:52,560
+an extension of nvme over fabric
+
+00:38:48,870 --> 00:38:54,690
+specific to fiber channel and so we
+
+00:38:52,560 --> 00:38:57,630
+could use the overall structure of the
+
+00:38:54,690 --> 00:39:01,010
+sequences we could possibly use some of
+
+00:38:57,630 --> 00:39:06,030
+the structure of the login packets and
+
+00:39:01,010 --> 00:39:07,500
+especially the the standard of course
+
+00:39:06,030 --> 00:39:09,090
+it's not really possible to get
+
+00:39:07,500 --> 00:39:11,040
+everything completely right from the
+
+00:39:09,090 --> 00:39:12,960
+beginning but we have learned a lot of
+
+00:39:11,040 --> 00:39:15,750
+things from various Kazi that we can
+
+00:39:12,960 --> 00:39:19,080
+reuse in virtio fibre channel from the
+
+00:39:15,750 --> 00:39:20,850
+very beginning and may have a high
+
+00:39:19,080 --> 00:39:24,990
+quality standard that can be implemented
+
+00:39:20,850 --> 00:39:30,510
+through be hosting the drivers so as a
+
+00:39:24,990 --> 00:39:34,290
+summary we believe that this initiative
+
+00:39:30,510 --> 00:39:39,450
+we host mechanism is the right way to do
+
+00:39:34,290 --> 00:39:41,850
+and in linux with very few changes
+
+00:39:39,450 --> 00:39:44,850
+requiring qmo and deliberate because all
+
+00:39:41,850 --> 00:39:47,580
+the handling would be split between the
+
+00:39:44,850 --> 00:39:49,710
+host fibre channel drivers and the fibre
+
+00:39:47,580 --> 00:39:54,240
+channel of the teras kasi 2.0 drivers
+
+00:39:49,710 --> 00:39:57,450
+but the the only changes would be in the
+
+00:39:54,240 --> 00:40:01,380
+kernel queuing limit would have really
+
+00:39:57,450 --> 00:40:05,010
+small infrastructure needed similar to
+
+00:40:01,380 --> 00:40:08,010
+how we did for the Phi Omega the device
+
+00:40:05,010 --> 00:40:10,860
+pass-through we also presented a way to
+
+00:40:08,010 --> 00:40:14,930
+do lab migration at the Liberty level or
+
+00:40:10,860 --> 00:40:18,630
+at the gas level using multipathing and
+
+00:40:14,930 --> 00:40:21,210
+the discussion is still ongoing on
+
+00:40:18,630 --> 00:40:23,580
+whether to extend from greater Scotty or
+
+00:40:21,210 --> 00:40:26,700
+go with the benefit of our channel
+
+00:40:23,580 --> 00:40:28,920
+device but at least we have presented
+
+00:40:26,700 --> 00:40:33,410
+the advantages and disadvantages and the
+
+00:40:28,920 --> 00:40:37,230
+ideas behind them and how we could
+
+00:40:33,410 --> 00:40:42,390
+integrate MKV extensions in the next
+
+00:40:37,230 --> 00:40:46,040
+versions of the video standards so that
+
+00:40:42,390 --> 00:40:46,040
+was from outside any questions
+
+00:40:55,000 --> 00:41:01,090
+I'm not a stylish person so but you
+
+00:40:58,510 --> 00:41:02,560
+haven't mentioned about scuzzy comments
+
+00:41:01,090 --> 00:41:05,350
+like for example reserved in and out
+
+00:41:02,560 --> 00:41:08,380
+where the iTune axis is put in the loom
+
+00:41:05,350 --> 00:41:10,780
+and then for example the V host approach
+
+00:41:08,380 --> 00:41:14,580
+wouldn't work right so are you thinking
+
+00:41:10,780 --> 00:41:17,110
+and guaranteeing this kind of no
+
+00:41:14,580 --> 00:41:19,570
+actually I didn't mention persistent
+
+00:41:17,110 --> 00:41:22,030
+reservations explicitly but what you're
+
+00:41:19,570 --> 00:41:24,040
+saying is exactly the reason why I'm
+
+00:41:22,030 --> 00:41:26,590
+proposing a different we host an
+
+00:41:24,040 --> 00:41:28,120
+initiator base because not a target base
+
+00:41:26,590 --> 00:41:30,660
+because like the one that exists already
+
+00:41:28,120 --> 00:41:34,030
+so the initiative we host would just
+
+00:41:30,660 --> 00:41:38,560
+forward the commands with the initiative
+
+00:41:34,030 --> 00:41:41,290
+ID from the the host MK V deport all the
+
+00:41:38,560 --> 00:41:43,990
+way to the LAN so you would have the LAN
+
+00:41:41,290 --> 00:41:45,670
+with that receives the reservation
+
+00:41:43,990 --> 00:41:48,100
+command has the target I did the
+
+00:41:45,670 --> 00:41:50,290
+transport ID for the initiator is in the
+
+00:41:48,100 --> 00:41:52,150
+procedural reservation command and you
+
+00:41:50,290 --> 00:41:55,710
+would just be a transparent channel
+
+00:41:52,150 --> 00:41:55,710
+between the initiative and the target
+
+00:41:56,670 --> 00:42:05,860
+but you're guided with the target B host
+
+00:41:59,290 --> 00:42:09,490
+persistent reservations don't work one
+
+00:42:05,860 --> 00:42:11,740
+question for me if you need to issue a
+
+00:42:09,490 --> 00:42:14,500
+lip for example from therefore that B
+
+00:42:11,740 --> 00:42:16,990
+port V hosts stuff is that possible or
+
+00:42:14,500 --> 00:42:19,330
+how do you do some let's say stuck and
+
+00:42:16,990 --> 00:42:22,180
+hung a fiber channels to do the initial
+
+00:42:19,330 --> 00:42:23,710
+ID if you don't so you would you would
+
+00:42:22,180 --> 00:42:27,580
+need to destroy the report and we
+
+00:42:23,710 --> 00:42:29,920
+created the MP IV port or so every the
+
+00:42:27,580 --> 00:42:32,830
+actual for internal commands will still
+
+00:42:29,920 --> 00:42:35,320
+be handled by the HB a we're just doing
+
+00:42:32,830 --> 00:42:39,160
+an abstraction based on whatever the HB
+
+00:42:35,320 --> 00:42:41,560
+a presenters so we won't a while we can
+
+00:42:39,160 --> 00:42:43,480
+do a scan the scan won't - won't be a
+
+00:42:41,560 --> 00:42:45,940
+real scan it would just be looking
+
+00:42:43,480 --> 00:42:47,710
+alright which reports that the host
+
+00:42:45,940 --> 00:42:49,810
+presents to us which device did he found
+
+00:42:47,710 --> 00:42:51,970
+we won't be doing any far better
+
+00:42:49,810 --> 00:42:55,600
+management stuff from the from the VMS
+
+00:42:51,970 --> 00:42:57,550
+like sending LS or whatever okay so
+
+00:42:55,600 --> 00:43:02,010
+these commands would still they need to
+
+00:42:57,550 --> 00:43:02,010
+be done from the hypervisor side yes
+
+00:43:04,510 --> 00:43:08,700
+no no no trust me you don't want to
+
+00:43:24,220 --> 00:43:39,440
+sorry well what you do a synchronization
+
+00:43:35,080 --> 00:43:41,930
+you need you you need to start up the
+
+00:43:39,440 --> 00:43:44,240
+target we M at the same time when the
+
+00:43:41,930 --> 00:43:57,340
+salsa AVM is still life otherwise you
+
+00:43:44,240 --> 00:43:57,340
+can't copy over data can you it's other
+
+00:43:59,650 --> 00:44:05,630
+and there's a new one where we fought
+
+00:44:02,300 --> 00:44:08,510
+from the old vm right but yes
+
+00:44:05,630 --> 00:44:11,030
+technically you're right technically not
+
+00:44:08,510 --> 00:44:13,910
+both need to be like on the same time in
+
+00:44:11,030 --> 00:44:15,590
+both cases the only one at any given
+
+00:44:13,910 --> 00:44:18,320
+point in time is actually executing
+
+00:44:15,590 --> 00:44:21,260
+instructions yes technically you are
+
+00:44:18,320 --> 00:44:23,780
+correct but as these boo above things
+
+00:44:21,260 --> 00:44:26,390
+are actually in lockstep so you would
+
+00:44:23,780 --> 00:44:29,690
+have to do the synchronization bit right
+
+00:44:26,390 --> 00:44:31,970
+I just switched off so I read the
+
+00:44:29,690 --> 00:44:34,070
+register now so now you can register and
+
+00:44:31,970 --> 00:44:35,720
+so no you don't want to do this because
+
+00:44:34,070 --> 00:44:37,400
+that would be yeah you increase the
+
+00:44:35,720 --> 00:44:39,560
+latency of the migration exactly you
+
+00:44:37,400 --> 00:44:40,670
+just have a massive latency woody to
+
+00:44:39,560 --> 00:44:43,130
+reconfigure everything
+
+00:44:40,670 --> 00:44:45,170
+no okay now it's understood but I was
+
+00:44:43,130 --> 00:44:47,980
+wondering about it so it's possible but
+
+00:44:45,170 --> 00:44:50,660
+it's not satisfactory because it creates
+
+00:44:47,980 --> 00:44:56,360
+lots of service for too long so yeah you
+
+00:44:50,660 --> 00:44:58,160
+increase it by seconds not by there can
+
+00:44:56,360 --> 00:45:01,360
+be literally hundreds of discs that have
+
+00:44:58,160 --> 00:45:01,360
+to be scandal and
+
+00:45:10,600 --> 00:45:20,739
+[Applause]
+
+00:45:14,880 --> 00:45:20,739
+
+YouTube URL: https://www.youtube.com/watch?v=ME1IdbtaU5E
+
+

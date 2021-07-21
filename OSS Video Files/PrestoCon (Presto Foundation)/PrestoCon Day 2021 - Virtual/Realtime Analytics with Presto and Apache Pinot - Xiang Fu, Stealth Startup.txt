@@ -1,0 +1,1536 @@
+Title: Realtime Analytics with Presto and Apache Pinot - Xiang Fu, Stealth Startup
+Publication date: 2021-03-27
+Playlist: PrestoCon Day 2021 - Virtual
+Description: 
+	Realtime Analytics with Presto and Apache Pinot - Xiang Fu, Stealth Startup
+
+In this world, most analytics products either focus on ad-hoc analytics, which requires query flexibility without guaranteed latency, or low latency analytics with limited query capability.
+
+In this talk, we will explore how to get the best of both worlds using Apache Pinot and Presto:
+1. How people do analytics today to trade-off Latency and Flexibility: Comparison over analytics on raw data vs pre-join/pre-cube dataset.
+2. Introduce Apache Pinot as a column store for fast real-time data analytics and Presto Pinot Connector to cover the entire landscape.
+3. Deep dive into Presto Pinot Connector to see how the connector does predicate and aggregation push down.
+4. Benchmark results for Presto Pinot connector. 
+
+For more info about Presto, the open source distributed SQL query engine for running interactive analytic queries against data sources of all sizes ranging from gigabytes to petabytes, see: https://prestodb.io/
+Captions: 
+	00:00:01,680 --> 00:00:06,240
+thanks for attending this talk
+
+00:00:03,520 --> 00:00:06,960
+today i'm going to talk about how we use
+
+00:00:06,240 --> 00:00:11,280
+presto
+
+00:00:06,960 --> 00:00:13,920
+and patripino to do real-time analytics
+
+00:00:11,280 --> 00:00:15,920
+a brief introduction for me i'm shanghu
+
+00:00:13,920 --> 00:00:18,800
+right now working on engineering stuff
+
+00:00:15,920 --> 00:00:21,359
+at the sales mode setup uh before my
+
+00:00:18,800 --> 00:00:24,160
+current journey i worked at uber
+
+00:00:21,359 --> 00:00:25,840
+in streaming platform team mostly on the
+
+00:00:24,160 --> 00:00:28,960
+data serving processing
+
+00:00:25,840 --> 00:00:31,519
+as well as analytics work
+
+00:00:28,960 --> 00:00:32,640
+for my open source contribution uh i'm a
+
+00:00:31,519 --> 00:00:35,280
+pmc
+
+00:00:32,640 --> 00:00:36,079
+and the committer of a patripino project
+
+00:00:35,280 --> 00:00:40,079
+and of course
+
+00:00:36,079 --> 00:00:42,399
+i'm a contributor for presto project
+
+00:00:40,079 --> 00:00:43,520
+in today's agenda i'm going to first
+
+00:00:42,399 --> 00:00:46,640
+talk about how we
+
+00:00:43,520 --> 00:00:49,200
+do a real-time analysis today and what
+
+00:00:46,640 --> 00:00:51,920
+has been compromised for core latency
+
+00:00:49,200 --> 00:00:53,840
+as well as core flexibility then i'll
+
+00:00:51,920 --> 00:00:54,879
+introduce the patripino to solve the low
+
+00:00:53,840 --> 00:00:58,480
+latency query
+
+00:00:54,879 --> 00:01:00,800
+problem and after that i will um
+
+00:00:58,480 --> 00:01:01,920
+introduce how we use press and pinot
+
+00:01:00,800 --> 00:01:04,960
+connector
+
+00:01:01,920 --> 00:01:06,880
+to cover the entire landscape lastly i
+
+00:01:04,960 --> 00:01:10,720
+will show some curved benchmark
+
+00:01:06,880 --> 00:01:12,880
+numbers uh for in our findings
+
+00:01:10,720 --> 00:01:14,560
+so let's take a look at how we do and
+
+00:01:12,880 --> 00:01:18,400
+that's today
+
+00:01:14,560 --> 00:01:18,880
+so first of all uh all our data sources
+
+00:01:18,400 --> 00:01:22,640
+like
+
+00:01:18,880 --> 00:01:26,159
+oltp or like uh key value store
+
+00:01:22,640 --> 00:01:29,200
+on our events are going through
+
+00:01:26,159 --> 00:01:32,479
+kafka they all land into data lake
+
+00:01:29,200 --> 00:01:33,360
+so from the data lake we can use all the
+
+00:01:32,479 --> 00:01:36,799
+raw data
+
+00:01:33,360 --> 00:01:37,840
+and we'll be able to use a processing
+
+00:01:36,799 --> 00:01:41,759
+framework like
+
+00:01:37,840 --> 00:01:43,920
+batch spark or presto to compute
+
+00:01:41,759 --> 00:01:45,119
+in this case the user have all the full
+
+00:01:43,920 --> 00:01:48,000
+flexibility
+
+00:01:45,119 --> 00:01:48,640
+to access all the data pick whatever
+
+00:01:48,000 --> 00:01:51,280
+they want
+
+00:01:48,640 --> 00:01:52,479
+and apply whatever computations they
+
+00:01:51,280 --> 00:01:55,119
+need
+
+00:01:52,479 --> 00:01:57,759
+however it takes a long time to retrieve
+
+00:01:55,119 --> 00:02:00,880
+the results and then the commutation
+
+00:01:57,759 --> 00:02:03,520
+are mostly like launched on demand so we
+
+00:02:00,880 --> 00:02:06,159
+can take a concrete example
+
+00:02:03,520 --> 00:02:07,439
+assume that this is an e-commerce
+
+00:02:06,159 --> 00:02:10,479
+business
+
+00:02:07,439 --> 00:02:11,360
+and we have a dimension table called the
+
+00:02:10,479 --> 00:02:15,200
+customers
+
+00:02:11,360 --> 00:02:17,680
+and the affect table called orders
+
+00:02:15,200 --> 00:02:18,319
+in this case if we want to generate a
+
+00:02:17,680 --> 00:02:20,080
+monthly
+
+00:02:18,319 --> 00:02:22,959
+sales report for all the female
+
+00:02:20,080 --> 00:02:25,280
+customers in california
+
+00:02:22,959 --> 00:02:27,440
+then from the raw data side we need to
+
+00:02:25,280 --> 00:02:30,080
+write a c code to join two tables
+
+00:02:27,440 --> 00:02:31,040
+and then aggregate the results right so
+
+00:02:30,080 --> 00:02:34,000
+in this case
+
+00:02:31,040 --> 00:02:34,480
+the query execution has four phases
+
+00:02:34,000 --> 00:02:37,840
+first
+
+00:02:34,480 --> 00:02:40,000
+the table scan phase which scans all the
+
+00:02:37,840 --> 00:02:43,200
+data from both tables
+
+00:02:40,000 --> 00:02:45,440
+one full table scan on the others and
+
+00:02:43,200 --> 00:02:48,239
+another footable scan on
+
+00:02:45,440 --> 00:02:49,120
+a customer's table meanwhile to perform
+
+00:02:48,239 --> 00:02:52,560
+the
+
+00:02:49,120 --> 00:02:55,760
+predicate for the customer states
+
+00:02:52,560 --> 00:02:59,440
+across california and gender equals
+
+00:02:55,760 --> 00:03:02,480
+female as that we will do a join
+
+00:02:59,440 --> 00:03:04,959
+to shuffle the data from both table
+
+00:03:02,480 --> 00:03:05,519
+based on the customer id so that we can
+
+00:03:04,959 --> 00:03:08,080
+join
+
+00:03:05,519 --> 00:03:09,760
+these two tables and after that we will
+
+00:03:08,080 --> 00:03:11,920
+do a group by phase
+
+00:03:09,760 --> 00:03:12,800
+which will again shuffle the data based
+
+00:03:11,920 --> 00:03:15,680
+on months
+
+00:03:12,800 --> 00:03:17,599
+of the order state as well as the
+
+00:03:15,680 --> 00:03:19,519
+customer's city
+
+00:03:17,599 --> 00:03:21,840
+once the goodbye is down we need to
+
+00:03:19,519 --> 00:03:22,480
+perform the aggregation which is the sum
+
+00:03:21,840 --> 00:03:25,680
+on those
+
+00:03:22,480 --> 00:03:26,400
+orders amount and then we will render
+
+00:03:25,680 --> 00:03:29,519
+the
+
+00:03:26,400 --> 00:03:32,480
+final results the
+
+00:03:29,519 --> 00:03:35,760
+the advantage of this solution is that
+
+00:03:32,480 --> 00:03:38,959
+it's flexible to do any computation
+
+00:03:35,760 --> 00:03:40,959
+and the the discount advantage here is
+
+00:03:38,959 --> 00:03:43,440
+the high quality cost which means we
+
+00:03:40,959 --> 00:03:46,480
+have a lot of disk and network i o
+
+00:03:43,440 --> 00:03:48,720
+we need to spend the cpu cycle
+
+00:03:46,480 --> 00:03:52,799
+on data partitioning and data
+
+00:03:48,720 --> 00:03:52,799
+serialization and industrializations
+
+00:03:52,959 --> 00:03:57,200
+to optimize this query performance etl
+
+00:03:55,920 --> 00:03:59,920
+comes to the picture
+
+00:03:57,200 --> 00:04:01,120
+in intel jobs users come pre-drawing a
+
+00:03:59,920 --> 00:04:04,640
+factor table
+
+00:04:01,120 --> 00:04:08,239
+with a dimension table and then queries
+
+00:04:04,640 --> 00:04:10,480
+on this pre-joined table so
+
+00:04:08,239 --> 00:04:11,920
+take the same example we will
+
+00:04:10,480 --> 00:04:15,040
+pre-drawing these customers
+
+00:04:11,920 --> 00:04:16,400
+and the orders table to be uh based on
+
+00:04:15,040 --> 00:04:17,919
+the customer id then we have a
+
+00:04:16,400 --> 00:04:20,720
+pre-drawing table
+
+00:04:17,919 --> 00:04:22,160
+and we can translate the previous query
+
+00:04:20,720 --> 00:04:25,040
+into this one
+
+00:04:22,160 --> 00:04:25,520
+so we can just work on flatten the table
+
+00:04:25,040 --> 00:04:28,960
+and
+
+00:04:25,520 --> 00:04:30,880
+we perform the filter on city across
+
+00:04:28,960 --> 00:04:34,160
+california and generally equals female
+
+00:04:30,880 --> 00:04:37,919
+and then we do group by and some
+
+00:04:34,160 --> 00:04:38,960
+so in this example uh the join the table
+
+00:04:37,919 --> 00:04:42,560
+size
+
+00:04:38,960 --> 00:04:45,840
+is the same as the all the orders table
+
+00:04:42,560 --> 00:04:47,520
+however we have more dimension data to
+
+00:04:45,840 --> 00:04:49,919
+be decorated into this
+
+00:04:47,520 --> 00:04:50,639
+pre-joined table the benefit is that
+
+00:04:49,919 --> 00:04:54,400
+it's still
+
+00:04:50,639 --> 00:04:58,160
+very flexible to explore user dimensions
+
+00:04:54,400 --> 00:05:00,800
+in this uh user orders join the table
+
+00:04:58,160 --> 00:05:03,120
+however the disadvantage here is that
+
+00:05:00,800 --> 00:05:05,360
+the current time is still proportional
+
+00:05:03,120 --> 00:05:07,120
+to the data scan which means that we
+
+00:05:05,360 --> 00:05:09,759
+cannot really predict
+
+00:05:07,120 --> 00:05:11,039
+how long this query will be wrong a
+
+00:05:09,759 --> 00:05:12,720
+noticeable improvement
+
+00:05:11,039 --> 00:05:14,639
+from the above approach is to
+
+00:05:12,720 --> 00:05:15,280
+pre-aggregate the results we want to
+
+00:05:14,639 --> 00:05:17,680
+query
+
+00:05:15,280 --> 00:05:20,160
+for example we can create a new table
+
+00:05:17,680 --> 00:05:23,360
+called user orders aggregate
+
+00:05:20,160 --> 00:05:25,759
+what it's doing is it will just
+
+00:05:23,360 --> 00:05:26,639
+group by all the date and the city and
+
+00:05:25,759 --> 00:05:30,320
+compute this
+
+00:05:26,639 --> 00:05:33,360
+sum of the cells into
+
+00:05:30,320 --> 00:05:35,120
+this pre-aggregated table so this table
+
+00:05:33,360 --> 00:05:37,600
+will significantly reduce
+
+00:05:35,120 --> 00:05:39,120
+the total number of the records because
+
+00:05:37,600 --> 00:05:42,560
+the total number of records
+
+00:05:39,120 --> 00:05:44,080
+is proportional to the unique
+
+00:05:42,560 --> 00:05:48,639
+combinations of date
+
+00:05:44,080 --> 00:05:51,360
+and the city in this case we can
+
+00:05:48,639 --> 00:05:52,080
+rewrite the query into this format which
+
+00:05:51,360 --> 00:05:54,479
+means that
+
+00:05:52,080 --> 00:05:56,240
+we still need to do some filtering and
+
+00:05:54,479 --> 00:05:59,440
+they similar we do do buy
+
+00:05:56,240 --> 00:06:02,000
+and we do some however because
+
+00:05:59,440 --> 00:06:02,960
+the total number of records are much
+
+00:06:02,000 --> 00:06:05,759
+smaller
+
+00:06:02,960 --> 00:06:08,080
+so the total effort of computation is
+
+00:06:05,759 --> 00:06:11,680
+much smaller than the previous
+
+00:06:08,080 --> 00:06:12,080
+pre-joined table the good thing here is
+
+00:06:11,680 --> 00:06:14,080
+that
+
+00:06:12,080 --> 00:06:15,280
+we have reduced the quality runtime
+
+00:06:14,080 --> 00:06:18,160
+workload a lot
+
+00:06:15,280 --> 00:06:20,160
+and we achieved a better quality latency
+
+00:06:18,160 --> 00:06:21,680
+the downside here is that
+
+00:06:20,160 --> 00:06:23,600
+the current time is still proportional
+
+00:06:21,680 --> 00:06:26,800
+to the multiplication
+
+00:06:23,600 --> 00:06:30,960
+of non-group by columns and it's
+
+00:06:26,800 --> 00:06:33,280
+still kind of not really uh predictable
+
+00:06:30,960 --> 00:06:35,120
+pre-cubing is a solution to achieve
+
+00:06:33,280 --> 00:06:37,840
+constant quality latency
+
+00:06:35,120 --> 00:06:39,120
+users can pre-compute all the metrics
+
+00:06:37,840 --> 00:06:40,800
+they are interested
+
+00:06:39,120 --> 00:06:42,639
+and based on all the dimension
+
+00:06:40,800 --> 00:06:45,600
+combinations so for an
+
+00:06:42,639 --> 00:06:47,199
+inquiry it will always be an extracted
+
+00:06:45,600 --> 00:06:50,000
+role to answer it
+
+00:06:47,199 --> 00:06:50,880
+for example we will just do a group by
+
+00:06:50,000 --> 00:06:53,440
+all the
+
+00:06:50,880 --> 00:06:54,960
+dimension combinations and generate this
+
+00:06:53,440 --> 00:06:59,039
+user orders cubed
+
+00:06:54,960 --> 00:06:59,440
+table and for the above query we will
+
+00:06:59,039 --> 00:07:01,919
+just
+
+00:06:59,440 --> 00:07:02,720
+do a filtering and the projection it
+
+00:07:01,919 --> 00:07:05,599
+will
+
+00:07:02,720 --> 00:07:06,319
+extract all the results we want the the
+
+00:07:05,599 --> 00:07:09,680
+advantage
+
+00:07:06,319 --> 00:07:11,919
+here is that uh the query runtime
+
+00:07:09,680 --> 00:07:14,319
+latency is very predictable because it's
+
+00:07:11,919 --> 00:07:16,960
+just the rolex effect
+
+00:07:14,319 --> 00:07:19,280
+however the downside here is that we
+
+00:07:16,960 --> 00:07:21,840
+have extra storage overhead
+
+00:07:19,280 --> 00:07:22,720
+one raw record will be translated into
+
+00:07:21,840 --> 00:07:26,000
+like many
+
+00:07:22,720 --> 00:07:28,400
+uh records and apart from that we have
+
+00:07:26,000 --> 00:07:30,720
+the problem of dimension explosion
+
+00:07:28,400 --> 00:07:31,919
+which means that if we want to add a new
+
+00:07:30,720 --> 00:07:35,759
+dimension
+
+00:07:31,919 --> 00:07:39,039
+new column into this uh cubed table
+
+00:07:35,759 --> 00:07:42,240
+the total data volume uh could be
+
+00:07:39,039 --> 00:07:42,639
+uh multiplied by uh the cardinality of
+
+00:07:42,240 --> 00:07:45,680
+this
+
+00:07:42,639 --> 00:07:48,319
+new column added
+
+00:07:45,680 --> 00:07:50,160
+okay now let's take a step back to take
+
+00:07:48,319 --> 00:07:53,599
+a look at
+
+00:07:50,160 --> 00:07:55,360
+how this landscape looks like we have
+
+00:07:53,599 --> 00:07:57,440
+on the left side we will have this
+
+00:07:55,360 --> 00:08:00,240
+effect table in the dimension table
+
+00:07:57,440 --> 00:08:02,240
+for any kind of computations we will
+
+00:08:00,240 --> 00:08:05,280
+have a high latency
+
+00:08:02,240 --> 00:08:06,240
+but we have good flexibility and of
+
+00:08:05,280 --> 00:08:09,520
+course
+
+00:08:06,240 --> 00:08:12,080
+uh the query source code will even be
+
+00:08:09,520 --> 00:08:14,319
+low in this case and
+
+00:08:12,080 --> 00:08:15,440
+we'll have a very good solution here
+
+00:08:14,319 --> 00:08:18,479
+called presto
+
+00:08:15,440 --> 00:08:20,560
+to solve this problem and on the right
+
+00:08:18,479 --> 00:08:21,680
+side if you want to achieve a better
+
+00:08:20,560 --> 00:08:24,720
+latency
+
+00:08:21,680 --> 00:08:27,280
+and a better suspect we need to do
+
+00:08:24,720 --> 00:08:28,639
+like pre-drawing or pre-aggregation or
+
+00:08:27,280 --> 00:08:31,759
+pre-cube of the
+
+00:08:28,639 --> 00:08:34,320
+data set and hence we can use
+
+00:08:31,759 --> 00:08:36,640
+apache pino which is a good engine for
+
+00:08:34,320 --> 00:08:39,200
+all those kind of use cases
+
+00:08:36,640 --> 00:08:40,800
+on a very high level view of a patripino
+
+00:08:39,200 --> 00:08:43,279
+it's a olap desktop
+
+00:08:40,800 --> 00:08:43,919
+it's built from linkedin for low latency
+
+00:08:43,279 --> 00:08:47,680
+analytics
+
+00:08:43,919 --> 00:08:49,040
+majorly so pinot has been widely adopted
+
+00:08:47,680 --> 00:08:52,080
+in user facing
+
+00:08:49,040 --> 00:08:53,760
+applications business analytics
+
+00:08:52,080 --> 00:08:56,160
+as well as the nominee detection use
+
+00:08:53,760 --> 00:09:00,160
+cases from more than 35 companies
+
+00:08:56,160 --> 00:09:03,200
+like uber uh linkedin weibo microsoft
+
+00:09:00,160 --> 00:09:05,200
+uh confluera so when i say uh this low
+
+00:09:03,200 --> 00:09:07,680
+latency it includes both low ingestion
+
+00:09:05,200 --> 00:09:09,680
+latency as well as a low correlation
+
+00:09:07,680 --> 00:09:11,360
+so this means the panel can directly
+
+00:09:09,680 --> 00:09:14,720
+ingest the data from
+
+00:09:11,360 --> 00:09:17,040
+kafka or kinesis and
+
+00:09:14,720 --> 00:09:18,399
+those event will be callable immediately
+
+00:09:17,040 --> 00:09:20,560
+apart from kafka
+
+00:09:18,399 --> 00:09:22,000
+users can also batter the data using
+
+00:09:20,560 --> 00:09:25,440
+hadoop or spark drops
+
+00:09:22,000 --> 00:09:28,399
+from blob star like hdfs or s3
+
+00:09:25,440 --> 00:09:29,120
+or true data lake so in our production
+
+00:09:28,399 --> 00:09:31,120
+environment
+
+00:09:29,120 --> 00:09:33,440
+pino handles the workload of ingesting
+
+00:09:31,120 --> 00:09:35,600
+millions of events per second
+
+00:09:33,440 --> 00:09:37,440
+and serving thousands of aquarius per
+
+00:09:35,600 --> 00:09:40,720
+segment with millisecond
+
+00:09:37,440 --> 00:09:42,959
+level of core agency and our largest
+
+00:09:40,720 --> 00:09:44,560
+deployment in pino is about a thousandth
+
+00:09:42,959 --> 00:09:47,920
+node we saw
+
+00:09:44,560 --> 00:09:50,959
+only one or two sres to operate that
+
+00:09:47,920 --> 00:09:52,080
+okay now let's try to uh expand this
+
+00:09:50,959 --> 00:09:55,279
+pinot box
+
+00:09:52,080 --> 00:09:56,480
+pinot has three major components so on
+
+00:09:55,279 --> 00:09:59,680
+the pinot data
+
+00:09:56,480 --> 00:10:01,920
+are stored in pinot servers from both uh
+
+00:09:59,680 --> 00:10:05,519
+real-time data consumed from kafka and
+
+00:10:01,920 --> 00:10:08,320
+the batch loaded data from like hdfs is3
+
+00:10:05,519 --> 00:10:10,560
+and then we have pinot controller which
+
+00:10:08,320 --> 00:10:13,440
+is responsible for all the cluster
+
+00:10:10,560 --> 00:10:14,720
+and the data management for example the
+
+00:10:13,440 --> 00:10:17,760
+data assignment
+
+00:10:14,720 --> 00:10:20,079
+or the petition assignment
+
+00:10:17,760 --> 00:10:22,079
+and all the pinot chorus goes to pinot
+
+00:10:20,079 --> 00:10:24,480
+broker which will maintain
+
+00:10:22,079 --> 00:10:25,519
+uh multiple routing tables and based on
+
+00:10:24,480 --> 00:10:28,640
+the query
+
+00:10:25,519 --> 00:10:31,600
+uh broker will be smart enough to choose
+
+00:10:28,640 --> 00:10:34,000
+the best strategy to do the scat gather
+
+00:10:31,600 --> 00:10:37,040
+for the query results from a selected
+
+00:10:34,000 --> 00:10:37,040
+uh pinot servers
+
+00:10:37,279 --> 00:10:43,120
+the secret behind the pino to optimize
+
+00:10:40,320 --> 00:10:44,079
+the quality performance across all the
+
+00:10:43,120 --> 00:10:47,839
+layers
+
+00:10:44,079 --> 00:10:51,040
+from storage to a query
+
+00:10:47,839 --> 00:10:54,640
+so from the start layer panel implements
+
+00:10:51,040 --> 00:10:57,519
+its own column format along with
+
+00:10:54,640 --> 00:10:58,399
+compression and different encoding
+
+00:10:57,519 --> 00:11:01,920
+algorithms
+
+00:10:58,399 --> 00:11:04,000
+like run-less encoding uh bit and bytes
+
+00:11:01,920 --> 00:11:06,560
+dictionary
+
+00:11:04,000 --> 00:11:07,040
+uh for the query processing layer you
+
+00:11:06,560 --> 00:11:09,519
+know has
+
+00:11:07,040 --> 00:11:11,519
+implemented multiple index technologies
+
+00:11:09,519 --> 00:11:14,160
+like convert index
+
+00:11:11,519 --> 00:11:16,959
+filter sorted index starter index to
+
+00:11:14,160 --> 00:11:20,079
+speed up all the queries
+
+00:11:16,959 --> 00:11:22,320
+and for the aggregation layer you know
+
+00:11:20,079 --> 00:11:26,000
+has darker index to do all the pre
+
+00:11:22,320 --> 00:11:29,040
+uh pre-aggregate and
+
+00:11:26,000 --> 00:11:30,560
+also this pre-aggregation is in a very
+
+00:11:29,040 --> 00:11:32,880
+cost effective manner
+
+00:11:30,560 --> 00:11:34,000
+star trek provides a way to do partial
+
+00:11:32,880 --> 00:11:36,640
+pre-computation
+
+00:11:34,000 --> 00:11:38,079
+for aggregation results for example we
+
+00:11:36,640 --> 00:11:41,519
+can just a pre-aggregate
+
+00:11:38,079 --> 00:11:44,720
+metrics contain more than a threshold of
+
+00:11:41,519 --> 00:11:46,079
+1 000 orders in all the dimension
+
+00:11:44,720 --> 00:11:49,120
+combinations
+
+00:11:46,079 --> 00:11:50,399
+then in the case of like we want to
+
+00:11:49,120 --> 00:11:52,320
+understand
+
+00:11:50,399 --> 00:11:53,440
+all the customers in the united states
+
+00:11:52,320 --> 00:11:56,320
+we want to know
+
+00:11:53,440 --> 00:11:58,160
+all the female customers in los angeles
+
+00:11:56,320 --> 00:12:00,480
+for all those cell stats we will do
+
+00:11:58,160 --> 00:12:03,839
+pre-aggregation but probably in some
+
+00:12:00,480 --> 00:12:05,920
+rural area of a particular zip code
+
+00:12:03,839 --> 00:12:07,120
+then we want to do pre-aggregate
+
+00:12:05,920 --> 00:12:10,000
+pre-computation
+
+00:12:07,120 --> 00:12:10,800
+so those kind of zip code this means
+
+00:12:10,000 --> 00:12:14,079
+that
+
+00:12:10,800 --> 00:12:17,760
+we can ensure that for any inquiry
+
+00:12:14,079 --> 00:12:21,040
+we will scan no more than 1 000
+
+00:12:17,760 --> 00:12:24,399
+records in order to answer this question
+
+00:12:21,040 --> 00:12:29,440
+so it can handle way more chorizo's put
+
+00:12:24,399 --> 00:12:29,440
+comparing to the normal inverting decks
+
+00:12:30,959 --> 00:12:37,839
+the needs of accelerating presto quarry
+
+00:12:34,720 --> 00:12:40,959
+speed and support and
+
+00:12:37,839 --> 00:12:44,000
+from like capino quarries are a perfect
+
+00:12:40,959 --> 00:12:46,160
+match here so we developed the presto
+
+00:12:44,000 --> 00:12:49,360
+and the pinot connector
+
+00:12:46,160 --> 00:12:52,399
+which can cover the entire
+
+00:12:49,360 --> 00:12:55,120
+landscape of analytics from like
+
+00:12:52,399 --> 00:12:58,000
+the bi visualization or like data
+
+00:12:55,120 --> 00:13:02,959
+products or anomaly detector use cases
+
+00:12:58,000 --> 00:13:02,959
+and as well as this ad hoc analysis
+
+00:13:03,600 --> 00:13:07,200
+since we want to leverage fast query
+
+00:13:06,240 --> 00:13:09,279
+from pino
+
+00:13:07,200 --> 00:13:10,240
+we implemented this aggregation push
+
+00:13:09,279 --> 00:13:13,440
+down feature
+
+00:13:10,240 --> 00:13:15,920
+so this will allow presto to
+
+00:13:13,440 --> 00:13:17,519
+do a best effort push down for
+
+00:13:15,920 --> 00:13:19,519
+aggregation functions
+
+00:13:17,519 --> 00:13:21,200
+filipino can support for example like
+
+00:13:19,519 --> 00:13:24,079
+consume min max
+
+00:13:21,200 --> 00:13:25,120
+uh distinct count or like approximate
+
+00:13:24,079 --> 00:13:28,240
+count
+
+00:13:25,120 --> 00:13:31,360
+so from our benchmark we observed about
+
+00:13:28,240 --> 00:13:33,360
+10 to 100 times latency improvement
+
+00:13:31,360 --> 00:13:35,600
+here i will go over how we do it as
+
+00:13:33,360 --> 00:13:37,120
+example for example user will send an
+
+00:13:35,600 --> 00:13:40,720
+aggregation group by query
+
+00:13:37,120 --> 00:13:43,600
+by saying select the sum with some
+
+00:13:40,720 --> 00:13:44,639
+filter and the group by so press the
+
+00:13:43,600 --> 00:13:46,480
+coordinator
+
+00:13:44,639 --> 00:13:48,000
+take this query will generate a query
+
+00:13:46,480 --> 00:13:50,399
+plan and figuring out that
+
+00:13:48,000 --> 00:13:51,519
+oh i can do aggregation push down for
+
+00:13:50,399 --> 00:13:55,519
+this
+
+00:13:51,519 --> 00:13:58,560
+query so the press the worker will
+
+00:13:55,519 --> 00:14:01,199
+generate a pino query and
+
+00:13:58,560 --> 00:14:02,959
+send it to pinot broker you know broker
+
+00:14:01,199 --> 00:14:04,560
+will figuring out okay this is the
+
+00:14:02,959 --> 00:14:06,720
+valley the pino query and
+
+00:14:04,560 --> 00:14:07,760
+it will quarry pinot server get the
+
+00:14:06,720 --> 00:14:10,560
+results
+
+00:14:07,760 --> 00:14:11,199
+and the pinot broker will reduce the
+
+00:14:10,560 --> 00:14:14,399
+results
+
+00:14:11,199 --> 00:14:15,760
+and return it back to uh press the
+
+00:14:14,399 --> 00:14:18,160
+worker as a whole
+
+00:14:15,760 --> 00:14:18,800
+so it means that the press worker will
+
+00:14:18,160 --> 00:14:22,320
+just get
+
+00:14:18,800 --> 00:14:26,160
+the results of the group
+
+00:14:22,320 --> 00:14:29,839
+and the aggregated value and the presto
+
+00:14:26,160 --> 00:14:32,720
+worker actually gets a much
+
+00:14:29,839 --> 00:14:33,760
+much smaller and computed results from
+
+00:14:32,720 --> 00:14:36,880
+pino
+
+00:14:33,760 --> 00:14:37,519
+so it reduced the a lot of workload from
+
+00:14:36,880 --> 00:14:40,959
+the
+
+00:14:37,519 --> 00:14:41,600
+presta worker side although we want to
+
+00:14:40,959 --> 00:14:43,839
+like
+
+00:14:41,600 --> 00:14:44,639
+do the push down computation as much as
+
+00:14:43,839 --> 00:14:47,279
+possible
+
+00:14:44,639 --> 00:14:49,120
+so there are still some certain cases
+
+00:14:47,279 --> 00:14:50,800
+that there's no way to really push down
+
+00:14:49,120 --> 00:14:53,519
+for example if i want to join
+
+00:14:50,800 --> 00:14:53,920
+a pinot table with another data source
+
+00:14:53,519 --> 00:14:57,440
+and
+
+00:14:53,920 --> 00:14:57,920
+then i will do the aggregation on some
+
+00:14:57,440 --> 00:15:00,399
+uh
+
+00:14:57,920 --> 00:15:01,279
+dimensions from the other tables right
+
+00:15:00,399 --> 00:15:04,000
+so in this case
+
+00:15:01,279 --> 00:15:05,440
+we need to uh actually pull all the data
+
+00:15:04,000 --> 00:15:09,040
+from pino
+
+00:15:05,440 --> 00:15:11,600
+and do the drawing in presto
+
+00:15:09,040 --> 00:15:13,199
+and then do aggregation impressed so in
+
+00:15:11,600 --> 00:15:16,079
+this case so we basically assume
+
+00:15:13,199 --> 00:15:16,800
+that there will be no aggregation push
+
+00:15:16,079 --> 00:15:19,600
+down
+
+00:15:16,800 --> 00:15:20,480
+so uh what we are going to do here is
+
+00:15:19,600 --> 00:15:24,240
+that the presto
+
+00:15:20,480 --> 00:15:27,600
+worker will actually directly
+
+00:15:24,240 --> 00:15:30,399
+contacting each pinot server
+
+00:15:27,600 --> 00:15:31,839
+and only send the query like select
+
+00:15:30,399 --> 00:15:33,759
+non-aggregation fields
+
+00:15:31,839 --> 00:15:34,880
+from this table along with some
+
+00:15:33,759 --> 00:15:37,680
+predicate
+
+00:15:34,880 --> 00:15:38,959
+uh also it's like a best effort
+
+00:15:37,680 --> 00:15:41,680
+practical push down
+
+00:15:38,959 --> 00:15:42,160
+so it will ensure press the worker will
+
+00:15:41,680 --> 00:15:45,519
+only
+
+00:15:42,160 --> 00:15:49,279
+uh only extract those uh records
+
+00:15:45,519 --> 00:15:53,360
+they are interested so from so from this
+
+00:15:49,279 --> 00:15:54,720
+way uh we basically implemented a grpc
+
+00:15:53,360 --> 00:15:58,639
+server
+
+00:15:54,720 --> 00:16:02,639
+in pinot server which means that we can
+
+00:15:58,639 --> 00:16:05,600
+have a configurable uh memory footprint
+
+00:16:02,639 --> 00:16:06,399
+for from pinot side to do the data
+
+00:16:05,600 --> 00:16:09,920
+pooling
+
+00:16:06,399 --> 00:16:12,959
+and it's also a perfect match for the
+
+00:16:09,920 --> 00:16:15,600
+presto site basically we can fetch
+
+00:16:12,959 --> 00:16:18,480
+data pages by page it's also in a
+
+00:16:15,600 --> 00:16:18,480
+streaming fashion
+
+00:16:19,040 --> 00:16:22,720
+so here comes to the benchmark so for
+
+00:16:21,839 --> 00:16:25,279
+the benchmark
+
+00:16:22,720 --> 00:16:27,360
+it's all set up on database with
+
+00:16:25,279 --> 00:16:29,920
+kubernetes we started with
+
+00:16:27,360 --> 00:16:31,120
+three pino uh controllers five brokers
+
+00:16:29,920 --> 00:16:33,839
+four servers
+
+00:16:31,120 --> 00:16:35,279
+uh one press recordings and four presto
+
+00:16:33,839 --> 00:16:37,759
+workers
+
+00:16:35,279 --> 00:16:38,480
+data set is the one billion random
+
+00:16:37,759 --> 00:16:41,440
+generated
+
+00:16:38,480 --> 00:16:43,360
+complex website it has some high
+
+00:16:41,440 --> 00:16:45,519
+cardinality dimension low currently
+
+00:16:43,360 --> 00:16:48,160
+dimensions and some metrics
+
+00:16:45,519 --> 00:16:50,720
+uh for the queries we are majorly
+
+00:16:48,160 --> 00:16:52,560
+testing our aggregation
+
+00:16:50,720 --> 00:16:54,560
+plus predicate and aggregation group
+
+00:16:52,560 --> 00:16:58,399
+bypass predicate
+
+00:16:54,560 --> 00:17:01,279
+so from the presta side we basically
+
+00:16:58,399 --> 00:17:03,360
+do this aggregation push down enable and
+
+00:17:01,279 --> 00:17:06,400
+disable
+
+00:17:03,360 --> 00:17:08,079
+conditions so that we can compare how
+
+00:17:06,400 --> 00:17:09,919
+this aggregation push down
+
+00:17:08,079 --> 00:17:12,160
+actually working and help the
+
+00:17:09,919 --> 00:17:14,640
+performance improvement
+
+00:17:12,160 --> 00:17:17,199
+so for this test it's based on the
+
+00:17:14,640 --> 00:17:20,880
+aggregation plus predicate push down
+
+00:17:17,199 --> 00:17:22,160
+so we tested the performance of with and
+
+00:17:20,880 --> 00:17:24,880
+without a
+
+00:17:22,160 --> 00:17:25,280
+aggregation push down so blue bar is
+
+00:17:24,880 --> 00:17:27,600
+with
+
+00:17:25,280 --> 00:17:29,360
+aggregation push down so you will find
+
+00:17:27,600 --> 00:17:32,160
+that most of the query latency are
+
+00:17:29,360 --> 00:17:35,440
+contributed from the pino query engine
+
+00:17:32,160 --> 00:17:38,320
+the red bar is presto so although we
+
+00:17:35,440 --> 00:17:39,600
+are a hundred times this uh number of
+
+00:17:38,320 --> 00:17:42,720
+records scan
+
+00:17:39,600 --> 00:17:45,600
+but the query uh latency didn't go
+
+00:17:42,720 --> 00:17:47,840
+like too too too high so it means that
+
+00:17:45,600 --> 00:17:48,799
+the query engine overhead is the major
+
+00:17:47,840 --> 00:17:51,840
+contribution
+
+00:17:48,799 --> 00:17:55,120
+uh for this thing and apparently
+
+00:17:51,840 --> 00:17:56,720
+uh pino is more lightweight the
+
+00:17:55,120 --> 00:17:58,720
+the right side the listening graph is
+
+00:17:56,720 --> 00:18:01,360
+for low circuit uh selectivity
+
+00:17:58,720 --> 00:18:01,919
+or predicates so core needs to scan more
+
+00:18:01,360 --> 00:18:04,000
+data
+
+00:18:01,919 --> 00:18:05,039
+and the latency is proportional to the
+
+00:18:04,000 --> 00:18:07,440
+number of
+
+00:18:05,039 --> 00:18:08,799
+records scanned so for large data scan
+
+00:18:07,440 --> 00:18:10,960
+press require
+
+00:18:08,799 --> 00:18:12,880
+requires fetching all the data needed
+
+00:18:10,960 --> 00:18:15,120
+from pino to process
+
+00:18:12,880 --> 00:18:16,160
+so the actual cost and the time
+
+00:18:15,120 --> 00:18:18,720
+consumption
+
+00:18:16,160 --> 00:18:19,919
+around the pinot data serialization
+
+00:18:18,720 --> 00:18:23,679
+network transfer
+
+00:18:19,919 --> 00:18:26,080
+and oppressor data deserialization
+
+00:18:23,679 --> 00:18:27,840
+so this is the benchmark for aggregation
+
+00:18:26,080 --> 00:18:30,400
+of dubai
+
+00:18:27,840 --> 00:18:31,440
+and this results is similar to the
+
+00:18:30,400 --> 00:18:34,960
+previous one
+
+00:18:31,440 --> 00:18:36,960
+so just uh to uh comparing to presto
+
+00:18:34,960 --> 00:18:38,720
+for scanning large amount of data pino
+
+00:18:36,960 --> 00:18:42,240
+latency increases are
+
+00:18:38,720 --> 00:18:45,520
+in a lower ratio from like uh
+
+00:18:42,240 --> 00:18:47,440
+50 million to 500 million uh
+
+00:18:45,520 --> 00:18:49,120
+number of dogs scanned pinot latency
+
+00:18:47,440 --> 00:18:51,919
+increased about two times
+
+00:18:49,120 --> 00:18:53,039
+and the price increased about six times
+
+00:18:51,919 --> 00:18:56,160
+so overall
+
+00:18:53,039 --> 00:18:59,200
+in this kind of uh aggregation push down
+
+00:18:56,160 --> 00:19:00,000
+it opens it opens up the gate for
+
+00:18:59,200 --> 00:19:03,200
+analytics
+
+00:19:00,000 --> 00:19:05,600
+and uh also fully allows our user
+
+00:19:03,200 --> 00:19:06,720
+to enjoy this real-time analytics with
+
+00:19:05,600 --> 00:19:09,679
+the flexible
+
+00:19:06,720 --> 00:19:10,559
+quality capability okay lastly so first
+
+00:19:09,679 --> 00:19:14,000
+of all thanks
+
+00:19:10,559 --> 00:19:16,720
+for attending uh this talk and uh you
+
+00:19:14,000 --> 00:19:19,679
+can try to uh get started with suppresto
+
+00:19:16,720 --> 00:19:20,160
+and pino uh by following this get
+
+00:19:19,679 --> 00:19:23,600
+started
+
+00:19:20,160 --> 00:19:25,840
+tutorial and also please join our pinot
+
+00:19:23,600 --> 00:19:28,880
+slag channel if you have any questions
+
+00:19:25,840 --> 00:19:32,160
+or you can just subscribe to our twitter
+
+00:19:28,880 --> 00:19:35,760
+or join our meetup for any like
+
+00:19:32,160 --> 00:19:38,080
+news update or like learning sessions
+
+00:19:35,760 --> 00:19:39,360
+and all feedbacks and contributions are
+
+00:19:38,080 --> 00:19:41,440
+welcome
+
+00:19:39,360 --> 00:19:44,799
+that's pretty much the talk for today
+
+00:19:41,440 --> 00:19:44,799
+
+YouTube URL: https://www.youtube.com/watch?v=0VCVfm7Orzw
+
+

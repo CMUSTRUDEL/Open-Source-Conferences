@@ -1,0 +1,3063 @@
+Title: LPC2019 - Linux Gen-Z Sub-system
+Publication date: 2019-09-20
+Playlist: Linux Plumbers Conference 2019
+Description: 
+	Linux Gen-Z Sub-system
+
+Speakers
+ Jim Hull (Hewlett Packard Enterprise)
+ Betty Dall (HPE)
+ Keith Packard (Hewlett Packard Enterprise)
+
+Description
+Gen-Z Linux Sub-system
+Discuss design choices for a Gen-Z kernel sub-system and the challenges of supporting the Gen-Z interconnect in Linux.
+
+Gen-Z is a fabric interconnect that connects a broad range of devices from CPUs, memory, I/O, and switches to other computers and all of their devices. It scales from two components in an enclosure to an exascale mesh. The Gen-Z consortium has over 70 member companies and the first version of the specification was published in 2018. Past history for new interconnects suggests we will see actual hardware products two years after the first specification - in 2020. We propose to add support for a Gen-Z kernel sub-system, a Gen-Z component device driver environment, and user space management applications.
+
+A Gen-Z sub-system needs support for these Gen-Z features:
+
+Registration and enumeration services that are similar to existing
+sub-systems like PCI.
+Gen-Z Memory Management Unit (ZMMU) provides memory mapping and access to fabric addresses. The Gen-Z sub-system can provide services to track PTE entries for the two types of ZMMU's in the specification: page grid and page table based.
+Region Keys (R-Keys) - Each ZMMU page can have R-Keys used to validate page access authorization. The Gen-Z sub-system needs to provide APIs for tracking, freeing, and validating R-Keys.
+Process Address Space Identifier (PASID) - ZMMU requester and responder Page Table Entries (PTEs) contain a PASID. The Gen-Z sub-system needs to provide APIs for tracking PASIDs.
+Data mover - Transmit and receive data movers are optional elements in bridges and other Gen-Z components. The Gen-Z sub-system can provide a user space interface to a RDMA driver that uses a Gen-Z data mover. For example, a libfabric Gen-Z provider implementation can use a RDMA driver to access data mover queues.
+UUIDs - Components are identified by UUIDs. The Gen-Z sub-system provides interfaces for tracking UUIDs of local and remote components. A Gen-Z driver binds to a UUID similarly to how a PCI driver binds to a vendor/device id.
+Interrupt handling - Interrupt request packets in Gen-Z trigger local interrupts. Local components such as bridges and data movers can also be sources of interrupts.
+We will discuss our proposed design for the Gen-Z sub-system illustrated in the following block diagram:
+
+Gen-Z Sub-system Block Diagram
+
+Gen-Z fabric management is global to the fabric. The operating system may not know what components on the fabric are assigned to it; the fabric manager decides which components belong to the operating system. Although user space discovery/management is unusual for Linux, it will allow the Gen-Z sub-system to focus on the mechanism of component management rather than the policy choices a fabric manager must make.
+
+To support user space discovery/management, the Gen-Z sub-system needs interfaces for management services:
+
+Fabric managers need read/write access to component control space in order to do fabric discovery and configuration. We propose using /sys files for each control structure and table.
+User space Gen-Z managers need notification of management events/interrupts from the Gen-Z fabric. We propose using poll on the bridges' device files to communicate events.
+Local management services pass fabric discovery events from user space to the kernel. Our proposed design uses generic Netlink messages for communication of these component add/remove/modify events.
+We are leveraging our experience with writing Linux bridge drivers for three different Gen-Z hardware bridges in the design of the Gen-Z Linux sub-system. Most recently, we wrote the DOE Exa-scale PathForward project's bridge driver with data movers (https://github.com/HewlettPackard/zhpe-driver). We wrote drivers for the Gen-Z Consortium's demonstration card that supports a block device and a NIC as well as a driver for the bridge in HPE's "The Machine" that is a precursor to Gen-Z.
+Captions: 
+	00:00:00,160 --> 00:00:01,790
+- Good morning everybody.
+
+00:00:01,790 --> 00:00:02,850
+I'm Jim Hall.
+
+00:00:02,850 --> 00:00:05,600
+I'm here with my colleague Betty Dall here in the front row.
+
+00:00:05,600 --> 00:00:08,910
+We're here from Hewlett Packard Enterprise
+
+00:00:08,910 --> 00:00:11,420
+to tell you about our proposal for a new
+
+00:00:11,420 --> 00:00:12,993
+Linux Gen-Z subsystem.
+
+00:00:15,870 --> 00:00:18,110
+Here's what we're gonna talk about today,
+
+00:00:18,110 --> 00:00:20,390
+starting with an introduction to Gen-Z because
+
+00:00:20,390 --> 00:00:22,730
+my assumption is that
+
+00:00:22,730 --> 00:00:25,310
+many of you don't even know what Gen-Z is,
+
+00:00:25,310 --> 00:00:26,990
+or how it works, or anything,
+
+00:00:26,990 --> 00:00:30,760
+so we're gonna do a really brief
+
+00:00:30,760 --> 00:00:33,520
+discussion of what you need to know
+
+00:00:33,520 --> 00:00:35,020
+so that you can understand what the rest of our
+
+00:00:35,020 --> 00:00:36,800
+presentation is about.
+
+00:00:36,800 --> 00:00:40,973
+So Gen-Z is an open, new interconnect protocol.
+
+00:00:42,340 --> 00:00:45,960
+First of all, it's a consortium with broad industry support.
+
+00:00:45,960 --> 00:00:49,060
+There's over 70 members in the Consortium right now,
+
+00:00:49,060 --> 00:00:52,290
+ranging from system designers to
+
+00:00:52,290 --> 00:00:55,100
+memory device designers to switch companies
+
+00:00:55,100 --> 00:00:56,483
+to software people,
+
+00:00:57,630 --> 00:00:59,440
+but mostly hardware,
+
+00:00:59,440 --> 00:01:02,860
+and there's a few of us thinking about software here.
+
+00:01:02,860 --> 00:01:05,440
+It's a whole family of specifications.
+
+00:01:05,440 --> 00:01:06,800
+There's a core spec which gives you
+
+00:01:06,800 --> 00:01:10,407
+the basics of the protocol and how control space works
+
+00:01:10,407 --> 00:01:12,740
+and some few things that we'll talk about later.
+
+00:01:12,740 --> 00:01:14,270
+There's physical specifications.
+
+00:01:14,270 --> 00:01:16,330
+there's mechanical specifications that talk about
+
+00:01:16,330 --> 00:01:19,180
+form factors for putting these things into boxes.
+
+00:01:19,180 --> 00:01:22,363
+Connectors, and a software and management spec as well.
+
+00:01:24,410 --> 00:01:29,410
+Its most important parameter probably is that
+
+00:01:30,300 --> 00:01:33,230
+Gen-Z is a memory semantic fabric,
+
+00:01:33,230 --> 00:01:36,650
+and by memory semantic I mean that you can have
+
+00:01:36,650 --> 00:01:38,800
+devices out on the other side of the fabric,
+
+00:01:38,800 --> 00:01:43,732
+and in your CPU, under the control of a Linux OS,
+
+00:01:43,732 --> 00:01:46,160
+you can do an mmap of a region of memory out there
+
+00:01:46,160 --> 00:01:47,983
+and do direct load-stores to that.
+
+00:01:49,030 --> 00:01:51,287
+So you don't have to just do RDMA messaging
+
+00:01:51,287 --> 00:01:52,700
+or Ethernet packets or anything,
+
+00:01:52,700 --> 00:01:56,040
+you can do load-stores to those devices out there.
+
+00:01:56,040 --> 00:01:58,250
+And Gen-Z can scale from anywhere from
+
+00:01:58,250 --> 00:02:03,040
+two to 256 million components on that fabric,
+
+00:02:03,040 --> 00:02:06,060
+which is, you know, a pretty big number.
+
+00:02:06,060 --> 00:02:06,980
+And
+
+00:02:08,910 --> 00:02:11,040
+Gen-Z is a PHY-independent protocol
+
+00:02:11,040 --> 00:02:12,780
+in the sense that there's a
+
+00:02:12,780 --> 00:02:15,580
+PHY-independence layer and you can run it against
+
+00:02:16,550 --> 00:02:18,070
+any number of PHYs,
+
+00:02:18,070 --> 00:02:20,550
+depending on what kind of latency, bandwidth,
+
+00:02:20,550 --> 00:02:22,173
+and reach that you need.
+
+00:02:23,320 --> 00:02:26,200
+The three PHYs that are specified right now
+
+00:02:26,200 --> 00:02:31,200
+include a PCI PHY at 32 gigatransfers per second,
+
+00:02:32,790 --> 00:02:37,400
+and two different 802.3 PHYs
+
+00:02:37,400 --> 00:02:39,423
+at 25 and 50 gigabits.
+
+00:02:40,370 --> 00:02:42,907
+And the reason there are these different PHYs is that
+
+00:02:42,907 --> 00:02:46,030
+PCI PHYs can go about this far,
+
+00:02:46,030 --> 00:02:48,333
+and copper,
+
+00:02:49,550 --> 00:02:52,210
+Ethernet PHYs can go about this far,
+
+00:02:52,210 --> 00:02:54,120
+and if you wanna go further than that,
+
+00:02:54,120 --> 00:02:57,100
+like across a row of data center boxes
+
+00:02:57,100 --> 00:02:58,870
+or an entire data center,
+
+00:02:58,870 --> 00:03:01,120
+then you probably need to do an optical PHY
+
+00:03:01,120 --> 00:03:04,743
+and there'll be some of those specified in Gen-Z as well.
+
+00:03:06,990 --> 00:03:10,990
+Gen-Z can support a completely unmodified OS
+
+00:03:10,990 --> 00:03:14,960
+by hiding all the complication of the fabric management
+
+00:03:14,960 --> 00:03:19,713
+and making the devices appear like PCI devices in firmware.
+
+00:03:20,970 --> 00:03:24,317
+But that's not what we're here to talk about. (laughs)
+
+00:03:24,317 --> 00:03:27,347
+We're here to talk about having Linux be a full player,
+
+00:03:28,550 --> 00:03:31,990
+and we'll talk a little bit later about
+
+00:03:31,990 --> 00:03:35,150
+why we think that's necessary and that just hiding it in the
+
+00:03:36,440 --> 00:03:37,993
+firmware is not a good idea.
+
+00:03:40,310 --> 00:03:43,210
+So, in this picture we have
+
+00:03:43,210 --> 00:03:46,250
+two different example fabrics.
+
+00:03:46,250 --> 00:03:50,800
+The one on the left is a pretty basic fabric.
+
+00:03:50,800 --> 00:03:55,460
+Two machines, each with a CPU and memory,
+
+00:03:55,460 --> 00:03:59,010
+connected over some coherent native interconnect
+
+00:03:59,010 --> 00:04:01,660
+between that CPU and a bridge,
+
+00:04:01,660 --> 00:04:03,840
+which is the name Gen-Z gives to the device
+
+00:04:03,840 --> 00:04:07,180
+that connects from a CPU out onto the Gen-Z fabric,
+
+00:04:07,180 --> 00:04:10,260
+and then two media components in each of those servers.
+
+00:04:10,260 --> 00:04:13,670
+So there's six Gen-Z components in all
+
+00:04:13,670 --> 00:04:15,363
+in that fabric on the left.
+
+00:04:19,360 --> 00:04:24,360
+Each component can have one or more interfaces.
+
+00:04:24,600 --> 00:04:26,680
+It's a point-to-point connection.
+
+00:04:26,680 --> 00:04:28,850
+If you want to fan out then you'll have to have a switch,
+
+00:04:28,850 --> 00:04:33,380
+which is that sort of octagonal thing in the middle there.
+
+00:04:33,380 --> 00:04:37,170
+Switches can be either standalone or integrated in with
+
+00:04:37,170 --> 00:04:39,460
+pretty much any other component type,
+
+00:04:39,460 --> 00:04:41,860
+if you want to have switching in that component.
+
+00:04:43,280 --> 00:04:47,510
+On the right-hand side is a far more complicated fabric.
+
+00:04:47,510 --> 00:04:50,410
+It's representative of what you might use in a
+
+00:04:51,650 --> 00:04:53,723
+HPC kind of environment.
+
+00:04:54,680 --> 00:04:58,680
+This is a two dimensional HyperX which means that
+
+00:05:00,290 --> 00:05:02,860
+each switch in the fabric is connected directly to
+
+00:05:02,860 --> 00:05:06,773
+all of the other switches in both its row and its column,
+
+00:05:09,460 --> 00:05:10,880
+which leads to
+
+00:05:12,170 --> 00:05:16,690
+one of the prime features of a Gen-Z fabric
+
+00:05:16,690 --> 00:05:18,957
+which is that you can have multipath.
+
+00:05:20,180 --> 00:05:25,010
+You can have software set up the routing to go
+
+00:05:26,670 --> 00:05:28,913
+between any number of those switches,
+
+00:05:30,250 --> 00:05:33,390
+directly, two hops to get directly there or
+
+00:05:33,390 --> 00:05:37,980
+multiple hops along the way for redundancy or
+
+00:05:37,980 --> 00:05:39,273
+bandwidth improvements.
+
+00:05:45,650 --> 00:05:48,443
+I mentioned that there has to be management software.
+
+00:05:50,890 --> 00:05:53,500
+In general, there will be multiple OS instances
+
+00:05:53,500 --> 00:05:55,383
+running on the nodes in the fabric.
+
+00:05:56,500 --> 00:05:58,720
+None of those individual
+
+00:06:00,150 --> 00:06:03,170
+OS instances can assume that they own the entire fabric
+
+00:06:04,440 --> 00:06:07,453
+or all the components that it might find out there.
+
+00:06:08,930 --> 00:06:12,260
+Furthermore, you don't have to assign
+
+00:06:12,260 --> 00:06:14,760
+complete components to any given OS instance.
+
+00:06:14,760 --> 00:06:17,650
+You could divide up those components, for example,
+
+00:06:17,650 --> 00:06:21,280
+a large media device can be carved up into pieces,
+
+00:06:21,280 --> 00:06:23,550
+and each of those we call a resource,
+
+00:06:23,550 --> 00:06:26,290
+and those can be individually assigned to
+
+00:06:26,290 --> 00:06:28,320
+particular OS instances.
+
+00:06:28,320 --> 00:06:32,150
+Or shared, which is one of the main ideas here,
+
+00:06:32,150 --> 00:06:33,720
+is that you don't have to have
+
+00:06:33,720 --> 00:06:36,670
+a resource assigned just to one OS,
+
+00:06:36,670 --> 00:06:40,123
+but they can be used by multiple ones simultaneously.
+
+00:06:44,520 --> 00:06:45,353
+To make that work,
+
+00:06:45,353 --> 00:06:48,560
+the Fabric Manager has to have some idea about
+
+00:06:48,560 --> 00:06:51,070
+what resources should be assigned to which OS instance.
+
+00:06:51,070 --> 00:06:53,520
+So we have this thing in the management
+
+00:06:53,520 --> 00:06:55,483
+subgroup called the grand plan.
+
+00:06:57,510 --> 00:06:59,760
+If you do a Google search for grand plan
+
+00:06:59,760 --> 00:07:02,700
+the first thing that comes up is something from
+
+00:07:02,700 --> 00:07:05,630
+Wookieepedia talking about the Sith
+
+00:07:05,630 --> 00:07:07,790
+in the Star Wars universe. (laughs)
+
+00:07:07,790 --> 00:07:08,770
+So,
+
+00:07:08,770 --> 00:07:11,480
+that's why I think it really is a grand plan
+
+00:07:11,480 --> 00:07:13,013
+in that sense exactly.
+
+00:07:15,142 --> 00:07:16,763
+(laughs) Let's see.
+
+00:07:19,910 --> 00:07:22,380
+Fabric management can be done either in-band,
+
+00:07:22,380 --> 00:07:25,090
+meaning that the fabric management traffic
+
+00:07:25,090 --> 00:07:28,090
+is going over the Gen-Z fabric itself,
+
+00:07:28,090 --> 00:07:30,810
+or out-of-band, which could mean you'd have some
+
+00:07:30,810 --> 00:07:34,210
+other set of
+
+00:07:34,210 --> 00:07:36,663
+connections between those devices, like Ethernet.
+
+00:07:39,080 --> 00:07:40,480
+Either one can be supported.
+
+00:07:41,440 --> 00:07:43,440
+And one of the main functions of this Gen-Z
+
+00:07:43,440 --> 00:07:45,230
+management software is to set up the routing,
+
+00:07:45,230 --> 00:07:46,490
+like I said before.
+
+00:07:46,490 --> 00:07:49,260
+It can have a multitude of routes and you have to decide
+
+00:07:49,260 --> 00:07:50,653
+which routes are good ones.
+
+00:07:52,070 --> 00:07:54,310
+Which ones should be enabled, which ones should
+
+00:07:54,310 --> 00:07:56,540
+be denied because you don't want those two components
+
+00:07:56,540 --> 00:07:57,990
+to talk to each other at all.
+
+00:08:01,850 --> 00:08:03,570
+And then because there's this Fabric Manager
+
+00:08:03,570 --> 00:08:05,570
+sitting out there and it's the only one who knows
+
+00:08:05,570 --> 00:08:08,080
+which resources should be assigned to an OS,
+
+00:08:08,080 --> 00:08:10,850
+there has to be some communication mechanism
+
+00:08:10,850 --> 00:08:12,480
+between a local management service
+
+00:08:12,480 --> 00:08:14,660
+running on each and every node
+
+00:08:14,660 --> 00:08:16,517
+that talks to that Fabric Manager and says,
+
+00:08:16,517 --> 00:08:18,867
+"Hey, which of these things that are out there
+
+00:08:18,867 --> 00:08:21,067
+"that you're managing am I supposed to see?"
+
+00:08:21,950 --> 00:08:24,170
+And that local management service will
+
+00:08:25,460 --> 00:08:27,767
+talk to that Fabric Manager using a
+
+00:08:28,800 --> 00:08:31,340
+DMTF Redfish interface
+
+00:08:32,670 --> 00:08:35,623
+to learn what resources are its.
+
+00:08:41,700 --> 00:08:42,690
+We're gonna drop down
+
+00:08:42,690 --> 00:08:46,010
+one little level of detail lower now and get you
+
+00:08:46,010 --> 00:08:47,913
+some very basic Gen-Z concepts.
+
+00:08:49,460 --> 00:08:52,270
+So there are three basic component roles.
+
+00:08:52,270 --> 00:08:54,620
+Requesters are the things that initiate packets
+
+00:08:54,620 --> 00:08:56,900
+in order to get service from some
+
+00:08:56,900 --> 00:08:58,450
+other entity out on the fabric,
+
+00:08:58,450 --> 00:09:00,530
+which is known as a responder,
+
+00:09:00,530 --> 00:09:03,400
+which executes that packet and then sends back
+
+00:09:03,400 --> 00:09:05,173
+an acknowledgement if it needs to.
+
+00:09:07,050 --> 00:09:11,320
+That acknowledgement happens
+
+00:09:11,320 --> 00:09:15,430
+both for reads and writes, so even writes are acknowledged.
+
+00:09:15,430 --> 00:09:18,980
+This is basically a reliable protocol.
+
+00:09:18,980 --> 00:09:20,900
+If there's some error in the transmission
+
+00:09:20,900 --> 00:09:22,020
+on any one of those links,
+
+00:09:22,020 --> 00:09:25,760
+the hardware will retry up to some programmed limit
+
+00:09:25,760 --> 00:09:29,743
+to try to make that transaction happen.
+
+00:09:30,710 --> 00:09:32,840
+But it could, of course, fail if that
+
+00:09:33,770 --> 00:09:34,840
+happens too many times,
+
+00:09:34,840 --> 00:09:36,813
+if the link is really dead, for example.
+
+00:09:38,350 --> 00:09:39,700
+And then there are switches
+
+00:09:40,550 --> 00:09:42,590
+whose role is just to route packets from
+
+00:09:42,590 --> 00:09:45,590
+ingress interfaces to egress interfaces,
+
+00:09:45,590 --> 00:09:48,320
+and they have a big set of tables
+
+00:09:48,320 --> 00:09:50,450
+in each switch component that decide
+
+00:09:51,330 --> 00:09:53,593
+what routing paths are ensured and which ones are not.
+
+00:09:56,980 --> 00:09:58,650
+Every component on the fabric has a
+
+00:09:58,650 --> 00:10:02,120
+28-bit global component ID,
+
+00:10:02,120 --> 00:10:04,133
+GCID or GCID.
+
+00:10:05,370 --> 00:10:08,230
+It's assigned by management software.
+
+00:10:08,230 --> 00:10:11,900
+The first 16 bits of those are called the subnet ID,
+
+00:10:11,900 --> 00:10:13,470
+which is optional,
+
+00:10:13,470 --> 00:10:16,720
+and then there's a required 12-bit component ID.
+
+00:10:16,720 --> 00:10:18,250
+So if you want to build a small fabric
+
+00:10:18,250 --> 00:10:20,060
+you don't have to have the full 28 bits,
+
+00:10:20,060 --> 00:10:21,483
+you can just do 12 of those.
+
+00:10:23,700 --> 00:10:27,730
+Components, every component on the fabric has two
+
+00:10:27,730 --> 00:10:29,203
+separate address spaces.
+
+00:10:30,310 --> 00:10:32,550
+There's the data address space,
+
+00:10:32,550 --> 00:10:35,343
+which is up to two to the 64 bytes in size,
+
+00:10:36,360 --> 00:10:38,450
+on each and every component,
+
+00:10:38,450 --> 00:10:41,580
+and next to it is a control address space,
+
+00:10:41,580 --> 00:10:43,020
+totally separate,
+
+00:10:43,020 --> 00:10:46,090
+two to the 52 bytes in size maximum,
+
+00:10:46,090 --> 00:10:49,710
+where management software will program
+
+00:10:51,140 --> 00:10:54,513
+various parameters into the component.
+
+00:10:56,780 --> 00:11:00,450
+A really important thing to understand is that,
+
+00:11:00,450 --> 00:11:04,000
+by default, packets are completely unordered on Gen-Z
+
+00:11:04,000 --> 00:11:06,923
+which is very different than PCIe which has
+
+00:11:06,923 --> 00:11:09,050
+a well-known ordering model.
+
+00:11:09,050 --> 00:11:14,050
+Here they are unordered by assumption,
+
+00:11:14,900 --> 00:11:16,660
+and that's for a couple of reasons.
+
+00:11:16,660 --> 00:11:19,860
+One, we showed in the previous slides
+
+00:11:19,860 --> 00:11:21,440
+that multipath can happen,
+
+00:11:21,440 --> 00:11:24,260
+so every packet that comes from my requester
+
+00:11:24,260 --> 00:11:27,700
+might follow a different path to that component
+
+00:11:27,700 --> 00:11:29,383
+and they may arrive out of order.
+
+00:11:30,440 --> 00:11:33,700
+Furthermore, there's the hardware retry mechanism which
+
+00:11:33,700 --> 00:11:37,270
+can cause just one packet to fail,
+
+00:11:37,270 --> 00:11:39,470
+others succeed and then that one is retried
+
+00:11:39,470 --> 00:11:42,083
+so that causes out of order as well.
+
+00:11:44,051 --> 00:11:44,884
+And finally,
+
+00:11:45,820 --> 00:11:49,670
+another big software-visible difference is that
+
+00:11:49,670 --> 00:11:51,740
+coherence in this fabric is
+
+00:11:51,740 --> 00:11:54,370
+usually going to be done with software
+
+00:11:55,360 --> 00:11:56,370
+and that's because
+
+00:11:58,690 --> 00:12:00,440
+hardware coherence mechanisms
+
+00:12:00,440 --> 00:12:02,110
+that we use on processors today
+
+00:12:03,370 --> 00:12:06,490
+really can't scale to the
+
+00:12:06,490 --> 00:12:08,443
+size fabrics we're talking about here.
+
+00:12:08,443 --> 00:12:11,410
+You would be spending all of your time doing
+
+00:12:11,410 --> 00:12:13,023
+snooping or even directory-based things
+
+00:12:13,023 --> 00:12:14,773
+that don't scale that far.
+
+00:12:15,740 --> 00:12:19,203
+So, coherence in general will be software-managed.
+
+00:12:24,740 --> 00:12:27,510
+Here's a picture of what control space
+
+00:12:28,400 --> 00:12:30,483
+looks like on each component.
+
+00:12:32,230 --> 00:12:34,210
+Every control space starts at zero
+
+00:12:34,210 --> 00:12:36,860
+and there's a required structure at address zero
+
+00:12:36,860 --> 00:12:38,920
+called the Core Structure,
+
+00:12:38,920 --> 00:12:40,823
+and so you start there.
+
+00:12:41,890 --> 00:12:44,150
+And inside that Core Structure there will be
+
+00:12:44,150 --> 00:12:47,160
+a bunch of fields describing various things,
+
+00:12:47,160 --> 00:12:49,250
+including pointers to other structures
+
+00:12:49,250 --> 00:12:52,033
+which describe more things about the component.
+
+00:12:53,940 --> 00:12:56,240
+And those pointers
+
+00:12:57,480 --> 00:13:00,710
+can create links, linked lists.
+
+00:13:00,710 --> 00:13:02,960
+So the Interface Structure here, for example,
+
+00:13:05,270 --> 00:13:07,200
+the first interface, number zero,
+
+00:13:07,200 --> 00:13:08,660
+is pointed to by the Core Structure,
+
+00:13:08,660 --> 00:13:10,984
+and then it points to one and on to two
+
+00:13:10,984 --> 00:13:12,603
+and end eventually.
+
+00:13:13,470 --> 00:13:17,840
+And there's a whole tree of defined links
+
+00:13:17,840 --> 00:13:21,900
+and a known mechanism to follow all those pointers
+
+00:13:21,900 --> 00:13:23,100
+and find all that stuff.
+
+00:13:24,300 --> 00:13:26,050
+There's really two things in control space.
+
+00:13:26,050 --> 00:13:27,740
+One are structures
+
+00:13:27,740 --> 00:13:29,680
+which have a fixed header in the front of them
+
+00:13:29,680 --> 00:13:33,450
+and therefore can be self-describing.
+
+00:13:33,450 --> 00:13:35,000
+There are also tables which are
+
+00:13:36,800 --> 00:13:39,100
+not structures, they don't have that fixed header
+
+00:13:39,100 --> 00:13:42,970
+and therefore you have to have special
+
+00:13:42,970 --> 00:13:45,770
+algorithm to go look at other fields and other structures
+
+00:13:45,770 --> 00:13:48,370
+to figure out how big that thing is, and what it is.
+
+00:14:01,120 --> 00:14:04,630
+I mentioned that bridges are the Gen-Z device
+
+00:14:04,630 --> 00:14:06,960
+that connects the CPU into the fabric.
+
+00:14:06,960 --> 00:14:09,553
+Here's a block diagram of an example bridge.
+
+00:14:11,090 --> 00:14:15,580
+This bridge block diagram is a
+
+00:14:15,580 --> 00:14:17,880
+marginally fictionalized version
+
+00:14:17,880 --> 00:14:21,950
+of a bridge that HPE has built and reported on
+
+00:14:21,950 --> 00:14:24,790
+at Hot Chips a couple of weeks ago.
+
+00:14:24,790 --> 00:14:26,377
+So if you want to find out more about that bridge
+
+00:14:26,377 --> 00:14:29,053
+you can look up that presentation.
+
+00:14:31,660 --> 00:14:34,330
+In the middle of this diagram is the CPU which has,
+
+00:14:34,330 --> 00:14:38,720
+of course, MMUs, and often IOMMUs these days.
+
+00:14:38,720 --> 00:14:42,040
+So these are standard CPUs with their local memory,
+
+00:14:42,040 --> 00:14:43,590
+and then they connect over some
+
+00:14:46,750 --> 00:14:48,753
+interconnect to the bridge.
+
+00:14:50,690 --> 00:14:52,540
+If you're doing the load-store
+
+00:14:53,990 --> 00:14:57,220
+mechanism then you'll start by
+
+00:14:57,220 --> 00:14:59,330
+executing a load or store instruction in the CPU
+
+00:14:59,330 --> 00:15:01,800
+through the standard MMU
+
+00:15:01,800 --> 00:15:04,800
+creating a physical address which comes out into the bridge.
+
+00:15:05,700 --> 00:15:08,090
+Now that physical address
+
+00:15:08,090 --> 00:15:13,090
+simply doesn't have enough data in it to resolve
+
+00:15:13,240 --> 00:15:16,020
+into a Gen-Z address because,
+
+00:15:16,020 --> 00:15:18,070
+as I mentioned, every component might have
+
+00:15:18,070 --> 00:15:20,650
+a full 64-bit address of its own
+
+00:15:20,650 --> 00:15:22,410
+and physical addresses on
+
+00:15:22,410 --> 00:15:24,323
+CPUs are just not that big these days.
+
+00:15:25,270 --> 00:15:26,720
+Furthermore, you need to have
+
+00:15:27,620 --> 00:15:31,160
+other data to fill in to the Gen-Z packet,
+
+00:15:31,160 --> 00:15:36,160
+like what the global destination is,
+
+00:15:36,220 --> 00:15:38,190
+and this thing called an R-Key which is
+
+00:15:38,190 --> 00:15:40,870
+part of the access control mechanism.
+
+00:15:40,870 --> 00:15:43,170
+And therefore, there's an extra layer of translation
+
+00:15:43,170 --> 00:15:45,870
+called the Requester ZMMU in the path,
+
+00:15:45,870 --> 00:15:48,420
+where that physical address is looked up
+
+00:15:48,420 --> 00:15:50,060
+and then turned into all those
+
+00:15:50,060 --> 00:15:52,510
+additional parameters before it goes out onto the
+
+00:15:53,510 --> 00:15:54,503
+Gen-Z fabric.
+
+00:15:55,720 --> 00:15:58,210
+Similarly on the way back in,
+
+00:15:58,210 --> 00:16:02,920
+a component will have been addressed and routed,
+
+00:16:02,920 --> 00:16:04,803
+the packet will be routed to the correct destination,
+
+00:16:04,803 --> 00:16:08,160
+presumably if not, the ressponder will throw it away.
+
+00:16:08,160 --> 00:16:10,300
+But assuming it arrives then
+
+00:16:10,300 --> 00:16:13,683
+the Z address will be looked up in the Responder ZMMU,
+
+00:16:15,320 --> 00:16:18,340
+along with the R-Key which is compared
+
+00:16:18,340 --> 00:16:20,670
+against the R-Key stored in the ZMMU
+
+00:16:20,670 --> 00:16:22,340
+and to make sure it matches,
+
+00:16:22,340 --> 00:16:24,740
+and again, if it doesn't, that we throw it away.
+
+00:16:25,940 --> 00:16:27,190
+And that will look up
+
+00:16:28,525 --> 00:16:29,875
+a virtual address and PASID
+
+00:16:30,800 --> 00:16:33,220
+which will be forwarded to an IOMMU before
+
+00:16:34,210 --> 00:16:35,860
+flowing into the system memory,
+
+00:16:35,860 --> 00:16:37,813
+assuming your platform has an IOMMU.
+
+00:16:43,240 --> 00:16:44,770
+Because load-store
+
+00:16:46,880 --> 00:16:48,740
+access probably can't get you
+
+00:16:49,730 --> 00:16:54,240
+direct access to all of the fancy packets
+
+00:16:54,240 --> 00:16:57,510
+and functionality that Gen-Z has,
+
+00:16:57,510 --> 00:17:00,270
+it's often a good idea in your bridge to have
+
+00:17:00,270 --> 00:17:02,670
+what's called a data mover,
+
+00:17:02,670 --> 00:17:05,323
+which is just a name for a fancy DMA engine,
+
+00:17:06,340 --> 00:17:10,610
+and it gives you access to
+
+00:17:10,610 --> 00:17:13,540
+packets that you can't generate with load-store.
+
+00:17:13,540 --> 00:17:17,620
+It can also provide you the option to do
+
+00:17:17,620 --> 00:17:19,193
+RDMA if you want to do that.
+
+00:17:21,180 --> 00:17:22,500
+Similarly, on the receive side,
+
+00:17:22,500 --> 00:17:25,120
+you can have a receive data mover which
+
+00:17:25,120 --> 00:17:27,450
+can receive messages from Gen-Z that are
+
+00:17:28,400 --> 00:17:31,303
+encapsulated Ethernet packets, for example,
+
+00:17:32,930 --> 00:17:37,140
+and send those off into a queue structure
+
+00:17:37,140 --> 00:17:39,790
+in normal kind of DMA way,
+
+00:17:39,790 --> 00:17:42,750
+because they're not
+
+00:17:42,750 --> 00:17:44,700
+packets that have direct addresses,
+
+00:17:44,700 --> 00:17:47,253
+instead they're more context-based.
+
+00:17:48,480 --> 00:17:51,280
+And finally, the control space has to be
+
+00:17:51,280 --> 00:17:52,550
+directly accessible
+
+00:17:54,210 --> 00:17:55,860
+both from the local CPU,
+
+00:17:55,860 --> 00:17:57,810
+and if you're doing in-band management,
+
+00:17:59,490 --> 00:18:02,440
+that control space has to be accessible
+
+00:18:03,380 --> 00:18:04,743
+from the fabric as well.
+
+00:18:05,850 --> 00:18:06,913
+And so,
+
+00:18:08,540 --> 00:18:11,520
+a responder will take control packets,
+
+00:18:11,520 --> 00:18:13,320
+which are different than data packets,
+
+00:18:13,320 --> 00:18:16,030
+and route them not to the responder's MMU
+
+00:18:16,030 --> 00:18:18,793
+but to the control space block directly.
+
+00:18:20,040 --> 00:18:21,177
+Again, this is just an example,
+
+00:18:21,177 --> 00:18:24,060
+you don't have to build your bridge like this but
+
+00:18:25,390 --> 00:18:28,380
+Gen-Z subsystem needs to be able to manage
+
+00:18:28,380 --> 00:18:30,343
+these resources in bridges.
+
+00:18:32,920 --> 00:18:34,493
+A little more about ZMMUs.
+
+00:18:35,910 --> 00:18:40,080
+The assumption in the spec is that
+
+00:18:40,080 --> 00:18:41,920
+they are OS-managed so
+
+00:18:42,900 --> 00:18:46,070
+the OS has direct ability to write
+
+00:18:46,070 --> 00:18:47,620
+the translations into the ZMMU,
+
+00:18:49,410 --> 00:18:51,840
+which means that any OS can generate
+
+00:18:51,840 --> 00:18:55,890
+a packet that's destined to any particular device out there.
+
+00:18:55,890 --> 00:18:56,737
+And so then you might ask,
+
+00:18:56,737 --> 00:18:59,780
+"Well, how do you deal with access control and security?"
+
+00:18:59,780 --> 00:19:01,160
+And that's a whole 'nother talk
+
+00:19:01,160 --> 00:19:02,863
+that we're not gonna talk about here.
+
+00:19:06,079 --> 00:19:07,270
+We've done the diagram description,
+
+00:19:07,270 --> 00:19:08,720
+I already covered most of the
+
+00:19:08,720 --> 00:19:13,313
+Requester ZMMU items on this bullet here.
+
+00:19:14,330 --> 00:19:17,100
+I did say the Responder ZMMU is in data space only
+
+00:19:17,100 --> 00:19:18,343
+and not control space.
+
+00:19:21,000 --> 00:19:21,833
+And
+
+00:19:23,061 --> 00:19:26,160
+the Gen-Z spec defines
+
+00:19:26,160 --> 00:19:30,340
+two different kinds of ZMMU structures.
+
+00:19:30,340 --> 00:19:32,740
+The first is called a page-table-based one which
+
+00:19:34,000 --> 00:19:36,880
+is structured much like a CPU's MMUs
+
+00:19:36,880 --> 00:19:41,360
+with multiple levels of in-memory page tables and
+
+00:19:41,360 --> 00:19:44,180
+caching those elements into a TLB in
+
+00:19:46,165 --> 00:19:46,998
+the ZMMU,
+
+00:19:48,270 --> 00:19:51,780
+very much like a CPU or IOMMU structure.
+
+00:19:51,780 --> 00:19:53,890
+But there's also another kind which is called a page grid
+
+00:19:53,890 --> 00:19:56,543
+which is an on-chip only,
+
+00:19:57,410 --> 00:19:58,930
+no tables in memory,
+
+00:19:58,930 --> 00:20:02,300
+and it has a fixed number of PTEs and
+
+00:20:04,890 --> 00:20:09,890
+therefore is a very limited resource.
+
+00:20:10,140 --> 00:20:14,500
+And so we need to have code in the subsystem to
+
+00:20:14,500 --> 00:20:16,773
+handle both of those kinds of ZMMUs.
+
+00:20:21,393 --> 00:20:22,226
+All right.
+
+00:20:26,346 --> 00:20:29,690
+That covers pretty much the introduction to Gen-Z
+
+00:20:29,690 --> 00:20:31,023
+that I wanted to
+
+00:20:33,020 --> 00:20:35,700
+get you guys all up to speed as much as possible
+
+00:20:35,700 --> 00:20:37,460
+in the short time we have.
+
+00:20:37,460 --> 00:20:39,350
+Let's move on now and talk about the
+
+00:20:39,350 --> 00:20:40,763
+kernel subsystem itself.
+
+00:20:43,130 --> 00:20:45,593
+So, why do we want to do a kernel subsystem?
+
+00:20:47,390 --> 00:20:50,030
+Well first, we want to enable native device drivers
+
+00:20:51,240 --> 00:20:55,110
+to control IO devices or accelerators
+
+00:20:55,110 --> 00:20:58,363
+that are out there on the Gen-Z fabric,
+
+00:20:59,880 --> 00:21:01,970
+and that enables
+
+00:21:04,270 --> 00:21:06,003
+full access of all these advanced Gen-Z features.
+
+00:21:06,003 --> 00:21:08,300
+There's a whole list of them here on this slide
+
+00:21:08,300 --> 00:21:10,500
+which we are not going to cover today
+
+00:21:10,500 --> 00:21:11,643
+due to lack of time.
+
+00:21:13,770 --> 00:21:16,510
+And it also enables the sharing, like I mentioned before,
+
+00:21:16,510 --> 00:21:19,900
+where if you do it in firmware then pretty much
+
+00:21:22,130 --> 00:21:23,900
+a resource assigned to firmware
+
+00:21:23,900 --> 00:21:27,910
+and then presented to an OS as if it were a local device,
+
+00:21:27,910 --> 00:21:31,470
+well that OS instance is of course going to assume
+
+00:21:31,470 --> 00:21:34,820
+that it has full and exclusive access to that device.
+
+00:21:34,820 --> 00:21:37,030
+And so if you wanna do sharing
+
+00:21:37,030 --> 00:21:38,410
+you can't do it the firmware way,
+
+00:21:38,410 --> 00:21:42,670
+you have to have a OS-visible knowledge about
+
+00:21:42,670 --> 00:21:44,070
+the sharing that's going on.
+
+00:21:46,010 --> 00:21:48,760
+For the more we have in our design the idea that
+
+00:21:50,940 --> 00:21:52,690
+we're going to put Fabric Manager
+
+00:21:52,690 --> 00:21:55,730
+and those local management services that I mentioned
+
+00:21:55,730 --> 00:21:56,783
+in user space,
+
+00:21:58,080 --> 00:22:01,000
+and the Gen-Z subsystem will be the
+
+00:22:01,000 --> 00:22:04,640
+mechanism that those user space processes will be
+
+00:22:05,580 --> 00:22:07,313
+given access to those resources.
+
+00:22:08,430 --> 00:22:09,510
+And why are we doing this now?
+
+00:22:09,510 --> 00:22:13,243
+Well, because hardware is showing up essentially now.
+
+00:22:17,840 --> 00:22:19,640
+Here are the things we had in mind while
+
+00:22:19,640 --> 00:22:21,193
+doing the design that we have.
+
+00:22:22,390 --> 00:22:26,460
+First, since this Gen-Z subsystem wants to expose
+
+00:22:27,610 --> 00:22:29,073
+native devices,
+
+00:22:30,690 --> 00:22:34,323
+it needs to be a bus subsystem in the Linux kernel sense,
+
+00:22:35,410 --> 00:22:38,340
+and we have existing examples of bus subsystems
+
+00:22:38,340 --> 00:22:41,490
+like PCI, and USB, and Greybus.
+
+00:22:41,490 --> 00:22:44,810
+So we want to be like those where we can.
+
+00:22:44,810 --> 00:22:47,940
+That way driver writers that are used to doing
+
+00:22:47,940 --> 00:22:51,280
+drivers for those bus subsystems will not be
+
+00:22:52,850 --> 00:22:56,383
+too freaked out by some kind of odd design that we've done.
+
+00:22:57,810 --> 00:23:01,270
+This next one is maybe the most important of all,
+
+00:23:01,270 --> 00:23:03,250
+which is that we want policy to be in user space
+
+00:23:03,250 --> 00:23:04,750
+and just the mechanism in the kernel,
+
+00:23:04,750 --> 00:23:05,923
+to the extent possible.
+
+00:23:07,020 --> 00:23:09,420
+The previous speaker was talking all about these
+
+00:23:10,290 --> 00:23:12,470
+odd heuristics in the memory management system
+
+00:23:12,470 --> 00:23:15,300
+for page reclaim and we don't wanna have
+
+00:23:15,300 --> 00:23:17,100
+things like that that get in the way
+
+00:23:18,640 --> 00:23:20,220
+of making this work,
+
+00:23:20,220 --> 00:23:22,513
+so just let user space do it.
+
+00:23:24,580 --> 00:23:26,220
+We're going to use existing kernel services
+
+00:23:26,220 --> 00:23:27,370
+where that makes sense.
+
+00:23:28,780 --> 00:23:31,970
+And last but not least,
+
+00:23:31,970 --> 00:23:34,000
+we have to deal with the fact that
+
+00:23:34,000 --> 00:23:36,120
+if you read the core spec in Gen-Z,
+
+00:23:36,120 --> 00:23:38,253
+nearly every feature in there is optional.
+
+00:23:40,850 --> 00:23:42,930
+So we have to somehow deal with
+
+00:23:42,930 --> 00:23:44,920
+that level of complexity where
+
+00:23:45,770 --> 00:23:48,890
+we have to be able to make sure that
+
+00:23:48,890 --> 00:23:50,560
+we can build an interoperable system
+
+00:23:50,560 --> 00:23:54,820
+of these components where they may have chosen
+
+00:23:54,820 --> 00:23:57,083
+slightly different feature sets.
+
+00:23:59,640 --> 00:24:01,360
+So here is our
+
+00:24:02,430 --> 00:24:05,473
+block diagram of what we are proposing to build.
+
+00:24:07,510 --> 00:24:11,010
+The subsystem itself is in kernel space down at the bottom,
+
+00:24:11,010 --> 00:24:13,160
+it's those two green boxes.
+
+00:24:13,160 --> 00:24:15,710
+The key on the right says the green things are new,
+
+00:24:15,710 --> 00:24:17,183
+so that's the new stuff.
+
+00:24:18,160 --> 00:24:20,490
+It will be connected to
+
+00:24:20,490 --> 00:24:24,423
+bus and DMA subsystems in the kernel as you might expect.
+
+00:24:25,350 --> 00:24:27,023
+We'll talk about Netlink,
+
+00:24:28,820 --> 00:24:31,450
+hotplug infrastructure, and the /sys file system
+
+00:24:32,500 --> 00:24:33,790
+in a minute, yes, Terry?
+
+00:24:33,790 --> 00:24:35,377
+- Yeah, when you say it's new,
+
+00:24:36,427 --> 00:24:37,760
+existing new or,
+
+00:24:39,580 --> 00:24:43,333
+when you say new, it's existing new, or to be built?
+
+00:24:45,150 --> 00:24:46,560
+- New in the subsystem
+
+00:24:46,560 --> 00:24:49,100
+or new user space components using the subsystem,
+
+00:24:49,100 --> 00:24:51,460
+so it's code, new code that we're writing now,
+
+00:24:51,460 --> 00:24:52,800
+that's the green stuff.
+
+00:24:52,800 --> 00:24:56,070
+Yellow stuff is already in the kernel,
+
+00:24:56,070 --> 00:24:58,873
+and blue I haven't talked about yet, but I will now.
+
+00:25:00,170 --> 00:25:01,540
+So we need to have interfaces,
+
+00:25:01,540 --> 00:25:03,370
+both down to bridge device drivers
+
+00:25:03,370 --> 00:25:06,400
+which we'll be talking about a little bit more later,
+
+00:25:06,400 --> 00:25:08,160
+so that's at the bottom.
+
+00:25:08,160 --> 00:25:11,760
+Each vendor supplies a bridge device driver that
+
+00:25:11,760 --> 00:25:13,820
+corresponds to their bridge device.
+
+00:25:13,820 --> 00:25:16,710
+And then there'll be a set of upward-facing
+
+00:25:19,660 --> 00:25:22,910
+native device drivers that provide various services
+
+00:25:22,910 --> 00:25:24,530
+like block device services,
+
+00:25:24,530 --> 00:25:26,540
+or memory device services,
+
+00:25:26,540 --> 00:25:30,910
+or Ethernet NIC services,
+
+00:25:30,910 --> 00:25:33,973
+or RDMA services to user space.
+
+00:25:37,400 --> 00:25:40,070
+And then in the user space itself there are two main
+
+00:25:42,100 --> 00:25:44,130
+components being described here.
+
+00:25:44,130 --> 00:25:47,090
+The first is the local management services
+
+00:25:47,090 --> 00:25:49,760
+block on the right,
+
+00:25:49,760 --> 00:25:52,683
+not the far right but just next to that,
+
+00:25:54,624 --> 00:25:56,130
+and we call that LLaMaS because it's the
+
+00:25:56,130 --> 00:25:57,750
+Linux Local Management Service,
+
+00:25:57,750 --> 00:25:59,120
+and you stick a couple of A's in there
+
+00:25:59,120 --> 00:26:00,763
+and you get a cool name, LLaMaS.
+
+00:26:02,670 --> 00:26:03,503
+And then there's
+
+00:26:05,160 --> 00:26:07,673
+a Fabric Manager which we're calling Zephyr.
+
+00:26:08,570 --> 00:26:10,100
+Zephyr because
+
+00:26:10,100 --> 00:26:12,670
+besides the definition which has to do with wind
+
+00:26:12,670 --> 00:26:14,710
+there's one that has to do with fabric,
+
+00:26:14,710 --> 00:26:17,173
+so Fabric Manager named Zephyr.
+
+00:26:18,720 --> 00:26:22,673
+And we'll talk more about those in a little while.
+
+00:26:24,920 --> 00:26:27,570
+But first, let's talk about the kernel piece of this.
+
+00:26:30,190 --> 00:26:31,750
+One thing I want to make clear is that this is
+
+00:26:31,750 --> 00:26:33,470
+very definitely a work in progress.
+
+00:26:33,470 --> 00:26:35,450
+We are not done by any means.
+
+00:26:35,450 --> 00:26:38,100
+We have some code that implements some of this stuff,
+
+00:26:39,090 --> 00:26:42,020
+but we're at a good place where
+
+00:26:42,020 --> 00:26:45,820
+if there are glaring deficiencies that you see
+
+00:26:45,820 --> 00:26:47,140
+or things that we're doing wrong,
+
+00:26:47,140 --> 00:26:48,840
+let us know now.
+
+00:26:48,840 --> 00:26:51,900
+You'll see a set of questions here in a little bit
+
+00:26:51,900 --> 00:26:53,940
+that we have for the community to answer
+
+00:26:53,940 --> 00:26:57,380
+and hopefully we'll get some of those answers today or
+
+00:26:57,380 --> 00:27:00,373
+at the end of the talk or out in the hallway track.
+
+00:27:05,510 --> 00:27:07,450
+Okay, so the first aspect of
+
+00:27:09,640 --> 00:27:12,780
+getting the subsystem operational is basically that
+
+00:27:12,780 --> 00:27:16,360
+we assume that a bridge device will be discovered
+
+00:27:16,360 --> 00:27:19,420
+on its native bus, say it's connected via BPCI,
+
+00:27:19,420 --> 00:27:24,150
+or some PCI variant like CXL or C6,
+
+00:27:24,150 --> 00:27:26,603
+or OpenCAPI, or whatever.
+
+00:27:28,630 --> 00:27:31,610
+So that bridge device will be discovered in a normal way
+
+00:27:31,610 --> 00:27:34,330
+using those existing subsystems,
+
+00:27:34,330 --> 00:27:37,240
+and then when it's got its device ready, initialized,
+
+00:27:37,240 --> 00:27:40,880
+it will make a call to genz_register_bridge
+
+00:27:40,880 --> 00:27:45,050
+which is the notification to the Gen-Z subsystem that
+
+00:27:45,050 --> 00:27:46,880
+this isn't just some ordinary PCI device
+
+00:27:46,880 --> 00:27:49,983
+but it wants to talk to Gen-Z,
+
+00:27:51,680 --> 00:27:54,270
+and that'll happen usually during the probe function
+
+00:27:54,270 --> 00:27:55,720
+of that native bridge driver.
+
+00:27:57,070 --> 00:28:01,610
+And when the subsystem finds such a bridge
+
+00:28:03,720 --> 00:28:05,980
+it will be presented two things.
+
+00:28:05,980 --> 00:28:08,060
+One is the native device pointer
+
+00:28:09,600 --> 00:28:12,273
+for that device on its native bus,
+
+00:28:13,530 --> 00:28:15,610
+as well as a pointer to a structure
+
+00:28:15,610 --> 00:28:17,783
+which has got a bunch of function pointers in it,
+
+00:28:18,840 --> 00:28:21,920
+and those function pointers will include
+
+00:28:21,920 --> 00:28:24,590
+callbacks into the bridge driver to let it
+
+00:28:24,590 --> 00:28:26,030
+return bridge information,
+
+00:28:26,030 --> 00:28:29,920
+or perform control space reads or writes or mmaps,
+
+00:28:29,920 --> 00:28:32,130
+or data space reads or writes,
+
+00:28:32,130 --> 00:28:34,400
+or control write message which is
+
+00:28:34,400 --> 00:28:36,990
+a packet I haven't really talked about but
+
+00:28:36,990 --> 00:28:39,290
+it's used to talk to other management entities
+
+00:28:40,791 --> 00:28:41,773
+out on the fabric.
+
+00:28:43,657 --> 00:28:46,750
+And then, of course, there's an unregister which
+
+00:28:46,750 --> 00:28:47,583
+corresponds.
+
+00:28:52,278 --> 00:28:53,800
+Up in that upper block,
+
+00:28:53,800 --> 00:28:55,693
+blue block in the block diagram,
+
+00:28:57,060 --> 00:29:00,820
+for native device registration we'll have
+
+00:29:00,820 --> 00:29:03,560
+a genz_register_driver function
+
+00:29:03,560 --> 00:29:06,830
+very much like the PCI version.
+
+00:29:06,830 --> 00:29:10,810
+In fact, I think it has identical parameter interface.
+
+00:29:10,810 --> 00:29:12,430
+The main difference between
+
+00:29:13,670 --> 00:29:16,691
+device driver registration for Gen-Z versus PCI
+
+00:29:16,691 --> 00:29:20,153
+is that in the PCI world you have vendor and device IDs,
+
+00:29:21,000 --> 00:29:24,840
+and in Gen-Z all the IDs are UUIDs instead,
+
+00:29:24,840 --> 00:29:27,953
+so the matching will be by UUID.
+
+00:29:29,560 --> 00:29:30,660
+And again, there'll be
+
+00:29:31,975 --> 00:29:34,125
+a genz_driver structure passed in which has
+
+00:29:35,590 --> 00:29:39,050
+PCI-like probe, remove, suspend, resume
+
+00:29:39,050 --> 00:29:40,633
+kinds of function pointers.
+
+00:29:42,410 --> 00:29:44,440
+And again, there's an unregister.
+
+00:29:57,290 --> 00:29:59,200
+As I mentioned before,
+
+00:29:59,200 --> 00:30:03,670
+ZMMUs and IOMMU management's pretty fundamental to the way
+
+00:30:03,670 --> 00:30:04,743
+Gen-Z works,
+
+00:30:05,760 --> 00:30:08,530
+and so we want to centralize control
+
+00:30:08,530 --> 00:30:10,740
+and management of those so that we don't have to have
+
+00:30:10,740 --> 00:30:12,823
+every driver doing the same thing.
+
+00:30:13,890 --> 00:30:16,879
+So the subsystem won't know about ZMMUs,
+
+00:30:16,879 --> 00:30:19,160
+it will have calls that will allow mapping
+
+00:30:19,160 --> 00:30:23,670
+control space or data space as ZMMU entries.
+
+00:30:23,670 --> 00:30:25,920
+Control space in particular so that we can do
+
+00:30:27,657 --> 00:30:30,690
+an implementation of the sysfs interface
+
+00:30:30,690 --> 00:30:33,430
+to user space which we'll talk about in a minute
+
+00:30:33,430 --> 00:30:34,263
+some more.
+
+00:30:37,270 --> 00:30:39,630
+As I said, we're work in progress here,
+
+00:30:39,630 --> 00:30:42,130
+so we don't know exactly what this API looks like,
+
+00:30:43,280 --> 00:30:45,310
+but to the extent possible we're going to try to hide this
+
+00:30:45,310 --> 00:30:48,110
+difference between page grid and page-table-based ZMMUs.
+
+00:30:49,010 --> 00:30:51,260
+I'm still not convinced that we can do that but
+
+00:30:51,260 --> 00:30:52,093
+that's the goal.
+
+00:30:57,100 --> 00:31:01,180
+Because Gen-Z can connect to an IOMMU in the system,
+
+00:31:01,180 --> 00:31:04,093
+and because PASIDs appear in the ZMMUs themselves,
+
+00:31:05,120 --> 00:31:08,210
+we're very interested in having some kind of common
+
+00:31:08,210 --> 00:31:11,607
+set of calls that'll allow us to manage PASIDs.
+
+00:31:11,607 --> 00:31:13,150
+And so you can see our first
+
+00:31:13,150 --> 00:31:18,040
+questions out to the community here in blue which is
+
+00:31:18,040 --> 00:31:19,410
+should there be, or can there be,
+
+00:31:19,410 --> 00:31:22,880
+generic Linux interfaces for managing PASIDs?
+
+00:31:22,880 --> 00:31:24,720
+And there was a talk earlier
+
+00:31:24,720 --> 00:31:27,920
+and some hallway conversations we've had since which
+
+00:31:27,920 --> 00:31:29,660
+I think has convinced us that
+
+00:31:29,660 --> 00:31:32,890
+that is the direction that the kernel is heading so
+
+00:31:32,890 --> 00:31:34,933
+good. (laughs)
+
+00:31:36,100 --> 00:31:37,870
+Second question out to the community here
+
+00:31:37,870 --> 00:31:39,263
+is about huge pages.
+
+00:31:40,190 --> 00:31:41,540
+It's our understanding that
+
+00:31:42,630 --> 00:31:44,690
+huge pages for device memory are not
+
+00:31:44,690 --> 00:31:46,820
+well-supported in the kernel today,
+
+00:31:46,820 --> 00:31:49,260
+and there's a whole host of reasons
+
+00:31:49,260 --> 00:31:51,300
+printed on the slide here for
+
+00:31:51,300 --> 00:31:54,603
+why we think Gen-Z really could benefit from that.
+
+00:31:55,990 --> 00:31:57,240
+First off, as I mentioned before,
+
+00:31:57,240 --> 00:31:59,250
+there's a huge number of components possible
+
+00:31:59,250 --> 00:32:01,820
+and each of them can have a huge data space,
+
+00:32:01,820 --> 00:32:06,030
+and if you're trying to map all of those with 4K pages
+
+00:32:06,030 --> 00:32:07,223
+you're going to be sad.
+
+00:32:08,500 --> 00:32:09,333
+So,
+
+00:32:10,920 --> 00:32:14,603
+big pages helps solve that problem, at least mitigate it.
+
+00:32:17,630 --> 00:32:19,790
+Especially in the page grid case
+
+00:32:19,790 --> 00:32:24,070
+since there's so few PTEs in the device,
+
+00:32:24,070 --> 00:32:28,220
+they tend to have a huge range of page sizes available.
+
+00:32:28,220 --> 00:32:30,400
+The bridge I mentioned before
+
+00:32:30,400 --> 00:32:33,580
+supports everything from 4K to
+
+00:32:33,580 --> 00:32:36,043
+256 terabyte pages,
+
+00:32:37,890 --> 00:32:39,630
+so we'd like to be able to take advantage of that
+
+00:32:39,630 --> 00:32:40,613
+in the ZMMU.
+
+00:32:44,763 --> 00:32:47,080
+And then the third question on this slide is
+
+00:32:48,450 --> 00:32:50,540
+again about IOMMUs because
+
+00:32:51,990 --> 00:32:55,900
+we've seen patches posted over the last year or so
+
+00:32:55,900 --> 00:32:57,650
+about Shared Virtual Addressing
+
+00:32:57,650 --> 00:32:59,840
+and making a common interface style MMUs.
+
+00:32:59,840 --> 00:33:01,920
+And again, we could very much
+
+00:33:01,920 --> 00:33:03,870
+take advantage of that in our subsystem
+
+00:33:05,130 --> 00:33:06,540
+because we can have a bridge, for example,
+
+00:33:06,540 --> 00:33:07,850
+that connects via CXL,
+
+00:33:07,850 --> 00:33:09,310
+and if CXL is implemented by
+
+00:33:10,820 --> 00:33:13,150
+Intel and AMD and ARM CPUs
+
+00:33:15,004 --> 00:33:17,254
+you could use that same bridge but the IOMMUs
+
+00:33:18,510 --> 00:33:20,253
+in those platforms are different.
+
+00:33:21,180 --> 00:33:23,630
+I'd like to have a set of common calls that
+
+00:33:23,630 --> 00:33:27,293
+we can make to manage those IOMMUs from the subsystem.
+
+00:33:32,120 --> 00:33:33,700
+I mentioned data movers earlier
+
+00:33:33,700 --> 00:33:35,513
+in the block diagram for a bridge.
+
+00:33:41,460 --> 00:33:42,800
+We're a bit torn here.
+
+00:33:42,800 --> 00:33:47,800
+Kernel drivers like block or emulated Ethernet NIC drivers
+
+00:33:48,980 --> 00:33:50,490
+would greatly benefit from having
+
+00:33:50,490 --> 00:33:52,093
+a generic data mover interface,
+
+00:33:53,100 --> 00:33:54,900
+so that we could write the code once
+
+00:33:55,940 --> 00:34:00,070
+and call into the subsystem where it could
+
+00:34:00,070 --> 00:34:02,763
+then have interfaces to the underlying bridge driver.
+
+00:34:07,010 --> 00:34:07,843
+And
+
+00:34:15,320 --> 00:34:16,850
+that would also be
+
+00:34:16,850 --> 00:34:19,420
+useful in being able to generate packet types
+
+00:34:20,640 --> 00:34:25,550
+in Gen-Z that are hard to do with load-store-like atomics,
+
+00:34:25,550 --> 00:34:26,620
+or the right message,
+
+00:34:26,620 --> 00:34:29,180
+or some of the more exotic ones like
+
+00:34:29,180 --> 00:34:30,713
+buffer and pattern requests.
+
+00:34:32,816 --> 00:34:35,560
+On the other hand, RDMA drivers,
+
+00:34:35,560 --> 00:34:37,400
+which in the end want to expose
+
+00:34:37,400 --> 00:34:40,690
+the queues and the data mover hardware
+
+00:34:40,690 --> 00:34:44,140
+directly to user space are gonna have to have
+
+00:34:44,140 --> 00:34:47,210
+user space drivers that hide the
+
+00:34:47,210 --> 00:34:49,760
+differences between those queue mechanisms,
+
+00:34:49,760 --> 00:34:51,650
+and so they are not particularly interested
+
+00:34:51,650 --> 00:34:56,130
+in having a common data mover interface.
+
+00:34:56,130 --> 00:34:58,540
+So, question to the community again is
+
+00:34:59,980 --> 00:35:01,970
+do you think we should work on that
+
+00:35:01,970 --> 00:35:03,163
+or not?
+
+00:35:11,150 --> 00:35:14,570
+Interrupts and Unsolicited Event Packets are
+
+00:35:16,560 --> 00:35:19,060
+kinda different in the Gen-Z space.
+
+00:35:19,060 --> 00:35:21,330
+I'll describe Unsolicited Event Packets here in a minute,
+
+00:35:21,330 --> 00:35:23,560
+but interrupts themselves are very different.
+
+00:35:23,560 --> 00:35:25,650
+Unlike in PCI where they're the very nice
+
+00:35:25,650 --> 00:35:28,110
+architected MSI, MSI-X interrupt structure
+
+00:35:28,110 --> 00:35:30,450
+and you can have common code in the kernel
+
+00:35:30,450 --> 00:35:32,010
+that knows how to manage all of those things
+
+00:35:32,010 --> 00:35:33,370
+and common code that
+
+00:35:35,244 --> 00:35:37,680
+interoperates with the underlying
+
+00:35:40,350 --> 00:35:45,350
+interrupt chip and similar structures in the kernel,
+
+00:35:45,500 --> 00:35:47,310
+that's not how it works in Gen-Z.
+
+00:35:47,310 --> 00:35:48,920
+Every device can have interrupts
+
+00:35:50,050 --> 00:35:53,210
+but there's no common mechanism for describing them
+
+00:35:53,210 --> 00:35:56,250
+or programming them so it has to be done
+
+00:35:56,250 --> 00:35:57,823
+on a per-driver basis,
+
+00:35:59,020 --> 00:36:00,900
+not unlike what was described by Intel in
+
+00:36:00,900 --> 00:36:03,683
+the SIOV talk yesterday,
+
+00:36:05,330 --> 00:36:07,700
+so maybe we can leverage something from what they're doing,
+
+00:36:07,700 --> 00:36:08,550
+I don't know yet.
+
+00:36:10,240 --> 00:36:12,740
+Interrupts can come from different places in Gen-Z.
+
+00:36:12,740 --> 00:36:14,180
+There are packets that let you send
+
+00:36:14,180 --> 00:36:15,410
+interrupts across the fabric
+
+00:36:15,410 --> 00:36:17,130
+from one OS instance to another,
+
+00:36:17,130 --> 00:36:19,050
+or from any component to any other component
+
+00:36:19,050 --> 00:36:21,840
+that can take an interrupt packet,
+
+00:36:21,840 --> 00:36:22,913
+so that's one source.
+
+00:36:24,120 --> 00:36:26,570
+Interrupts can come from the bridge
+
+00:36:26,570 --> 00:36:28,670
+when the data mover has a completion queue
+
+00:36:28,670 --> 00:36:30,280
+with a entry that's done or
+
+00:36:31,530 --> 00:36:34,840
+some incoming packet comes into the receive data mover
+
+00:36:34,840 --> 00:36:36,780
+that will want to generate interrupts.
+
+00:36:36,780 --> 00:36:38,610
+And then there are these things called UEPs,
+
+00:36:38,610 --> 00:36:40,183
+Unsolicited Event Packets,
+
+00:36:41,520 --> 00:36:43,460
+which are the Gen-Z mechanism for
+
+00:36:44,390 --> 00:36:47,800
+some component in the fabric to signal
+
+00:36:47,800 --> 00:36:49,460
+kind of fabric state changes,
+
+00:36:49,460 --> 00:36:50,800
+like links up and down,
+
+00:36:50,800 --> 00:36:54,710
+or hot add and remove of components, or errors,
+
+00:36:54,710 --> 00:36:59,710
+and so we need to have mechanisms to pass those interrupts
+
+00:36:59,970 --> 00:37:01,600
+up into user space if there are
+
+00:37:01,600 --> 00:37:04,063
+user space managers that are handling that.
+
+00:37:05,370 --> 00:37:09,620
+And our proposal
+
+00:37:09,620 --> 00:37:13,690
+is that those UEPs become local interrupts
+
+00:37:13,690 --> 00:37:15,973
+on the targeted bridge component,
+
+00:37:17,454 --> 00:37:18,810
+and those are handled by the subsystem
+
+00:37:18,810 --> 00:37:22,033
+and then forwarded to user space by some mechanism,
+
+00:37:23,720 --> 00:37:26,540
+perhaps Netlink which we'll talk about here
+
+00:37:26,540 --> 00:37:27,640
+some more in a minute.
+
+00:37:30,740 --> 00:37:31,573
+Okay.
+
+00:37:32,690 --> 00:37:34,500
+That's kinda the end of our
+
+00:37:34,500 --> 00:37:36,910
+kernel subsystem part of this.
+
+00:37:36,910 --> 00:37:38,510
+I want to talk about the user space pieces
+
+00:37:38,510 --> 00:37:43,510
+and what the kernel subsystem is presenting to user space
+
+00:37:43,610 --> 00:37:47,743
+to make user space management components work better.
+
+00:37:53,810 --> 00:37:55,110
+So as I hinted at earlier,
+
+00:37:55,110 --> 00:37:58,140
+Gen-Z discovery is rather different than the way,
+
+00:37:58,140 --> 00:37:59,857
+say, PCI does it, which is all in the kernel
+
+00:37:59,857 --> 00:38:03,730
+and you just explore the PCI hierarchy and
+
+00:38:04,970 --> 00:38:06,950
+you assume that all your devices are local
+
+00:38:06,950 --> 00:38:09,570
+and owned by the OS.
+
+00:38:09,570 --> 00:38:10,623
+So here,
+
+00:38:12,330 --> 00:38:17,330
+every node running an OS instance on the Gen-Z fabric
+
+00:38:17,850 --> 00:38:20,620
+needs to run a copy of LLaMaS,
+
+00:38:20,620 --> 00:38:22,903
+the Local Management Services process,
+
+00:38:24,100 --> 00:38:29,100
+and LLaMaS is gonna use Redfish, as I mentioned before,
+
+00:38:29,330 --> 00:38:32,160
+to go and talk to the Fabric Manager and find out
+
+00:38:32,160 --> 00:38:34,960
+which resources are owned by this OS instance,
+
+00:38:34,960 --> 00:38:37,190
+and when it has one of those resources
+
+00:38:37,190 --> 00:38:39,570
+it's going to make a Netlink call
+
+00:38:39,570 --> 00:38:43,727
+into the kernel Gen-Z subsystem and say,
+
+00:38:43,727 --> 00:38:44,987
+"Add this component."
+
+00:38:45,950 --> 00:38:49,500
+And that's going to cause the subsystem to create
+
+00:38:49,500 --> 00:38:52,680
+new entries in /sys/devices,
+
+00:38:52,680 --> 00:38:55,330
+under this path that you see here,
+
+00:38:55,330 --> 00:38:58,853
+and you'll see that more on a further slide,
+
+00:39:01,810 --> 00:39:04,670
+to cause that resource to appear under a
+
+00:39:05,560 --> 00:39:09,633
+subnet ID and component ID for a given fabric.
+
+00:39:10,750 --> 00:39:15,560
+And once that subsystem creates those
+
+00:39:15,560 --> 00:39:20,560
+/sys/devices then through the usual udev mechanism
+
+00:39:21,710 --> 00:39:26,710
+that will cause a search for a driver that can bind
+
+00:39:27,080 --> 00:39:30,170
+to the particular UUID that was added
+
+00:39:30,170 --> 00:39:32,600
+as part of that add component command,
+
+00:39:32,600 --> 00:39:35,453
+and we get a driver bound to that.
+
+00:39:38,850 --> 00:39:42,433
+Fabric Manager node is completely different.
+
+00:39:44,670 --> 00:39:48,470
+Fabric Manager is the thing that needs to go out and explore
+
+00:39:48,470 --> 00:39:50,400
+the entire fabric and try to figure out
+
+00:39:50,400 --> 00:39:52,230
+what's actually there,
+
+00:39:52,230 --> 00:39:55,610
+and if you have a grand plan, as I mentioned before,
+
+00:39:55,610 --> 00:39:57,630
+does the grand plan match up with what
+
+00:39:57,630 --> 00:40:00,060
+we actually discovered out there.
+
+00:40:00,060 --> 00:40:02,280
+So it needs to discover those interfaces,
+
+00:40:02,280 --> 00:40:04,730
+it needs to find switches and bridges, media controllers,
+
+00:40:04,730 --> 00:40:07,700
+and all the things that are out there and
+
+00:40:09,880 --> 00:40:12,630
+the mechanism we're proposing that it use to do that
+
+00:40:16,220 --> 00:40:20,163
+is, again, Netlink add fabric component command,
+
+00:40:21,060 --> 00:40:22,370
+which again will cause
+
+00:40:23,980 --> 00:40:27,160
+new sysfs tree entries to be added
+
+00:40:27,160 --> 00:40:30,253
+under /sys/bus/genz instead of /sys/devices.
+
+00:40:31,100 --> 00:40:35,690
+And once those sysfs entries are there
+
+00:40:35,690 --> 00:40:37,200
+then the Fabric Manager can
+
+00:40:40,150 --> 00:40:45,150
+open the files that it finds in those sysfs trees
+
+00:40:45,490 --> 00:40:50,140
+in order to get direct read-write access to the
+
+00:40:50,140 --> 00:40:52,470
+control space structures,
+
+00:40:52,470 --> 00:40:55,063
+like I mentioned in the introductory slides.
+
+00:40:58,550 --> 00:40:59,383
+Yep?
+
+00:41:06,860 --> 00:41:09,160
+- So, um,
+
+00:41:09,160 --> 00:41:10,200
+does this mean
+
+00:41:11,853 --> 00:41:14,810
+if your boot device is
+
+00:41:16,810 --> 00:41:21,540
+out somewhere in the Gen-Z fabric
+
+00:41:23,623 --> 00:41:26,460
+you will need to bring up LLaMaS
+
+00:41:28,850 --> 00:41:31,683
+in order to boot, or is that--
+
+00:41:31,683 --> 00:41:33,260
+- So, boot is an interesting thing.
+
+00:41:33,260 --> 00:41:35,270
+So, just like
+
+00:41:37,770 --> 00:41:41,793
+in a local machine PCI environment today,
+
+00:41:43,120 --> 00:41:45,670
+in order to boot from some unknown PCI device
+
+00:41:45,670 --> 00:41:47,610
+that's on your machine
+
+00:41:47,610 --> 00:41:49,640
+you need to have UEFI drivers,
+
+00:41:49,640 --> 00:41:52,700
+assuming you're using a UEFI environment,
+
+00:41:52,700 --> 00:41:54,473
+that corresponds to that device.
+
+00:41:55,410 --> 00:41:56,700
+That will be true here
+
+00:41:59,090 --> 00:42:01,470
+in a Gen-Z fabric as well.
+
+00:42:01,470 --> 00:42:03,610
+UEFI will have to be modified, it's gonna have
+
+00:42:03,610 --> 00:42:04,647
+a new subsystem. - Yes, obviously, yeah.
+
+00:42:04,647 --> 00:42:09,647
+But once the kernel and initramfs have been loaded,
+
+00:42:11,928 --> 00:42:14,600
+are we gonna need to have LLaMaS in the initramfs to--
+
+00:42:14,600 --> 00:42:16,620
+- Yes, you're gonna need to have LLaMaS in the initramfs.
+
+00:42:16,620 --> 00:42:17,940
+- [Audience Member] Yeah, okay.
+
+00:42:17,940 --> 00:42:20,240
+- Yes, that is the implication of this design.
+
+00:42:29,710 --> 00:42:31,160
+All right, let's see where we were.
+
+00:42:31,160 --> 00:42:33,540
+Okay, I think we were about on the last bullet here
+
+00:42:33,540 --> 00:42:38,290
+which is that, another question here.
+
+00:42:38,290 --> 00:42:41,510
+So, Netlink seemed to us to be
+
+00:42:41,510 --> 00:42:44,080
+a pretty good communication mechanism,
+
+00:42:44,080 --> 00:42:47,760
+both to inform the kernel of add and delete
+
+00:42:47,760 --> 00:42:51,420
+component resource commands because it has this
+
+00:42:51,420 --> 00:42:53,130
+structure that lets you audit
+
+00:42:53,130 --> 00:42:55,560
+the kind of data that's going through,
+
+00:42:55,560 --> 00:42:57,507
+but it's also a bidirectional communication mechanism,
+
+00:42:57,507 --> 00:43:00,830
+and so we can send UEPs and other interrupt events
+
+00:43:00,830 --> 00:43:03,840
+back to user space using Netlink as well.
+
+00:43:03,840 --> 00:43:07,110
+And so the question to the community is,
+
+00:43:07,110 --> 00:43:09,050
+is that a good choice?
+
+00:43:09,050 --> 00:43:11,750
+We had a hallway conversation yesterday with,
+
+00:43:11,750 --> 00:43:13,030
+what was the name, Jason?
+
+00:43:13,030 --> 00:43:15,333
+Jason, kind of Mr. RDMA,
+
+00:43:17,400 --> 00:43:19,070
+who suggested that they chose ioctl
+
+00:43:19,070 --> 00:43:21,803
+for its performance benefit over Netlink.
+
+00:43:23,210 --> 00:43:26,660
+I don't know that this has such stringent
+
+00:43:27,650 --> 00:43:30,370
+performance goals as RDMA does but
+
+00:43:32,264 --> 00:43:33,620
+maybe that's something that to think about
+
+00:43:33,620 --> 00:43:34,830
+instead of Netlink, I don't know.
+
+00:43:34,830 --> 00:43:37,380
+Although I don't know how to use ioctl in kind of a
+
+00:43:38,280 --> 00:43:39,953
+kernel to user space mechanism.
+
+00:43:42,170 --> 00:43:47,170
+So here is a very high-level, very simplified version
+
+00:43:47,340 --> 00:43:51,800
+of what you might see in /sys/devices on a managed node.
+
+00:43:51,800 --> 00:43:56,080
+Remember, that six-node simple topology that I showed.
+
+00:43:56,080 --> 00:44:00,800
+In this example we have the assumption that
+
+00:44:00,800 --> 00:44:03,800
+just a single one of those media controllers,
+
+00:44:03,800 --> 00:44:08,360
+which has been assigned subnet ID zero
+
+00:44:08,360 --> 00:44:10,163
+and component ID two,
+
+00:44:11,230 --> 00:44:12,740
+has been assigned to this node.
+
+00:44:12,740 --> 00:44:15,370
+So, LLaMaS has run at this point
+
+00:44:15,370 --> 00:44:17,650
+and done its add command.
+
+00:44:17,650 --> 00:44:20,670
+It's told us that this CID exists
+
+00:44:20,670 --> 00:44:24,440
+and in /sys you'll see a handful of
+
+00:44:26,640 --> 00:44:29,100
+properties like the component class
+
+00:44:29,100 --> 00:44:31,170
+and the FRU UUID, which I didn't tell you about,
+
+00:44:31,170 --> 00:44:32,200
+so you don't know what that is,
+
+00:44:32,200 --> 00:44:34,840
+the GCID, and then two memory resources.
+
+00:44:34,840 --> 00:44:35,710
+So we assume that
+
+00:44:37,090 --> 00:44:39,480
+two regions of that memory component number two
+
+00:44:39,480 --> 00:44:40,910
+have been assigned to this OS.
+
+00:44:40,910 --> 00:44:42,340
+And you'll then see
+
+00:44:43,990 --> 00:44:46,550
+control and data space regions
+
+00:44:47,600 --> 00:44:52,103
+correspond to those memory regions as the resources here.
+
+00:44:53,460 --> 00:44:56,817
+There's a symlink from bridge0
+
+00:44:57,840 --> 00:45:00,050
+that points to its actual native device.
+
+00:45:00,050 --> 00:45:02,240
+In this case we're assuming, on the right-hand side,
+
+00:45:02,240 --> 00:45:05,880
+that this bridge device is connected by PCI,
+
+00:45:05,880 --> 00:45:07,730
+so that first part of that hierarchy
+
+00:45:07,730 --> 00:45:09,580
+is a completely standard PCI
+
+00:45:10,720 --> 00:45:13,130
+representation of a device in /sys/devices.
+
+00:45:13,130 --> 00:45:15,817
+And then attached to that bridge device
+
+00:45:15,817 --> 00:45:18,480
+we'll create a Gen-Z hierarchy
+
+00:45:19,460 --> 00:45:20,840
+and in there we'll have
+
+00:45:23,040 --> 00:45:27,390
+sysfs directories and binary attribute files
+
+00:45:27,390 --> 00:45:29,300
+corresponding to the control space structures
+
+00:45:29,300 --> 00:45:34,300
+that are visible to that local bridge.
+
+00:45:40,620 --> 00:45:43,410
+In contrast, on the Fabric Manager,
+
+00:45:43,410 --> 00:45:45,040
+of course, if it's running LLaMaS as well
+
+00:45:45,040 --> 00:45:48,670
+because it's locally managed and has Gen-Z devices,
+
+00:45:48,670 --> 00:45:51,360
+then under /sys/devices on Fabric Manager
+
+00:45:51,360 --> 00:45:52,360
+you'll see a hierarchy
+
+00:45:52,360 --> 00:45:53,960
+not unlike the one on the previous page.
+
+00:45:53,960 --> 00:45:58,960
+But the unique stuff for /sys on the Fabric Manager
+
+00:46:00,260 --> 00:46:02,040
+is all below /sys/bus/genz
+
+00:46:03,630 --> 00:46:07,710
+and under a fabric0 hierarchy.
+
+00:46:07,710 --> 00:46:09,150
+Of course, if you have multiple bridges
+
+00:46:09,150 --> 00:46:10,890
+you might be connected to multiple fabrics
+
+00:46:10,890 --> 00:46:12,507
+so that's why there's this fabric0,
+
+00:46:12,507 --> 00:46:16,113
+fabric1, fabric N, in the path here.
+
+00:46:17,030 --> 00:46:20,133
+Again, the space ID and CID subdirectories.
+
+00:46:22,300 --> 00:46:25,530
+And then for each of the devices
+
+00:46:25,530 --> 00:46:28,090
+out in the fabric that have been discovered you'll see
+
+00:46:28,090 --> 00:46:31,740
+the control space structures that will allow
+
+00:46:32,610 --> 00:46:35,880
+Zephyr to come in and do opens of those
+
+00:46:35,880 --> 00:46:37,840
+binary attribute files and
+
+00:46:39,890 --> 00:46:43,720
+do reads and writes to cause control space changes
+
+00:46:43,720 --> 00:46:47,150
+or read the parameters out of the devices and do the
+
+00:46:48,160 --> 00:46:50,060
+fabric management that it needs to do.
+
+00:46:51,610 --> 00:46:52,480
+And
+
+00:46:53,730 --> 00:46:58,480
+the next blue question for the community here is
+
+00:46:58,480 --> 00:47:01,100
+does this sysfs hierarchy look like
+
+00:47:01,100 --> 00:47:02,790
+something sane to you?
+
+00:47:02,790 --> 00:47:03,910
+Is it consistent with
+
+00:47:05,650 --> 00:47:07,603
+Linux's intended usage of sysfs?
+
+00:47:09,040 --> 00:47:11,730
+One thing that worries me a bit is that because,
+
+00:47:11,730 --> 00:47:14,950
+in the limit, you could have 256 million components
+
+00:47:14,950 --> 00:47:15,963
+out on the fabric,
+
+00:47:16,950 --> 00:47:19,890
+that's a whole pile of sysfs files and directories.
+
+00:47:19,890 --> 00:47:22,000
+I mean, like, more than there's probably even been
+
+00:47:22,000 --> 00:47:23,580
+in sysfs before.
+
+00:47:23,580 --> 00:47:25,740
+So, are we gonna run into some kind of
+
+00:47:26,910 --> 00:47:30,140
+limitations in the sysfs subsystem
+
+00:47:30,140 --> 00:47:32,070
+just by having so much stuff?
+
+00:47:32,070 --> 00:47:33,830
+Now realistically, of course,
+
+00:47:33,830 --> 00:47:35,890
+probably won't have a single Fabric Manager
+
+00:47:35,890 --> 00:47:37,170
+managing a fabric that big.
+
+00:47:37,170 --> 00:47:39,580
+You'll do some kind of federated thing and divide it up,
+
+00:47:39,580 --> 00:47:41,240
+and there's a whole bunch of
+
+00:47:41,240 --> 00:47:45,550
+stuff in the system and management spec for Gen-Z
+
+00:47:45,550 --> 00:47:47,820
+that describes how you can do all of that.
+
+00:47:47,820 --> 00:47:50,390
+So maybe it's not as bad as I make it out, but,
+
+00:47:50,390 --> 00:47:54,523
+in the limit, it seems like a lot of sysfs stuff.
+
+00:48:00,090 --> 00:48:03,680
+Okay, that just about ends our talk.
+
+00:48:03,680 --> 00:48:06,770
+This is the place where we would normally in the talk have
+
+00:48:07,780 --> 00:48:09,733
+you guys asking me questions but,
+
+00:48:10,610 --> 00:48:12,540
+before we get to that,
+
+00:48:12,540 --> 00:48:15,230
+for those who want to look at this afterwards
+
+00:48:16,110 --> 00:48:17,740
+we've summarized that set of
+
+00:48:17,740 --> 00:48:20,190
+kernel questions that were in blue on the earlier slides
+
+00:48:20,190 --> 00:48:21,450
+so you don't have to go searching for them
+
+00:48:21,450 --> 00:48:25,070
+if you don't want to, you have them all right here.
+
+00:48:25,070 --> 00:48:28,510
+And finally, I have some references, so,
+
+00:48:28,510 --> 00:48:30,850
+the Consortium web page will let you get
+
+00:48:31,760 --> 00:48:34,700
+access to all of the specifications that I mentioned,
+
+00:48:34,700 --> 00:48:35,650
+they're all public.
+
+00:48:36,680 --> 00:48:38,330
+There are, of course, newer versions coming out
+
+00:48:38,330 --> 00:48:40,980
+that aren't public yet but they'll be out there soon.
+
+00:48:41,890 --> 00:48:45,530
+Our code is on GitHub, linux-genz,
+
+00:48:47,490 --> 00:48:49,100
+at least an early version of the code.
+
+00:48:49,100 --> 00:48:51,020
+We're working hard to get it a little more sane,
+
+00:48:51,020 --> 00:48:53,500
+so don't look at it today. (laughs)
+
+00:48:53,500 --> 00:48:55,630
+Give us a couple of days in the labs.
+
+00:48:55,630 --> 00:48:57,730
+We'll have more of this actually up there.
+
+00:48:59,210 --> 00:49:00,853
+LLaMaS has two GitHub
+
+00:49:04,180 --> 00:49:06,563
+repos because LLaMaS itself is,
+
+00:49:11,360 --> 00:49:13,960
+oh, it's just on my screen, good, let's ignore that.
+
+00:49:16,100 --> 00:49:19,480
+LLaMaS itself is one repo
+
+00:49:19,480 --> 00:49:23,180
+but it's using a homegrown
+
+00:49:23,180 --> 00:49:27,820
+Netlink interface called Alpaka as well.
+
+00:49:27,820 --> 00:49:32,680
+The thing which you do not see on this list is Zephyr
+
+00:49:32,680 --> 00:49:34,570
+and that's because we haven't started work on that,
+
+00:49:34,570 --> 00:49:36,883
+but it will show up here as well.
+
+00:49:38,550 --> 00:49:40,640
+All right, and that's all I have.
+
+00:49:40,640 --> 00:49:42,490
+Anybody have questions?
+
+00:49:42,490 --> 00:49:43,390
+Oh, to over there.
+
+00:49:47,360 --> 00:49:51,440
+- Yeah, so, I see Python 3 and I'm a bit worried, so,
+
+00:49:51,440 --> 00:49:53,840
+some environments, they have very little memory,
+
+00:49:53,840 --> 00:49:56,110
+like, for example, kdump.
+
+00:49:56,110 --> 00:49:59,250
+Crash kernel, you basically reserve just a bit of memory,
+
+00:49:59,250 --> 00:50:01,230
+and you want it to be real small because
+
+00:50:01,230 --> 00:50:03,770
+you basically never use this memory.
+
+00:50:03,770 --> 00:50:06,810
+So, what if we boot from
+
+00:50:08,030 --> 00:50:10,580
+Gen-Z attached to disk,
+
+00:50:10,580 --> 00:50:15,343
+kernel crashed, and we need to dump our memory to the disk.
+
+00:50:16,420 --> 00:50:18,970
+So you mentioned that you still have to have LLaMaS
+
+00:50:20,700 --> 00:50:23,640
+in initrd and I'm just worrying
+
+00:50:23,640 --> 00:50:26,470
+that it will take too much disk space.
+
+00:50:26,470 --> 00:50:27,483
+- Good point, so--
+
+00:50:27,483 --> 00:50:30,390
+- So the question is, is it possible to implement
+
+00:50:30,390 --> 00:50:32,420
+very minimalistic, I don't know,
+
+00:50:32,420 --> 00:50:36,400
+LLaMa Gen-Z discovery so you can place it in kernel.
+
+00:50:36,400 --> 00:50:38,760
+Because if you make it very complex, like,
+
+00:50:38,760 --> 00:50:41,210
+I don't know, coreboot, it will basically die.
+
+00:50:41,210 --> 00:50:42,413
+No one will be using it.
+
+00:50:43,610 --> 00:50:46,253
+- Understood, so, first our,
+
+00:50:47,470 --> 00:50:49,570
+I think you should consider this first implementation
+
+00:50:49,570 --> 00:50:51,750
+of LLaMaS to be more of a prototype than anything else.
+
+00:50:51,750 --> 00:50:54,140
+We're doing it in Python because it's easy.
+
+00:50:54,140 --> 00:50:56,820
+It doesn't have to be in Python, it could be in C,
+
+00:50:56,820 --> 00:50:59,733
+or C++, or Go, or whatever you like, Ruby.
+
+00:51:01,410 --> 00:51:05,400
+And second, for something like a crash kernel,
+
+00:51:05,400 --> 00:51:10,030
+if you are willing to preconfigure things, for example,
+
+00:51:10,030 --> 00:51:12,330
+in a static file there's nothing that says that LLaMaS
+
+00:51:12,330 --> 00:51:13,820
+actually has to go out over the network
+
+00:51:13,820 --> 00:51:17,920
+and talk to the actual Fabric Manager,
+
+00:51:17,920 --> 00:51:21,110
+it could have a local configuration file that is
+
+00:51:23,850 --> 00:51:25,652
+kind of a proxy for that. - So it would be possible for
+
+00:51:25,652 --> 00:51:28,460
+system, do discovery, have some,
+
+00:51:28,460 --> 00:51:31,690
+I don't know, preconfigured configuration
+
+00:51:31,690 --> 00:51:35,300
+that you can apply in your crash kernel when it kicks in.
+
+00:51:35,300 --> 00:51:36,133
+- [Jim] Yeah, I think that would--
+
+00:51:36,133 --> 00:51:38,668
+- And you won't have all the stuff in the initrd then,
+
+00:51:38,668 --> 00:51:40,453
+or most of it, okay, thank you.
+
+00:51:45,200 --> 00:51:46,353
+- [Host] Any more questions?
+
+00:51:48,218 --> 00:51:52,901
+We had two. (laughs)
+
+00:51:56,810 --> 00:51:58,760
+- Oh, there is another question, uh oh.
+
+00:52:00,350 --> 00:52:02,593
+- [Man In White] Perhaps a little heretical but
+
+00:52:03,650 --> 00:52:06,230
+given you're building a system that has
+
+00:52:06,230 --> 00:52:09,073
+access to devices all over,
+
+00:52:11,050 --> 00:52:13,060
+would we be looking at
+
+00:52:13,060 --> 00:52:16,670
+why bother with some existing technologies?
+
+00:52:16,670 --> 00:52:18,420
+The thing that struck me directly was,
+
+00:52:18,420 --> 00:52:20,510
+well, RDMA is to do,
+
+00:52:20,510 --> 00:52:23,390
+talk to that device way over there
+
+00:52:23,390 --> 00:52:24,760
+through a direct connection,
+
+00:52:24,760 --> 00:52:26,280
+or what looks like a direct connection,
+
+00:52:26,280 --> 00:52:27,997
+would you be looking at saying,
+
+00:52:27,997 --> 00:52:29,670
+"Well, we don't need RDMA anymore,"
+
+00:52:29,670 --> 00:52:32,593
+so why bother ask the question about RDMA on the slides?
+
+00:52:34,080 --> 00:52:34,913
+- So--
+
+00:52:34,913 --> 00:52:35,900
+- [Man In White] Hence heretical question.
+
+00:52:35,900 --> 00:52:38,940
+- Yeah, I know. (laughs)
+
+00:52:38,940 --> 00:52:40,980
+Kind of a philosophical thing.
+
+00:52:40,980 --> 00:52:43,500
+If you were to take Gen-Z to its logical extreme
+
+00:52:43,500 --> 00:52:47,390
+where we're trying to provide direct load-store access to
+
+00:52:47,390 --> 00:52:48,950
+all those things out there
+
+00:52:48,950 --> 00:52:53,370
+then I would say, yes, RDMA's not necessary in that world.
+
+00:52:53,370 --> 00:52:56,830
+However, there's a huge body of
+
+00:52:56,830 --> 00:52:59,407
+HPC codes in particular that are based on MPI
+
+00:52:59,407 --> 00:53:02,400
+and Libfabric and RDMA underneath,
+
+00:53:02,400 --> 00:53:04,660
+and we don't wanna just throw that all away.
+
+00:53:04,660 --> 00:53:08,770
+And so Gen-Z, in some sense,
+
+00:53:08,770 --> 00:53:11,040
+isn't better than any one of those technologies
+
+00:53:11,040 --> 00:53:12,510
+that you might mention.
+
+00:53:12,510 --> 00:53:15,623
+It's not better than PCI necessarily.
+
+00:53:15,623 --> 00:53:17,768
+It's not better than InfiniBand necessarily.
+
+00:53:17,768 --> 00:53:20,110
+It's not better than CXL necessarily.
+
+00:53:20,110 --> 00:53:22,550
+But it does do a lot of stuff and
+
+00:53:22,550 --> 00:53:26,870
+we want to bring in and not leave behind legacy codes,
+
+00:53:26,870 --> 00:53:29,900
+so I think RDMA is an important use case
+
+00:53:29,900 --> 00:53:32,810
+and so I think it needs to live
+
+00:53:32,810 --> 00:53:36,270
+on top of the Gen-Z subsystem for a long time.
+
+00:53:41,740 --> 00:53:44,990
+- [Host] Any other comments, questions?
+
+00:53:46,631 --> 00:53:48,345
+Okay, thank you, Jim.
+
+00:53:48,345 --> 00:53:49,541
+(audience claps)
+
+00:53:49,541 --> 00:53:50,541
+
+YouTube URL: https://www.youtube.com/watch?v=kgcggdB3vWc
+
+

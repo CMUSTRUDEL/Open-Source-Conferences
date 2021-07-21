@@ -1,0 +1,3350 @@
+Title: [2014] Automatic NUMA Balancing by Rik van Riel
+Publication date: 2014-10-29
+Playlist: KVM Forum 2014
+Description: 
+	In NUMA systems, each CPU has its own bank of memory, resulting in fast access to local memory, and slower access to memory elsewhere in the system. Recently a mechanism has been implemented in the Linux kernel to automatically run programs near their memory, and to move memory to near the programs using it. This presentation explains why computers are built this way, why NUMA locality matters, how the automatic NUMA balancing kernel code works, what it can do, and what kind of performance improvements have been observed. This presentation is also a good opportunity to discuss recent and future developments for the automatic NUMA balancing code.
+
+
+Rik van Riel
+Red Hat
+
+Rik van Riel is a principal software engineer at Red Hat, and a long term contributor to the Linux kernel. He has contributed to the memory management subsystem, the scheduler, and various components related to virtualization. Rik is active in community projects like kernelnewbies.org and likes to hike and rock climb in his spare time.
+
+
+Slides: http://events.linuxfoundation.org/sites/events/files/slides/kvmplumbers2014_riel_automatic_numa_balancing_1.pdf
+Captions: 
+	00:00:11,599 --> 00:00:13,840
+okay
+
+00:00:14,480 --> 00:00:19,520
+i have a half hour slot so i will
+
+00:00:17,680 --> 00:00:20,800
+go through this presentation relatively
+
+00:00:19,520 --> 00:00:23,039
+quickly um
+
+00:00:20,800 --> 00:00:24,160
+we know then i created this presentation
+
+00:00:23,039 --> 00:00:26,880
+in spring
+
+00:00:24,160 --> 00:00:31,119
+and i updated it a little bit with some
+
+00:00:26,880 --> 00:00:35,120
+of the work that has been going on since
+
+00:00:31,119 --> 00:00:38,079
+today i will explain the internal
+
+00:00:35,120 --> 00:00:39,760
+details of automatic pneuma balancing to
+
+00:00:38,079 --> 00:00:42,960
+give people an overview of
+
+00:00:39,760 --> 00:00:45,600
+exactly how it works
+
+00:00:42,960 --> 00:00:46,960
+and of course to start that um you'll
+
+00:00:45,600 --> 00:00:47,920
+want to know a little bit about pneuma
+
+00:00:46,960 --> 00:00:50,000
+systems
+
+00:00:47,920 --> 00:00:52,079
+and i'll jump right into that if you
+
+00:00:50,000 --> 00:00:53,440
+have questions at any point
+
+00:00:52,079 --> 00:00:57,360
+feel free to ask them during the
+
+00:00:53,440 --> 00:00:57,360
+presentation i will try to answer you
+
+00:00:57,680 --> 00:01:03,600
+well what is pneuma numa
+
+00:01:01,199 --> 00:01:05,840
+is an artifact of modern systems larger
+
+00:01:03,600 --> 00:01:08,799
+systems from sgi have had it for a while
+
+00:01:05,840 --> 00:01:10,960
+but in modern systems the memory
+
+00:01:08,799 --> 00:01:13,040
+controller is built into the cpu
+
+00:01:10,960 --> 00:01:15,280
+so in a moment you have multiple cpu
+
+00:01:13,040 --> 00:01:17,119
+sockets in a system
+
+00:01:15,280 --> 00:01:19,040
+you have a little bit of memory near one
+
+00:01:17,119 --> 00:01:20,159
+cpu a little bit of memory in another
+
+00:01:19,040 --> 00:01:22,560
+cpu
+
+00:01:20,159 --> 00:01:23,920
+and they can each access their local
+
+00:01:22,560 --> 00:01:26,080
+memory quickly
+
+00:01:23,920 --> 00:01:29,040
+memory on the other side of the system
+
+00:01:26,080 --> 00:01:30,880
+is significantly slower
+
+00:01:29,040 --> 00:01:32,640
+on a small nomad system it might be a
+
+00:01:30,880 --> 00:01:35,040
+twenty or thirty percent
+
+00:01:32,640 --> 00:01:37,040
+performance penalty to excess memory
+
+00:01:35,040 --> 00:01:39,280
+that is on the other sockets
+
+00:01:37,040 --> 00:01:40,720
+on a very large system it might be a
+
+00:01:39,280 --> 00:01:43,600
+factor two or three
+
+00:01:40,720 --> 00:01:46,479
+performance penalty to access memory
+
+00:01:43,600 --> 00:01:46,479
+that is far away
+
+00:01:47,439 --> 00:01:51,119
+and there are two kinds of new words
+
+00:01:49,840 --> 00:01:53,200
+that pneuma introduces
+
+00:01:51,119 --> 00:01:54,720
+you're probably familiar with them a
+
+00:01:53,200 --> 00:01:57,759
+node is simply
+
+00:01:54,720 --> 00:01:58,320
+a collection of physical cpu and the
+
+00:01:57,759 --> 00:02:01,759
+memory
+
+00:01:58,320 --> 00:02:04,560
+that comes with that cpu
+
+00:02:01,759 --> 00:02:05,840
+and interconnect are the straws that the
+
+00:02:04,560 --> 00:02:09,840
+data travels through
+
+00:02:05,840 --> 00:02:09,840
+to get from one node to another
+
+00:02:10,560 --> 00:02:15,599
+the four node hp systems and many other
+
+00:02:13,280 --> 00:02:20,000
+four node systems look like this
+
+00:02:15,599 --> 00:02:23,200
+we have four nodes each of the corners
+
+00:02:20,000 --> 00:02:24,480
+we have a processor they are all
+
+00:02:23,200 --> 00:02:26,239
+attached to their own memory
+
+00:02:24,480 --> 00:02:27,680
+they may or may not have their own i o
+
+00:02:26,239 --> 00:02:31,200
+channels
+
+00:02:27,680 --> 00:02:32,879
+and all of these are directly connected
+
+00:02:31,200 --> 00:02:35,680
+and the light blue arrows here in the
+
+00:02:32,879 --> 00:02:36,000
+middle are the interconnects between the
+
+00:02:35,680 --> 00:02:39,360
+different
+
+00:02:36,000 --> 00:02:41,280
+nodes and when a processor on one node
+
+00:02:39,360 --> 00:02:42,480
+needs a piece of memory that is another
+
+00:02:41,280 --> 00:02:44,319
+node
+
+00:02:42,480 --> 00:02:46,239
+it will have to send a message over the
+
+00:02:44,319 --> 00:02:48,959
+interconnect
+
+00:02:46,239 --> 00:02:49,760
+to ask for the memory elsewhere in the
+
+00:02:48,959 --> 00:02:51,440
+system
+
+00:02:49,760 --> 00:02:52,879
+and that's the kind that that is what
+
+00:02:51,440 --> 00:02:56,400
+slows down
+
+00:02:52,879 --> 00:02:56,400
+the excess of remote memory
+
+00:02:57,040 --> 00:03:00,239
+you can make these pneuma systems as
+
+00:02:58,480 --> 00:03:00,800
+large and as complicated as you once
+
+00:03:00,239 --> 00:03:05,040
+which
+
+00:03:00,800 --> 00:03:08,640
+our friends at hp have done a d980 has
+
+00:03:05,040 --> 00:03:10,560
+three levels of distance between the
+
+00:03:08,640 --> 00:03:14,480
+nodes
+
+00:03:10,560 --> 00:03:17,040
+every one of these blue boxes here
+
+00:03:14,480 --> 00:03:19,440
+is a pneuma node a processor with
+
+00:03:17,040 --> 00:03:21,760
+attached memory
+
+00:03:19,440 --> 00:03:23,920
+one of these is directly connected to
+
+00:03:21,760 --> 00:03:27,040
+another one of those
+
+00:03:23,920 --> 00:03:30,879
+but if we want to if this processor here
+
+00:03:27,040 --> 00:03:32,720
+wants to access the memory over there
+
+00:03:30,879 --> 00:03:34,000
+it has to send a message through the
+
+00:03:32,720 --> 00:03:35,519
+node controller
+
+00:03:34,000 --> 00:03:37,760
+which has to send a message to the next
+
+00:03:35,519 --> 00:03:38,959
+node controller which then has to send a
+
+00:03:37,760 --> 00:03:41,519
+message there
+
+00:03:38,959 --> 00:03:43,040
+and hopefully it can get i can get the
+
+00:03:41,519 --> 00:03:45,440
+memory from there
+
+00:03:43,040 --> 00:03:47,760
+if you're out of luck your memory might
+
+00:03:45,440 --> 00:03:49,200
+be dirty in the cash over here
+
+00:03:47,760 --> 00:03:51,040
+and it's going to take even longer to
+
+00:03:49,200 --> 00:03:54,000
+get
+
+00:03:51,040 --> 00:03:54,480
+so the larger system gets you can see
+
+00:03:54,000 --> 00:03:57,599
+the more
+
+00:03:54,480 --> 00:04:00,080
+overhead is involved in accessing
+
+00:03:57,599 --> 00:04:03,519
+memory that is not local to the cpu but
+
+00:04:00,080 --> 00:04:03,519
+remote on a different node
+
+00:04:04,000 --> 00:04:09,840
+and hp has made a new
+
+00:04:07,040 --> 00:04:10,720
+a large system as well which again has
+
+00:04:09,840 --> 00:04:13,840
+two nodes
+
+00:04:10,720 --> 00:04:15,040
+close to each other connected to the
+
+00:04:13,840 --> 00:04:16,000
+rest of the system through an
+
+00:04:15,040 --> 00:04:18,479
+interconnect
+
+00:04:16,000 --> 00:04:20,000
+it's a really big fast interconnect so
+
+00:04:18,479 --> 00:04:23,120
+all the nodes elsewhere on the system
+
+00:04:20,000 --> 00:04:23,120
+are roughly the same speed
+
+00:04:24,800 --> 00:04:28,080
+the performance of pneuma systems is
+
+00:04:26,880 --> 00:04:31,280
+determined by
+
+00:04:28,080 --> 00:04:34,240
+a few different considerations firstly
+
+00:04:31,280 --> 00:04:36,400
+going through the interconnect makes
+
+00:04:34,240 --> 00:04:38,720
+memory access slower
+
+00:04:36,400 --> 00:04:41,040
+but if you if everybody tries to go
+
+00:04:38,720 --> 00:04:42,800
+through interconnect at the same time
+
+00:04:41,040 --> 00:04:46,080
+the interconnect will get congested and
+
+00:04:42,800 --> 00:04:46,080
+things get even slower
+
+00:04:46,479 --> 00:04:50,479
+the second consideration is the fact
+
+00:04:48,639 --> 00:04:52,320
+that processor threads and cores do
+
+00:04:50,479 --> 00:04:54,560
+share resources
+
+00:04:52,320 --> 00:04:55,600
+so if you have one big program running
+
+00:04:54,560 --> 00:04:58,320
+on the numa system
+
+00:04:55,600 --> 00:04:58,880
+it may still be better to spread out the
+
+00:04:58,320 --> 00:05:01,759
+different
+
+00:04:58,880 --> 00:05:02,400
+tasks in that workload to the different
+
+00:05:01,759 --> 00:05:05,840
+nodes
+
+00:05:02,400 --> 00:05:07,120
+because then you get more cpu cache
+
+00:05:05,840 --> 00:05:08,800
+available
+
+00:05:07,120 --> 00:05:10,160
+some of the threads might be running in
+
+00:05:08,800 --> 00:05:11,840
+turbo mode
+
+00:05:10,160 --> 00:05:13,280
+if you use a few threads everywhere and
+
+00:05:11,840 --> 00:05:14,560
+leave other threads idle
+
+00:05:13,280 --> 00:05:16,080
+so you do not want to just jam
+
+00:05:14,560 --> 00:05:19,360
+everything onto one socket and leave the
+
+00:05:16,080 --> 00:05:19,360
+rest of the system unused
+
+00:05:21,440 --> 00:05:25,520
+to deal with that the automatic number
+
+00:05:24,000 --> 00:05:28,400
+balancing code has two
+
+00:05:25,520 --> 00:05:30,000
+main strategies andrea constantly came
+
+00:05:28,400 --> 00:05:33,039
+up with the realization that both of
+
+00:05:30,000 --> 00:05:35,360
+these are needed a few years ago
+
+00:05:33,039 --> 00:05:37,680
+the first one is called cpu follows
+
+00:05:35,360 --> 00:05:41,280
+memory which means
+
+00:05:37,680 --> 00:05:43,919
+we measure where a task has its memory
+
+00:05:41,280 --> 00:05:46,880
+and we try to run the task where it has
+
+00:05:43,919 --> 00:05:46,880
+most of its memory
+
+00:05:47,280 --> 00:05:52,960
+and the second one memory follows cpu
+
+00:05:51,120 --> 00:05:54,800
+we try to run a task where most of the
+
+00:05:52,960 --> 00:05:56,880
+task's memory is
+
+00:05:54,800 --> 00:05:58,000
+and the rest of the memory we can
+
+00:05:56,880 --> 00:06:00,000
+migrate over
+
+00:05:58,000 --> 00:06:03,919
+we simply copy the data and make the
+
+00:06:00,000 --> 00:06:03,919
+program user memory in the new location
+
+00:06:05,280 --> 00:06:08,639
+sounds pretty simple so far but there
+
+00:06:06,960 --> 00:06:10,240
+are lots of little details and corner
+
+00:06:08,639 --> 00:06:13,600
+cases involved which i will
+
+00:06:10,240 --> 00:06:13,600
+slowly walk you through
+
+00:06:14,400 --> 00:06:21,039
+it all starts with the pitchfalls
+
+00:06:18,479 --> 00:06:22,479
+and will slowly go and get into more and
+
+00:06:21,039 --> 00:06:25,360
+more complicated details
+
+00:06:22,479 --> 00:06:25,360
+of the numa code
+
+00:06:25,520 --> 00:06:29,039
+periodically we simply go through the
+
+00:06:28,400 --> 00:06:30,800
+memory
+
+00:06:29,039 --> 00:06:32,960
+of each process that is running on the
+
+00:06:30,800 --> 00:06:35,600
+system
+
+00:06:32,960 --> 00:06:37,840
+and the program will unmap a little bit
+
+00:06:35,600 --> 00:06:39,759
+of its own memory over time
+
+00:06:37,840 --> 00:06:40,960
+it does that from running in kernel
+
+00:06:39,759 --> 00:06:44,000
+space
+
+00:06:40,960 --> 00:06:46,800
+and we do that by simply clearing all
+
+00:06:44,000 --> 00:06:50,080
+the permission bits in the page table
+
+00:06:46,800 --> 00:06:51,919
+so you have a page that
+
+00:06:50,080 --> 00:06:54,000
+a page table entry still points at a
+
+00:06:51,919 --> 00:06:55,360
+piece of memory but the program is not
+
+00:06:54,000 --> 00:06:57,759
+allowed to read it
+
+00:06:55,360 --> 00:06:59,520
+or write it or do anything else with it
+
+00:06:57,759 --> 00:07:02,560
+and when it tries to access it
+
+00:06:59,520 --> 00:07:03,759
+cpu generates a page fault and page full
+
+00:07:02,560 --> 00:07:08,000
+handler sees
+
+00:07:03,759 --> 00:07:11,520
+oh this is a numa page
+
+00:07:08,000 --> 00:07:13,280
+so i will give it back to the program
+
+00:07:11,520 --> 00:07:17,840
+and i will do something else with it
+
+00:07:13,280 --> 00:07:19,360
+if necessary
+
+00:07:17,840 --> 00:07:20,880
+one of the things that we will do i know
+
+00:07:19,360 --> 00:07:25,199
+my page fault
+
+00:07:20,880 --> 00:07:28,080
+time is migration if the same program
+
+00:07:25,199 --> 00:07:30,800
+or the same pneuma node access the same
+
+00:07:28,080 --> 00:07:34,400
+page multiple times in a row
+
+00:07:30,800 --> 00:07:36,160
+then we migrate the page we simply copy
+
+00:07:34,400 --> 00:07:37,759
+over the page data
+
+00:07:36,160 --> 00:07:40,000
+to the location where the task is
+
+00:07:37,759 --> 00:07:41,840
+running and then we point the page table
+
+00:07:40,000 --> 00:07:44,720
+at the new location
+
+00:07:41,840 --> 00:07:46,400
+and the memory that was remote is now
+
+00:07:44,720 --> 00:07:49,599
+local to the program
+
+00:07:46,400 --> 00:07:53,599
+and it can run a little bit faster
+
+00:07:49,599 --> 00:07:56,080
+but page migration is pretty expensive
+
+00:07:53,599 --> 00:07:56,639
+so we do it when we're pretty sure about
+
+00:07:56,080 --> 00:07:59,680
+it
+
+00:07:56,639 --> 00:08:02,560
+and we also want to make sure that
+
+00:07:59,680 --> 00:08:03,520
+the program is relatively stable in that
+
+00:08:02,560 --> 00:08:05,599
+location
+
+00:08:03,520 --> 00:08:07,520
+because the program keeps moving around
+
+00:08:05,599 --> 00:08:09,440
+and we have to keep copying the memory
+
+00:08:07,520 --> 00:08:11,199
+all over the system
+
+00:08:09,440 --> 00:08:13,919
+then the pneuma code will slow things
+
+00:08:11,199 --> 00:08:17,759
+down more than it speeds things up
+
+00:08:13,919 --> 00:08:22,000
+so their second element is figuring out
+
+00:08:17,759 --> 00:08:23,919
+where each task's memory is
+
+00:08:22,000 --> 00:08:25,440
+to do that we keep a set of statistics
+
+00:08:23,919 --> 00:08:28,639
+per task
+
+00:08:25,440 --> 00:08:30,879
+and every time we get a number page
+
+00:08:28,639 --> 00:08:30,879
+fault
+
+00:08:31,199 --> 00:08:38,159
+we will simply increment the counter
+
+00:08:34,560 --> 00:08:41,039
+on this task had a page folder node 0.
+
+00:08:38,159 --> 00:08:41,680
+if the memory wasn't node 2 dispatch
+
+00:08:41,039 --> 00:08:45,279
+this page
+
+00:08:41,680 --> 00:08:47,680
+accessed memory on node 2.
+
+00:08:45,279 --> 00:08:48,800
+and we keep that as a floating average
+
+00:08:47,680 --> 00:08:51,200
+so over time
+
+00:08:48,800 --> 00:08:52,080
+we have a pretty good idea where the
+
+00:08:51,200 --> 00:08:55,839
+memory is
+
+00:08:52,080 --> 00:08:55,839
+that the different tasks are using
+
+00:08:56,640 --> 00:09:00,560
+and we get a bit of a classification of
+
+00:08:58,880 --> 00:09:04,160
+defaults going on as well
+
+00:09:00,560 --> 00:09:06,399
+to tweak other things in the policy
+
+00:09:04,160 --> 00:09:07,519
+we track whether a false is local or
+
+00:09:06,399 --> 00:09:09,120
+remote
+
+00:09:07,519 --> 00:09:11,600
+if it doesn't same node where the task
+
+00:09:09,120 --> 00:09:14,800
+is running it's local
+
+00:09:11,600 --> 00:09:17,440
+if a program has almost all local faults
+
+00:09:14,800 --> 00:09:19,839
+that means that we don't have to do
+
+00:09:17,440 --> 00:09:22,080
+anything else with the numa code because
+
+00:09:19,839 --> 00:09:23,839
+it's already running in an optimal way
+
+00:09:22,080 --> 00:09:26,000
+and then at that point we can slow down
+
+00:09:23,839 --> 00:09:27,839
+the scanning
+
+00:09:26,000 --> 00:09:29,760
+if a task has too much of his memory
+
+00:09:27,839 --> 00:09:31,519
+running remotely then
+
+00:09:29,760 --> 00:09:33,360
+we should probably scan more often
+
+00:09:31,519 --> 00:09:37,200
+figure out what is going on
+
+00:09:33,360 --> 00:09:38,959
+and correct the placement of the task
+
+00:09:37,200 --> 00:09:41,040
+and the same thing is private versus
+
+00:09:38,959 --> 00:09:42,160
+shared if you are dealing with a
+
+00:09:41,040 --> 00:09:44,959
+multi-threaded
+
+00:09:42,160 --> 00:09:46,000
+program like a kvm guest you will have
+
+00:09:44,959 --> 00:09:48,720
+multiple threads
+
+00:09:46,000 --> 00:09:50,399
+accessing the same memory and placement
+
+00:09:48,720 --> 00:09:52,399
+gets a little more complicated
+
+00:09:50,399 --> 00:09:55,040
+and i'll slowly get into that further in
+
+00:09:52,399 --> 00:09:57,360
+into the talk
+
+00:09:55,040 --> 00:09:58,480
+first we have a simple example of full
+
+00:09:57,360 --> 00:10:02,079
+statistics
+
+00:09:58,480 --> 00:10:05,920
+we have two tasks a and b
+
+00:10:02,079 --> 00:10:09,040
+and a system with four numa nodes task b
+
+00:10:05,920 --> 00:10:10,399
+has has almost all of its accesses on
+
+00:10:09,040 --> 00:10:12,800
+node zero
+
+00:10:10,399 --> 00:10:14,560
+well task a has most of its accesses on
+
+00:10:12,800 --> 00:10:17,279
+node two
+
+00:10:14,560 --> 00:10:18,560
+that's pretty obvious if we run task b
+
+00:10:17,279 --> 00:10:21,600
+on node 0
+
+00:10:18,560 --> 00:10:23,920
+and task a on node 2 most of the memory
+
+00:10:21,600 --> 00:10:25,760
+access are local and we can
+
+00:10:23,920 --> 00:10:28,880
+we can migrate the rest of the memory
+
+00:10:25,760 --> 00:10:33,839
+over and it will all run fine
+
+00:10:28,880 --> 00:10:36,800
+it's pretty obvious but
+
+00:10:33,839 --> 00:10:38,240
+it's not always that easy the main cause
+
+00:10:36,800 --> 00:10:40,959
+is when tasks are sharing
+
+00:10:38,240 --> 00:10:43,360
+memory you have multiple threads in a
+
+00:10:40,959 --> 00:10:46,480
+kvm
+
+00:10:43,360 --> 00:10:48,000
+guest for example the qmu process itself
+
+00:10:46,480 --> 00:10:50,240
+or the jvm
+
+00:10:48,000 --> 00:10:53,360
+or you might have a database with a
+
+00:10:50,240 --> 00:10:53,360
+shared memory segment
+
+00:10:53,440 --> 00:10:57,440
+and sometimes these tasks also have more
+
+00:10:56,399 --> 00:11:01,519
+threads
+
+00:10:57,440 --> 00:11:04,800
+than we can run on a particular node
+
+00:11:01,519 --> 00:11:07,760
+if you have two cpus in your system
+
+00:11:04,800 --> 00:11:08,800
+and each of those has four cores but you
+
+00:11:07,760 --> 00:11:13,120
+run a program
+
+00:11:08,800 --> 00:11:14,800
+that needs eight cpu cores
+
+00:11:13,120 --> 00:11:16,240
+then some of the threads will be running
+
+00:11:14,800 --> 00:11:17,200
+on one side of the system and some on
+
+00:11:16,240 --> 00:11:19,279
+the other
+
+00:11:17,200 --> 00:11:20,240
+and we have to figure out which is the
+
+00:11:19,279 --> 00:11:23,920
+best where and
+
+00:11:20,240 --> 00:11:23,920
+spreading the memory between the nodes
+
+00:11:25,279 --> 00:11:29,839
+and this also leads to some other
+
+00:11:27,440 --> 00:11:29,839
+constraints
+
+00:11:30,240 --> 00:11:34,640
+the pneuma code is not the only
+
+00:11:32,320 --> 00:11:37,360
+placement code in the scheduler
+
+00:11:34,640 --> 00:11:38,800
+there's also load balancing code which
+
+00:11:37,360 --> 00:11:40,560
+looks at all the different parts of the
+
+00:11:38,800 --> 00:11:41,279
+system and if there's an imbalance in
+
+00:11:40,560 --> 00:11:43,279
+load
+
+00:11:41,279 --> 00:11:45,040
+the load balancer tries to evens things
+
+00:11:43,279 --> 00:11:47,680
+out so you have
+
+00:11:45,040 --> 00:11:49,519
+about the same activity everywhere in
+
+00:11:47,680 --> 00:11:52,720
+the system
+
+00:11:49,519 --> 00:11:53,839
+and if the numa code always does what it
+
+00:11:52,720 --> 00:11:55,760
+wants to do
+
+00:11:53,839 --> 00:11:58,079
+then the pneuma code might create an
+
+00:11:55,760 --> 00:12:00,160
+imbalance by moving a program
+
+00:11:58,079 --> 00:12:02,240
+and then the load balancer might move
+
+00:12:00,160 --> 00:12:04,240
+some other program back over
+
+00:12:02,240 --> 00:12:06,639
+and things keep tumbling around the
+
+00:12:04,240 --> 00:12:09,440
+system like a washing machine
+
+00:12:06,639 --> 00:12:11,360
+we keep creating more and more overhead
+
+00:12:09,440 --> 00:12:12,720
+so the pneuma code has to be very
+
+00:12:11,360 --> 00:12:15,760
+careful
+
+00:12:12,720 --> 00:12:18,240
+to only move things around
+
+00:12:15,760 --> 00:12:19,760
+when it does not create an imbalance
+
+00:12:18,240 --> 00:12:24,560
+that
+
+00:12:19,760 --> 00:12:26,000
+that a load balancer would trigger
+
+00:12:24,560 --> 00:12:28,399
+and at least the two things that the
+
+00:12:26,000 --> 00:12:30,560
+pneuma code can do
+
+00:12:28,399 --> 00:12:33,360
+if the node if the load between two
+
+00:12:30,560 --> 00:12:35,440
+nodes is pretty similar
+
+00:12:33,360 --> 00:12:37,519
+we can move a task from one node to the
+
+00:12:35,440 --> 00:12:38,880
+other and it will still be pretty
+
+00:12:37,519 --> 00:12:40,399
+similar
+
+00:12:38,880 --> 00:12:43,360
+load balancer is not going to do
+
+00:12:40,399 --> 00:12:46,240
+anything we are free to do that
+
+00:12:43,360 --> 00:12:47,360
+the second thing that we can do if we
+
+00:12:46,240 --> 00:12:49,200
+have
+
+00:12:47,360 --> 00:12:50,720
+a task running on one node in a task
+
+00:12:49,200 --> 00:12:53,279
+another node
+
+00:12:50,720 --> 00:12:55,120
+we can always swap them around move them
+
+00:12:53,279 --> 00:12:58,800
+to each other's location
+
+00:12:55,120 --> 00:12:58,800
+the load balancer will still be happy
+
+00:12:59,200 --> 00:13:02,639
+and both of these things are examined in
+
+00:13:00,959 --> 00:13:05,920
+the in the task placement
+
+00:13:02,639 --> 00:13:07,600
+code the algorithm
+
+00:13:05,920 --> 00:13:09,279
+simply looks at all the nodes on the
+
+00:13:07,600 --> 00:13:12,000
+system
+
+00:13:09,279 --> 00:13:13,839
+and if a node looks like it is a better
+
+00:13:12,000 --> 00:13:16,079
+location than a current node
+
+00:13:13,839 --> 00:13:20,000
+where the program is running then it
+
+00:13:16,079 --> 00:13:23,920
+will check all the cpus on that node
+
+00:13:20,000 --> 00:13:27,920
+if the cpu is idle and we can move the
+
+00:13:23,920 --> 00:13:27,920
+task without creating a load imbalance
+
+00:13:28,079 --> 00:13:34,959
+we'll probably try that if the cpu
+
+00:13:31,920 --> 00:13:36,240
+is not idle we look at the task that is
+
+00:13:34,959 --> 00:13:40,240
+currently running
+
+00:13:36,240 --> 00:13:43,279
+on that cpu and
+
+00:13:40,240 --> 00:13:45,839
+we look whether task swap would be a
+
+00:13:43,279 --> 00:13:48,800
+good option
+
+00:13:45,839 --> 00:13:49,519
+and we find the option that has the best
+
+00:13:48,800 --> 00:13:52,639
+score
+
+00:13:49,519 --> 00:13:53,680
+and do that one i've got some very
+
+00:13:52,639 --> 00:13:56,720
+simple
+
+00:13:53,680 --> 00:13:59,519
+example to start out with we have
+
+00:13:56,720 --> 00:13:59,839
+two programs running on the system task
+
+00:13:59,519 --> 00:14:04,320
+a
+
+00:13:59,839 --> 00:14:05,839
+and task t they're both a node 0.
+
+00:14:04,320 --> 00:14:09,600
+on the right hand side we can see that
+
+00:14:05,839 --> 00:14:13,199
+task a has most of its memory accesses
+
+00:14:09,600 --> 00:14:16,000
+on node 1. in task d most of its memory
+
+00:14:13,199 --> 00:14:19,120
+access is on node 0.
+
+00:14:16,000 --> 00:14:22,160
+if we simply move task a
+
+00:14:19,120 --> 00:14:23,920
+to node 1 we remove
+
+00:14:22,160 --> 00:14:26,720
+an imbalance in the system so we make
+
+00:14:23,920 --> 00:14:30,160
+the load balancer happier than it is now
+
+00:14:26,720 --> 00:14:33,760
+and we improve the numeral locality of
+
+00:14:30,160 --> 00:14:35,199
+task a by 40 percent it's pretty easy we
+
+00:14:33,760 --> 00:14:37,040
+move task a over
+
+00:14:35,199 --> 00:14:39,440
+to node one and things are better than
+
+00:14:37,040 --> 00:14:40,480
+b4
+
+00:14:39,440 --> 00:14:42,959
+let's make it a little bit more
+
+00:14:40,480 --> 00:14:46,000
+complicated
+
+00:14:42,959 --> 00:14:48,639
+we have task a like before
+
+00:14:46,000 --> 00:14:51,440
+most of its memory access is on node 1
+
+00:14:48,639 --> 00:14:54,720
+but it's running on node 0.
+
+00:14:51,440 --> 00:14:57,600
+but this time task t is running on
+
+00:14:54,720 --> 00:14:59,199
+node 1 and task d has most of its
+
+00:14:57,600 --> 00:15:02,720
+accesses
+
+00:14:59,199 --> 00:15:03,519
+on node zero it's again a fairly easy
+
+00:15:02,720 --> 00:15:06,240
+case
+
+00:15:03,519 --> 00:15:06,959
+we swap the two around and locality
+
+00:15:06,240 --> 00:15:09,839
+improves
+
+00:15:06,959 --> 00:15:09,839
+for both of these
+
+00:15:10,639 --> 00:15:14,399
+now let's make it a little bit more
+
+00:15:11,839 --> 00:15:17,040
+complicated
+
+00:15:14,399 --> 00:15:19,120
+task a is the same as before moving task
+
+00:15:17,040 --> 00:15:22,240
+a to node 1
+
+00:15:19,120 --> 00:15:22,959
+is a 40 improvement in locality but this
+
+00:15:22,240 --> 00:15:27,440
+time around
+
+00:15:22,959 --> 00:15:31,040
+moving task d to node 0
+
+00:15:27,440 --> 00:15:34,560
+would be a 20 reduction
+
+00:15:31,040 --> 00:15:34,959
+in locality now we cannot just move task
+
+00:15:34,560 --> 00:15:37,839
+a
+
+00:15:34,959 --> 00:15:40,240
+over to node 1 and leave it at that
+
+00:15:37,839 --> 00:15:41,759
+because that will create an imbalance
+
+00:15:40,240 --> 00:15:43,759
+and the load balancer will do something
+
+00:15:41,759 --> 00:15:45,360
+about that and
+
+00:15:43,759 --> 00:15:47,680
+we don't know what task it is going to
+
+00:15:45,360 --> 00:15:50,560
+move back
+
+00:15:47,680 --> 00:15:51,759
+so we have to do in this case we simply
+
+00:15:50,560 --> 00:15:55,040
+swap them around
+
+00:15:51,759 --> 00:15:57,040
+and we get a net 20 improvement
+
+00:15:55,040 --> 00:15:59,920
+and the memory migration code will fix
+
+00:15:57,040 --> 00:15:59,920
+up the rest later
+
+00:16:02,079 --> 00:16:05,360
+let's make it a little bit more
+
+00:16:03,120 --> 00:16:08,240
+complicated still
+
+00:16:05,360 --> 00:16:09,440
+we have a situation task a exactly the
+
+00:16:08,240 --> 00:16:12,720
+same as before
+
+00:16:09,440 --> 00:16:14,480
+but task t running on node one
+
+00:16:12,720 --> 00:16:16,399
+has eighty percent of its access is
+
+00:16:14,480 --> 00:16:17,920
+there and only twenty percent on node
+
+00:16:16,399 --> 00:16:19,680
+zero
+
+00:16:17,920 --> 00:16:22,480
+in this case the improvements that we
+
+00:16:19,680 --> 00:16:25,839
+get from moving task a
+
+00:16:22,480 --> 00:16:28,000
+to node one is smaller
+
+00:16:25,839 --> 00:16:29,519
+than the reduction in locality that we
+
+00:16:28,000 --> 00:16:33,040
+get from moving
+
+00:16:29,519 --> 00:16:34,800
+task d over to node zero so it's best to
+
+00:16:33,040 --> 00:16:38,320
+just leave things alone
+
+00:16:34,800 --> 00:16:40,160
+and let the memory migration code
+
+00:16:38,320 --> 00:16:44,240
+deal with it and gradually move the
+
+00:16:40,160 --> 00:16:44,240
+memory over to where the tasks are
+
+00:16:45,040 --> 00:16:50,000
+well you've noticed the theme here
+
+00:16:48,399 --> 00:16:52,720
+things get more and more complicated
+
+00:16:50,000 --> 00:16:52,720
+throughout the talk
+
+00:16:53,120 --> 00:16:57,279
+multiple tasks can access the same
+
+00:16:55,600 --> 00:16:58,959
+memory
+
+00:16:57,279 --> 00:17:01,680
+looking at a large multi-threaded
+
+00:16:58,959 --> 00:17:04,400
+process or a database
+
+00:17:01,680 --> 00:17:06,079
+we have some magic in the page false
+
+00:17:04,400 --> 00:17:09,120
+tracking code
+
+00:17:06,079 --> 00:17:12,319
+we store the cpu number
+
+00:17:09,120 --> 00:17:15,679
+and the low bits of the page
+
+00:17:12,319 --> 00:17:18,160
+the page id or the process id sorry
+
+00:17:15,679 --> 00:17:19,360
+in the struct page and in the next fault
+
+00:17:18,160 --> 00:17:23,199
+we can see
+
+00:17:19,360 --> 00:17:26,319
+whether the task
+
+00:17:23,199 --> 00:17:28,960
+that is faulting the page now
+
+00:17:26,319 --> 00:17:30,400
+has any relationship to the task that
+
+00:17:28,960 --> 00:17:32,160
+fall to the page left
+
+00:17:30,400 --> 00:17:33,760
+it might be the same task in which case
+
+00:17:32,160 --> 00:17:37,919
+we simply move the page
+
+00:17:33,760 --> 00:17:39,520
+to where the task is or
+
+00:17:37,919 --> 00:17:41,120
+if they're accessing the same page as
+
+00:17:39,520 --> 00:17:43,760
+their writing to it
+
+00:17:41,120 --> 00:17:45,600
+we know that these two tasks are related
+
+00:17:43,760 --> 00:17:46,320
+and we group them together in a numa
+
+00:17:45,600 --> 00:17:48,160
+group
+
+00:17:46,320 --> 00:17:51,440
+and we can add more and more tasks to
+
+00:17:48,160 --> 00:17:51,440
+the numa group over time
+
+00:17:52,240 --> 00:17:56,160
+and well some files everybody accesses
+
+00:17:54,720 --> 00:17:59,200
+but they do that read only
+
+00:17:56,160 --> 00:18:00,799
+things like the c library we ignore
+
+00:17:59,200 --> 00:18:03,919
+those because
+
+00:18:00,799 --> 00:18:06,160
+if read-only faults were counted
+
+00:18:03,919 --> 00:18:08,880
+every process in the system would be in
+
+00:18:06,160 --> 00:18:08,880
+the same group
+
+00:18:09,360 --> 00:18:15,840
+and yes that was a bug we had early on
+
+00:18:16,640 --> 00:18:20,559
+now the group statistics look exactly
+
+00:18:18,960 --> 00:18:22,559
+like the test statistics
+
+00:18:20,559 --> 00:18:24,799
+the statistics of a pneuma group is
+
+00:18:22,559 --> 00:18:28,640
+simply the sum of the statistics of all
+
+00:18:24,799 --> 00:18:31,440
+the tasks that are part of the group
+
+00:18:28,640 --> 00:18:32,880
+and when we are comparing two groups to
+
+00:18:31,440 --> 00:18:35,120
+tasks from different groups
+
+00:18:32,880 --> 00:18:36,160
+we look at the group statistics if we
+
+00:18:35,120 --> 00:18:38,080
+are comparing
+
+00:18:36,160 --> 00:18:40,240
+two tasks from the same group we look at
+
+00:18:38,080 --> 00:18:42,799
+the test statistics
+
+00:18:40,240 --> 00:18:44,320
+in this example here you can see we have
+
+00:18:42,799 --> 00:18:46,400
+two processes
+
+00:18:44,320 --> 00:18:48,160
+with two threads each and they're all
+
+00:18:46,400 --> 00:18:50,960
+jumbled over the system
+
+00:18:48,160 --> 00:18:52,080
+we have the green workload and the blue
+
+00:18:50,960 --> 00:18:55,679
+workload
+
+00:18:52,080 --> 00:18:57,679
+and they look pretty equal
+
+00:18:55,679 --> 00:19:00,240
+right now but one of them is going to
+
+00:18:57,679 --> 00:19:04,240
+win say that the green task
+
+00:19:00,240 --> 00:19:07,679
+wins on one of the notes and
+
+00:19:04,240 --> 00:19:08,960
+at that point the green task gets pulled
+
+00:19:07,679 --> 00:19:10,559
+over
+
+00:19:08,960 --> 00:19:12,240
+if the green task has slightly more
+
+00:19:10,559 --> 00:19:16,720
+excesses than the blue task
+
+00:19:12,240 --> 00:19:16,720
+on on note 0 and
+
+00:19:17,440 --> 00:19:22,720
+the in the blue task has more on note 1
+
+00:19:20,160 --> 00:19:26,640
+or more even
+
+00:19:22,720 --> 00:19:28,960
+we end up moving the tasks around first
+
+00:19:26,640 --> 00:19:31,120
+and after that the rest of the memory
+
+00:19:28,960 --> 00:19:32,160
+will get migrated over to wherever the
+
+00:19:31,120 --> 00:19:38,320
+tasks are
+
+00:19:32,160 --> 00:19:41,919
+for this group
+
+00:19:38,320 --> 00:19:45,280
+um but we do want this to be somewhat
+
+00:19:41,919 --> 00:19:48,880
+even if you have a very large workload
+
+00:19:45,280 --> 00:19:52,160
+it is possible that the same program
+
+00:19:48,880 --> 00:19:54,400
+takes up space on multiple luma nodes
+
+00:19:52,160 --> 00:19:55,840
+and in that case we want to limit the
+
+00:19:54,400 --> 00:19:58,799
+number of memory
+
+00:19:55,840 --> 00:20:00,480
+migration that is going on because we
+
+00:19:58,799 --> 00:20:03,120
+would just keep bouncing it around
+
+00:20:00,480 --> 00:20:07,600
+if it is accessed from different nodes
+
+00:20:03,120 --> 00:20:09,760
+all the time
+
+00:20:07,600 --> 00:20:10,720
+memory that is private to each of the
+
+00:20:09,760 --> 00:20:12,640
+threads
+
+00:20:10,720 --> 00:20:15,200
+we want to locate locally where the
+
+00:20:12,640 --> 00:20:15,200
+thread is
+
+00:20:15,440 --> 00:20:20,960
+and we want to maximize how much memory
+
+00:20:18,400 --> 00:20:23,120
+bandwidth the application has
+
+00:20:20,960 --> 00:20:25,360
+um if an application is all of its
+
+00:20:23,120 --> 00:20:26,880
+memory on one node
+
+00:20:25,360 --> 00:20:28,400
+but half of the of the threads are
+
+00:20:26,880 --> 00:20:30,400
+running somewhere else
+
+00:20:28,400 --> 00:20:31,600
+it's going to run slower because
+
+00:20:30,400 --> 00:20:34,480
+everything has to go across the
+
+00:20:31,600 --> 00:20:36,000
+interconnect into the one memory bus
+
+00:20:34,480 --> 00:20:38,400
+we want to split the memory somewhat
+
+00:20:36,000 --> 00:20:41,520
+evenly between nodes
+
+00:20:38,400 --> 00:20:42,480
+if you have this situation where a
+
+00:20:41,520 --> 00:20:47,200
+single workload
+
+00:20:42,480 --> 00:20:51,919
+runs on two pneuma nodes and the memory
+
+00:20:47,200 --> 00:20:51,919
+is not divided evenly between the notes
+
+00:20:52,880 --> 00:20:55,919
+at this point the program does not run
+
+00:20:54,480 --> 00:20:58,880
+as fast as it could
+
+00:20:55,919 --> 00:20:58,880
+we want to fix this
+
+00:21:00,880 --> 00:21:06,960
+to do that we look
+
+00:21:04,080 --> 00:21:09,919
+at all the statistics that we have we
+
+00:21:06,960 --> 00:21:12,400
+figure out which nodes
+
+00:21:09,919 --> 00:21:14,880
+the pro the program is using really
+
+00:21:12,400 --> 00:21:14,880
+actively
+
+00:21:15,200 --> 00:21:19,760
+private faults are always allowed to
+
+00:21:16,799 --> 00:21:22,480
+migrate if it is only that threat using
+
+00:21:19,760 --> 00:21:25,280
+the memory it should have it locally and
+
+00:21:22,480 --> 00:21:28,400
+we don't care about the rest
+
+00:21:25,280 --> 00:21:31,760
+but shared falls are only
+
+00:21:28,400 --> 00:21:35,919
+allowed to migrate from a more heavily
+
+00:21:31,760 --> 00:21:35,919
+used to a less heavily used node
+
+00:21:37,440 --> 00:21:45,919
+so it looks like this from left to right
+
+00:21:42,080 --> 00:21:47,520
+shared fault migrations are allowed
+
+00:21:45,919 --> 00:21:49,200
+from right to left they're blocked
+
+00:21:47,520 --> 00:21:50,000
+because the left node already has much
+
+00:21:49,200 --> 00:21:55,120
+more memory
+
+00:21:50,000 --> 00:21:56,960
+and a right node and eventually
+
+00:21:55,120 --> 00:21:58,400
+it will look like this where both are
+
+00:21:56,960 --> 00:21:59,919
+about the same
+
+00:21:58,400 --> 00:22:01,440
+and there is no point in doing
+
+00:21:59,919 --> 00:22:03,520
+migrations
+
+00:22:01,440 --> 00:22:05,360
+of any memory that is shared between
+
+00:22:03,520 --> 00:22:08,799
+different threads
+
+00:22:05,360 --> 00:22:12,480
+in the in the pneuma group
+
+00:22:08,799 --> 00:22:15,280
+only private faults still get migrations
+
+00:22:12,480 --> 00:22:16,640
+after this state has been reached and
+
+00:22:15,280 --> 00:22:19,840
+this gives us
+
+00:22:16,640 --> 00:22:22,720
+a good use of memory bandwidth for a
+
+00:22:19,840 --> 00:22:23,520
+very large process and a minimum amount
+
+00:22:22,720 --> 00:22:25,919
+of overhead
+
+00:22:23,520 --> 00:22:27,440
+because we stop most of the page
+
+00:22:25,919 --> 00:22:30,320
+migrations
+
+00:22:27,440 --> 00:22:30,320
+we never do those
+
+00:22:31,440 --> 00:22:35,200
+now we have a part of the talk that i'm
+
+00:22:34,240 --> 00:22:40,720
+going to have to skip
+
+00:22:35,200 --> 00:22:43,760
+because we only have five minutes left
+
+00:22:40,720 --> 00:22:47,760
+the slides are online uh for
+
+00:22:43,760 --> 00:22:52,159
+both of the conferences
+
+00:22:47,760 --> 00:22:52,159
+and for um what's
+
+00:22:52,799 --> 00:22:56,480
+up there we go so i'll just go into more
+
+00:22:55,360 --> 00:22:59,760
+technical details
+
+00:22:56,480 --> 00:23:01,280
+of things that i
+
+00:22:59,760 --> 00:23:03,039
+i'm working on or things that we're not
+
+00:23:01,280 --> 00:23:04,480
+working on yet because we haven't gotten
+
+00:23:03,039 --> 00:23:09,039
+around to it but stuff that a coach
+
+00:23:04,480 --> 00:23:10,799
+should probably do in the future
+
+00:23:09,039 --> 00:23:13,600
+a big one is dealing with very large
+
+00:23:10,799 --> 00:23:15,760
+pneuma systems where
+
+00:23:13,600 --> 00:23:16,960
+if we are dealing with a workload that
+
+00:23:15,760 --> 00:23:20,559
+spans
+
+00:23:16,960 --> 00:23:23,120
+multiple pneuma nodes the big hp
+
+00:23:20,559 --> 00:23:24,720
+system that i showed the diagram of
+
+00:23:23,120 --> 00:23:27,919
+earlier
+
+00:23:24,720 --> 00:23:32,480
+if we have four workloads on that system
+
+00:23:27,919 --> 00:23:34,400
+that each use two number nodes
+
+00:23:32,480 --> 00:23:35,919
+we want those two nodes for each of
+
+00:23:34,400 --> 00:23:38,000
+those programs to be nodes that are
+
+00:23:35,919 --> 00:23:39,360
+sitting right next to each other
+
+00:23:38,000 --> 00:23:42,640
+and not notice that they're all the way
+
+00:23:39,360 --> 00:23:42,640
+on the other side of the system
+
+00:23:43,600 --> 00:23:48,000
+and i have an implementation for that
+
+00:23:45,200 --> 00:23:50,720
+actually posted it to lqml last week
+
+00:23:48,000 --> 00:23:51,679
+and if you know it verified it it seems
+
+00:23:50,720 --> 00:23:55,760
+to work
+
+00:23:51,679 --> 00:23:55,760
+i'm trying to get that code upstream
+
+00:23:55,840 --> 00:23:59,200
+if you're looking at the dl980 system
+
+00:23:58,080 --> 00:24:02,320
+again
+
+00:23:59,200 --> 00:24:05,679
+if we have four workloads running
+
+00:24:02,320 --> 00:24:08,640
+that each take two nodes
+
+00:24:05,679 --> 00:24:09,360
+you want a workload to simply take two
+
+00:24:08,640 --> 00:24:10,799
+nodes
+
+00:24:09,360 --> 00:24:12,400
+use up two nodes that are directly
+
+00:24:10,799 --> 00:24:16,159
+connected to the other
+
+00:24:12,400 --> 00:24:17,919
+and you do not want workloads
+
+00:24:16,159 --> 00:24:19,760
+to be spread around say between node
+
+00:24:17,919 --> 00:24:21,679
+seven and node three
+
+00:24:19,760 --> 00:24:23,520
+because then all the communication
+
+00:24:21,679 --> 00:24:26,320
+between threads of the workload
+
+00:24:23,520 --> 00:24:29,360
+has to take two extra hops through the
+
+00:24:26,320 --> 00:24:29,360
+backplane controllers
+
+00:24:30,880 --> 00:24:35,279
+and what we do in this case is do a
+
+00:24:34,400 --> 00:24:39,279
+comparison
+
+00:24:35,279 --> 00:24:42,799
+between groups of nodes
+
+00:24:39,279 --> 00:24:46,559
+in a backplane system like the dl980
+
+00:24:42,799 --> 00:24:51,120
+from hp or their new systems you have
+
+00:24:46,559 --> 00:24:55,200
+natural groups of nodes and
+
+00:24:51,120 --> 00:24:58,080
+if we are comparing if we have a task
+
+00:24:55,200 --> 00:25:00,640
+running um a group of tasks running on
+
+00:24:58,080 --> 00:25:02,000
+node seven and a node three
+
+00:25:00,640 --> 00:25:05,120
+and we have another group of tasks
+
+00:25:02,000 --> 00:25:08,400
+running on node six and node two
+
+00:25:05,120 --> 00:25:11,440
+we want to untangle them and make sure
+
+00:25:08,400 --> 00:25:15,039
+that all of the processes of one task
+
+00:25:11,440 --> 00:25:16,720
+are over here and all of the processes
+
+00:25:15,039 --> 00:25:20,000
+of the other group
+
+00:25:16,720 --> 00:25:20,880
+of the luma group are over here and we
+
+00:25:20,000 --> 00:25:25,679
+can do that
+
+00:25:20,880 --> 00:25:28,880
+by simply noticing well hey
+
+00:25:25,679 --> 00:25:32,799
+if you're comparing tasks on note 7
+
+00:25:28,880 --> 00:25:36,320
+with node 2 for example
+
+00:25:32,799 --> 00:25:38,880
+we notice these nodes are
+
+00:25:36,320 --> 00:25:41,120
+three hops away from each other we have
+
+00:25:38,880 --> 00:25:45,679
+to traverse three links
+
+00:25:41,120 --> 00:25:49,760
+to get to the other side and
+
+00:25:45,679 --> 00:25:53,120
+at that point we can add up the score
+
+00:25:49,760 --> 00:25:54,480
+on each of the nodes on each side so we
+
+00:25:53,120 --> 00:25:56,799
+add up the scores
+
+00:25:54,480 --> 00:25:58,960
+from these four nodes we edit the scores
+
+00:25:56,799 --> 00:26:00,720
+from those four nodes
+
+00:25:58,960 --> 00:26:02,559
+at that point the different pneuma
+
+00:26:00,720 --> 00:26:04,559
+groups will
+
+00:26:02,559 --> 00:26:06,640
+win from each other on a particular side
+
+00:26:04,559 --> 00:26:08,799
+of the system
+
+00:26:06,640 --> 00:26:11,120
+if we do a comparison between node 5 and
+
+00:26:08,799 --> 00:26:14,559
+node 7 for example we see there are
+
+00:26:11,120 --> 00:26:16,559
+two hops away and
+
+00:26:14,559 --> 00:26:20,400
+at that point the groups are smaller we
+
+00:26:16,559 --> 00:26:23,600
+add up node 6 and 7 and we add up node 5
+
+00:26:20,400 --> 00:26:25,919
+4 and 5. and
+
+00:26:23,600 --> 00:26:26,799
+we will naturally untangle workloads
+
+00:26:25,919 --> 00:26:28,640
+that way
+
+00:26:26,799 --> 00:26:32,000
+so they end up running on nodes that are
+
+00:26:28,640 --> 00:26:32,000
+the closest to each other
+
+00:26:32,559 --> 00:26:35,600
+we need a slightly different algorithm
+
+00:26:34,320 --> 00:26:38,960
+for systems that
+
+00:26:35,600 --> 00:26:41,679
+do not have a backplane it is possible
+
+00:26:38,960 --> 00:26:43,919
+to directly connect
+
+00:26:41,679 --> 00:26:44,960
+intel and probably amd cpus as well to
+
+00:26:43,919 --> 00:26:49,279
+each other
+
+00:26:44,960 --> 00:26:51,679
+you're using the cpu qpi links
+
+00:26:49,279 --> 00:26:52,640
+in this situation we have two rings of
+
+00:26:51,679 --> 00:26:55,440
+nodes
+
+00:26:52,640 --> 00:26:56,559
+and they are connected to each other in
+
+00:26:55,440 --> 00:27:00,400
+a funny way
+
+00:26:56,559 --> 00:27:02,240
+that makes it possible that each of
+
+00:27:00,400 --> 00:27:06,720
+these nodes
+
+00:27:02,240 --> 00:27:08,799
+is directly connected to three others
+
+00:27:06,720 --> 00:27:12,159
+and the other four nodes in the system
+
+00:27:08,799 --> 00:27:12,159
+are only two hops away
+
+00:27:12,240 --> 00:27:15,600
+the big difference with the
+
+00:27:15,679 --> 00:27:19,360
+topology of the hp system is that on the
+
+00:27:18,240 --> 00:27:23,120
+hp system
+
+00:27:19,360 --> 00:27:26,960
+the hops in between are node controllers
+
+00:27:23,120 --> 00:27:30,720
+they cannot run programs on this system
+
+00:27:26,960 --> 00:27:33,120
+going from node 3 to node 8
+
+00:27:30,720 --> 00:27:34,880
+the hop that is in between is also a
+
+00:27:33,120 --> 00:27:38,159
+pneuma node and it can also
+
+00:27:34,880 --> 00:27:41,200
+run programs and this changes the
+
+00:27:38,159 --> 00:27:41,200
+algorithm a little
+
+00:27:42,480 --> 00:27:49,360
+and specifically we simply add up
+
+00:27:45,840 --> 00:27:51,520
+the false from nearby nodes
+
+00:27:49,360 --> 00:27:54,000
+divided by the number of hops or divided
+
+00:27:51,520 --> 00:27:57,679
+by the numa distance from these nodes
+
+00:27:54,000 --> 00:28:00,960
+and a node that is
+
+00:27:57,679 --> 00:28:02,399
+close to a node with a very high number
+
+00:28:00,960 --> 00:28:05,279
+of pneuma faults
+
+00:28:02,399 --> 00:28:06,000
+will get some of those faults added to
+
+00:28:05,279 --> 00:28:09,200
+it
+
+00:28:06,000 --> 00:28:09,200
+and this means that
+
+00:28:09,360 --> 00:28:13,120
+if a program for example is currently
+
+00:28:12,320 --> 00:28:17,840
+running
+
+00:28:13,120 --> 00:28:22,799
+on node 1 and node 6.
+
+00:28:17,840 --> 00:28:26,159
+i'll see nodes 8 and 7 and 5
+
+00:28:22,799 --> 00:28:26,640
+and 2 will all get a little bit of extra
+
+00:28:26,159 --> 00:28:29,919
+score
+
+00:28:26,640 --> 00:28:31,120
+because they are close to one of these
+
+00:28:29,919 --> 00:28:33,840
+cpu3
+
+00:28:31,120 --> 00:28:35,919
+will get a very high score because it
+
+00:28:33,840 --> 00:28:39,520
+gets half of these guys falls
+
+00:28:35,919 --> 00:28:42,159
+and half of this nodes falls and
+
+00:28:39,520 --> 00:28:43,840
+by giving this one a high score
+
+00:28:42,159 --> 00:28:44,640
+whichever one of these is the lowest
+
+00:28:43,840 --> 00:28:47,120
+score
+
+00:28:44,640 --> 00:28:48,880
+will probably end up migrating the tasks
+
+00:28:47,120 --> 00:28:52,399
+here
+
+00:28:48,880 --> 00:28:53,600
+and then suddenly the group of tasks is
+
+00:28:52,399 --> 00:28:59,840
+running on two nodes
+
+00:28:53,600 --> 00:28:59,840
+that is sitting right next to each other
+
+00:28:59,919 --> 00:29:03,520
+um well that's how we solve this part of
+
+00:29:01,840 --> 00:29:06,399
+the problem
+
+00:29:03,520 --> 00:29:06,880
+um i think it's yeah three o'clock now
+
+00:29:06,399 --> 00:29:09,039
+oh
+
+00:29:06,880 --> 00:29:10,799
+well i have about three slides left or
+
+00:29:09,039 --> 00:29:13,840
+four slides so i'll take a few minutes
+
+00:29:10,799 --> 00:29:13,840
+from your break
+
+00:29:14,640 --> 00:29:19,919
+there's another thing where i'm not sure
+
+00:29:17,120 --> 00:29:19,919
+what to do yet
+
+00:29:20,320 --> 00:29:23,840
+tasks that are running on the numa
+
+00:29:22,240 --> 00:29:25,520
+system may have memory that is not
+
+00:29:23,840 --> 00:29:27,520
+movable
+
+00:29:25,520 --> 00:29:28,960
+it could be part of a kvm guest that is
+
+00:29:27,520 --> 00:29:32,080
+used for direct
+
+00:29:28,960 --> 00:29:34,000
+for device assignments or it could be
+
+00:29:32,080 --> 00:29:36,000
+a piece of m-log's memory or anything
+
+00:29:34,000 --> 00:29:39,120
+like that
+
+00:29:36,000 --> 00:29:40,159
+the memory is not movable but we might
+
+00:29:39,120 --> 00:29:44,320
+still want to get
+
+00:29:40,159 --> 00:29:47,120
+page faults from it because
+
+00:29:44,320 --> 00:29:49,440
+getting the statistics of the memory why
+
+00:29:47,120 --> 00:29:51,760
+is end lock memory non-readable
+
+00:29:49,440 --> 00:29:52,720
+um right now it's an implementation
+
+00:29:51,760 --> 00:29:55,440
+thing
+
+00:29:52,720 --> 00:29:56,640
+but it's mostly there because we don't
+
+00:29:55,440 --> 00:29:58,799
+know why something was
+
+00:29:56,640 --> 00:29:59,840
+unlocked and we have no no way to
+
+00:29:58,799 --> 00:30:01,679
+distinguish
+
+00:29:59,840 --> 00:30:04,080
+whether it was an m lock because people
+
+00:30:01,679 --> 00:30:06,320
+are doing direct access to it
+
+00:30:04,080 --> 00:30:07,600
+or simply because they don't want it
+
+00:30:06,320 --> 00:30:09,200
+swapped
+
+00:30:07,600 --> 00:30:10,880
+there's some work going on to split that
+
+00:30:09,200 --> 00:30:15,919
+out but right now we don't really
+
+00:30:10,880 --> 00:30:19,279
+know but the memory that is not movable
+
+00:30:15,919 --> 00:30:20,960
+is still used by tasks that can be moved
+
+00:30:19,279 --> 00:30:23,279
+and having the folds from these memory
+
+00:30:20,960 --> 00:30:25,440
+areas in the statistics
+
+00:30:23,279 --> 00:30:28,399
+it may help us do better placement of
+
+00:30:25,440 --> 00:30:30,559
+the tasks using this memory
+
+00:30:28,399 --> 00:30:32,480
+but it also generates extra overhead
+
+00:30:30,559 --> 00:30:33,919
+getting page fulls of memory that we
+
+00:30:32,480 --> 00:30:36,000
+cannot migrate
+
+00:30:33,919 --> 00:30:37,200
+and whether or not this is worth doing
+
+00:30:36,000 --> 00:30:40,000
+is something that we'll just have to
+
+00:30:37,200 --> 00:30:40,000
+experiment with
+
+00:30:41,039 --> 00:30:46,000
+ksm is another issue it's mostly used
+
+00:30:44,080 --> 00:30:49,120
+for kvm guests
+
+00:30:46,000 --> 00:30:51,279
+when system memory is getting low it
+
+00:30:49,120 --> 00:30:54,960
+finds pages with identical content it
+
+00:30:51,279 --> 00:30:54,960
+merges them in one memory page
+
+00:30:55,760 --> 00:30:59,760
+ksm right now extremely simple luma
+
+00:30:57,919 --> 00:31:02,960
+support where it will only
+
+00:30:59,760 --> 00:31:05,440
+merge pages between
+
+00:31:02,960 --> 00:31:06,880
+tasks on the same numa node but
+
+00:31:05,440 --> 00:31:08,080
+afterwards the task could be moved to a
+
+00:31:06,880 --> 00:31:12,080
+different numa node
+
+00:31:08,080 --> 00:31:12,080
+and the ksm page is no longer local
+
+00:31:12,960 --> 00:31:16,720
+we may need we may want to do something
+
+00:31:14,720 --> 00:31:19,919
+with that on the other hand
+
+00:31:16,720 --> 00:31:20,399
+people who use ksm they want to cram as
+
+00:31:19,919 --> 00:31:22,240
+many
+
+00:31:20,399 --> 00:31:23,519
+virtual machines on the same system as
+
+00:31:22,240 --> 00:31:26,480
+possible
+
+00:31:23,519 --> 00:31:30,000
+so they may not even be interested in
+
+00:31:26,480 --> 00:31:33,200
+having multiple copies of the same page
+
+00:31:30,000 --> 00:31:37,039
+they would rather have their guests run
+
+00:31:33,200 --> 00:31:38,720
+ten percent slower than use up
+
+00:31:37,039 --> 00:31:40,480
+two percent more memory and have fewer
+
+00:31:38,720 --> 00:31:42,960
+guesses on the system or have swapping
+
+00:31:40,480 --> 00:31:44,640
+which slows down things down even worse
+
+00:31:42,960 --> 00:31:48,320
+so i'm really not sure if this is
+
+00:31:44,640 --> 00:31:48,320
+something that that we should touch
+
+00:31:49,600 --> 00:31:56,480
+this is a big one interrupt locality
+
+00:31:53,039 --> 00:32:00,559
+if you have a 40 gigabit network card
+
+00:31:56,480 --> 00:32:02,960
+on one numa node of the system and
+
+00:32:00,559 --> 00:32:05,120
+your kvm gift is running on a pneuma
+
+00:32:02,960 --> 00:32:09,200
+note two hops away
+
+00:32:05,120 --> 00:32:09,200
+you are not going to do 40 gigabits
+
+00:32:09,840 --> 00:32:15,120
+so trying to get the kvm gaff to run
+
+00:32:12,559 --> 00:32:16,880
+where it is doing i o
+
+00:32:15,120 --> 00:32:20,399
+is a big thing right now this is
+
+00:32:16,880 --> 00:32:20,399
+something that needs to be done manually
+
+00:32:20,960 --> 00:32:25,760
+it is something that we would like to do
+
+00:32:22,559 --> 00:32:29,120
+automatically but
+
+00:32:25,760 --> 00:32:30,720
+it's really difficult just to figure out
+
+00:32:29,120 --> 00:32:33,279
+how to implement this
+
+00:32:30,720 --> 00:32:36,559
+when should the irq affinity outweigh
+
+00:32:33,279 --> 00:32:38,799
+the memory affinity for example
+
+00:32:36,559 --> 00:32:39,600
+if we have two guests using the same 40
+
+00:32:38,799 --> 00:32:44,240
+gigabit
+
+00:32:39,600 --> 00:32:45,760
+interface which one is more important
+
+00:32:44,240 --> 00:32:48,480
+is it the one that is doing more network
+
+00:32:45,760 --> 00:32:50,159
+traffic or is the only reason that it
+
+00:32:48,480 --> 00:32:53,679
+does my memory traffic
+
+00:32:50,159 --> 00:32:53,679
+the fact that it runs closer by
+
+00:32:55,440 --> 00:32:59,840
+it's not it's not really easy to to
+
+00:32:57,360 --> 00:33:02,080
+figure out any answers to this and
+
+00:32:59,840 --> 00:33:03,120
+i would like to fix this someday but i
+
+00:33:02,080 --> 00:33:06,480
+to be honest i'm
+
+00:33:03,120 --> 00:33:06,480
+not quite sure where to start
+
+00:33:06,960 --> 00:33:11,200
+inter-process communication is another
+
+00:33:08,880 --> 00:33:15,039
+area where
+
+00:33:11,200 --> 00:33:17,039
+different tasks sometimes do a lot of
+
+00:33:15,039 --> 00:33:20,080
+communication with each other
+
+00:33:17,039 --> 00:33:20,480
+usually across loopback network sockets
+
+00:33:20,080 --> 00:33:24,159
+or
+
+00:33:20,480 --> 00:33:27,200
+pipes things like that
+
+00:33:24,159 --> 00:33:29,279
+again we can measure how much different
+
+00:33:27,200 --> 00:33:30,559
+tasks talk to each other
+
+00:33:29,279 --> 00:33:33,519
+there's already some code in the
+
+00:33:30,559 --> 00:33:35,279
+scheduler to try and move tasks
+
+00:33:33,519 --> 00:33:38,000
+closer to each other when they
+
+00:33:35,279 --> 00:33:40,480
+communicate with each other
+
+00:33:38,000 --> 00:33:42,799
+but that code is totally independent of
+
+00:33:40,480 --> 00:33:46,559
+the pneuma code today
+
+00:33:42,799 --> 00:33:47,679
+and if and even if we implement it with
+
+00:33:46,559 --> 00:33:50,559
+the pneuma code
+
+00:33:47,679 --> 00:33:51,760
+at what point does inter-process
+
+00:33:50,559 --> 00:33:56,640
+communication
+
+00:33:51,760 --> 00:33:56,640
+outweigh memory and cpu locality
+
+00:33:57,760 --> 00:34:01,760
+it gets more complicated once you're
+
+00:33:59,360 --> 00:34:04,000
+dealing with multi-threaded programs
+
+00:34:01,760 --> 00:34:06,000
+it's one of those areas where i've got
+
+00:34:04,000 --> 00:34:08,240
+some vague ideas in my mind on what
+
+00:34:06,000 --> 00:34:10,320
+statistics we could gather to look at
+
+00:34:08,240 --> 00:34:12,560
+but i'm not entirely sure yet how to use
+
+00:34:10,320 --> 00:34:12,560
+them
+
+00:34:12,720 --> 00:34:17,679
+but the newman balancing code has been
+
+00:34:15,760 --> 00:34:18,839
+getting better over time it's covering
+
+00:34:17,679 --> 00:34:23,359
+more and more
+
+00:34:18,839 --> 00:34:25,440
+workloads for some simple workloads
+
+00:34:23,359 --> 00:34:27,200
+even for some even for kvm guest
+
+00:34:25,440 --> 00:34:29,679
+placement we can get
+
+00:34:27,200 --> 00:34:30,480
+within a few percent of optimal memory
+
+00:34:29,679 --> 00:34:34,079
+tuning
+
+00:34:30,480 --> 00:34:35,520
+for certain benchmarks for
+
+00:34:34,079 --> 00:34:37,359
+things that have more complicated
+
+00:34:35,520 --> 00:34:39,200
+requirements like doing lots of
+
+00:34:37,359 --> 00:34:40,720
+inter-process communication or
+
+00:34:39,200 --> 00:34:42,480
+networking
+
+00:34:40,720 --> 00:34:45,119
+and other things that this code simply
+
+00:34:42,480 --> 00:34:46,720
+does not measure
+
+00:34:45,119 --> 00:34:49,040
+you may still need to do manual
+
+00:34:46,720 --> 00:34:49,919
+placements because at the moment we only
+
+00:34:49,040 --> 00:34:53,760
+do memory
+
+00:34:49,919 --> 00:34:53,760
+and cpu placement
+
+00:34:54,560 --> 00:34:59,119
+but the code is slowly getting better
+
+00:34:57,280 --> 00:35:00,880
+and the range of systems for automatic
+
+00:34:59,119 --> 00:35:04,320
+placement works very well
+
+00:35:00,880 --> 00:35:04,320
+is growing over time
+
+00:35:04,640 --> 00:35:08,960
+and for some cases as well we have seen
+
+00:35:07,200 --> 00:35:11,200
+that
+
+00:35:08,960 --> 00:35:12,400
+when workloads go idle and then they get
+
+00:35:11,200 --> 00:35:14,880
+busy again
+
+00:35:12,400 --> 00:35:16,000
+in those cases automatic placements can
+
+00:35:14,880 --> 00:35:19,200
+work better than manual
+
+00:35:16,000 --> 00:35:20,720
+placement because manually you don't
+
+00:35:19,200 --> 00:35:22,480
+really know what workload
+
+00:35:20,720 --> 00:35:23,920
+will be busy when and when it will be
+
+00:35:22,480 --> 00:35:25,680
+idle
+
+00:35:23,920 --> 00:35:27,280
+and having the automatic placement code
+
+00:35:25,680 --> 00:35:31,680
+deal with some of those things can work
+
+00:35:27,280 --> 00:35:34,320
+better than manual already
+
+00:35:31,680 --> 00:35:34,320
+any questions
+
+00:35:35,359 --> 00:35:41,040
+with vms i think that friends are also
+
+00:35:39,200 --> 00:35:44,320
+interesting
+
+00:35:41,040 --> 00:35:44,560
+do you only deal with processes or also
+
+00:35:44,320 --> 00:35:49,040
+in
+
+00:35:44,560 --> 00:35:51,599
+threads we notice that threads
+
+00:35:49,040 --> 00:35:53,440
+they access the same memory and they get
+
+00:35:51,599 --> 00:35:55,520
+grouped together
+
+00:35:53,440 --> 00:35:57,520
+we use the same grouping mechanism for
+
+00:35:55,520 --> 00:36:01,920
+processes that have shared memory
+
+00:35:57,520 --> 00:36:01,920
+and for threads that share all memory
+
+00:36:03,440 --> 00:36:06,720
+what about shared memory that many
+
+00:36:05,760 --> 00:36:10,400
+process uses
+
+00:36:06,720 --> 00:36:12,880
+and on large systems lots of
+
+00:36:10,400 --> 00:36:14,320
+large distances how much does that
+
+00:36:12,880 --> 00:36:17,599
+affect performance i mean
+
+00:36:14,320 --> 00:36:19,839
+for example if big c is in one volt
+
+00:36:17,599 --> 00:36:21,599
+and all the tasks running on the other
+
+00:36:19,839 --> 00:36:23,839
+node are using it or
+
+00:36:21,599 --> 00:36:26,960
+even an even larger library well for for
+
+00:36:23,839 --> 00:36:27,359
+things like libc it's probably not a big
+
+00:36:26,960 --> 00:36:30,079
+issue
+
+00:36:27,359 --> 00:36:32,400
+it is always read-only which means you
+
+00:36:30,079 --> 00:36:34,560
+can always cache it easily
+
+00:36:32,400 --> 00:36:36,079
+but things that are does not fit on the
+
+00:36:34,560 --> 00:36:37,520
+camera
+
+00:36:36,079 --> 00:36:40,000
+i have things that do not fit on the
+
+00:36:37,520 --> 00:36:41,920
+cache and things that are
+
+00:36:40,000 --> 00:36:43,520
+it really depends on the topology of the
+
+00:36:41,920 --> 00:36:46,960
+system let's go
+
+00:36:43,520 --> 00:36:50,079
+let's go to this one if we are
+
+00:36:46,960 --> 00:36:50,880
+if a task has memory here but it's
+
+00:36:50,079 --> 00:36:54,000
+running here
+
+00:36:50,880 --> 00:36:55,520
+or here or there on on cpu one it has a
+
+00:36:54,000 --> 00:36:57,359
+direct link
+
+00:36:55,520 --> 00:36:59,200
+then the slowdown in accessing that
+
+00:36:57,359 --> 00:37:03,599
+memory
+
+00:36:59,200 --> 00:37:06,320
+might be 20 or 30 percent but
+
+00:37:03,599 --> 00:37:07,359
+a 20 or 30 slowdown in accessing the
+
+00:37:06,320 --> 00:37:09,920
+memory
+
+00:37:07,359 --> 00:37:11,599
+is not the same as a 20 to 30 slow down
+
+00:37:09,920 --> 00:37:13,119
+in how fast it runs
+
+00:37:11,599 --> 00:37:15,520
+because we'll have some of the memory
+
+00:37:13,119 --> 00:37:18,320
+locally as well and it will also be
+
+00:37:15,520 --> 00:37:19,040
+spending some time simply doing stuff on
+
+00:37:18,320 --> 00:37:22,240
+the cpu
+
+00:37:19,040 --> 00:37:22,240
+and not waiting for memory
+
+00:37:28,240 --> 00:37:31,760
+no oh they definitely are
+
+00:37:32,960 --> 00:37:37,760
+on systems like this v-note has
+
+00:37:36,400 --> 00:37:39,440
+sitting over there but we have some
+
+00:37:37,760 --> 00:37:42,400
+measurements where
+
+00:37:39,440 --> 00:37:44,320
+if a program runs on two nodes right
+
+00:37:42,400 --> 00:37:47,440
+next to each other
+
+00:37:44,320 --> 00:37:50,800
+it could run about 20
+
+00:37:47,440 --> 00:37:51,599
+faster than if it has it's running over
+
+00:37:50,800 --> 00:37:54,880
+here
+
+00:37:51,599 --> 00:37:54,880
+and over on over there
+
+00:37:54,960 --> 00:38:00,960
+the the amount of distance between them
+
+00:37:58,079 --> 00:38:04,480
+it really matters if too many tasks are
+
+00:38:00,960 --> 00:38:07,680
+using it
+
+00:38:04,480 --> 00:38:11,359
+asm i mean really worth it to duplicate
+
+00:38:07,680 --> 00:38:13,760
+the charger if it's really only
+
+00:38:11,359 --> 00:38:14,800
+people have looked at that in the past
+
+00:38:13,760 --> 00:38:16,720
+but
+
+00:38:14,800 --> 00:38:18,880
+and it had made a big difference on
+
+00:38:16,720 --> 00:38:21,359
+really large pneuma systems
+
+00:38:18,880 --> 00:38:22,720
+i don't know if it is worth doing today
+
+00:38:21,359 --> 00:38:26,320
+because
+
+00:38:22,720 --> 00:38:27,440
+cpus have really large level 3 caches
+
+00:38:26,320 --> 00:38:29,599
+today
+
+00:38:27,440 --> 00:38:31,440
+and the code that is used a lot by
+
+00:38:29,599 --> 00:38:34,720
+different processes in the system can
+
+00:38:31,440 --> 00:38:34,720
+pretty easily be cached
+
+00:38:37,119 --> 00:38:40,720
+i mentioned earlier that you have a that
+
+00:38:39,200 --> 00:38:41,839
+is flips between a low balance and a
+
+00:38:40,720 --> 00:38:43,440
+number code
+
+00:38:41,839 --> 00:38:45,040
+and it does sound a bit like you have
+
+00:38:43,440 --> 00:38:46,240
+two systems fighting over optimum
+
+00:38:45,040 --> 00:38:48,880
+placement there
+
+00:38:46,240 --> 00:38:49,760
+and how much do you think improvement
+
+00:38:48,880 --> 00:38:51,520
+would it be
+
+00:38:49,760 --> 00:38:53,520
+to just switch off the load balancing
+
+00:38:51,520 --> 00:38:55,119
+code and say let's do numeral placement
+
+00:38:53,520 --> 00:38:57,680
+or do one or the other
+
+00:38:55,119 --> 00:38:59,040
+are there any numbers there available we
+
+00:38:57,680 --> 00:39:02,880
+i think we still need
+
+00:38:59,040 --> 00:39:05,520
+the load balancing code because
+
+00:39:02,880 --> 00:39:08,400
+if we have a system like this and all
+
+00:39:05,520 --> 00:39:10,320
+the programs are running here
+
+00:39:08,400 --> 00:39:11,920
+then it will be a lot slower than if the
+
+00:39:10,320 --> 00:39:14,240
+programs are spread out
+
+00:39:11,920 --> 00:39:16,560
+across the rest of the system can you
+
+00:39:14,240 --> 00:39:20,400
+maybe make the load balancer aware of
+
+00:39:16,560 --> 00:39:20,880
+luma the the node balancer is already
+
+00:39:20,400 --> 00:39:24,800
+aware
+
+00:39:20,880 --> 00:39:28,400
+of pneuma and when deciding what program
+
+00:39:24,800 --> 00:39:31,760
+process to move it will look
+
+00:39:28,400 --> 00:39:34,240
+for a process that is not running
+
+00:39:31,760 --> 00:39:36,079
+on one of its favorite numa nodes it
+
+00:39:34,240 --> 00:39:38,400
+will initially look for that
+
+00:39:36,079 --> 00:39:40,160
+so it's not really a competition with
+
+00:39:38,400 --> 00:39:42,079
+some kind of consideration
+
+00:39:40,160 --> 00:39:45,200
+yeah the two pieces of code try to be
+
+00:39:42,079 --> 00:39:48,880
+considerate of each other
+
+00:39:45,200 --> 00:39:50,400
+yes um this reminds us slightly of the
+
+00:39:48,880 --> 00:39:52,800
+or back in the old days we had something
+
+00:39:50,400 --> 00:39:56,240
+called the cash only memory architecture
+
+00:39:52,800 --> 00:39:56,960
+coma which was kind of the ultimate
+
+00:39:56,240 --> 00:39:59,359
+where you had
+
+00:39:56,960 --> 00:40:00,160
+where you didn't have any online cash
+
+00:39:59,359 --> 00:40:04,880
+because
+
+00:40:00,160 --> 00:40:07,560
+i'm supposed to be very respected
+
+00:40:04,880 --> 00:40:09,760
+but i think in general if you have a lot
+
+00:40:07,560 --> 00:40:11,680
+of
+
+00:40:09,760 --> 00:40:13,599
+shared memory then most of it would have
+
+00:40:11,680 --> 00:40:14,000
+to be made only otherwise it's it's
+
+00:40:13,599 --> 00:40:16,400
+about
+
+00:40:14,000 --> 00:40:18,480
+disarmament it depends on what you do
+
+00:40:16,400 --> 00:40:21,920
+what the shared memory is for
+
+00:40:18,480 --> 00:40:24,400
+if it's a lot of very actively read data
+
+00:40:21,920 --> 00:40:25,839
+having it read-only is extremely useful
+
+00:40:24,400 --> 00:40:29,119
+if you say a database
+
+00:40:25,839 --> 00:40:29,839
+then using your shared memory even read
+
+00:40:29,119 --> 00:40:31,520
+write
+
+00:40:29,839 --> 00:40:34,800
+is still a good idea because it is so
+
+00:40:31,520 --> 00:40:38,079
+much faster than going to disk
+
+00:40:34,800 --> 00:40:40,640
+that's true but another question was
+
+00:40:38,079 --> 00:40:41,440
+this um the tool you had some slides you
+
+00:40:40,640 --> 00:40:43,200
+skipped
+
+00:40:41,440 --> 00:40:44,800
+in the tool side because it seems like
+
+00:40:43,200 --> 00:40:48,560
+this really
+
+00:40:44,800 --> 00:40:50,560
+begs for better tools we there are
+
+00:40:48,560 --> 00:40:52,640
+a good number of numa tools out there
+
+00:40:50,560 --> 00:40:54,160
+and i encourage you to download the
+
+00:40:52,640 --> 00:40:55,040
+slides and play around with the
+
+00:40:54,160 --> 00:40:58,560
+different tools
+
+00:40:55,040 --> 00:40:58,560
+that are listed in the tools section
+
+00:40:58,720 --> 00:41:02,880
+do you have any tips for application
+
+00:41:00,400 --> 00:41:06,319
+programmers to write applications in a
+
+00:41:02,880 --> 00:41:09,280
+way that can help you
+
+00:41:06,319 --> 00:41:09,920
+that is a good question i guess one of
+
+00:41:09,280 --> 00:41:12,640
+the
+
+00:41:09,920 --> 00:41:15,920
+things that i have seen a very i have an
+
+00:41:12,640 --> 00:41:19,040
+example of what not to do
+
+00:41:15,920 --> 00:41:21,680
+we ran into that a while ago
+
+00:41:19,040 --> 00:41:22,880
+and the customer by the way is also
+
+00:41:21,680 --> 00:41:24,079
+aware that they should not have been
+
+00:41:22,880 --> 00:41:26,480
+doing this
+
+00:41:24,079 --> 00:41:29,040
+but it's an artifact of the tool set
+
+00:41:26,480 --> 00:41:33,040
+that they were using for programming
+
+00:41:29,040 --> 00:41:36,079
+they have a particular
+
+00:41:33,040 --> 00:41:38,880
+tool toolsets something in java where
+
+00:41:36,079 --> 00:41:39,440
+a different thread handles a different
+
+00:41:38,880 --> 00:41:42,720
+step
+
+00:41:39,440 --> 00:41:45,200
+in the process of dealing with a request
+
+00:41:42,720 --> 00:41:47,200
+so a request would come in get processed
+
+00:41:45,200 --> 00:41:48,800
+by one thread
+
+00:41:47,200 --> 00:41:51,599
+off the next threat for the next step in
+
+00:41:48,800 --> 00:41:54,319
+processing and there were 20 different
+
+00:41:51,599 --> 00:41:56,560
+or 20 plus different steps involved so
+
+00:41:54,319 --> 00:41:59,359
+each single request that came in
+
+00:41:56,560 --> 00:42:03,839
+got handled by 20 different threads that
+
+00:41:59,359 --> 00:42:03,839
+were spread out all over the system
+
+00:42:06,319 --> 00:42:10,000
+and the way to to do that kind of thing
+
+00:42:08,880 --> 00:42:12,000
+instead
+
+00:42:10,000 --> 00:42:13,680
+when you get a request you would route
+
+00:42:12,000 --> 00:42:16,400
+it to one particular
+
+00:42:13,680 --> 00:42:18,000
+instance of a thread so we could handle
+
+00:42:16,400 --> 00:42:21,280
+that request locally
+
+00:42:18,000 --> 00:42:21,280
+and then send back the result
+
+00:42:24,400 --> 00:42:28,160
+so once two tasks get put into the same
+
+00:42:27,040 --> 00:42:30,400
+numer group
+
+00:42:28,160 --> 00:42:31,520
+they never split apart they stay that
+
+00:42:30,400 --> 00:42:34,000
+way forever
+
+00:42:31,520 --> 00:42:35,760
+if two tasks get split it gets put in
+
+00:42:34,000 --> 00:42:38,000
+the same pneumogroup
+
+00:42:35,760 --> 00:42:40,319
+there's really only one way or there's
+
+00:42:38,000 --> 00:42:42,400
+two ways of leaving the lumo group
+
+00:42:40,319 --> 00:42:43,680
+one is exiting that's the obvious one
+
+00:42:42,400 --> 00:42:46,000
+but the pneuma group
+
+00:42:43,680 --> 00:42:48,160
+can also merge into a lot of lumbar
+
+00:42:46,000 --> 00:42:51,680
+group if you have a task
+
+00:42:48,160 --> 00:42:53,280
+with five threads for example
+
+00:42:51,680 --> 00:42:55,200
+and they slowly discover that they are
+
+00:42:53,280 --> 00:42:56,160
+sharing memory you might have a number
+
+00:42:55,200 --> 00:42:58,079
+group with two
+
+00:42:56,160 --> 00:42:59,680
+tasks in it and other number group with
+
+00:42:58,079 --> 00:43:01,599
+three tasks
+
+00:42:59,680 --> 00:43:04,560
+and if one of the threads in a numa
+
+00:43:01,599 --> 00:43:06,800
+group with two tasks discovers from hey
+
+00:43:04,560 --> 00:43:08,800
+i am sharing memory with somebody in a
+
+00:43:06,800 --> 00:43:10,560
+larger number group
+
+00:43:08,800 --> 00:43:12,160
+then it will move into the other group
+
+00:43:10,560 --> 00:43:12,880
+and eventually the other guy will move
+
+00:43:12,160 --> 00:43:16,079
+too
+
+00:43:12,880 --> 00:43:16,880
+can you disable normal balancing can you
+
+00:43:16,079 --> 00:43:18,640
+disable
+
+00:43:16,880 --> 00:43:21,920
+balancing and then re-enabling it and
+
+00:43:18,640 --> 00:43:24,560
+get all clear all the stats
+
+00:43:21,920 --> 00:43:27,119
+disabling number balancing and then
+
+00:43:24,560 --> 00:43:30,720
+re-enabling it does not clear the stats
+
+00:43:27,119 --> 00:43:32,960
+but the stats age out over time
+
+00:43:30,720 --> 00:43:34,480
+so to disappear fairly quickly what i'm
+
+00:43:32,960 --> 00:43:36,319
+thinking of here is a case where you've
+
+00:43:34,480 --> 00:43:37,280
+got a big multi-thread application that
+
+00:43:36,319 --> 00:43:39,680
+has a
+
+00:43:37,280 --> 00:43:41,119
+initialization phase which is really bad
+
+00:43:39,680 --> 00:43:42,720
+and shares everything
+
+00:43:41,119 --> 00:43:44,640
+but then settles into a long-term
+
+00:43:42,720 --> 00:43:46,560
+pattern where there's reasonable
+
+00:43:44,640 --> 00:43:48,160
+locality for each threat
+
+00:43:46,560 --> 00:43:49,599
+is it going to be too late by that stage
+
+00:43:48,160 --> 00:43:51,680
+and it will have glued all the threads
+
+00:43:49,599 --> 00:43:54,240
+together so they won't be able to
+
+00:43:51,680 --> 00:43:57,760
+ibm can do that i mean at the end you
+
+00:43:54,240 --> 00:44:01,040
+run into my balancer inside it can start
+
+00:43:57,760 --> 00:44:01,680
+the stuff okay well having different
+
+00:44:01,040 --> 00:44:03,760
+threads
+
+00:44:01,680 --> 00:44:05,359
+glued together in the same pneumogroup
+
+00:44:03,760 --> 00:44:06,400
+but afterwards accessing their own
+
+00:44:05,359 --> 00:44:10,319
+memory
+
+00:44:06,400 --> 00:44:14,079
+is totally harmless because we will move
+
+00:44:10,319 --> 00:44:15,760
+the private the private memory for each
+
+00:44:14,079 --> 00:44:16,880
+threat over to where each of the threads
+
+00:44:15,760 --> 00:44:19,680
+is
+
+00:44:16,880 --> 00:44:21,520
+and if you have a number of threads
+
+00:44:19,680 --> 00:44:22,720
+accessing the same memory inside the
+
+00:44:21,520 --> 00:44:24,480
+group
+
+00:44:22,720 --> 00:44:25,760
+chances are those threats will still get
+
+00:44:24,480 --> 00:44:26,480
+grouped together on the same pneuma
+
+00:44:25,760 --> 00:44:28,079
+nodes
+
+00:44:26,480 --> 00:44:30,000
+and the threads accessing other memory
+
+00:44:28,079 --> 00:44:32,079
+will get grouped in other pneuma nodes
+
+00:44:30,000 --> 00:44:33,839
+i think it means if they start sharing
+
+00:44:32,079 --> 00:44:35,680
+often lots of memory assets with each
+
+00:44:33,839 --> 00:44:36,319
+other and then they stop sharing they
+
+00:44:35,680 --> 00:44:38,800
+start
+
+00:44:36,319 --> 00:44:41,040
+watching yes and that's fine because we
+
+00:44:38,800 --> 00:44:42,880
+have we detect that the same memory is
+
+00:44:41,040 --> 00:44:43,839
+used several times over by the same
+
+00:44:42,880 --> 00:44:46,079
+thread
+
+00:44:43,839 --> 00:44:47,440
+and we move it to where the thread is
+
+00:44:46,079 --> 00:44:51,359
+all right
+
+00:44:47,440 --> 00:44:52,800
+yep it is time yeah to
+
+00:44:51,359 --> 00:45:05,839
+get something to drink and move on to
+
+00:44:52,800 --> 00:45:05,839
+our next store thank you
+
+00:45:29,200 --> 00:45:31,280
+
+YouTube URL: https://www.youtube.com/watch?v=mjVw_oe1hEA
+
+

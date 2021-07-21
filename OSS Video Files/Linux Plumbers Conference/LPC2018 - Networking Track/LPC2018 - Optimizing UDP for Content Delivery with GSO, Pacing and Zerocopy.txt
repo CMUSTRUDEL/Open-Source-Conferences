@@ -1,0 +1,2585 @@
+Title: LPC2018 - Optimizing UDP for Content Delivery with GSO, Pacing and Zerocopy
+Publication date: 2018-12-04
+Playlist: LPC2018 - Networking Track
+Description: 
+	url:  https://linuxplumbersconf.org/event/2/contributions/106/
+speaker:  Willem de Bruijn (Google)
+
+
+UDP is a popular foundation for new protocols. It is available across
+operating systems without superuser privileges and widely supported
+by middleboxes. Shipping protocols in userspace on top of
+a robust UDP stack allows for rapid deployment, experimentation
+and innovation of network protocols.
+
+But implementing protocols in userspace has limitations. The
+environment lacks access to features like high resolution timers
+and hardware offload. Transport cost can be high. Cycle count of
+transferring large payloads with UDP can be up to 3x that of TCP.
+
+In this talk we present recent and ongoing work, both by the authors
+and others, at improving UDP for content delivery.
+
+UDP Segmentation offload amortizes transmit stack traversal by
+sending as many as 64 segments as one large fused large packet.
+The kernel passes this through the stack as one datagram, then
+splits it into multiple packets and replicates their network and
+transport headers just before handing to the network device.
+
+Some devices can offload segmentation for exact multiples of
+segment size. We discuss how partial GSO support combines the
+best of software and hardware offload and evaluate the benefits of
+segmentation offload over standard UDP.
+
+With these large buffers, MSG_ZEROCOPY becomes effective at
+removing the cost of copying in sendmsg, often the largest
+single line item in these workloads. We extend this to UDP and
+evaluate it on top of GSO.
+
+Bursting too many segments at once can cause drops and retransmits.
+SO_TXTIME adds a release time interface which allows offloading of
+pacing to the kernel, where it is both more accurate and cheaper.
+We will look at this interface and how it is supported by queuing
+disciplines and hardware devices.
+
+Finally, we look at how these transmit savings can be extended to
+the forwarding and receive paths through the complement of GSO,
+GRO, and local delivery of fused packets.
+Captions: 
+	00:00:06,020 --> 00:00:10,620
+who lives been hiking internetworking
+
+00:00:08,160 --> 00:00:12,000
+for quite some time looking after ghouls
+
+00:00:10,620 --> 00:00:14,400
+interests as well as help streams
+
+00:00:12,000 --> 00:00:16,860
+interest as well he's been doing a lot
+
+00:00:14,400 --> 00:00:20,240
+of work with UDP from zero copy to his
+
+00:00:16,860 --> 00:00:22,859
+present work on GSM is big stuff
+
+00:00:20,240 --> 00:00:25,220
+probably influenced by quick in some way
+
+00:00:22,859 --> 00:00:29,099
+so the work that he's doing on it just
+
+00:00:25,220 --> 00:00:32,640
+yes and really appreciate all the work
+
+00:00:29,099 --> 00:00:38,580
+and contributions he does and take it
+
+00:00:32,640 --> 00:00:40,019
+away thank you sorry just quickly see
+
+00:00:38,580 --> 00:00:46,409
+how much time acts yeah but it's half an
+
+00:00:40,019 --> 00:00:50,750
+hour okay thanks yeah let's have a look
+
+00:00:46,409 --> 00:00:53,790
+at some recent UDP stack optimizations
+
+00:00:50,750 --> 00:00:56,580
+specifically for delivering content
+
+00:00:53,790 --> 00:00:59,790
+across the internet at skills and as
+
+00:00:56,580 --> 00:01:02,670
+David alluded to this work is inspired
+
+00:00:59,790 --> 00:01:04,739
+by quick now this is not a talk about
+
+00:01:02,670 --> 00:01:07,680
+quick so at the bottom you can see two
+
+00:01:04,739 --> 00:01:12,060
+links to recent quick presentations and
+
+00:01:07,680 --> 00:01:14,610
+papers what's relevant here is that it's
+
+00:01:12,060 --> 00:01:17,490
+a reliable transport protocol on top of
+
+00:01:14,610 --> 00:01:21,960
+UDP that showed some qualitative
+
+00:01:17,490 --> 00:01:26,520
+benefits when we converted Google egress
+
+00:01:21,960 --> 00:01:28,399
+traffic from TCP to quick and about that
+
+00:01:26,520 --> 00:01:30,680
+number that I quote is of
+
+00:01:28,399 --> 00:01:32,540
+most recent number I saw but it's
+
+00:01:30,680 --> 00:01:34,189
+actually higher than I think 35% of
+
+00:01:32,540 --> 00:01:36,500
+these days so Google egress that is
+
+00:01:34,189 --> 00:01:40,759
+egressing over quick instead of over TCP
+
+00:01:36,500 --> 00:01:42,380
+and it's that's growing majority of
+
+00:01:40,759 --> 00:01:44,990
+Google egress and surprisingly I think
+
+00:01:42,380 --> 00:01:46,250
+is a YouTube traffic so that's actually
+
+00:01:44,990 --> 00:01:49,820
+a pretty sizable fraction of the
+
+00:01:46,250 --> 00:01:51,229
+internet so it converted to quick gave
+
+00:01:49,820 --> 00:01:53,179
+some qualitative benefits but it
+
+00:01:51,229 --> 00:01:55,700
+actually came with pretty big cost which
+
+00:01:53,179 --> 00:01:58,460
+is at some point of 3x and and more
+
+00:01:55,700 --> 00:02:01,100
+recently a 2x higher cycle cost per byte
+
+00:01:58,460 --> 00:02:02,569
+cent so when you definitely like a cool
+
+00:02:01,100 --> 00:02:04,640
+new experimental protocol that's quite
+
+00:02:02,569 --> 00:02:08,899
+acceptable but once you reach this scale
+
+00:02:04,640 --> 00:02:10,789
+obviously it's not acceptable so the the
+
+00:02:08,899 --> 00:02:12,560
+impetus produce talked really is how can
+
+00:02:10,789 --> 00:02:16,280
+we reduce this cycle cost where does it
+
+00:02:12,560 --> 00:02:17,900
+come from one thing to keep in mind is
+
+00:02:16,280 --> 00:02:21,470
+that these kind of production loads it's
+
+00:02:17,900 --> 00:02:25,340
+not just um optimizing you know Network
+
+00:02:21,470 --> 00:02:27,200
+UDP stream in practice these servers are
+
+00:02:25,340 --> 00:02:29,420
+much more powerful in their cloud client
+
+00:02:27,200 --> 00:02:31,220
+so it's quite likely to have thousands
+
+00:02:29,420 --> 00:02:33,140
+of concurrent connections to various
+
+00:02:31,220 --> 00:02:36,470
+clients across the wide area network
+
+00:02:33,140 --> 00:02:38,540
+each relatively small right 1 megabyte
+
+00:02:36,470 --> 00:02:41,930
+per second and you'll see later why you
+
+00:02:38,540 --> 00:02:44,569
+bytes and some of this here so quick is
+
+00:02:41,930 --> 00:02:46,160
+no longer only used at Google there's a
+
+00:02:44,569 --> 00:02:47,720
+quite a lot of interest outside there's
+
+00:02:46,160 --> 00:02:52,250
+also it's going through ICF
+
+00:02:47,720 --> 00:02:53,720
+standardization so one potential idea
+
+00:02:52,250 --> 00:02:55,400
+here could be like well why don't we
+
+00:02:53,720 --> 00:02:58,760
+just be implemented in the kernel and
+
+00:02:55,400 --> 00:03:00,970
+maybe that will make it more efficient
+
+00:02:58,760 --> 00:03:03,739
+but I actually didn't want to do that
+
+00:03:00,970 --> 00:03:06,709
+because that will only benefit quick not
+
+00:03:03,739 --> 00:03:08,299
+the next quick or whatever protocol and
+
+00:03:06,709 --> 00:03:10,100
+it's actually particularly relevant
+
+00:03:08,299 --> 00:03:12,290
+because there already are multiple
+
+00:03:10,100 --> 00:03:13,970
+versions quick itself there's G quickly
+
+00:03:12,290 --> 00:03:16,700
+often pool which is the Google version
+
+00:03:13,970 --> 00:03:18,859
+and I quick the IETF standardized
+
+00:03:16,700 --> 00:03:21,370
+version which is quite different so
+
+00:03:18,859 --> 00:03:24,380
+instead what we're going to focus on is
+
+00:03:21,370 --> 00:03:25,329
+optimizing the UDP stack for these kind
+
+00:03:24,380 --> 00:03:28,609
+of protocols
+
+00:03:25,329 --> 00:03:31,280
+yupi is often used for protocols that
+
+00:03:28,609 --> 00:03:33,470
+require timely delivery more than
+
+00:03:31,280 --> 00:03:35,120
+reliable delivery but even for reliable
+
+00:03:33,470 --> 00:03:36,769
+protocols it's nice because it's
+
+00:03:35,120 --> 00:03:37,430
+available across operating systems
+
+00:03:36,769 --> 00:03:40,700
+without suit
+
+00:03:37,430 --> 00:03:42,019
+user privileges middleboxes don't leave
+
+00:03:40,700 --> 00:03:45,890
+it alone but at least leave it a little
+
+00:03:42,019 --> 00:03:50,599
+a little bit more than non tcp or UDP
+
+00:03:45,890 --> 00:03:51,920
+protocols and it's very extensible so
+
+00:03:50,599 --> 00:03:54,319
+then the question basically comes if
+
+00:03:51,920 --> 00:03:57,560
+we're going to optimize UDP like why was
+
+00:03:54,319 --> 00:03:59,629
+quick 2x more expensive this is user
+
+00:03:57,560 --> 00:04:01,180
+space or is this in the kernel so we're
+
+00:03:59,629 --> 00:04:05,150
+going to ignore the quick server for now
+
+00:04:01,180 --> 00:04:07,040
+and instead look at a micro benchmark
+
+00:04:05,150 --> 00:04:09,200
+that is in the kernel source tree
+
+00:04:07,040 --> 00:04:12,980
+this was emerges along with the UDP
+
+00:04:09,200 --> 00:04:14,720
+second segmentation offload patches um
+
+00:04:12,980 --> 00:04:17,810
+what we're looking at here is basically
+
+00:04:14,720 --> 00:04:21,560
+sending saturating a 10 gigabit NIC on a
+
+00:04:17,810 --> 00:04:23,810
+some reasonably modern machine the
+
+00:04:21,560 --> 00:04:25,370
+details of this test and other tests are
+
+00:04:23,810 --> 00:04:28,960
+all in the paper I'm gonna go over some
+
+00:04:25,370 --> 00:04:31,639
+for expediency and what we see is that
+
+00:04:28,960 --> 00:04:35,570
+start sending 10 gigabits of traffic
+
+00:04:31,639 --> 00:04:38,349
+over TCP if we measure system-wide
+
+00:04:35,570 --> 00:04:42,110
+cycles with firth takes about 600
+
+00:04:38,349 --> 00:04:45,949
+million cycles per second with UDP it's
+
+00:04:42,110 --> 00:04:47,840
+almost a factor five higher so pretty
+
+00:04:45,949 --> 00:04:49,520
+clear that this 5x cost is a big
+
+00:04:47,840 --> 00:04:52,250
+contributor to the 2x cost and the quick
+
+00:04:49,520 --> 00:04:54,169
+server as a whole and if you look at the
+
+00:04:52,250 --> 00:04:56,630
+number of system calls made by these
+
+00:04:54,169 --> 00:04:58,220
+applications that's a pretty big
+
+00:04:56,630 --> 00:05:00,680
+indication that you know that might be
+
+00:04:58,220 --> 00:05:02,300
+part of the problem here so a naive
+
+00:05:00,680 --> 00:05:04,070
+solution might be like well let's just
+
+00:05:02,300 --> 00:05:06,440
+you send that message and bash the
+
+00:05:04,070 --> 00:05:09,430
+number of system calls and it will solve
+
+00:05:06,440 --> 00:05:14,990
+this problem but if you look at a perf
+
+00:05:09,430 --> 00:05:17,360
+trace a perfect record then it's pretty
+
+00:05:14,990 --> 00:05:19,039
+I don't have that here but it's you'll
+
+00:05:17,360 --> 00:05:20,419
+see that there's not a single hotspot
+
+00:05:19,039 --> 00:05:23,389
+right it's not just a system calling
+
+00:05:20,419 --> 00:05:25,400
+even with all these sort of Spectre and
+
+00:05:23,389 --> 00:05:27,169
+meltdown mitigations it's really just
+
+00:05:25,400 --> 00:05:28,789
+accrues across the stack and the real
+
+00:05:27,169 --> 00:05:31,520
+issue is that we have to send all these
+
+00:05:28,789 --> 00:05:33,090
+datagrams that are MTU sized across the
+
+00:05:31,520 --> 00:05:37,800
+stack whereas TC does not
+
+00:05:33,090 --> 00:05:41,430
+so we can actually validate that
+
+00:05:37,800 --> 00:05:44,820
+intuition if we look at TCP without the
+
+00:05:41,430 --> 00:05:47,480
+TCP segmentation offload with eat tool
+
+00:05:44,820 --> 00:05:49,320
+you can disable to yourself and I'll
+
+00:05:47,480 --> 00:05:50,910
+assume most people know what the
+
+00:05:49,320 --> 00:05:53,190
+segmentation also it is but I'll go into
+
+00:05:50,910 --> 00:05:55,860
+it a little bit later but basically with
+
+00:05:53,190 --> 00:05:57,960
+TCP TSO the network card will split up
+
+00:05:55,860 --> 00:05:59,970
+large buffers into smaller ones and send
+
+00:05:57,960 --> 00:06:02,400
+those on so we can send larger packets
+
+00:05:59,970 --> 00:06:04,410
+to the network card if we turn off to
+
+00:06:02,400 --> 00:06:07,800
+you so it falls back on to a kernel
+
+00:06:04,410 --> 00:06:10,530
+implementation state mechanism GSO and
+
+00:06:07,800 --> 00:06:11,370
+we can see that basically this number of
+
+00:06:10,530 --> 00:06:14,430
+system calls
+
+00:06:11,370 --> 00:06:17,910
+stays the same but the cost of sending
+
+00:06:14,430 --> 00:06:21,180
+it in cycles is goes up is that about
+
+00:06:17,910 --> 00:06:23,160
+three fold and then if we turn off
+
+00:06:21,180 --> 00:06:24,540
+segmentation off less completely also
+
+00:06:23,160 --> 00:06:27,660
+the in kernel version
+
+00:06:24,540 --> 00:06:30,560
+TCP is actually no faster than UDP or no
+
+00:06:27,660 --> 00:06:32,760
+more efficient than UDP in this case so
+
+00:06:30,560 --> 00:06:35,370
+this is a good hint that if you add
+
+00:06:32,760 --> 00:06:39,169
+segmentation offload the UDP we can be
+
+00:06:35,370 --> 00:06:41,700
+the same kind of benefits all right so
+
+00:06:39,169 --> 00:06:43,560
+I'm going to talk about how to do this
+
+00:06:41,700 --> 00:06:46,979
+and how you can use this and also a
+
+00:06:43,560 --> 00:06:49,800
+couple of related features that are new
+
+00:06:46,979 --> 00:06:52,500
+in the kernel that actually all of these
+
+00:06:49,800 --> 00:06:55,140
+together help us improve their quick
+
+00:06:52,500 --> 00:06:56,880
+server and service like that I should
+
+00:06:55,140 --> 00:07:00,060
+point out that this is not nearly all my
+
+00:06:56,880 --> 00:07:03,060
+work so thanks to everyone who worked on
+
+00:07:00,060 --> 00:07:05,550
+the UDP stack recently in these changes
+
+00:07:03,060 --> 00:07:08,270
+if you're interested who did what the
+
+00:07:05,550 --> 00:07:10,710
+paper has more details on this as well
+
+00:07:08,270 --> 00:07:11,610
+alright so segmentation offload the idea
+
+00:07:10,710 --> 00:07:14,370
+is pretty straightforward
+
+00:07:11,610 --> 00:07:17,220
+if the cost of the kernel stack
+
+00:07:14,370 --> 00:07:19,820
+transmission accrues by having to go
+
+00:07:17,220 --> 00:07:22,770
+through the stack many times for a given
+
+00:07:19,820 --> 00:07:27,110
+payload then let's build larger packets
+
+00:07:22,770 --> 00:07:30,210
+and we basically can ignore the packet
+
+00:07:27,110 --> 00:07:33,120
+size on the wire to a certain extent and
+
+00:07:30,210 --> 00:07:35,460
+after virtual MTU size that's larger
+
+00:07:33,120 --> 00:07:37,380
+within the kernel and with TCP
+
+00:07:35,460 --> 00:07:41,040
+segmentation of load even to the network
+
+00:07:37,380 --> 00:07:45,450
+card right so normally with datagrams
+
+00:07:41,040 --> 00:07:48,000
+you have to send a Datagram that fits on
+
+00:07:45,450 --> 00:07:50,040
+the wire often this is Ethernet 1500
+
+00:07:48,000 --> 00:07:52,170
+bytes so you subtract the headers
+
+00:07:50,040 --> 00:07:55,590
+this is ipv6 and that's the payload you
+
+00:07:52,170 --> 00:08:00,870
+can send each system call with the
+
+00:07:55,590 --> 00:08:05,250
+maximum MTU size allowed by ipv6 it's 45
+
+00:08:00,870 --> 00:08:07,980
+times as large so you cut the traversals
+
+00:08:05,250 --> 00:08:10,920
+45 X and you know you might get the 5 X
+
+00:08:07,980 --> 00:08:13,560
+in reduction in overall cycles that's
+
+00:08:10,920 --> 00:08:16,200
+the idea now one thing to keep in mind
+
+00:08:13,560 --> 00:08:18,870
+is the TCP the contract with the
+
+00:08:16,200 --> 00:08:20,700
+application is a byte stream so the
+
+00:08:18,870 --> 00:08:22,290
+kernel has much more leeway and how it
+
+00:08:20,700 --> 00:08:27,450
+splits off that and then sends it on the
+
+00:08:22,290 --> 00:08:29,880
+network then with UDP UDP Datagram is
+
+00:08:27,450 --> 00:08:36,090
+supposed to arrive at the receiver the
+
+00:08:29,880 --> 00:08:39,030
+same way that the sender sent it out so
+
+00:08:36,090 --> 00:08:41,490
+drive from the point normally an
+
+00:08:39,030 --> 00:08:43,890
+application will have to send datagrams
+
+00:08:41,490 --> 00:08:45,980
+one by one possibly send a message they
+
+00:08:43,890 --> 00:08:48,600
+go to the stack one at a time and
+
+00:08:45,980 --> 00:08:50,040
+they're sent out one at a time with UDP
+
+00:08:48,600 --> 00:08:52,350
+giro the interface changes
+
+00:08:50,040 --> 00:08:53,760
+I saw the GSO the interface changes so
+
+00:08:52,350 --> 00:08:55,590
+the application that will look at that
+
+00:08:53,760 --> 00:08:57,000
+it's not a very complicated change but
+
+00:08:55,590 --> 00:09:00,000
+the application now sends a larger
+
+00:08:57,000 --> 00:09:04,260
+packet knowingly that this is contains
+
+00:09:00,000 --> 00:09:05,820
+multiple payloads together and with gso
+
+00:09:04,260 --> 00:09:08,160
+the kernel will still split it up and
+
+00:09:05,820 --> 00:09:09,870
+pass it to the NIC exactly as if the
+
+00:09:08,160 --> 00:09:13,920
+application would have sent individual
+
+00:09:09,870 --> 00:09:15,660
+packets and with Hardware offload it's
+
+00:09:13,920 --> 00:09:19,490
+actually the NIC that does this but of
+
+00:09:15,660 --> 00:09:19,490
+course we need drivers that support this
+
+00:09:19,900 --> 00:09:25,240
+this all mites I'm very familiar and and
+
+00:09:22,420 --> 00:09:26,260
+we've had a UDP fragmentation uploading
+
+00:09:25,240 --> 00:09:30,550
+the kernel for a while
+
+00:09:26,260 --> 00:09:33,370
+UFO however is mostly gone which I'm
+
+00:09:30,550 --> 00:09:36,279
+quite happy about but also it's not
+
+00:09:33,370 --> 00:09:38,140
+transparent in the way that G is always
+
+00:09:36,279 --> 00:09:40,390
+so with you to be fragmentation offload
+
+00:09:38,140 --> 00:09:44,680
+an application explicitly configures a
+
+00:09:40,390 --> 00:09:46,660
+socket to bypass the MTU limits as built
+
+00:09:44,680 --> 00:09:48,279
+a larger packet and relies on IP to
+
+00:09:46,660 --> 00:09:50,920
+fragment this and send the fragments out
+
+00:09:48,279 --> 00:09:52,900
+on the network these fragments can take
+
+00:09:50,920 --> 00:09:55,330
+different paths on the network and they
+
+00:09:52,900 --> 00:09:58,210
+take expert costs on the recipients on
+
+00:09:55,330 --> 00:10:01,120
+the receiver to reassemble the logic
+
+00:09:58,210 --> 00:10:04,300
+Datagram so there are a number of issues
+
+00:10:01,120 --> 00:10:07,690
+with this segmentation what we do is the
+
+00:10:04,300 --> 00:10:11,230
+application sends multiple payloads they
+
+00:10:07,690 --> 00:10:14,770
+are taken as a single Datagram so they
+
+00:10:11,230 --> 00:10:16,810
+got one IP header or ipv6 header one UDP
+
+00:10:14,770 --> 00:10:19,779
+header to go down the stack and at some
+
+00:10:16,810 --> 00:10:22,830
+point in the network card or just before
+
+00:10:19,779 --> 00:10:25,120
+the payloads are split up and the
+
+00:10:22,830 --> 00:10:26,950
+headers are replicated so they all get
+
+00:10:25,120 --> 00:10:28,690
+the same header which you can do because
+
+00:10:26,950 --> 00:10:30,880
+they all have to say you know source and
+
+00:10:28,690 --> 00:10:34,660
+destination they will have the same TTL
+
+00:10:30,880 --> 00:10:36,940
+they all have the same toss so you with
+
+00:10:34,660 --> 00:10:38,230
+segmentation we end up building exactly
+
+00:10:36,940 --> 00:10:40,300
+the same stream of data grabs and we
+
+00:10:38,230 --> 00:10:42,880
+would have built had an application just
+
+00:10:40,300 --> 00:10:45,820
+issued multiple individual sent calls
+
+00:10:42,880 --> 00:10:47,140
+off MTU size so that's that's the
+
+00:10:45,820 --> 00:10:51,220
+powerful part it's transparent to the
+
+00:10:47,140 --> 00:10:54,610
+network and to the receiver so how do
+
+00:10:51,220 --> 00:10:56,500
+you use this basically all that's
+
+00:10:54,610 --> 00:10:58,900
+required when sending this larger packet
+
+00:10:56,500 --> 00:11:00,520
+is signaling to the kernel that you're
+
+00:10:58,900 --> 00:11:03,250
+well aware that this thing exceeds MTU
+
+00:11:00,520 --> 00:11:07,150
+and that's fine or I should say hummus s
+
+00:11:03,250 --> 00:11:09,520
+and that's fine and all segments are the
+
+00:11:07,150 --> 00:11:12,160
+same size and and though that segment
+
+00:11:09,520 --> 00:11:14,920
+size is smaller than or equal to MSS and
+
+00:11:12,160 --> 00:11:17,440
+the kernel should split it up among this
+
+00:11:14,920 --> 00:11:19,360
+second size so there are two ways you do
+
+00:11:17,440 --> 00:11:22,779
+this either with the sets are cupped
+
+00:11:19,360 --> 00:11:26,950
+that remains associated with the socket
+
+00:11:22,779 --> 00:11:30,910
+this setting or with the control message
+
+00:11:26,950 --> 00:11:33,400
+at sendmessage time and the buffer does
+
+00:11:30,910 --> 00:11:35,590
+not need to be an exact multiple off to
+
+00:11:33,400 --> 00:11:39,660
+you so sighs if it isn't then the last
+
+00:11:35,590 --> 00:11:39,660
+segment will be shorter than the others
+
+00:11:40,020 --> 00:11:45,610
+all right so does this actually help is
+
+00:11:43,240 --> 00:11:49,090
+the obvious next question and it does it
+
+00:11:45,610 --> 00:11:52,090
+seems in his benchmark so this is the
+
+00:11:49,090 --> 00:11:54,370
+benchmark extended with UDP gso and we
+
+00:11:52,090 --> 00:11:57,610
+see that the cycles per second is
+
+00:11:54,370 --> 00:11:58,900
+comparable to TCP TSO speed-up slightly
+
+00:11:57,610 --> 00:12:01,450
+better but you know the numbers aren't
+
+00:11:58,900 --> 00:12:03,310
+very precise so that's encouraging
+
+00:12:01,450 --> 00:12:04,990
+and then the obvious next question is
+
+00:12:03,310 --> 00:12:08,650
+well this is all nice and good but TCP
+
+00:12:04,990 --> 00:12:10,630
+tso is much better so what does UDP I
+
+00:12:08,650 --> 00:12:13,870
+kind of call it TSO because that's TCP
+
+00:12:10,630 --> 00:12:16,120
+segmentation offload I guess a large
+
+00:12:13,870 --> 00:12:18,850
+segmentation offload is the nice inverse
+
+00:12:16,120 --> 00:12:21,280
+of large receive of them so I don't have
+
+00:12:18,850 --> 00:12:24,220
+numbers for this but to my surprise
+
+00:12:21,280 --> 00:12:27,940
+within two weeks of dispatch ship
+
+00:12:24,220 --> 00:12:30,220
+getting merged Alexander dive sent an
+
+00:12:27,940 --> 00:12:34,050
+RFC patches for the Intel I HDB driver
+
+00:12:30,220 --> 00:12:36,760
+and not much later the Mellanox folks
+
+00:12:34,050 --> 00:12:39,070
+submitted a patch that's at large for
+
+00:12:36,760 --> 00:12:41,740
+the mx-5 driver and this summer
+
+00:12:39,070 --> 00:12:45,580
+Morris's many presented some results
+
+00:12:41,740 --> 00:12:51,060
+which are very much in line with TCP TSS
+
+00:12:45,580 --> 00:12:51,060
+if I recall correctly it's about a 2x
+
+00:12:51,490 --> 00:12:58,000
+that 50% increase in throughput versus
+
+00:12:55,029 --> 00:13:01,330
+gso at half the cycle so that's that's
+
+00:12:58,000 --> 00:13:04,240
+you know an impressive improvement 6x so
+
+00:13:01,330 --> 00:13:05,890
+we'll see as I said I don't have data
+
+00:13:04,240 --> 00:13:08,380
+myself but those numbers are very
+
+00:13:05,890 --> 00:13:12,070
+encouraging to use at geo so and the -
+
+00:13:08,380 --> 00:13:13,690
+to reduce that quick gap now what's
+
+00:13:12,070 --> 00:13:16,060
+interesting is once we do this obviously
+
+00:13:13,690 --> 00:13:16,870
+the cost across the stack is much lower
+
+00:13:16,060 --> 00:13:19,180
+than it was before
+
+00:13:16,870 --> 00:13:21,220
+and now if you look at a perfect race
+
+00:13:19,180 --> 00:13:22,420
+which again I don't have a slide we
+
+00:13:21,220 --> 00:13:24,220
+would see that there's actually one hot
+
+00:13:22,420 --> 00:13:26,830
+spot appears and it's a very common one
+
+00:13:24,220 --> 00:13:30,490
+or a very familiar one sorry I missed a
+
+00:13:26,830 --> 00:13:32,410
+few slides we'll get to that later first
+
+00:13:30,490 --> 00:13:34,770
+so if we do Hardware offload there's an
+
+00:13:32,410 --> 00:13:38,800
+interesting problem which is as I said
+
+00:13:34,770 --> 00:13:40,720
+these segments segmented packets that
+
+00:13:38,800 --> 00:13:44,589
+you sell packets need not be a perfect
+
+00:13:40,720 --> 00:13:46,120
+multiple of GSF size if they are you can
+
+00:13:44,589 --> 00:13:49,870
+just replicate the IP and the UDP
+
+00:13:46,120 --> 00:13:52,000
+headers if they aren't then the length
+
+00:13:49,870 --> 00:13:54,640
+fields need to be updated and that is
+
+00:13:52,000 --> 00:13:57,339
+something that's more complex especially
+
+00:13:54,640 --> 00:14:02,620
+to do in firmware so device drivers that
+
+00:13:57,339 --> 00:14:06,250
+don't support this can still use G TSO
+
+00:14:02,620 --> 00:14:07,870
+or l a-- so in this case with a very
+
+00:14:06,250 --> 00:14:10,360
+nice elegant solution to this problem
+
+00:14:07,870 --> 00:14:12,520
+that Alexander died implemented long
+
+00:14:10,360 --> 00:14:15,370
+before UDP gia so we're in the context
+
+00:14:12,520 --> 00:14:17,589
+of tunnel a tunnel offload just GSM
+
+00:14:15,370 --> 00:14:21,279
+partial so if you look at the packet on
+
+00:14:17,589 --> 00:14:23,250
+the right it basically cannot be
+
+00:14:21,279 --> 00:14:25,000
+offloaded to Hardware because some
+
+00:14:23,250 --> 00:14:28,360
+fields in the header need to be updated
+
+00:14:25,000 --> 00:14:30,130
+which G is so partial this packet will
+
+00:14:28,360 --> 00:14:32,829
+go into the geocell layer in the kernel
+
+00:14:30,130 --> 00:14:34,480
+it will split it into not 45 second
+
+00:14:32,829 --> 00:14:36,130
+segment switch you would normally do if
+
+00:14:34,480 --> 00:14:39,070
+you have to apply to you so instead of
+
+00:14:36,130 --> 00:14:41,649
+two you so it's listed in two to one
+
+00:14:39,070 --> 00:14:44,079
+that's a perfect multiple of G so size
+
+00:14:41,649 --> 00:14:46,449
+still a G so packet it passes that to
+
+00:14:44,079 --> 00:14:49,540
+the NIC and it will split it into 44
+
+00:14:46,449 --> 00:14:51,970
+sex segments and one that's a non gso
+
+00:14:49,540 --> 00:14:53,740
+packet that has always had it updated by
+
+00:14:51,970 --> 00:14:57,730
+the colonel I think is a very very nice
+
+00:14:53,740 --> 00:14:59,050
+optimization and this is transparent so
+
+00:14:57,730 --> 00:15:00,870
+device drivers don't have to worry about
+
+00:14:59,050 --> 00:15:03,730
+this already implemented themselves
+
+00:15:00,870 --> 00:15:06,610
+there's some other constraints if if you
+
+00:15:03,730 --> 00:15:09,459
+want to use this so how does choose to
+
+00:15:06,610 --> 00:15:11,829
+use sir sighs it is really the same
+
+00:15:09,459 --> 00:15:13,779
+choice that you make without gso and how
+
+00:15:11,829 --> 00:15:16,899
+to choose the send buffer size whose it
+
+00:15:13,779 --> 00:15:19,089
+follows the same rules so the lazy
+
+00:15:16,899 --> 00:15:21,550
+choice is sort of the device I'm - you
+
+00:15:19,089 --> 00:15:23,500
+often eat that alone the realistic
+
+00:15:21,550 --> 00:15:26,230
+choice is you have to know the path MTU
+
+00:15:23,500 --> 00:15:27,910
+and especially for workloads like a
+
+00:15:26,230 --> 00:15:30,790
+quick server where we have many
+
+00:15:27,910 --> 00:15:33,010
+connections basically over a few
+
+00:15:30,790 --> 00:15:35,110
+unconnected sockets it's likely that you
+
+00:15:33,010 --> 00:15:37,690
+pass the GSO size as a C message with
+
+00:15:35,110 --> 00:15:41,260
+Datagram depending on the path MTU of
+
+00:15:37,690 --> 00:15:44,860
+that particular flow the number of
+
+00:15:41,260 --> 00:15:45,910
+segments so the one ideally all the data
+
+00:15:44,860 --> 00:15:47,350
+that's outstanding
+
+00:15:45,910 --> 00:15:49,209
+it would pass to the kernel in one
+
+00:15:47,350 --> 00:15:51,790
+gigantic buffer and and have to deal
+
+00:15:49,209 --> 00:15:54,279
+with it there is an upper limit because
+
+00:15:51,790 --> 00:15:56,649
+it it has a virtual high into you but it
+
+00:15:54,279 --> 00:16:00,699
+still has to be an IP or ipv6 packet so
+
+00:15:56,649 --> 00:16:03,699
+64 kilobytes is the upper limit we add
+
+00:16:00,699 --> 00:16:05,410
+in another constraint which is 64 is the
+
+00:16:03,699 --> 00:16:07,089
+max number and the reason for this is
+
+00:16:05,410 --> 00:16:09,220
+that there's no constraint on how small
+
+00:16:07,089 --> 00:16:11,529
+the GSO size can be so if the GSO size
+
+00:16:09,220 --> 00:16:14,949
+is 1 byte I didn't want an unprivileged
+
+00:16:11,529 --> 00:16:17,440
+application to be able to verse 64 K
+
+00:16:14,949 --> 00:16:19,620
+packets on the wire by building a large
+
+00:16:17,440 --> 00:16:21,430
+packet with the smallest ESS eyes and
+
+00:16:19,620 --> 00:16:23,290
+finally there's a constraint that I
+
+00:16:21,430 --> 00:16:27,730
+guess with a patch we can just fix this
+
+00:16:23,290 --> 00:16:29,470
+but a gso packet that's smaller than the
+
+00:16:27,730 --> 00:16:32,350
+GSO size will get dropped and it's not a
+
+00:16:29,470 --> 00:16:34,480
+UDP TP specific issue but you have to be
+
+00:16:32,350 --> 00:16:36,610
+careful that if you set Geo society sets
+
+00:16:34,480 --> 00:16:40,180
+knock offs and send datagrams that are
+
+00:16:36,610 --> 00:16:41,500
+both larger than gso size but also you
+
+00:16:40,180 --> 00:16:44,350
+long that's smaller - smaller one
+
+00:16:41,500 --> 00:16:44,870
+basically go and make it out so don't do
+
+00:16:44,350 --> 00:16:47,540
+that
+
+00:16:44,870 --> 00:16:50,960
+the final constraint here is in
+
+00:16:47,540 --> 00:16:53,170
+checksumming the device has to support
+
+00:16:50,960 --> 00:16:56,540
+Jackson muffler it would be possible to
+
+00:16:53,170 --> 00:16:58,310
+use gtp gso and a path that does not
+
+00:16:56,540 --> 00:17:04,160
+have hardware checksum offload but that
+
+00:16:58,310 --> 00:17:06,740
+basically means ignoring to checksum
+
+00:17:04,160 --> 00:17:09,380
+that's computed for the large packet at
+
+00:17:06,740 --> 00:17:11,330
+that sent and then we computing a new
+
+00:17:09,380 --> 00:17:13,130
+checks on in the GSO layer for each
+
+00:17:11,330 --> 00:17:14,510
+packet and that's just great
+
+00:17:13,130 --> 00:17:17,000
+incredibly expensive it's much cheaper
+
+00:17:14,510 --> 00:17:18,980
+to do two checksum and copy optimization
+
+00:17:17,000 --> 00:17:21,310
+if you know that there is no hardware
+
+00:17:18,980 --> 00:17:22,460
+offload and in that case you just
+
+00:17:21,310 --> 00:17:25,490
+hartfield
+
+00:17:22,460 --> 00:17:25,930
+UDP GS own you have to fall back up to
+
+00:17:25,490 --> 00:17:28,670
+normal
+
+00:17:25,930 --> 00:17:30,140
+transmission shouldn't be a problem in
+
+00:17:28,670 --> 00:17:33,110
+any like real server environment of
+
+00:17:30,140 --> 00:17:35,110
+course all right so now we get to the
+
+00:17:33,110 --> 00:17:38,810
+there actually another optimization that
+
+00:17:35,110 --> 00:17:43,310
+I worked on a while ago this patch that
+
+00:17:38,810 --> 00:17:44,570
+originally included a UDP option and I
+
+00:17:43,310 --> 00:17:46,280
+dropped it from the patch Hut because
+
+00:17:44,570 --> 00:17:48,800
+there was no way I could make a zero
+
+00:17:46,280 --> 00:17:51,760
+copy effective with UDP so what this
+
+00:17:48,800 --> 00:17:56,210
+version of zero copy does is it
+
+00:17:51,760 --> 00:17:58,190
+basically replaces copying with page
+
+00:17:56,210 --> 00:18:00,080
+spinning and a notification from the
+
+00:17:58,190 --> 00:18:03,890
+kernel back up to user space for each
+
+00:18:00,080 --> 00:18:06,110
+send call when data has been sent out so
+
+00:18:03,890 --> 00:18:09,950
+it's not free in any by any means and
+
+00:18:06,110 --> 00:18:12,530
+because it's a percent cost compared to
+
+00:18:09,950 --> 00:18:14,240
+a per byte cost for copying the bigger
+
+00:18:12,530 --> 00:18:16,700
+the buffer is the more benefit you get
+
+00:18:14,240 --> 00:18:19,880
+from this optimization and with 1500
+
+00:18:16,700 --> 00:18:22,640
+bytes or 1472 by qdp buffers we
+
+00:18:19,880 --> 00:18:24,680
+basically saw no benefit now that we
+
+00:18:22,640 --> 00:18:29,810
+have UDP gso when we can actually send
+
+00:18:24,680 --> 00:18:33,680
+64 kilobyte UDP payloads zero copy
+
+00:18:29,810 --> 00:18:36,140
+becomes a viable up to optimization
+
+00:18:33,680 --> 00:18:38,090
+this is a slide from the zero copy
+
+00:18:36,140 --> 00:18:40,510
+talked a while ago where we saw that
+
+00:18:38,090 --> 00:18:43,309
+with TCP stream if you just look at the
+
+00:18:40,510 --> 00:18:45,440
+process cycles four out of five cycles
+
+00:18:43,309 --> 00:18:47,740
+were spent copying a pretty good
+
+00:18:45,440 --> 00:18:50,960
+indication that this is worth optimizing
+
+00:18:47,740 --> 00:18:53,030
+I should point out again these are
+
+00:18:50,960 --> 00:18:55,309
+process cycles these do not include like
+
+00:18:53,030 --> 00:18:56,840
+interrupts handling and so so all the
+
+00:18:55,309 --> 00:18:58,490
+other numbers in this talk are actually
+
+00:18:56,840 --> 00:19:02,570
+system-wide cycles which are much more
+
+00:18:58,490 --> 00:19:05,300
+representative of true cost so Elfi like
+
+00:19:02,570 --> 00:19:08,059
+revisit basically this data but for the
+
+00:19:05,300 --> 00:19:10,520
+benchmark the UDP GSO Venge TX that
+
+00:19:08,059 --> 00:19:13,280
+we've been looking at me we can see that
+
+00:19:10,520 --> 00:19:15,880
+if we don't do zero copy yet we can
+
+00:19:13,280 --> 00:19:18,410
+actually look with perf how much high
+
+00:19:15,880 --> 00:19:20,090
+system-wide is spent copying and with
+
+00:19:18,410 --> 00:19:22,610
+the tcp case it was a quarter so that's
+
+00:19:20,090 --> 00:19:24,470
+kind of your upper upper bound on what
+
+00:19:22,610 --> 00:19:26,179
+you can benefit from zero comedy with
+
+00:19:24,470 --> 00:19:27,980
+UDP it's only three percent so there's
+
+00:19:26,179 --> 00:19:29,630
+obviously not you know a lot of
+
+00:19:27,980 --> 00:19:31,100
+opportunity there so that explains why
+
+00:19:29,630 --> 00:19:32,120
+UDP zero copy was not very effective
+
+00:19:31,100 --> 00:19:35,750
+through this Lee
+
+00:19:32,120 --> 00:19:38,360
+now if you actually look at TCP without
+
+00:19:35,750 --> 00:19:40,309
+TSO and without Jia so which spend more
+
+00:19:38,360 --> 00:19:43,640
+time in the stack and less time in
+
+00:19:40,309 --> 00:19:47,510
+copying as a result we can see that that
+
+00:19:43,640 --> 00:19:49,730
+those two have less opportunity so that
+
+00:19:47,510 --> 00:19:51,080
+also leads that with GDP G is so
+
+00:19:49,730 --> 00:19:52,520
+spending less time in the stack it
+
+00:19:51,080 --> 00:19:55,460
+probably spends more time copying and
+
+00:19:52,520 --> 00:19:58,370
+indeed it does the benchmark was not
+
+00:19:55,460 --> 00:20:00,710
+really meant for zero copy so I added a
+
+00:19:58,370 --> 00:20:02,510
+it rotates the same buffer over and over
+
+00:20:00,710 --> 00:20:05,000
+and over again so it's it's warm in the
+
+00:20:02,510 --> 00:20:07,220
+cache so I added a version of rotates
+
+00:20:05,000 --> 00:20:09,260
+buffers the cache thrashing variant and
+
+00:20:07,220 --> 00:20:13,010
+then we spend a little bit more time in
+
+00:20:09,260 --> 00:20:14,780
+copying so this kind of is the upper
+
+00:20:13,010 --> 00:20:18,260
+bound of what we can achieve with zero
+
+00:20:14,780 --> 00:20:20,600
+copy and VB gso and if you look at what
+
+00:20:18,260 --> 00:20:23,510
+I reapplied to zero copy patch said we
+
+00:20:20,600 --> 00:20:26,420
+can indeed see that the cycle cost for
+
+00:20:23,510 --> 00:20:29,330
+gso and DSL cache thrashing variants are
+
+00:20:26,420 --> 00:20:30,450
+the same with zero copy we don't care at
+
+00:20:29,330 --> 00:20:31,890
+this point of it's cool
+
+00:20:30,450 --> 00:20:34,850
+ha dado because we're not touching it
+
+00:20:31,890 --> 00:20:37,590
+and the speed up versus copying goes up
+
+00:20:34,850 --> 00:20:40,650
+now here the same applies that really as
+
+00:20:37,590 --> 00:20:42,540
+with GSM in general that with Ella so I
+
+00:20:40,650 --> 00:20:44,280
+hope that we can approach the numbers
+
+00:20:42,540 --> 00:20:46,440
+for DCP TSO because we're doing even
+
+00:20:44,280 --> 00:20:47,450
+less in the stack and even more spend
+
+00:20:46,440 --> 00:20:53,130
+more time copying
+
+00:20:47,450 --> 00:20:56,570
+so this dispatch is not merged yet but I
+
+00:20:53,130 --> 00:20:56,570
+think we're going to try to resubmit it
+
+00:20:56,960 --> 00:21:02,040
+with all this fast transmission we
+
+00:21:00,750 --> 00:21:03,780
+actually run into another problem that's
+
+00:21:02,040 --> 00:21:06,300
+not Jesus or specific but it's even more
+
+00:21:03,780 --> 00:21:08,280
+relevant with GSO which is as I said
+
+00:21:06,300 --> 00:21:12,480
+these workloads server workload sent to
+
+00:21:08,280 --> 00:21:14,490
+many clients at the same time so we need
+
+00:21:12,480 --> 00:21:17,340
+to send at a rate that the client is
+
+00:21:14,490 --> 00:21:18,060
+movies capable of receiving if you send
+
+00:21:17,340 --> 00:21:20,100
+too fast
+
+00:21:18,060 --> 00:21:22,980
+UDP this is of course easy to do just
+
+00:21:20,100 --> 00:21:25,620
+cause a lot of drops so we need to paste
+
+00:21:22,980 --> 00:21:27,390
+the traffic and so far the quick server
+
+00:21:25,620 --> 00:21:30,750
+paces in user space which means that it
+
+00:21:27,390 --> 00:21:35,490
+has to wake up the process suffer a lot
+
+00:21:30,750 --> 00:21:37,560
+of system call or so yeah system call
+
+00:21:35,490 --> 00:21:40,260
+cost context switching you know cold
+
+00:21:37,560 --> 00:21:42,150
+caches and such so again the idea is
+
+00:21:40,260 --> 00:21:43,740
+more we the application you can send a
+
+00:21:42,150 --> 00:21:46,350
+lot of data to the kernel and that the
+
+00:21:43,740 --> 00:21:48,480
+criminal handle the efficient delivery
+
+00:21:46,350 --> 00:21:53,550
+of it and that's what we do with facing
+
+00:21:48,480 --> 00:21:55,530
+offload so drive home the point if even
+
+00:21:53,550 --> 00:21:58,020
+if we don't think of facing and just
+
+00:21:55,530 --> 00:22:00,720
+send packets at whatever is the natural
+
+00:21:58,020 --> 00:22:01,590
+latency incurred by go through the stack
+
+00:22:00,720 --> 00:22:04,500
+for every cent
+
+00:22:01,590 --> 00:22:08,280
+once you have gso this actually is a
+
+00:22:04,500 --> 00:22:11,510
+much more compressed a transmission so
+
+00:22:08,280 --> 00:22:15,660
+it becomes a bigger problem into you so
+
+00:22:11,510 --> 00:22:18,060
+the issue itself is that this bursty
+
+00:22:15,660 --> 00:22:21,750
+traffic increased drops a little in the
+
+00:22:18,060 --> 00:22:22,980
+wire for a reliable transfer protocol
+
+00:22:21,750 --> 00:22:24,810
+that means that there are more to
+
+00:22:22,980 --> 00:22:27,570
+retransmissions and retransmissions just
+
+00:22:24,810 --> 00:22:29,760
+need more cycles so if we sent very very
+
+00:22:27,570 --> 00:22:33,450
+fast we actually you know make it more
+
+00:22:29,760 --> 00:22:36,330
+expensive to send data this particular
+
+00:22:33,450 --> 00:22:40,500
+use case as I said about these one
+
+00:22:36,330 --> 00:22:44,580
+megabyte per second clients we can send
+
+00:22:40,500 --> 00:22:46,500
+that data in 100 microseconds and is
+
+00:22:44,580 --> 00:22:48,390
+pretty you can be assured that this does
+
+00:22:46,500 --> 00:22:50,550
+not arrive at the client right so
+
+00:22:48,390 --> 00:22:54,000
+instead the idea was facing is to send
+
+00:22:50,550 --> 00:22:55,620
+at a small time scale at the same rate
+
+00:22:54,000 --> 00:22:57,750
+as we send it at a large time scale at
+
+00:22:55,620 --> 00:23:01,080
+the time scale for practical purposes I
+
+00:22:57,750 --> 00:23:03,210
+guess is 1 millisecond so instead of
+
+00:23:01,080 --> 00:23:05,310
+sending one megabyte and round robin to
+
+00:23:03,210 --> 00:23:07,770
+the next actually sent 1 kilobyte and
+
+00:23:05,310 --> 00:23:12,510
+then you know do the same for all for
+
+00:23:07,770 --> 00:23:15,000
+the all the other clients instead of
+
+00:23:12,510 --> 00:23:17,670
+waking up the process every millisecond
+
+00:23:15,000 --> 00:23:19,170
+to do this which is very expensive
+
+00:23:17,670 --> 00:23:21,060
+the kernel has had support for
+
+00:23:19,170 --> 00:23:23,550
+offloading this to the acutest layer for
+
+00:23:21,060 --> 00:23:26,730
+a long time som X spacing rate is a way
+
+00:23:23,550 --> 00:23:29,690
+to basically say for a connected socket
+
+00:23:26,730 --> 00:23:32,580
+for a flow and what rate that flow and
+
+00:23:29,690 --> 00:23:37,500
+data from that flow can be DQ'd from the
+
+00:23:32,580 --> 00:23:40,050
+Q disk that requires FQ to 2 so not
+
+00:23:37,500 --> 00:23:42,810
+every Q disk but here basically checks
+
+00:23:40,050 --> 00:23:45,690
+there's a pacing rate the issue with a
+
+00:23:42,810 --> 00:23:48,000
+so much spacing rate for quick traffic
+
+00:23:45,690 --> 00:23:50,880
+for unconnected sockets is that it
+
+00:23:48,000 --> 00:23:53,220
+relies requires a connection this summer
+
+00:23:50,880 --> 00:23:56,210
+a different interface was added SOT X
+
+00:23:53,220 --> 00:23:58,620
+time and this allows associating a
+
+00:23:56,210 --> 00:24:02,610
+delivery time with each individual
+
+00:23:58,620 --> 00:24:05,520
+Datagram so similar to how with v PG or
+
+00:24:02,610 --> 00:24:06,240
+so we can associate a GSoC switch each
+
+00:24:05,520 --> 00:24:09,180
+Datagram
+
+00:24:06,240 --> 00:24:12,000
+over connected unconnected sockets with
+
+00:24:09,180 --> 00:24:14,550
+SOT X time basically application signals
+
+00:24:12,000 --> 00:24:17,570
+that it wants to use it on the soccer it
+
+00:24:14,550 --> 00:24:20,190
+then computes a time in the future in
+
+00:24:17,570 --> 00:24:22,860
+nanoseconds you know in the tie clock
+
+00:24:20,190 --> 00:24:23,250
+base and just associated with a control
+
+00:24:22,860 --> 00:24:25,820
+message
+
+00:24:23,250 --> 00:24:29,860
+passes it to the kernel and the kernel
+
+00:24:25,820 --> 00:24:35,920
+with the write to disk again which is
+
+00:24:29,860 --> 00:24:38,740
+new cutest was added here or with FQ the
+
+00:24:35,920 --> 00:24:40,420
+cutest will hold the date off until it's
+
+00:24:38,740 --> 00:24:41,620
+ready to release so the application
+
+00:24:40,420 --> 00:24:46,390
+needs to may see if you're awake and
+
+00:24:41,620 --> 00:24:47,710
+some more data at once one particular
+
+00:24:46,390 --> 00:24:49,420
+issue with G so and we're running into
+
+00:24:47,710 --> 00:24:51,280
+right now and I'm not sure exactly I
+
+00:24:49,420 --> 00:24:52,930
+think I have plenty of time but we're
+
+00:24:51,280 --> 00:24:55,720
+getting into the future work part here
+
+00:24:52,930 --> 00:24:57,640
+or the open issues is that there are
+
+00:24:55,720 --> 00:24:59,110
+conflicting goals with geo so we try to
+
+00:24:57,640 --> 00:25:01,390
+send as much as possible into the kernel
+
+00:24:59,110 --> 00:25:04,690
+but with pacing we try to actually send
+
+00:25:01,390 --> 00:25:08,140
+out like very little in small intervals
+
+00:25:04,690 --> 00:25:11,110
+and if it's one megabyte and this is why
+
+00:25:08,140 --> 00:25:13,000
+I use bytes here one kilobyte per
+
+00:25:11,110 --> 00:25:14,470
+millisecond means less than one am
+
+00:25:13,000 --> 00:25:17,200
+assessed so we basically could not use
+
+00:25:14,470 --> 00:25:21,010
+to you so if we want to send out this
+
+00:25:17,200 --> 00:25:24,160
+sized Datagram every millisecond and I
+
+00:25:21,010 --> 00:25:26,320
+think what we're going to need is some
+
+00:25:24,160 --> 00:25:31,180
+kind of interface that allows passing a
+
+00:25:26,320 --> 00:25:34,150
+GS o sk p with a GS o size and a TX time
+
+00:25:31,180 --> 00:25:36,610
+and some kind of like fractional TX time
+
+00:25:34,150 --> 00:25:39,630
+that says every subsequent segments
+
+00:25:36,610 --> 00:25:42,130
+should be sent so many nanoseconds or
+
+00:25:39,630 --> 00:25:44,500
+jiffy's or whatever later than the
+
+00:25:42,130 --> 00:25:46,930
+previous one and break up the segment in
+
+00:25:44,500 --> 00:25:48,610
+there in the kernel layer in theory we
+
+00:25:46,930 --> 00:25:51,190
+can already basically do gso on a
+
+00:25:48,610 --> 00:25:52,600
+virtual device so that it we segment and
+
+00:25:51,190 --> 00:25:55,900
+I have the second individual segments
+
+00:25:52,600 --> 00:25:58,600
+queued on a physical NIC but this is
+
+00:25:55,900 --> 00:26:01,750
+pretty much an open issue to point out
+
+00:25:58,600 --> 00:26:04,060
+that it's it's relevant we we did an
+
+00:26:01,750 --> 00:26:06,520
+experiment with the existing quick
+
+00:26:04,060 --> 00:26:09,190
+server which does not use gdb geo so
+
+00:26:06,520 --> 00:26:10,480
+that's recently implemented but this was
+
+00:26:09,190 --> 00:26:14,560
+the first thing we thought without and
+
+00:26:10,480 --> 00:26:16,090
+that does use a space pacing and we
+
+00:26:14,560 --> 00:26:17,530
+increase the pacing interval so when you
+
+00:26:16,090 --> 00:26:20,070
+increase the pacing in a volume asically
+
+00:26:17,530 --> 00:26:22,840
+send slightly more versity traffic and
+
+00:26:20,070 --> 00:26:25,780
+as you can expect the loss rate goes up
+
+00:26:22,840 --> 00:26:26,980
+when you do this but the CPU time spent
+
+00:26:25,780 --> 00:26:29,650
+in the application and out quite
+
+00:26:26,980 --> 00:26:32,680
+tremendously so the CPU time went down
+
+00:26:29,650 --> 00:26:34,669
+even though we had to retransmit more
+
+00:26:32,680 --> 00:26:36,379
+data at some point the tool problem
+
+00:26:34,669 --> 00:26:38,359
+each other out also we don't want to
+
+00:26:36,379 --> 00:26:40,009
+inflate this on the network so there are
+
+00:26:38,359 --> 00:26:42,710
+you know there's a question what's the
+
+00:26:40,009 --> 00:26:44,809
+reasonable choice here probably eight is
+
+00:26:42,710 --> 00:26:46,220
+reasonable particularly if you keep in
+
+00:26:44,809 --> 00:26:49,100
+mind that them loss rate is from a very
+
+00:26:46,220 --> 00:26:50,480
+low base but this is sort of a
+
+00:26:49,100 --> 00:26:57,470
+short-term hack this is not a real
+
+00:26:50,480 --> 00:26:58,879
+solution yeah so all right actually I'm
+
+00:26:57,470 --> 00:27:00,909
+talking faster than I thought so I
+
+00:26:58,879 --> 00:27:06,889
+thought I would not have time for this
+
+00:27:00,909 --> 00:27:10,309
+and also the hope you sort of in first
+
+00:27:06,889 --> 00:27:12,049
+of GSO is on the cent path is to do this
+
+00:27:10,309 --> 00:27:17,499
+patching on the receive path which upgr
+
+00:27:12,049 --> 00:27:19,789
+oh this I suggested when I when I
+
+00:27:17,499 --> 00:27:21,350
+submitted this talk has like that would
+
+00:27:19,789 --> 00:27:23,179
+be pretty cool future work to add this
+
+00:27:21,350 --> 00:27:25,639
+as well and maybe I'll get around to
+
+00:27:23,179 --> 00:27:28,100
+like a RFC fat chat by the time the of
+
+00:27:25,639 --> 00:27:29,539
+the conference in the meantime Bala and
+
+00:27:28,100 --> 00:27:32,779
+he actually implemented all of it and
+
+00:27:29,539 --> 00:27:35,090
+merged it last week so that's that was
+
+00:27:32,779 --> 00:27:38,379
+really impressive I'm just going to show
+
+00:27:35,090 --> 00:27:41,659
+you so that you know that you can use it
+
+00:27:38,379 --> 00:27:43,059
+gr oh you know it's not it's new to UDP
+
+00:27:41,659 --> 00:27:45,379
+but it's not new as a feature obviously
+
+00:27:43,059 --> 00:27:47,960
+it's been around for a while and it has
+
+00:27:45,379 --> 00:27:49,580
+a couple of purposes its if it's
+
+00:27:47,960 --> 00:27:51,649
+implemented carefully is the perfect
+
+00:27:49,580 --> 00:27:55,789
+inverse of G or so and what that means
+
+00:27:51,649 --> 00:27:58,909
+is that if in a few packets that come in
+
+00:27:55,789 --> 00:28:01,580
+datagrams that come in are coalesce into
+
+00:27:58,909 --> 00:28:05,149
+larger packets and they when they're
+
+00:28:01,580 --> 00:28:07,879
+forwarded they go to the GSO layer which
+
+00:28:05,149 --> 00:28:10,279
+segments them again so from one observer
+
+00:28:07,879 --> 00:28:13,850
+on the network it should be invisible
+
+00:28:10,279 --> 00:28:17,029
+whether packets were coalesced and then
+
+00:28:13,850 --> 00:28:18,529
+split up within the host they are
+
+00:28:17,029 --> 00:28:20,239
+exactly the same as what we don't use
+
+00:28:18,529 --> 00:28:23,629
+this feature the only difference is that
+
+00:28:20,239 --> 00:28:26,950
+we can batch the number of IP traversals
+
+00:28:23,629 --> 00:28:26,950
+by up to 45 times
+
+00:28:27,130 --> 00:28:30,670
+so for the forwarding plane that's very
+
+00:28:29,050 --> 00:28:33,700
+useful for local delivery we have
+
+00:28:30,670 --> 00:28:37,150
+another problem that as I said datagrams
+
+00:28:33,700 --> 00:28:38,800
+actually unlike TCP that message
+
+00:28:37,150 --> 00:28:40,630
+boundary has to be maintained so we
+
+00:28:38,800 --> 00:28:42,700
+cannot just coalesce these packets and
+
+00:28:40,630 --> 00:28:43,150
+pass into an application and be done
+
+00:28:42,700 --> 00:28:45,130
+with it
+
+00:28:43,150 --> 00:28:46,570
+applications have to be aware that these
+
+00:28:45,130 --> 00:28:49,140
+are larger packets so they have to
+
+00:28:46,570 --> 00:28:52,570
+basically opt in to receiving gr o
+
+00:28:49,140 --> 00:28:55,420
+assembled packets that we'll see in the
+
+00:28:52,570 --> 00:28:58,570
+next slide but all the did which was
+
+00:28:55,420 --> 00:29:00,190
+really nice is to show that basically if
+
+00:28:58,570 --> 00:29:06,760
+you don't have if you have applications
+
+00:29:00,190 --> 00:29:09,640
+that don't opt into this feature you
+
+00:29:06,760 --> 00:29:11,860
+basically either cannot apply gr o which
+
+00:29:09,640 --> 00:29:13,390
+requires a socket lookup early on to
+
+00:29:11,860 --> 00:29:16,560
+figure out whether it is there is a
+
+00:29:13,390 --> 00:29:20,770
+socket and whether it has the feature
+
+00:29:16,560 --> 00:29:22,780
+but even if you do that if you do a
+
+00:29:20,770 --> 00:29:24,220
+socket look up at the GRA layer and you
+
+00:29:22,780 --> 00:29:26,050
+find that well there's a socket that's
+
+00:29:24,220 --> 00:29:28,420
+willing to receive general packets let
+
+00:29:26,050 --> 00:29:31,150
+me assemble gyro packets by the time
+
+00:29:28,420 --> 00:29:32,830
+that packet goes to the stack the packet
+
+00:29:31,150 --> 00:29:35,230
+might have gone through a NAT layer or
+
+00:29:32,830 --> 00:29:36,910
+so and the actual packet has changed and
+
+00:29:35,230 --> 00:29:38,710
+the socket look up at the high layer is
+
+00:29:36,910 --> 00:29:41,290
+actually different and now it arrives at
+
+00:29:38,710 --> 00:29:42,880
+a socket that does not is not capable of
+
+00:29:41,290 --> 00:29:47,260
+gyro and now you have a problem right
+
+00:29:42,880 --> 00:29:49,060
+you cannot pass this this packet so my
+
+00:29:47,260 --> 00:29:50,800
+solution was just to drop it I admit
+
+00:29:49,060 --> 00:29:53,020
+that that's not a very nice one he had a
+
+00:29:50,800 --> 00:29:54,430
+very much nicer one which is to apply to
+
+00:29:53,020 --> 00:29:56,860
+segmentation as if you're in the
+
+00:29:54,430 --> 00:29:59,050
+forwarding plane split it up and pass
+
+00:29:56,860 --> 00:30:02,050
+these segmented packets up to the
+
+00:29:59,050 --> 00:30:05,650
+application so that how that works in
+
+00:30:02,050 --> 00:30:07,570
+all cases now the open question is do we
+
+00:30:05,650 --> 00:30:10,360
+still need to socket lookup early in the
+
+00:30:07,570 --> 00:30:12,550
+stack to figure out whether we can
+
+00:30:10,360 --> 00:30:16,210
+deliver large packets or should we just
+
+00:30:12,550 --> 00:30:18,250
+always apply Giro and in the case where
+
+00:30:16,210 --> 00:30:20,200
+we get to the socket and it cannot
+
+00:30:18,250 --> 00:30:20,920
+accept your packets just segment on
+
+00:30:20,200 --> 00:30:23,980
+demand
+
+00:30:20,920 --> 00:30:25,780
+the that depends really on whether it is
+
+00:30:23,980 --> 00:30:27,520
+more efficient to do batching Plus
+
+00:30:25,780 --> 00:30:29,220
+segmentation versus not doing it at all
+
+00:30:27,520 --> 00:30:31,810
+and I think we need more data to that
+
+00:30:29,220 --> 00:30:34,570
+one potential optimization at Stefan
+
+00:30:31,810 --> 00:30:36,970
+cluster suggested was uh using frag list
+
+00:30:34,570 --> 00:30:39,400
+based segmentation instead of building
+
+00:30:36,970 --> 00:30:41,170
+upon a skivvy with frags because that's
+
+00:30:39,400 --> 00:30:49,420
+basically chain of skv so they're much
+
+00:30:41,170 --> 00:30:50,710
+cheaper to to split up and yeah so
+
+00:30:49,420 --> 00:30:52,840
+basically the current the current
+
+00:30:50,710 --> 00:30:55,870
+situation is that we do a socket lookup
+
+00:30:52,840 --> 00:30:58,180
+and segmentation only in the case where
+
+00:30:55,870 --> 00:30:59,620
+it turned out that the original socket
+
+00:30:58,180 --> 00:31:02,140
+lookup in the gr layer was different
+
+00:30:59,620 --> 00:31:04,510
+from the final socket lookup I want to
+
+00:31:02,140 --> 00:31:06,190
+make one more point of this batching in
+
+00:31:04,510 --> 00:31:08,500
+the receive path another really cool
+
+00:31:06,190 --> 00:31:12,400
+Patchett this this summer from Edward
+
+00:31:08,500 --> 00:31:14,380
+Creek which was not batching within a
+
+00:31:12,400 --> 00:31:17,620
+flow the way Giro does it but really
+
+00:31:14,380 --> 00:31:21,480
+just batching sPB's that come in from
+
+00:31:17,620 --> 00:31:23,710
+whatever flows so the nappy layer sends
+
+00:31:21,480 --> 00:31:25,960
+journey to not be full a number of
+
+00:31:23,710 --> 00:31:27,610
+packets of the stack previously or we
+
+00:31:25,960 --> 00:31:29,560
+send each packet individually up the
+
+00:31:27,610 --> 00:31:32,020
+stack before it sent the other one and
+
+00:31:29,560 --> 00:31:33,790
+the stack traversal is pretty long which
+
+00:31:32,020 --> 00:31:35,710
+means that this working set is quite
+
+00:31:33,790 --> 00:31:38,020
+likely to exceed the instruction cache
+
+00:31:35,710 --> 00:31:39,340
+basically thrash the cache so what he
+
+00:31:38,020 --> 00:31:40,540
+did which was really neat he went
+
+00:31:39,340 --> 00:31:43,000
+through the older layers in the stack
+
+00:31:40,540 --> 00:31:46,090
+and instead of accepting a single SPB
+
+00:31:43,000 --> 00:31:48,010
+they now accept a list of sk B's and so
+
+00:31:46,090 --> 00:31:49,840
+he threads a list of s khabees to
+
+00:31:48,010 --> 00:31:52,540
+Nadia's receivers KB and through IP
+
+00:31:49,840 --> 00:31:55,930
+receive and as a result each of these
+
+00:31:52,540 --> 00:31:57,910
+layers is processing multiple packets so
+
+00:31:55,930 --> 00:32:01,240
+it's a working set is in the cache in is
+
+00:31:57,910 --> 00:32:03,100
+hot and he saw about a 25% efficiency
+
+00:32:01,240 --> 00:32:06,220
+improvement for is a benchmarks for that
+
+00:32:03,100 --> 00:32:07,140
+and that's just you know on top of any
+
+00:32:06,220 --> 00:32:10,920
+benefits
+
+00:32:07,140 --> 00:32:12,299
+Gero so collectively these are that
+
+00:32:10,920 --> 00:32:14,610
+doesn't help just UDP but it definitely
+
+00:32:12,299 --> 00:32:20,220
+also helps UDP and it also helps quick
+
+00:32:14,610 --> 00:32:21,809
+obviously so how can a socket notify did
+
+00:32:20,220 --> 00:32:24,900
+Colonel that it's willing to receive
+
+00:32:21,809 --> 00:32:30,179
+large packets set the sensor corrupt
+
+00:32:24,900 --> 00:32:33,030
+vbg ro and then call with receive
+
+00:32:30,179 --> 00:32:35,490
+message with sufficient control data to
+
+00:32:33,030 --> 00:32:37,380
+actually read an additional metadata
+
+00:32:35,490 --> 00:32:40,250
+field which is the same GS own size
+
+00:32:37,380 --> 00:32:43,980
+field that the application passes them
+
+00:32:40,250 --> 00:32:45,840
+GSM send now the application can in
+
+00:32:43,980 --> 00:32:48,210
+userspace split up the payload and
+
+00:32:45,840 --> 00:32:51,150
+discrete data grounds that it would have
+
+00:32:48,210 --> 00:32:53,610
+received otherwise and this big question
+
+00:32:51,150 --> 00:32:56,040
+here or - is this useful these are not
+
+00:32:53,610 --> 00:32:57,690
+results from Apollo's patch at I should
+
+00:32:56,040 --> 00:33:01,140
+caution these are basically results for
+
+00:32:57,690 --> 00:33:02,610
+my an RFC that I had a long time ago but
+
+00:33:01,140 --> 00:33:04,710
+you can see that there's a significant
+
+00:33:02,610 --> 00:33:07,470
+speed up right the numbers on the right
+
+00:33:04,710 --> 00:33:12,840
+column at one point X speed up is is
+
+00:33:07,470 --> 00:33:15,960
+really positive my final point here is
+
+00:33:12,840 --> 00:33:18,059
+that there's a big caveat which is if
+
+00:33:15,960 --> 00:33:20,580
+you send across the wide area network
+
+00:33:18,059 --> 00:33:23,190
+the odds of receiving perfect trains of
+
+00:33:20,580 --> 00:33:24,480
+packets are pretty slim right gr o is
+
+00:33:23,190 --> 00:33:26,309
+very effective within the data center
+
+00:33:24,480 --> 00:33:30,600
+it's extremely effective in a synthetic
+
+00:33:26,309 --> 00:33:32,910
+benchmark like this on top of this if we
+
+00:33:30,600 --> 00:33:34,950
+send across the way with pacing we ask
+
+00:33:32,910 --> 00:33:36,990
+of getting these bursts are even lower
+
+00:33:34,950 --> 00:33:38,970
+on the other hand there are some cases
+
+00:33:36,990 --> 00:33:40,380
+where it might actually that might
+
+00:33:38,970 --> 00:33:42,690
+actually end up matching up apparently
+
+00:33:40,380 --> 00:33:44,910
+that mobile base stations quite a statue
+
+00:33:42,690 --> 00:33:47,520
+of long practice so we'll see if this is
+
+00:33:44,910 --> 00:33:49,080
+this is definitely useful in data center
+
+00:33:47,520 --> 00:33:52,799
+applications we'll see how useful it is
+
+00:33:49,080 --> 00:33:54,840
+for the quick serving case we saw here
+
+00:33:52,799 --> 00:33:56,720
+when I was asked to work on quick
+
+00:33:54,840 --> 00:33:58,610
+actually the
+
+00:33:56,720 --> 00:34:01,010
+the immediate question was make our
+
+00:33:58,610 --> 00:34:02,840
+servers more efficient like safe cost in
+
+00:34:01,010 --> 00:34:06,200
+the data center but a secondary question
+
+00:34:02,840 --> 00:34:07,850
+was also help mobile clients spend less
+
+00:34:06,200 --> 00:34:12,350
+cycles and spend less power on
+
+00:34:07,850 --> 00:34:17,330
+transmission so if this is useful in the
+
+00:34:12,350 --> 00:34:18,830
+client-side that is when in itself I'll
+
+00:34:17,330 --> 00:34:21,260
+just finish up by basically saying how
+
+00:34:18,830 --> 00:34:22,670
+this changes our quick server so we've
+
+00:34:21,260 --> 00:34:27,080
+had this issue for a while with it what
+
+00:34:22,670 --> 00:34:29,150
+the quick servers really optimized by
+
+00:34:27,080 --> 00:34:31,580
+using whatever kernel feature we had
+
+00:34:29,150 --> 00:34:35,150
+which meant on this receive path we use
+
+00:34:31,580 --> 00:34:37,010
+packet sockets with our X ring to get
+
+00:34:35,150 --> 00:34:38,420
+the packets into user space but we
+
+00:34:37,010 --> 00:34:40,790
+didn't have to do reassembly in user
+
+00:34:38,420 --> 00:34:42,790
+space so we also have UDP sockets for
+
+00:34:40,790 --> 00:34:45,470
+fragmented packets and then we have
+
+00:34:42,790 --> 00:34:48,020
+packet fan out with a PBF filter to
+
+00:34:45,470 --> 00:34:51,340
+filter out the fragments and then a so
+
+00:34:48,020 --> 00:34:53,690
+we use pert BPF on the UDP sockets to
+
+00:34:51,340 --> 00:34:55,760
+load balance in both cases to load
+
+00:34:53,690 --> 00:34:57,890
+balance and I'll transmit we used raw
+
+00:34:55,760 --> 00:34:59,570
+sockets and all of this requires super
+
+00:34:57,890 --> 00:35:01,430
+user privileges and it's not something
+
+00:34:59,570 --> 00:35:04,060
+you really wanted to like put out and
+
+00:35:01,430 --> 00:35:08,120
+get help as a reference implementation
+
+00:35:04,060 --> 00:35:10,460
+so the plan is obviously with if we now
+
+00:35:08,120 --> 00:35:14,000
+can use UDP sockets on both receive and
+
+00:35:10,460 --> 00:35:16,829
+I'll transmit and we with a sir we use
+
+00:35:14,000 --> 00:35:18,660
+per BBF but a much more sensible
+
+00:35:16,829 --> 00:35:38,339
+reference implementation of a quick
+
+00:35:18,660 --> 00:35:40,920
+server time for one question so one of
+
+00:35:38,339 --> 00:35:44,789
+the things that TCP uses for pacing is
+
+00:35:40,920 --> 00:35:48,150
+really acts and limiting the amount of
+
+00:35:44,789 --> 00:35:49,579
+memory used by the socket right is there
+
+00:35:48,150 --> 00:35:51,809
+any way to do that first quick
+
+00:35:49,579 --> 00:35:54,029
+understand would be challenging this out
+
+00:35:51,809 --> 00:35:55,410
+a quick has its own congestion control
+
+00:35:54,029 --> 00:36:08,029
+I didn't even uses the same congestion
+
+00:35:55,410 --> 00:36:08,029
+control product I get one more last one
+
+00:36:08,359 --> 00:36:14,940
+yeah actually the is there any version
+
+00:36:11,400 --> 00:36:21,449
+of quick that supports the segmentation
+
+00:36:14,940 --> 00:36:23,130
+GSO so our internal quick server someone
+
+00:36:21,449 --> 00:36:26,160
+added it recently and we're testing it
+
+00:36:23,130 --> 00:36:27,660
+right now but I'm not sure how many
+
+00:36:26,160 --> 00:36:30,229
+quick servers are out there and how many
+
+00:36:27,660 --> 00:36:33,509
+of those are open source
+
+00:36:30,229 --> 00:36:34,380
+and is there any plan of up streaming
+
+00:36:33,509 --> 00:36:36,599
+this change
+
+00:36:34,380 --> 00:36:37,440
+well the feature the kernel features
+
+00:36:36,599 --> 00:36:40,619
+upstream
+
+00:36:37,440 --> 00:36:42,989
+I mean Ingram in quick start Oh actually
+
+00:36:40,619 --> 00:36:44,699
+I'm sorry I'm so let's forget we have
+
+00:36:42,989 --> 00:36:46,940
+open source software it is actually in
+
+00:36:44,699 --> 00:36:46,940
+crow
+
+00:36:48,160 --> 00:36:55,810
+I should be able to point you to the
+
+00:36:49,690 --> 00:36:58,110
+patch data Mart Chrome as this okay all
+
+00:36:55,810 --> 00:37:02,439
+right Thank You Willem
+
+00:36:58,110 --> 00:37:02,439
+
+YouTube URL: https://www.youtube.com/watch?v=ccUeG1dAhbw
+
+

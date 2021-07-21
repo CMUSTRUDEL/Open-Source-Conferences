@@ -1,0 +1,2919 @@
+Title: LPC2019 - SwitchDev offload optimizations
+Publication date: 2019-09-17
+Playlist: Linux Plumbers Conference 2019
+Description: 
+	SwitchDev offload optimizations
+
+Speaker
+Mr Allan Nielsen
+Description
+Linux has a nice SW bridge implementation which provides most of the classic
+Ethernet switching features. DSA and SwitchDev frameworks allow us to
+represent HW switch devices in Linux and potentially offload the SW forwarding
+to HW.
+
+But the offloading facilities are not perfect, and there seem to be room for
+further improvements:
+
+Limiting the flooding of L2-Multicast traffic. IGMP snooping can limit the
+flooding of L3 traffic, but L2-Multicast traffic are always flooded.
+
+Today all bridge slave interfaces are put into promiscuous mode to allow
+learning/flooding. But if the bridge is offloaded with HW capable of doing
+learning/learning, then this should not be necessary.
+
+When not put into promiscuous mode, the struct net_device structure has a
+list of multicast addresses which should be received by the interface. But
+when VLAN sub-interfaces are created, the VLAN information is lost when
+addresses are installed in the mc list.
+
+The assumption in the bridge code is that all multicast frames goes to the
+CPU. But what would it actually take only to request the needed multicast
+frames to the CPU?
+
+Challenges in adding new redundancy and protection protocols to the kernel,
+and how to offload such protocols to HW.
+
+The intend with the talk is to present some of the issues we are facing in
+adding DSA/SwitchDev drivers for existing and near-time future HW. I will have few solutions to present, but will give our thoughts on how it may be solved. Hopefully with will result in good discussions and input from the audience.
+
+Background information: I'm working on a SwitchDev driver for a yet to be
+released HW Ethernet switch. It will be a TSN switch targeting industrial
+networks, with HW accelerators to implement redundancy protocols. CPU power are very limited, and latency are extremely important, which is why it is important for us to improve the HW offload facilities.
+Captions: 
+	00:00:00,827 --> 00:00:04,330
+- Okay, our next talk is by Allan Nielsen
+
+00:00:04,330 --> 00:00:05,200
+and he's gonna talk
+
+00:00:05,200 --> 00:00:08,489
+about SwitchDev hardware offload optimizations.
+
+00:00:08,489 --> 00:00:10,343
+So please give him a warm welcome.
+
+00:00:11,178 --> 00:00:15,010
+(audience applauding)
+
+00:00:15,010 --> 00:00:17,243
+- Hello everybody, I'm really happy to be here.
+
+00:00:22,000 --> 00:00:23,590
+Just a few words on who I am
+
+00:00:23,590 --> 00:00:24,750
+before we start diving into this
+
+00:00:24,750 --> 00:00:27,240
+because it may affect how I see things
+
+00:00:27,240 --> 00:00:29,100
+and how we should proceed from here.
+
+00:00:29,100 --> 00:00:30,880
+So I'm a software engineer at Microchip,
+
+00:00:30,880 --> 00:00:31,930
+located in Copenhagen.
+
+00:00:31,930 --> 00:00:34,030
+I've been working at all these VSC parts
+
+00:00:34,030 --> 00:00:35,170
+that are that are written
+
+00:00:35,170 --> 00:00:37,500
+for roughly the past seven years.
+
+00:00:37,500 --> 00:00:39,140
+And in this audience,
+
+00:00:39,140 --> 00:00:41,540
+I need to say I am much more knowledgeable
+
+00:00:41,540 --> 00:00:43,710
+about network technology in general than I am
+
+00:00:43,710 --> 00:00:46,273
+in the deep-end coimplementation of SwitchDev and DSA
+
+00:00:48,543 --> 00:00:51,060
+and the general kernel upstream development.
+
+00:00:51,060 --> 00:00:51,893
+But we are learning a lot
+
+00:00:51,893 --> 00:00:55,170
+and we're getting a lot of support from the community
+
+00:00:55,170 --> 00:00:57,803
+so I'm very optimistic about this.
+
+00:00:58,750 --> 00:01:02,050
+I've been deeply involved in the upstreaming efforts
+
+00:01:02,050 --> 00:01:05,560
+and how Microchip should approach this
+
+00:01:05,560 --> 00:01:07,810
+and making many of the decisions
+
+00:01:07,810 --> 00:01:10,110
+about really pushing that we need
+
+00:01:10,110 --> 00:01:11,870
+to go for an upstream implementation
+
+00:01:11,870 --> 00:01:13,560
+because we believe it's a nightmare
+
+00:01:13,560 --> 00:01:15,810
+to maintain out of stream, and so on.
+
+00:01:15,810 --> 00:01:18,419
+So that's also another aspect of my work
+
+00:01:18,419 --> 00:01:21,423
+which is taking a good amount of time.
+
+00:01:23,230 --> 00:01:26,650
+So just to be clear for everybody,
+
+00:01:26,650 --> 00:01:29,160
+this is not really a presentation on what we have achieved,
+
+00:01:29,160 --> 00:01:32,450
+this is a presentation of lots of problems we have run into
+
+00:01:32,450 --> 00:01:34,044
+and some things we're working on,
+
+00:01:34,044 --> 00:01:35,280
+some things we want to achieve.
+
+00:01:35,280 --> 00:01:36,930
+Hopefully there'll come another opportunity
+
+00:01:36,930 --> 00:01:39,730
+where we can present all the results,
+
+00:01:39,730 --> 00:01:41,330
+but this is not what this is.
+
+00:01:41,330 --> 00:01:44,220
+So any ideas, solutions, examples here
+
+00:01:44,220 --> 00:01:45,640
+shouldn't be used or counted on.
+
+00:01:45,640 --> 00:01:47,180
+They will probably change many times
+
+00:01:47,180 --> 00:01:50,510
+before this is something that is useful
+
+00:01:50,510 --> 00:01:52,860
+for anybody outside Microchip.
+
+00:01:52,860 --> 00:01:54,423
+So just to be clear.
+
+00:01:55,690 --> 00:01:59,960
+So I want to talk about SwitchDev offload optimization
+
+00:01:59,960 --> 00:02:01,760
+because this is where I spend my time,
+
+00:02:01,760 --> 00:02:04,200
+this is where I'm facing a lot of issues.
+
+00:02:04,200 --> 00:02:05,880
+But in order to do this in a meaningful way,
+
+00:02:05,880 --> 00:02:07,097
+we kind of need to introduce
+
+00:02:07,097 --> 00:02:09,040
+what kind of hardware I'm working on,
+
+00:02:09,040 --> 00:02:10,840
+what kind of use cases I'm interested in
+
+00:02:10,840 --> 00:02:12,320
+because without this context,
+
+00:02:12,320 --> 00:02:16,400
+it's pretty hard to make some good adjustments and so on.
+
+00:02:16,400 --> 00:02:19,290
+So this is probably what I will be spending,
+
+00:02:19,290 --> 00:02:21,007
+I don't know, half of the time on explaining
+
+00:02:21,007 --> 00:02:22,700
+the use cases and so on.
+
+00:02:22,700 --> 00:02:25,410
+And the remaining half time will be
+
+00:02:25,410 --> 00:02:28,300
+kind of what are the problems we have seen
+
+00:02:28,300 --> 00:02:31,200
+and what are the discussions, our understanding about it
+
+00:02:31,200 --> 00:02:35,430
+and hopefully we will get something useful,
+
+00:02:35,430 --> 00:02:37,210
+good discussions out of this.
+
+00:02:37,210 --> 00:02:42,210
+So we kind of want to explain the use cases as we see them
+
+00:02:42,320 --> 00:02:45,980
+but we also very much want to understand how you see them
+
+00:02:45,980 --> 00:02:48,553
+in order to be able to proceed with this work.
+
+00:02:50,010 --> 00:02:53,393
+So the hardware I will considering in this talk,
+
+00:02:54,370 --> 00:02:58,150
+Microchip certainly have hardware in this range
+
+00:02:58,150 --> 00:03:00,030
+but it's not Microchip-specific.
+
+00:03:00,030 --> 00:03:03,510
+So it's simple switches with very low port counts.
+
+00:03:03,510 --> 00:03:05,760
+Many of them have only two ports and then an integrated CPU
+
+00:03:05,760 --> 00:03:07,873
+which can forward shapers to and from.
+
+00:03:09,200 --> 00:03:10,906
+The CPU is typically really small.
+
+00:03:10,906 --> 00:03:15,350
+But it do have DMA channels in order for it to make frameIO.
+
+00:03:15,350 --> 00:03:18,260
+And often the CPU is not really here to serve the switch,
+
+00:03:18,260 --> 00:03:19,570
+it's assumed to do its work on its on.
+
+00:03:19,570 --> 00:03:22,330
+The CPU is here in order to serve the IO
+
+00:03:22,330 --> 00:03:23,570
+which is in the other end.
+
+00:03:23,570 --> 00:03:25,970
+So it's for deeply-embedded systems
+
+00:03:25,970 --> 00:03:28,920
+where it's kind of the main controller for this device.
+
+00:03:28,920 --> 00:03:31,380
+It may be a sensor, it may be controlling something,
+
+00:03:31,380 --> 00:03:33,700
+I don't know, it's not really important for it.
+
+00:03:33,700 --> 00:03:36,560
+The important thing here is that we cannot really expect
+
+00:03:36,560 --> 00:03:38,633
+the CPU to spend a huge amount of its time
+
+00:03:38,633 --> 00:03:39,820
+doing the bridging.
+
+00:03:39,820 --> 00:03:43,623
+This is kind of why we're interested in doing the offload.
+
+00:03:46,920 --> 00:03:50,020
+And typically also, it either has an integrated CPU
+
+00:03:50,020 --> 00:03:53,173
+or it supports external CPUs via PCI Express.
+
+00:03:54,700 --> 00:03:57,900
+And often, we want to have some kind of redundancy here.
+
+00:03:57,900 --> 00:04:00,667
+Either the FRER or the CB standards, DLR, MRP.
+
+00:04:01,930 --> 00:04:05,040
+I may get to this as the last thing in the talk,
+
+00:04:05,040 --> 00:04:07,900
+let's see how times are flying.
+
+00:04:07,900 --> 00:04:12,780
+But this is kind of the important properties
+
+00:04:12,780 --> 00:04:14,480
+of the hardware I want to discuss.
+
+00:04:14,480 --> 00:04:15,990
+The hardware can do tons of other things,
+
+00:04:15,990 --> 00:04:17,350
+at least the hardware I'm working on,
+
+00:04:17,350 --> 00:04:21,093
+but this is to set the scope of this presentation.
+
+00:04:24,100 --> 00:04:28,033
+So with this hardware, it's important to understand
+
+00:04:28,033 --> 00:04:30,240
+how it's expected to be used
+
+00:04:30,240 --> 00:04:32,560
+and what we see in many cases is
+
+00:04:32,560 --> 00:04:35,120
+that due to the cost of wiring,
+
+00:04:35,120 --> 00:04:37,800
+there's a significant interest in order to build
+
+00:04:37,800 --> 00:04:40,550
+these daisy chains where you simply take
+
+00:04:40,550 --> 00:04:43,420
+a bunch of devices, you daisy-chain them together,
+
+00:04:43,420 --> 00:04:45,843
+and then you expect that the switch can pick up the frames
+
+00:04:45,843 --> 00:04:47,280
+the CPU is interested in,
+
+00:04:47,280 --> 00:04:50,248
+in order to get the needed input connectivity
+
+00:04:50,248 --> 00:04:51,500
+and in order to work.
+
+00:04:51,500 --> 00:04:56,500
+And because of these chains of devices,
+
+00:04:57,730 --> 00:05:00,010
+the latency becomes quite important.
+
+00:05:00,010 --> 00:05:02,690
+So there can be maybe 100 devices chained together,
+
+00:05:02,690 --> 00:05:05,163
+meaning that the latency is times 100.
+
+00:05:08,060 --> 00:05:10,260
+Another good thing to understand here,
+
+00:05:10,260 --> 00:05:13,690
+and that's kind of how marketing sees this,
+
+00:05:13,690 --> 00:05:17,060
+so they have these devices and there's a switch on it.
+
+00:05:17,060 --> 00:05:18,760
+This happens to be where I'm working,
+
+00:05:18,760 --> 00:05:21,630
+but they are promoting those as host devices.
+
+00:05:21,630 --> 00:05:23,930
+So all the use cases are kind of seen
+
+00:05:23,930 --> 00:05:25,660
+as if the switchboard is a host
+
+00:05:25,660 --> 00:05:29,600
+because this is the implication they're going to.
+
+00:05:29,600 --> 00:05:32,310
+They are not fulfilling a job of a big switch
+
+00:05:32,310 --> 00:05:33,850
+that's sit on the top of a rack.
+
+00:05:33,850 --> 00:05:35,120
+They are actually fulfilling a job
+
+00:05:35,120 --> 00:05:38,470
+of some kind of host node that sits somewhere
+
+00:05:38,470 --> 00:05:40,270
+in your network and in some machine.
+
+00:05:42,680 --> 00:05:45,450
+And that's actually quite important to understand
+
+00:05:45,450 --> 00:05:47,100
+and after I did the slides
+
+00:05:47,100 --> 00:05:49,690
+I realized maybe I should have picked a better title.
+
+00:05:49,690 --> 00:05:53,000
+Something like Connecting Hosts via Bridges
+
+00:05:53,000 --> 00:05:53,833
+or something else,
+
+00:05:53,833 --> 00:05:56,069
+because this is actually what it's dominating
+
+00:05:56,069 --> 00:05:59,730
+many of the problems and how we are defining
+
+00:05:59,730 --> 00:06:01,593
+these problems we want to solve.
+
+00:06:04,660 --> 00:06:07,177
+Yeah and the CPU's busy solving other issues,
+
+00:06:07,177 --> 00:06:08,777
+that's what I have said already.
+
+00:06:09,670 --> 00:06:12,724
+Another very much expected use case
+
+00:06:12,724 --> 00:06:15,438
+is to build these rings, because when you start to chain
+
+00:06:15,438 --> 00:06:17,600
+a huge amount of nodes together
+
+00:06:17,600 --> 00:06:21,410
+it becomes very vulnerable to some cable cuts
+
+00:06:21,410 --> 00:06:22,243
+or what do I know.
+
+00:06:22,243 --> 00:06:26,823
+So it's pretty common in these networks to create rings
+
+00:06:26,823 --> 00:06:29,690
+that may be going through some gateway node
+
+00:06:29,690 --> 00:06:32,280
+that can connect the ring to other rings and so on.
+
+00:06:32,280 --> 00:06:35,310
+And in classic ethernet, this is a pretty bad idea
+
+00:06:35,310 --> 00:06:37,920
+because you would have a look on the network clearly
+
+00:06:37,920 --> 00:06:40,830
+but that's kind of why I highlighted
+
+00:06:40,830 --> 00:06:42,460
+these redundancy features.
+
+00:06:42,460 --> 00:06:47,040
+So something, assuming we get the bulk of these issues fixed
+
+00:06:47,040 --> 00:06:48,790
+then it's kind of the next step as we see it.
+
+00:06:48,790 --> 00:06:52,273
+We want to work on some MRP and DLR
+
+00:06:52,273 --> 00:06:54,500
+with our ring protection protocols,
+
+00:06:54,500 --> 00:06:56,380
+which are really important in this domain
+
+00:06:56,380 --> 00:06:58,840
+and which we also see some good opportunity
+
+00:06:58,840 --> 00:07:00,150
+to do hardware offloading of,
+
+00:07:00,150 --> 00:07:02,620
+because they are doing a lot of repeated work
+
+00:07:02,620 --> 00:07:03,640
+again and again and again.
+
+00:07:03,640 --> 00:07:05,420
+Something hardware's pretty good at,
+
+00:07:05,420 --> 00:07:07,790
+and then we want to put all these data machines
+
+00:07:07,790 --> 00:07:10,403
+and so on in the Linux kernel.
+
+00:07:10,403 --> 00:07:15,403
+So this is kind of the domain we are working in,
+
+00:07:15,470 --> 00:07:17,070
+at least with this specific.
+
+00:07:17,070 --> 00:07:20,780
+We do have other products in other domains
+
+00:07:20,780 --> 00:07:22,930
+but this is what I want to talk about here.
+
+00:07:23,950 --> 00:07:25,370
+So of course as always,
+
+00:07:25,370 --> 00:07:28,070
+please interrupt if you have any questions about this.
+
+00:07:29,660 --> 00:07:34,660
+So let's try to discuss some of the offload optimizations
+
+00:07:35,270 --> 00:07:36,530
+that can be done here.
+
+00:07:36,530 --> 00:07:40,410
+And in order to have, kind of a good reference
+
+00:07:40,410 --> 00:07:44,107
+to say, "Okay, what can we do if we choose
+
+00:07:44,107 --> 00:07:45,460
+"not to go the Linux way?"
+
+00:07:45,460 --> 00:07:47,330
+If we have some existing setup,
+
+00:07:47,330 --> 00:07:50,120
+which are often seen where you kind of have
+
+00:07:50,120 --> 00:07:55,120
+these three-port switches that exist, a last number of,
+
+00:07:55,140 --> 00:07:56,620
+and you have some proprietary software
+
+00:07:56,620 --> 00:07:57,477
+setting up the switches.
+
+00:07:57,477 --> 00:08:00,200
+You have your classic Linux SoC
+
+00:08:00,200 --> 00:08:03,380
+connected via NIC to the CPU, and the CPU drives to the IO.
+
+00:08:03,380 --> 00:08:05,930
+That will kind of be my reference would say,
+
+00:08:05,930 --> 00:08:07,730
+"What are people doing today?"
+
+00:08:07,730 --> 00:08:09,690
+Because these are not new problems.
+
+00:08:09,690 --> 00:08:12,190
+People have been doing this for a long time.
+
+00:08:12,190 --> 00:08:14,540
+New standards is coming, not only to make it more attractive
+
+00:08:14,540 --> 00:08:18,000
+but kind of to have some existing reference
+
+00:08:18,000 --> 00:08:20,403
+that is not supposed to be discussable.
+
+00:08:22,720 --> 00:08:26,120
+And then we want to pretty much achieve
+
+00:08:26,120 --> 00:08:29,210
+the same use cases with comparable performance.
+
+00:08:29,210 --> 00:08:31,660
+Of course, it does not need to be one-to-one.
+
+00:08:31,660 --> 00:08:34,973
+We just want whatever worked before should still be working.
+
+00:08:36,990 --> 00:08:38,330
+And with this model
+
+00:08:38,330 --> 00:08:40,110
+we'll be considering the hardware I introduced
+
+00:08:40,110 --> 00:08:42,450
+where we'll be having a two-port switch.
+
+00:08:42,450 --> 00:08:46,370
+It will have a DMA being able to transfer frames to the CPU.
+
+00:08:46,370 --> 00:08:47,860
+It can, of course, do offloading
+
+00:08:47,860 --> 00:08:50,330
+for wanting frames from the two poles.
+
+00:08:50,330 --> 00:08:52,120
+It has, even though it's only two ports,
+
+00:08:52,120 --> 00:08:54,250
+it's not the EtherCAT system.
+
+00:08:54,250 --> 00:08:56,150
+it does have a complete curing system
+
+00:08:56,150 --> 00:08:58,920
+meaning that you can inject frames from the CPU
+
+00:08:58,920 --> 00:09:01,360
+and take the variety into account and all of this.
+
+00:09:01,360 --> 00:09:06,360
+So it is actually real bridging, it's not cheating.
+
+00:09:06,510 --> 00:09:08,450
+And that could easily be four ports.
+
+00:09:08,450 --> 00:09:10,950
+It wouldn't change, kind of, the big picture here.
+
+00:09:13,150 --> 00:09:17,180
+And the key things I will be looking at are,
+
+00:09:17,180 --> 00:09:19,310
+in terms of performance, is the number of frames
+
+00:09:19,310 --> 00:09:20,460
+being copied to the CPU
+
+00:09:20,460 --> 00:09:22,910
+because typically the IO between the switch core
+
+00:09:22,910 --> 00:09:25,330
+and the CPU is pretty low.
+
+00:09:25,330 --> 00:09:30,070
+So we do have a significant limit about what we can do.
+
+00:09:30,070 --> 00:09:33,630
+And also, each frame going to the CPU
+
+00:09:33,630 --> 00:09:34,670
+ends up being processed
+
+00:09:34,670 --> 00:09:36,280
+and if it was not needed in the first case,
+
+00:09:36,280 --> 00:09:38,100
+we would rather not have it there.
+
+00:09:38,100 --> 00:09:40,870
+Of course, it does not need to be a binary comparison,
+
+00:09:40,870 --> 00:09:43,423
+so it just needs to be reasonable.
+
+00:09:44,710 --> 00:09:47,970
+So this is what I will be comparing it to,
+
+00:09:47,970 --> 00:09:50,500
+and some of the optimization does a big difference,
+
+00:09:50,500 --> 00:09:52,640
+some of them does a little difference.
+
+00:09:52,640 --> 00:09:55,140
+I tried to order them so that we look at
+
+00:09:55,140 --> 00:09:55,973
+the big difference first
+
+00:09:55,973 --> 00:09:59,060
+and then the later we get into the presentation,
+
+00:09:59,060 --> 00:10:01,183
+the little less important it will probably be.
+
+00:10:03,720 --> 00:10:06,340
+So another terminology,
+
+00:10:06,340 --> 00:10:08,340
+I was not sure what it was called,
+
+00:10:08,340 --> 00:10:10,690
+so just to be sure we mean the same thing.
+
+00:10:10,690 --> 00:10:13,530
+So I often refer to foreign interfaces
+
+00:10:13,530 --> 00:10:14,550
+and when doing that,
+
+00:10:14,550 --> 00:10:17,560
+I mean when you enslave an interface to a bridge
+
+00:10:17,560 --> 00:10:18,760
+that comes from something else
+
+00:10:18,760 --> 00:10:20,910
+than the switch to that driver.
+
+00:10:20,910 --> 00:10:23,200
+So this is what I refer to as foreign interfaces.
+
+00:10:23,200 --> 00:10:27,580
+So this is a central piece of how the bridge core
+
+00:10:27,580 --> 00:10:29,987
+is working and it's pretty nice
+
+00:10:29,987 --> 00:10:32,440
+and it can do some real cool things.
+
+00:10:32,440 --> 00:10:35,930
+But there are a few optimizations that becomes a lot harder
+
+00:10:35,930 --> 00:10:38,010
+when having these foreign interfaces.
+
+00:10:38,010 --> 00:10:41,020
+So I'll try to highlight when can this be supported
+
+00:10:41,020 --> 00:10:42,140
+and when can it not.
+
+00:10:42,140 --> 00:10:45,710
+Because it may affect how things needs to be done.
+
+00:10:45,710 --> 00:10:49,323
+And it also may affect if it should be done,
+
+00:10:50,410 --> 00:10:53,130
+because, as I see it, it's a pretty cool feature
+
+00:10:53,130 --> 00:10:55,440
+or something that we would actually like
+
+00:10:55,440 --> 00:10:57,803
+to be able to use more and more.
+
+00:10:58,840 --> 00:11:01,243
+But if the downside is that we cannot enable the use case,
+
+00:11:01,243 --> 00:11:03,350
+then it's probably also something where we want
+
+00:11:03,350 --> 00:11:05,970
+to at least be able to suboptimize the cases
+
+00:11:05,970 --> 00:11:09,550
+where we happen to not have any foreign interfaces.
+
+00:11:09,550 --> 00:11:12,810
+And then that is probably the case
+
+00:11:15,010 --> 00:11:16,910
+in most of these scenarios that I have been listing.
+
+00:11:16,910 --> 00:11:18,850
+Then the bridge will probably be forwarding
+
+00:11:18,850 --> 00:11:20,700
+between the two interfaces that have.
+
+00:11:22,454 --> 00:11:24,930
+And it is something that you can actually check for today.
+
+00:11:24,930 --> 00:11:27,610
+So several of the existing implementations
+
+00:11:27,610 --> 00:11:30,320
+do not allow these foreign interfaces
+
+00:11:30,320 --> 00:11:32,410
+to be enslaved to a switch when they are there.
+
+00:11:32,410 --> 00:11:33,843
+So it's not a new concept.
+
+00:11:36,060 --> 00:11:39,700
+So for people who have followed,
+
+00:11:39,700 --> 00:11:44,284
+next we caused a bit of a noise there.
+
+00:11:44,284 --> 00:11:45,643
+Sorry for that.
+
+00:11:47,720 --> 00:11:51,030
+So today, when an interface is enslaved too far.
+
+00:11:51,030 --> 00:11:52,630
+So now I will go into explaining
+
+00:11:53,620 --> 00:11:55,810
+a bunch of very specific use cases.
+
+00:11:55,810 --> 00:11:58,330
+We want to optimize how we can see it happening
+
+00:11:58,330 --> 00:12:00,200
+and what it will need to do.
+
+00:12:00,200 --> 00:12:01,460
+And the promiscuous mode will be
+
+00:12:01,460 --> 00:12:03,210
+the first one I will be discussing.
+
+00:12:07,140 --> 00:12:10,570
+So today, when an interface is being enslaved to a bridge,
+
+00:12:10,570 --> 00:12:12,873
+the interface is set to promiscuous mode.
+
+00:12:14,180 --> 00:12:16,260
+And when I was reading the code,
+
+00:12:16,260 --> 00:12:17,750
+I said, "Hmm, this makes a lot of sense."
+
+00:12:17,750 --> 00:12:19,700
+Because this code was probably written
+
+00:12:19,700 --> 00:12:21,690
+before we had SwitchDev or DSA
+
+00:12:21,690 --> 00:12:23,340
+So that kind of makes a lot of sense
+
+00:12:23,340 --> 00:12:25,830
+if you want to do bridging across a bunch of NICs.
+
+00:12:25,830 --> 00:12:28,250
+You kind of need the package to go to the CPU,
+
+00:12:28,250 --> 00:12:32,160
+for the CPU to take a forwarding decision.
+
+00:12:32,160 --> 00:12:33,300
+And I'm using him, okay.
+
+00:12:33,300 --> 00:12:35,770
+So there are some optimizations.
+
+00:12:35,770 --> 00:12:38,100
+If you happen to not want to do flooding,
+
+00:12:38,100 --> 00:12:40,710
+not want to do learning, then you don't need it.
+
+00:12:40,710 --> 00:12:42,360
+This really helped us,
+
+00:12:42,360 --> 00:12:45,600
+and using the hardware we are working on,
+
+00:12:45,600 --> 00:12:48,750
+and probably most of the hardware that exists in the DSA,
+
+00:12:48,750 --> 00:12:52,580
+and SwitchDev world can actually do the flooding
+
+00:12:52,580 --> 00:12:53,450
+and learning on their own.
+
+00:12:53,450 --> 00:12:55,390
+So we're sort of, hmm, this would be
+
+00:12:55,390 --> 00:12:56,700
+a good candidate to start with,
+
+00:12:56,700 --> 00:12:59,466
+because it, to us it seemed obvious
+
+00:12:59,466 --> 00:13:03,030
+that you may not need to put these interfaces
+
+00:13:03,030 --> 00:13:04,173
+into promiscuous mode.
+
+00:13:05,650 --> 00:13:09,240
+And we didn't really foresee this big discussion
+
+00:13:09,240 --> 00:13:10,360
+there was on it.
+
+00:13:10,360 --> 00:13:14,110
+And apparently there were kind of two things.
+
+00:13:14,110 --> 00:13:15,243
+The one discussion was that there were
+
+00:13:15,243 --> 00:13:17,080
+a very different understanding about
+
+00:13:17,080 --> 00:13:19,250
+what does promiscuous mode mean.
+
+00:13:19,250 --> 00:13:20,572
+So some people had the view,
+
+00:13:20,572 --> 00:13:23,644
+it means every frame on the wires should go to the CPU.
+
+00:13:23,644 --> 00:13:25,510
+Other side was it means
+
+00:13:25,510 --> 00:13:27,920
+that you should disable all Rx filtering,
+
+00:13:27,920 --> 00:13:29,570
+meaning that all filtered traffic
+
+00:13:29,570 --> 00:13:31,520
+should never go to the CPU.
+
+00:13:31,520 --> 00:13:34,580
+I will not go into this discussion here.
+
+00:13:34,580 --> 00:13:36,150
+It has been well discussed at the mailing list,
+
+00:13:36,150 --> 00:13:38,390
+but it's good to have in mind.
+
+00:13:38,390 --> 00:13:39,870
+- [Host] I am going to make a quick statement
+
+00:13:39,870 --> 00:13:42,290
+because this topic I've thought about.
+
+00:13:42,290 --> 00:13:43,123
+- Please do.
+
+00:13:44,080 --> 00:13:45,850
+- [Host] It is clear that the bridge
+
+00:13:45,850 --> 00:13:49,353
+is trying to achieve a certain objective.
+
+00:13:51,060 --> 00:13:52,810
+And when the user fires up CCP dump
+
+00:13:52,810 --> 00:13:55,100
+they're trying to achieve a certain objective,
+
+00:13:55,100 --> 00:13:56,200
+and they're different.
+
+00:13:58,780 --> 00:14:00,910
+So it kind of seems to suggest that the fact
+
+00:14:00,910 --> 00:14:05,360
+that we've shared this promiscuous operation
+
+00:14:05,360 --> 00:14:07,550
+with the bridge is illogical,
+
+00:14:07,550 --> 00:14:09,360
+because it's something else.
+
+00:14:09,360 --> 00:14:11,130
+There should be a backhaul that says
+
+00:14:11,130 --> 00:14:13,300
+not, put the interface in promiscuous mode,
+
+00:14:13,300 --> 00:14:15,920
+but, we're putting this bridge that you are a part of
+
+00:14:15,920 --> 00:14:17,490
+into learning and flooding mode.
+
+00:14:17,490 --> 00:14:19,700
+Do whatever is appropriate for your device
+
+00:14:19,700 --> 00:14:21,900
+to achieve this objective.
+
+00:14:21,900 --> 00:14:23,030
+And then we can solve
+
+00:14:23,030 --> 00:14:25,330
+the quote-unquote promiscuous mode problem
+
+00:14:25,330 --> 00:14:27,270
+in the other space that that exists,
+
+00:14:27,270 --> 00:14:29,100
+and I think that's how we should move forward.
+
+00:14:29,100 --> 00:14:30,030
+For the record.
+
+00:14:30,030 --> 00:14:35,030
+- I agree, and also our intent here was actually,
+
+00:14:35,070 --> 00:14:36,750
+we wanted to be easy to debug.
+
+00:14:36,750 --> 00:14:40,350
+We wanted to be able to CCP dump like we always do.
+
+00:14:40,350 --> 00:14:42,820
+And then that was kind of a clear objective.
+
+00:14:42,820 --> 00:14:44,716
+And there is a really easy workaround
+
+00:14:44,716 --> 00:14:46,540
+if you wanted to avoid this discussion.
+
+00:14:46,540 --> 00:14:48,580
+And that is to not implement promiscuous mode
+
+00:14:48,580 --> 00:14:50,887
+because yeah, the kernel thinks it's in promiscuous mode
+
+00:14:50,887 --> 00:14:52,693
+but if it's not implemented, hmm.
+
+00:14:54,540 --> 00:14:58,070
+And this is actually what is done in the Ocelot device
+
+00:14:58,070 --> 00:14:59,270
+where we ran into this issue,
+
+00:14:59,270 --> 00:15:01,740
+but we really didn't have the energy to try
+
+00:15:01,740 --> 00:15:02,701
+to do anything about it.
+
+00:15:02,701 --> 00:15:05,890
+So we found, hmm, yeah it works,
+
+00:15:05,890 --> 00:15:08,583
+but it would really be nice to have this debug feature.
+
+00:15:10,540 --> 00:15:13,280
+So clearly, after discussing it at the mailing list
+
+00:15:13,280 --> 00:15:17,587
+there have been a lot of items of, "So I can try to do this
+
+00:15:17,587 --> 00:15:19,280
+"and keep the changes in the drive?"
+
+00:15:19,280 --> 00:15:21,136
+Unfortunately we haven't found a way to do that.
+
+00:15:21,136 --> 00:15:24,067
+So if there's something we want to get solved,
+
+00:15:24,067 --> 00:15:29,067
+then at least, based on the experience we have done so far,
+
+00:15:29,390 --> 00:15:31,940
+we pretty much believe that we need to do
+
+00:15:33,150 --> 00:15:35,120
+some changes in the core bridge implementation
+
+00:15:35,120 --> 00:15:36,550
+in order to achieve this.
+
+00:15:36,550 --> 00:15:37,383
+Luckily, we can still--
+
+00:15:37,383 --> 00:15:39,570
+- [Host] Can you clarify would you exactly mean
+
+00:15:39,570 --> 00:15:40,720
+by a foreign interface?
+
+00:15:40,720 --> 00:15:44,676
+These are NetDevs that are not in any way
+
+00:15:44,676 --> 00:15:46,740
+part of the SwitchDev device.
+
+00:15:46,740 --> 00:15:47,860
+- Yep, exactly.
+
+00:15:47,860 --> 00:15:49,490
+- So in the situation where you have
+
+00:15:49,490 --> 00:15:50,690
+this sophisticated device
+
+00:15:50,690 --> 00:15:53,070
+that can learn and flood on its own,
+
+00:15:53,070 --> 00:15:55,860
+this promiscuous mode request from the bridging layer,
+
+00:15:55,860 --> 00:15:58,550
+you would not put in promiscuous mode
+
+00:15:58,550 --> 00:15:59,570
+for the SwitchDev device,
+
+00:15:59,570 --> 00:16:03,310
+but that Ether0, Ether1 guys may really do promiscuous mode
+
+00:16:03,310 --> 00:16:05,230
+and learn through the software switch.
+
+00:16:05,230 --> 00:16:06,063
+- Yeah. - Okay, that makes
+
+00:16:06,063 --> 00:16:07,985
+a lot of sense.
+
+00:16:07,985 --> 00:16:10,360
+- And it may be physical devices, but it could also be
+
+00:16:10,360 --> 00:16:11,780
+a tunnel, as far as I understand.
+
+00:16:11,780 --> 00:16:13,110
+So we could be bridging in and out
+
+00:16:13,110 --> 00:16:14,613
+of a NICs and a tunnel, yeah.
+
+00:16:15,720 --> 00:16:17,240
+Which is a nice way of testing it
+
+00:16:17,240 --> 00:16:18,490
+when you happen to have an associate
+
+00:16:18,490 --> 00:16:21,340
+that only has non-paired devices and we create a tunnel
+
+00:16:21,340 --> 00:16:24,240
+in order to see, does it actually do something meaningful?
+
+00:16:26,160 --> 00:16:28,360
+So these are kind of the challenges that,
+
+00:16:28,360 --> 00:16:30,370
+so the first two, we need to work on this
+
+00:16:30,370 --> 00:16:31,430
+if we want it to work.
+
+00:16:31,430 --> 00:16:33,530
+At least, that is my point of view.
+
+00:16:33,530 --> 00:16:36,760
+We need to find something that everybody can agree on
+
+00:16:36,760 --> 00:16:38,400
+if we want this functionality to work.
+
+00:16:38,400 --> 00:16:40,280
+I would very much like it to work,
+
+00:16:40,280 --> 00:16:41,113
+but it is a debug feature
+
+00:16:41,113 --> 00:16:44,870
+so it's not the most important topic on my agenda.
+
+00:16:44,870 --> 00:16:46,720
+So another interesting outcome
+
+00:16:46,720 --> 00:16:48,310
+out of playing around with this
+
+00:16:48,310 --> 00:16:50,580
+was I actually, and it was also mentioned
+
+00:16:50,580 --> 00:16:51,413
+at the mailing list,
+
+00:16:51,413 --> 00:16:54,200
+is that the bridge code generates some events
+
+00:16:54,200 --> 00:16:57,900
+when new MAC addresses are being learned.
+
+00:16:57,900 --> 00:17:00,440
+And naturally, in order to keep these events flowing
+
+00:17:00,440 --> 00:17:03,384
+we need some way of, some other channel,
+
+00:17:03,384 --> 00:17:05,780
+of information to get this from the hardware.
+
+00:17:05,780 --> 00:17:08,890
+So it's actually something that is being implemented
+
+00:17:08,890 --> 00:17:11,410
+in the next chips we are doing,
+
+00:17:11,410 --> 00:17:13,640
+where we will be getting an interrupt
+
+00:17:13,640 --> 00:17:15,390
+from the MAC tables such that we can integrate
+
+00:17:15,390 --> 00:17:17,710
+over newly learned MAC entries
+
+00:17:17,710 --> 00:17:21,720
+and feed these events back to the bridge core.
+
+00:17:21,720 --> 00:17:22,890
+So we will get it, the name.
+
+00:17:22,890 --> 00:17:25,980
+I saw that Mellanox actually have the same functionality
+
+00:17:25,980 --> 00:17:28,412
+in their SoCs, so I'm not 100% sure how it works,
+
+00:17:28,412 --> 00:17:33,340
+but that is certainly something that is needed
+
+00:17:33,340 --> 00:17:35,230
+in order to get to the same people.
+
+00:17:35,230 --> 00:17:38,110
+And it would be really nice to have these events.
+
+00:17:38,110 --> 00:17:40,400
+Another mechanism could be to do polling.
+
+00:17:40,400 --> 00:17:43,394
+Then you can also learning if something's new.
+
+00:17:43,394 --> 00:17:45,505
+(woman chattering)
+
+00:17:45,505 --> 00:17:46,663
+- [Host] Hey, hey, hey, hey.
+
+00:17:51,350 --> 00:17:54,120
+- So the kernel already has support for it.
+
+00:17:54,120 --> 00:17:56,740
+I mean, the SwitchDev driver and the Mellanox driver
+
+00:17:56,740 --> 00:17:59,610
+already supports learning from hardware.
+
+00:17:59,610 --> 00:18:00,780
+Learning from MACs.
+
+00:18:00,780 --> 00:18:04,810
+So are you suggesting here the kernel needs more support
+
+00:18:04,810 --> 00:18:07,150
+or are you suggesting your hardware needs support--
+
+00:18:07,150 --> 00:18:09,530
+- [Allan] No, I'm suggesting my driver needs it.
+
+00:18:09,530 --> 00:18:10,538
+- Driver needs the support, yeah.
+
+00:18:10,538 --> 00:18:12,900
+- So it's pretty much an observation.
+
+00:18:12,900 --> 00:18:15,050
+So people who want to take advantage
+
+00:18:15,050 --> 00:18:17,760
+of not putting interfaces into promiscuous mode
+
+00:18:17,760 --> 00:18:18,650
+need to be aware that
+
+00:18:18,650 --> 00:18:20,960
+then you need to provide these learning events.
+
+00:18:20,960 --> 00:18:23,480
+And if your drivers do not do this work,
+
+00:18:23,480 --> 00:18:25,950
+then they will not be there, and it will be a difference.
+
+00:18:25,950 --> 00:18:30,600
+So it's just to highlight that you need to remember this
+
+00:18:30,600 --> 00:18:32,230
+otherwise they will be missing,
+
+00:18:32,230 --> 00:18:34,516
+and you may not want that.
+
+00:18:34,516 --> 00:18:35,350
+- [Woman] Okay, got it.
+
+00:18:35,350 --> 00:18:37,930
+- So honestly it's always kind of felt weird to me
+
+00:18:37,930 --> 00:18:40,790
+that a bridge device has this one interface
+
+00:18:40,790 --> 00:18:42,080
+that is kind of special,
+
+00:18:42,080 --> 00:18:43,650
+which is the name of the bridge device.
+
+00:18:43,650 --> 00:18:47,480
+It's always felt to me like the interface
+
+00:18:47,480 --> 00:18:49,120
+that you put into the bridge
+
+00:18:49,120 --> 00:18:51,440
+should be kind of the same sort of slave
+
+00:18:51,440 --> 00:18:53,830
+as all the physical interfaces you put into it.
+
+00:18:53,830 --> 00:18:57,110
+And that you could have multiple virtual slaves
+
+00:18:57,110 --> 00:18:58,530
+that you put into the bridge.
+
+00:18:58,530 --> 00:19:00,810
+And then if you were to enable promiscuity
+
+00:19:00,810 --> 00:19:02,690
+on those slaves interfaces
+
+00:19:02,690 --> 00:19:04,470
+you would just see what the bridge is delivering
+
+00:19:04,470 --> 00:19:05,420
+to those interfaces,
+
+00:19:05,420 --> 00:19:06,930
+but if you were to enable promiscuity
+
+00:19:06,930 --> 00:19:08,670
+on the actual bridge interface
+
+00:19:08,670 --> 00:19:12,110
+you'd kind of see the actual behavior of the entire bridge.
+
+00:19:12,110 --> 00:19:14,410
+- It's a side-effect of history, right.
+
+00:19:14,410 --> 00:19:16,420
+That we were, in the stone ages
+
+00:19:16,420 --> 00:19:17,360
+everything was a networking device.
+
+00:19:17,360 --> 00:19:19,810
+So if we needed a control object
+
+00:19:19,810 --> 00:19:23,480
+for a higher level representation of a group of devices
+
+00:19:23,480 --> 00:19:24,880
+we would just make another net device for that.
+
+00:19:24,880 --> 00:19:27,610
+It's bonding, bridging, everything, so.
+
+00:19:27,610 --> 00:19:30,720
+- I actually think it makes a lot of sense to me.
+
+00:19:30,720 --> 00:19:32,210
+You have the bridge device,
+
+00:19:32,210 --> 00:19:34,860
+which represented a Layer 2 broadcast domain
+
+00:19:34,860 --> 00:19:37,430
+while you have the physical interface that represents
+
+00:19:37,430 --> 00:19:38,830
+a physical domain, so if you want
+
+00:19:38,830 --> 00:19:41,530
+to inject a packet, you want to be flooded
+
+00:19:41,530 --> 00:19:43,450
+or forward according to learning
+
+00:19:43,450 --> 00:19:45,120
+you need to do it at the bridge device.
+
+00:19:45,120 --> 00:19:48,110
+If you want to do some LLDP and link specific stuff
+
+00:19:48,110 --> 00:19:49,430
+you should do it at the link device.
+
+00:19:49,430 --> 00:19:51,670
+At least, that is how I'm seeing it.
+
+00:19:51,670 --> 00:19:54,070
+- Well, conceptually my view of it
+
+00:19:54,070 --> 00:19:56,410
+is that you have a virtual interface
+
+00:19:56,410 --> 00:19:59,360
+with a virtual link into the bridge.
+
+00:19:59,360 --> 00:20:01,440
+And then that bridge has physical links
+
+00:20:01,440 --> 00:20:04,130
+out of the box for the physical network ports.
+
+00:20:04,130 --> 00:20:06,140
+And that you almost want to kind of like
+
+00:20:06,140 --> 00:20:07,860
+think of that entire bridge device
+
+00:20:07,860 --> 00:20:09,580
+as sitting in a separate namespace
+
+00:20:09,580 --> 00:20:11,453
+and kind of not bothering you.
+
+00:20:20,417 --> 00:20:22,580
+- But there is times where you need to see the details.
+
+00:20:22,580 --> 00:20:24,190
+For example, IGMP Snooping.
+
+00:20:24,190 --> 00:20:26,500
+Or PTP, when you need to send it out,
+
+00:20:26,500 --> 00:20:29,570
+a specific interface and not the bridge interface.
+
+00:20:29,570 --> 00:20:33,850
+So yes, it's nasty having this bridge interface
+
+00:20:33,850 --> 00:20:35,950
+as being something different.
+
+00:20:35,950 --> 00:20:38,880
+I would really like to see it nicely modeled
+
+00:20:38,880 --> 00:20:40,133
+as just another port.
+
+00:20:42,160 --> 00:20:44,210
+- Right, but that's precisely the problem right now.
+
+00:20:44,210 --> 00:20:46,830
+That you can't differentiate traffic
+
+00:20:46,830 --> 00:20:48,840
+that's coming in and out of the bridge
+
+00:20:48,840 --> 00:20:51,200
+that is the kernel's bridge interface,
+
+00:20:51,200 --> 00:20:52,880
+the stack's bridge interface,
+
+00:20:52,880 --> 00:20:54,610
+versus the bridge as a whole.
+
+00:20:54,610 --> 00:20:56,660
+While you can see the stuff coming in and out
+
+00:20:56,660 --> 00:20:58,210
+of individual physical interfaces,
+
+00:20:58,210 --> 00:21:01,067
+and there's no good reason why that physical interface
+
+00:21:01,067 --> 00:21:04,163
+is special compared to the bridge interface.
+
+00:21:07,940 --> 00:21:12,940
+- So if you faithfully follow the IEEE model of 802.1Q
+
+00:21:14,070 --> 00:21:16,560
+you will have all of every one of those interfaces.
+
+00:21:16,560 --> 00:21:19,110
+They have a top device for each one
+
+00:21:19,110 --> 00:21:20,240
+so that you can direct packets
+
+00:21:20,240 --> 00:21:22,740
+over the physical interface, specifically,
+
+00:21:22,740 --> 00:21:24,134
+or over the bridge interface,
+
+00:21:24,134 --> 00:21:25,970
+and then they have clauses on how to handle it all.
+
+00:21:25,970 --> 00:21:28,593
+So I'm just saying, if you followed the spec
+
+00:21:28,593 --> 00:21:30,593
+you would have all these things.
+
+00:21:31,520 --> 00:21:32,720
+It's a bit of work, but.
+
+00:21:34,240 --> 00:21:35,090
+- And it's there.
+
+00:21:36,796 --> 00:21:38,360
+- [Man] And a lot of hardware can support it, too,
+
+00:21:38,360 --> 00:21:42,800
+because all the hardware's built off of the 801.1Q spec.
+
+00:21:42,800 --> 00:21:43,633
+- Yes.
+
+00:21:46,920 --> 00:21:48,440
+So yeah, just to clarify this.
+
+00:21:48,440 --> 00:21:51,820
+So there is a big difference, if you can take the packet on
+
+00:21:51,820 --> 00:21:54,070
+at the bridge device or one of the linked devices.
+
+00:21:54,070 --> 00:21:57,290
+It's now being sent out forwarded to the Layer 2 domain
+
+00:21:57,290 --> 00:21:58,760
+represented by the bridge,
+
+00:21:58,760 --> 00:21:59,620
+while in the other case
+
+00:21:59,620 --> 00:22:01,780
+it will send out on the specific link.
+
+00:22:01,780 --> 00:22:04,240
+So we at least treat it differently,
+
+00:22:04,240 --> 00:22:06,323
+and I would assume others do the same.
+
+00:22:09,050 --> 00:22:11,360
+So maybe it could be done in a more elegant way
+
+00:22:11,360 --> 00:22:13,587
+but at least that is the way we have it
+
+00:22:13,587 --> 00:22:15,303
+and to me it seems to work well.
+
+00:22:19,850 --> 00:22:23,240
+So the other natural change that would come along
+
+00:22:23,240 --> 00:22:24,688
+if you implement this
+
+00:22:24,688 --> 00:22:27,900
+is that less frames will go to the CPU,
+
+00:22:27,900 --> 00:22:30,920
+which is pretty much what we wanted to achieve.
+
+00:22:30,920 --> 00:22:33,300
+And then you cannot have the task
+
+00:22:33,300 --> 00:22:35,370
+that you need to get your statistics right.
+
+00:22:35,370 --> 00:22:36,980
+You still had to do this,
+
+00:22:36,980 --> 00:22:39,100
+because it was only when the hour is passed
+
+00:22:39,100 --> 00:22:42,170
+that it goes to the CPU and the packet was marked
+
+00:22:42,170 --> 00:22:43,463
+that they needed to,
+
+00:22:45,665 --> 00:22:47,000
+the bridge shouldn't forward it
+
+00:22:47,000 --> 00:22:49,800
+because it has already been forwarded by hardware.
+
+00:22:49,800 --> 00:22:53,460
+So before the statistics was not 100% correct,
+
+00:22:53,460 --> 00:22:56,040
+at least in all situations,
+
+00:22:56,040 --> 00:22:57,640
+and they still are not.
+
+00:22:57,640 --> 00:23:00,000
+But we are doing the best we can to get them
+
+00:23:00,000 --> 00:23:01,130
+as close as possible.
+
+00:23:01,130 --> 00:23:03,370
+But statistics are surprisingly hard
+
+00:23:03,370 --> 00:23:06,830
+when having both software and hardware doing something
+
+00:23:06,830 --> 00:23:08,760
+and then, and yeah.
+
+00:23:08,760 --> 00:23:11,943
+Not always 100% right, but good enough to be useful.
+
+00:23:13,950 --> 00:23:17,560
+And notice the allmulti is still set,
+
+00:23:17,560 --> 00:23:18,810
+meaning that allmulti class packets
+
+00:23:18,810 --> 00:23:21,493
+will go to the CPU in other cases.
+
+00:23:25,500 --> 00:23:27,910
+Next optimization that is very common
+
+00:23:27,910 --> 00:23:31,670
+is that in many cases these networks
+
+00:23:31,670 --> 00:23:34,260
+have certain VLANs that are carrying a high amount
+
+00:23:34,260 --> 00:23:37,410
+of multicast or even broadcast traffic,
+
+00:23:37,410 --> 00:23:40,370
+and it can make a big difference
+
+00:23:40,370 --> 00:23:45,210
+to be able to protect the CPU from receiving this traffic.
+
+00:23:45,210 --> 00:23:48,920
+So typically what we are seeing is that,
+
+00:23:48,920 --> 00:23:51,330
+in the use cases we are operating in,
+
+00:23:51,330 --> 00:23:53,620
+it's desirable to be able to physically configure
+
+00:23:53,620 --> 00:23:55,480
+what VLANs do we actually want
+
+00:23:55,480 --> 00:23:58,023
+to connect your CPU when there's two.
+
+00:23:59,530 --> 00:24:01,950
+So this can actually be configured very easily today.
+
+00:24:01,950 --> 00:24:06,950
+So in the example below we can add our two port devices.
+
+00:24:07,000 --> 00:24:11,310
+So I'm using P0 and E0 a bit interchangeable
+
+00:24:11,310 --> 00:24:12,723
+but it is still correct.
+
+00:24:14,250 --> 00:24:16,030
+So you can add them to one VLAN
+
+00:24:16,030 --> 00:24:18,880
+and then you can only add you front ports to another VLAN.
+
+00:24:18,880 --> 00:24:22,074
+And then the bridge will be flooding traffic,
+
+00:24:22,074 --> 00:24:25,300
+including the CPU, in broadcast multicast traffic
+
+00:24:25,300 --> 00:24:27,570
+if it is on VLAN 100 and it will not do it
+
+00:24:27,570 --> 00:24:29,522
+if it it's on VLAN 200.
+
+00:24:29,522 --> 00:24:31,220
+This can easily be implemented.
+
+00:24:31,220 --> 00:24:34,090
+I'm not sure if this is how it was supposed to be used
+
+00:24:34,090 --> 00:24:38,760
+because at least in my reading of this driver
+
+00:24:38,760 --> 00:24:41,360
+it does not seem like that is how they are doing it.
+
+00:24:43,360 --> 00:24:44,890
+So the consequences of changing this
+
+00:24:44,890 --> 00:24:47,760
+is we don't need to do any changes
+
+00:24:47,760 --> 00:24:48,610
+in the bridge implementation.
+
+00:24:48,610 --> 00:24:51,190
+All the hooks and handles are there
+
+00:24:51,190 --> 00:24:52,863
+and they work nicely together.
+
+00:24:53,810 --> 00:24:56,060
+We cannot support foreign interfaces on this
+
+00:24:56,060 --> 00:24:59,660
+because it kind of assumes that if you have a VLAN
+
+00:24:59,660 --> 00:25:01,060
+where the CPU is not a member of,
+
+00:25:01,060 --> 00:25:02,770
+it will not see the packages,
+
+00:25:02,770 --> 00:25:05,100
+not even the broadcast multicast packages.
+
+00:25:05,100 --> 00:25:09,410
+So the CPU cannot give that additional interface a copy.
+
+00:25:09,410 --> 00:25:11,113
+So that's very unfortunate.
+
+00:25:13,010 --> 00:25:15,050
+We have other use cases where we cannot support
+
+00:25:15,050 --> 00:25:17,310
+the foreign interfaces, so we need to disable it anyway.
+
+00:25:17,310 --> 00:25:20,551
+So in the world of the driver I'm working on,
+
+00:25:20,551 --> 00:25:22,610
+we will prevent this from happening
+
+00:25:22,610 --> 00:25:25,430
+because, I cannot remember.
+
+00:25:25,430 --> 00:25:29,640
+There is a list of other problems that we are seeing
+
+00:25:29,640 --> 00:25:31,860
+with foreign interfaces, so we need to prevent that
+
+00:25:31,860 --> 00:25:34,120
+using the hooks that is already there.
+
+00:25:34,120 --> 00:25:37,094
+So it would be nice if it could
+
+00:25:37,094 --> 00:25:39,073
+but potentially they can not.
+
+00:25:40,870 --> 00:25:42,250
+We kind of want to do this
+
+00:25:42,250 --> 00:25:44,410
+because it makes a big difference.
+
+00:25:44,410 --> 00:25:45,740
+So this is actually real use cases.
+
+00:25:45,740 --> 00:25:48,910
+There are often these VLANs that is used
+
+00:25:48,910 --> 00:25:50,880
+to carry high-bandwidth traffic.
+
+00:25:50,880 --> 00:25:53,070
+Consider video-streams and so on.
+
+00:25:53,070 --> 00:25:56,700
+If the CPU is there to handle a contact,
+
+00:25:56,700 --> 00:25:59,080
+or an LED or something, you don't want it to receive
+
+00:25:59,080 --> 00:26:00,860
+all the video traffic that may be carried.
+
+00:26:00,860 --> 00:26:04,460
+So even though it may be a bit strange
+
+00:26:04,460 --> 00:26:07,920
+that we have a software bridge and we are not allowing it
+
+00:26:07,920 --> 00:26:09,097
+to see all the packages.
+
+00:26:09,097 --> 00:26:12,033
+We are not allowing it to be in the flooding domain.
+
+00:26:13,760 --> 00:26:15,610
+I think it's a compromise worth taking,
+
+00:26:15,610 --> 00:26:18,373
+and again, it works nicely with what we have already.
+
+00:26:20,170 --> 00:26:25,170
+The only thing that is not so nice is that
+
+00:26:25,660 --> 00:26:28,420
+when someone at a subinterface, to for instance the br0,
+
+00:26:28,420 --> 00:26:30,940
+they want to add a VLAN interface 100.
+
+00:26:30,940 --> 00:26:34,653
+So then you need to add VLAN 100 to the bridge.
+
+00:26:35,640 --> 00:26:38,220
+We are trying to see if we have the correct notifications
+
+00:26:38,220 --> 00:26:40,650
+in order to do this, but there are some cases
+
+00:26:40,650 --> 00:26:42,190
+where it's not working well.
+
+00:26:42,190 --> 00:26:44,510
+So we need, we're not convinced we need
+
+00:26:44,510 --> 00:26:48,940
+a change in the core system in order to support it.
+
+00:26:48,940 --> 00:26:50,793
+Hopefully we can do it with the hooks and handles
+
+00:26:50,793 --> 00:26:51,990
+that is already there,
+
+00:26:51,990 --> 00:26:54,180
+but it's something that would be nice.
+
+00:26:54,180 --> 00:26:56,123
+But to me it's kind of a nice-to-have.
+
+00:26:57,640 --> 00:27:00,960
+It's not unreasonable for the users to understand
+
+00:27:00,960 --> 00:27:03,660
+that they need to add the CPU to the VLANs
+
+00:27:03,660 --> 00:27:05,940
+where they have subinterfaces.
+
+00:27:05,940 --> 00:27:07,800
+But it would be very nice if it wasn't needed
+
+00:27:07,800 --> 00:27:09,853
+because why should it be needed?
+
+00:27:13,190 --> 00:27:14,293
+Any questions?
+
+00:27:15,750 --> 00:27:16,583
+Nice.
+
+00:27:19,340 --> 00:27:23,670
+So the next optimization is to add some hooks and handles
+
+00:27:23,670 --> 00:27:25,170
+in order to limit the flooding
+
+00:27:25,170 --> 00:27:27,190
+of non-Layer 3 multicast frames.
+
+00:27:27,190 --> 00:27:29,790
+So today in the kernel there is a lot of features
+
+00:27:29,790 --> 00:27:32,070
+in order to, there's IDMP,
+
+00:27:32,070 --> 00:27:34,660
+which can automatically inspect what host
+
+00:27:34,660 --> 00:27:37,800
+is interested in received certain multicast Layer 3 frames.
+
+00:27:37,800 --> 00:27:42,066
+You can also add static entries of Layer 3 frames
+
+00:27:42,066 --> 00:27:47,066
+but it's all limited to the group of multicast MAC addresses
+
+00:27:47,490 --> 00:27:50,940
+that is used by either IPv4 or IPv6.
+
+00:27:50,940 --> 00:27:54,390
+So there is no way in the existing kernels
+
+00:27:54,390 --> 00:27:57,980
+where we can add a static group for something like
+
+00:27:57,980 --> 00:28:01,830
+01:00:0, blah, blah, blah and number four.
+
+00:28:01,830 --> 00:28:06,830
+And these Layer 2 MAC addresses happen to be used
+
+00:28:06,940 --> 00:28:08,560
+quite a lot in these networks.
+
+00:28:08,560 --> 00:28:11,830
+For instance, they are the test and the beacon frames
+
+00:28:11,830 --> 00:28:14,320
+sent out by DLR and MRP.
+
+00:28:14,320 --> 00:28:16,190
+And some of these protocols want to send out,
+
+00:28:16,190 --> 00:28:19,212
+so it's a frame every 10 microseconds.
+
+00:28:19,212 --> 00:28:21,230
+That's a lot of frames.
+
+00:28:21,230 --> 00:28:24,100
+And if we don't do any changes, so we could apply
+
+00:28:24,100 --> 00:28:26,713
+the VLAN stuff I just mentioned earlier.
+
+00:28:28,210 --> 00:28:29,877
+But otherwise, if we don't do any changes,
+
+00:28:29,877 --> 00:28:32,400
+all these frames will go to the CPU
+
+00:28:32,400 --> 00:28:35,801
+and what it's worth is that many of these ring protections
+
+00:28:35,801 --> 00:28:38,280
+is actually explicitly saying,
+
+00:28:38,280 --> 00:28:40,360
+if you are switch and you don't implement these standards,
+
+00:28:40,360 --> 00:28:42,320
+then at least limit the flooding
+
+00:28:42,320 --> 00:28:44,240
+to the two ports where they belong
+
+00:28:44,240 --> 00:28:45,980
+because otherwise you will mess up
+
+00:28:45,980 --> 00:28:47,633
+other instantiation of this.
+
+00:28:48,540 --> 00:28:53,280
+So that's something that is at least needed
+
+00:28:53,280 --> 00:28:58,280
+if we want to have an unaware behavioral of these protocols
+
+00:28:59,147 --> 00:29:00,690
+then we need to limit it.
+
+00:29:00,690 --> 00:29:05,190
+So we did a bunch of iterations of these patches
+
+00:29:05,190 --> 00:29:08,387
+and we got some very good comments and feedback on it,
+
+00:29:08,387 --> 00:29:11,800
+and the patches are much more mature now,
+
+00:29:11,800 --> 00:29:14,510
+and I actually think they have a decent chance
+
+00:29:14,510 --> 00:29:17,710
+to be accepted in a revision or two later.
+
+00:29:17,710 --> 00:29:21,160
+So right now, we have it in our internal repositories.
+
+00:29:21,160 --> 00:29:25,100
+We are testing with it and we want to start developing
+
+00:29:25,100 --> 00:29:27,450
+the use cases of DLR and MRP internally
+
+00:29:27,450 --> 00:29:29,960
+and see if it actually fully solves our problems,
+
+00:29:29,960 --> 00:29:32,170
+so that we don't upstream a bunch of stuff
+
+00:29:32,170 --> 00:29:34,260
+that wasn't really needed anyway.
+
+00:29:34,260 --> 00:29:36,183
+So it's not because we have forgotten about it,
+
+00:29:36,183 --> 00:29:40,500
+it's just because we got the feedback we need very much
+
+00:29:40,500 --> 00:29:42,630
+and right now we have it for testing
+
+00:29:42,630 --> 00:29:45,790
+and yeah, and we have an issue with the show commands
+
+00:29:45,790 --> 00:29:47,480
+that we also need to have addressed
+
+00:29:47,480 --> 00:29:50,490
+in order to have something we want to process
+
+00:29:50,490 --> 00:29:51,673
+as the next revision.
+
+00:29:54,330 --> 00:29:57,060
+But this is, yeah, it's a small optimization,
+
+00:29:57,060 --> 00:30:01,063
+but it means a lot if you happen to have these use cases.
+
+00:30:05,200 --> 00:30:08,970
+So this is the final one of these optimizations
+
+00:30:08,970 --> 00:30:10,505
+I have prepared.
+
+00:30:10,505 --> 00:30:13,460
+And I need to say, this is also the one
+
+00:30:13,460 --> 00:30:15,870
+I'm least optimistic about
+
+00:30:15,870 --> 00:30:19,750
+because the payback you will get
+
+00:30:19,750 --> 00:30:21,890
+if you have everything else applied so far
+
+00:30:21,890 --> 00:30:23,980
+is getting less and less and less.
+
+00:30:23,980 --> 00:30:28,450
+But it's, I added it more in order to complete the analysis.
+
+00:30:28,450 --> 00:30:30,050
+So this is the final change we need
+
+00:30:30,050 --> 00:30:32,480
+if we're going to have equal in performance
+
+00:30:32,480 --> 00:30:35,350
+with what we do in existing use cases.
+
+00:30:35,350 --> 00:30:36,280
+So I'll get to it.
+
+00:30:36,280 --> 00:30:38,850
+In the same way as bridges today
+
+00:30:38,850 --> 00:30:41,280
+put interfaces into promiscuous mode,
+
+00:30:41,280 --> 00:30:44,360
+they also set their allmulti
+
+00:30:44,360 --> 00:30:46,800
+which means that an interface is supposed to receive
+
+00:30:46,800 --> 00:30:48,860
+all the multicast processes seen at the network.
+
+00:30:48,860 --> 00:30:53,666
+So it's not using the MC list in the native,
+
+00:30:53,666 --> 00:30:56,523
+it just copies all multicast frames to the CPU.
+
+00:30:57,360 --> 00:30:59,170
+And that solves a lot of problems
+
+00:30:59,170 --> 00:31:01,340
+because then you don't stand in the CPU
+
+00:31:01,340 --> 00:31:03,200
+and it's missing a frame and you're supposedly
+
+00:31:03,200 --> 00:31:04,513
+to have everything there.
+
+00:31:06,170 --> 00:31:10,340
+It is something that, again, it's something
+
+00:31:10,340 --> 00:31:12,770
+that normal NICs don't need to do
+
+00:31:12,770 --> 00:31:15,090
+because, when they are not operating at the bridge
+
+00:31:15,090 --> 00:31:17,750
+because in that case the bridge is,
+
+00:31:17,750 --> 00:31:21,140
+all the different software component is able to tell,
+
+00:31:21,140 --> 00:31:24,640
+I want this multicast address, I need it for this purpose.
+
+00:31:24,640 --> 00:31:26,790
+It will get registers and then eventually the driver
+
+00:31:26,790 --> 00:31:28,320
+will call the RX mode
+
+00:31:28,320 --> 00:31:30,230
+and it can set up hardware filters
+
+00:31:30,230 --> 00:31:32,020
+and only cover these multicast frames
+
+00:31:32,020 --> 00:31:34,600
+that is very much needed to the CPU.
+
+00:31:34,600 --> 00:31:38,807
+And if we are in the world where we, sorry.
+
+00:31:41,290 --> 00:31:42,130
+If we are in the world
+
+00:31:42,130 --> 00:31:44,530
+where we do not have foreign interfaces,
+
+00:31:44,530 --> 00:31:46,320
+we should actually be able to foresee
+
+00:31:46,320 --> 00:31:47,740
+what frames do we need in the CPU
+
+00:31:47,740 --> 00:31:50,280
+instead of relying on just getting everything there.
+
+00:31:50,280 --> 00:31:52,020
+Naturally, this is an optimization
+
+00:31:52,020 --> 00:31:54,720
+which only can be applied if you don't have
+
+00:31:54,720 --> 00:31:55,920
+any foreign interfaces.
+
+00:31:55,920 --> 00:31:57,940
+So if we wanted to do this
+
+00:31:58,970 --> 00:32:02,280
+we need to revert these optimizations
+
+00:32:02,280 --> 00:32:04,050
+if you add a foreign interface,
+
+00:32:04,050 --> 00:32:06,510
+in order to keep that use case running.
+
+00:32:06,510 --> 00:32:10,460
+So it's, it would be harder to do for sure.
+
+00:32:10,460 --> 00:32:13,160
+And maybe it makes sense for drivers
+
+00:32:13,160 --> 00:32:16,700
+like our that is not boarding foreign interfaces anyway.
+
+00:32:16,700 --> 00:32:20,770
+But then we need to add some more events into the kernel
+
+00:32:20,770 --> 00:32:24,043
+in order to get the right set of notifications there.
+
+00:32:26,490 --> 00:32:29,143
+But anyway, let's assume that we want to do this.
+
+00:32:29,143 --> 00:32:31,170
+I will not promise you that we will get to it,
+
+00:32:31,170 --> 00:32:32,440
+but let's assume we want to do it.
+
+00:32:32,440 --> 00:32:34,797
+Let's have a look at what actually needs to be changed
+
+00:32:34,797 --> 00:32:38,670
+in order to get this working.
+
+00:32:38,670 --> 00:32:41,970
+So the first obvious thing is
+
+00:32:41,970 --> 00:32:45,080
+that the br_dev_set_multicast_list, which is called
+
+00:32:45,080 --> 00:32:48,420
+in the rx_mode set, is an empty function.
+
+00:32:48,420 --> 00:32:51,810
+So naturally we need something to go there
+
+00:32:51,810 --> 00:32:53,950
+because we need to be able to tell
+
+00:32:53,950 --> 00:32:55,353
+whatever driver is implementing this,
+
+00:32:55,353 --> 00:32:57,010
+that now we have a new multicast
+
+00:32:57,010 --> 00:32:58,250
+that someone wants to listen at.
+
+00:32:58,250 --> 00:33:00,320
+So today we just throw away that information.
+
+00:33:00,320 --> 00:33:01,870
+We are not keeping it anywhere.
+
+00:33:02,870 --> 00:33:04,140
+No, the information is there,
+
+00:33:04,140 --> 00:33:07,653
+but the notification is not being implemented correctly.
+
+00:33:10,290 --> 00:33:11,400
+We tried to actually implement this
+
+00:33:11,400 --> 00:33:12,530
+just to play around with it,
+
+00:33:12,530 --> 00:33:15,780
+and get a feeling about how many other issues
+
+00:33:15,780 --> 00:33:16,990
+are we seeing.
+
+00:33:16,990 --> 00:33:18,380
+And the next issue we were seeing is
+
+00:33:18,380 --> 00:33:22,855
+that, yeah, most of these MAC addresses,
+
+00:33:22,855 --> 00:33:26,060
+multicast MAC addresses, that we're interested in seeing
+
+00:33:26,060 --> 00:33:27,880
+is actually coming from the subinterfaces.
+
+00:33:27,880 --> 00:33:30,280
+So they are coming from VLAN interfaces
+
+00:33:30,280 --> 00:33:32,570
+under the br0, because what we typically use
+
+00:33:32,570 --> 00:33:35,120
+a bridge tool is that we want not to connect
+
+00:33:35,120 --> 00:33:35,970
+to a physical wire,
+
+00:33:35,970 --> 00:33:39,275
+we want to connect to a Layer 2 broadcast domain.
+
+00:33:39,275 --> 00:33:41,980
+Layer 2 broadcast domain in VLAN inverse,
+
+00:33:41,980 --> 00:33:44,990
+which is typically represented by a VLAN.
+
+00:33:44,990 --> 00:33:46,400
+And that was kind of the next issue
+
+00:33:46,400 --> 00:33:51,400
+where we saw that, when you have a VLAN interface,
+
+00:33:52,110 --> 00:33:55,070
+it nicely implements the rx_mode set,
+
+00:33:55,070 --> 00:33:57,110
+but it erases all the VLAN information
+
+00:33:57,110 --> 00:33:58,730
+that it kind of needs to have.
+
+00:33:58,730 --> 00:34:02,360
+So if we wanted to do a good job in implementing
+
+00:34:02,360 --> 00:34:05,000
+the rx_mode set in the bridge device,
+
+00:34:05,000 --> 00:34:07,730
+we need to have a way to get the VLAN information
+
+00:34:07,730 --> 00:34:09,190
+from the subinterfaces,
+
+00:34:09,190 --> 00:34:10,910
+because otherwise we wouldn't know
+
+00:34:10,910 --> 00:34:12,960
+what VLAN would you be interested in?
+
+00:34:12,960 --> 00:34:14,390
+Then we could actually end up in a situation
+
+00:34:14,390 --> 00:34:16,490
+where I will be getting more traffic to the CPU
+
+00:34:16,490 --> 00:34:19,280
+than what we wanted, and that was kind of not
+
+00:34:19,280 --> 00:34:20,910
+where we wanted to go.
+
+00:34:20,910 --> 00:34:23,247
+So that also needed to be set.
+
+00:34:24,200 --> 00:34:26,240
+We fixed that with an ugly hack.
+
+00:34:26,240 --> 00:34:30,340
+We just extended the multicast list
+
+00:34:30,340 --> 00:34:32,500
+such that the VLAN interface could add useful information
+
+00:34:32,500 --> 00:34:34,230
+and everybody else had a zero.
+
+00:34:34,230 --> 00:34:36,570
+Just wanted to play around with it.
+
+00:34:36,570 --> 00:34:39,700
+And then we came to some other issues
+
+00:34:39,700 --> 00:34:43,280
+in the IDMP world that we never got to the bottom of,
+
+00:34:43,280 --> 00:34:46,000
+which is why I'm saying I'm not sure
+
+00:34:46,000 --> 00:34:47,210
+we will get to the bottom of this.
+
+00:34:47,210 --> 00:34:52,210
+At least, it requires significantly more effort to do so.
+
+00:34:53,540 --> 00:34:55,090
+Luckily, this is also what we see
+
+00:34:55,090 --> 00:34:56,930
+as the least important issue
+
+00:34:56,930 --> 00:35:00,280
+because we believe that we can actually get to a point
+
+00:35:00,280 --> 00:35:03,060
+that is good enough, if we are applying the series
+
+00:35:03,060 --> 00:35:05,080
+of other optimizations.
+
+00:35:05,080 --> 00:35:09,130
+But this is pretty much the bones of work
+
+00:35:09,130 --> 00:35:10,510
+we see that is needed
+
+00:35:10,510 --> 00:35:13,310
+if we want to get to exactly the same amount of frames
+
+00:35:13,310 --> 00:35:15,923
+copied to the CPUs in these two cases.
+
+00:35:17,480 --> 00:35:18,620
+Another funny observation
+
+00:35:18,620 --> 00:35:22,450
+is that after I did this presentation I realized,
+
+00:35:22,450 --> 00:35:24,260
+it has nothing to do with hardware.
+
+00:35:24,260 --> 00:35:26,991
+So everything I said could actually be applied
+
+00:35:26,991 --> 00:35:29,160
+to the configuration up here,
+
+00:35:29,160 --> 00:35:31,180
+where we are having an existing switch.
+
+00:35:31,180 --> 00:35:35,480
+So it doesn't matter if the hardware is different.
+
+00:35:35,480 --> 00:35:36,920
+Pretty much all these optimizations
+
+00:35:36,920 --> 00:35:38,940
+will make sense in the same context
+
+00:35:38,940 --> 00:35:39,870
+and could be useful.
+
+00:35:39,870 --> 00:35:41,590
+I was just having to be focusing
+
+00:35:41,590 --> 00:35:43,240
+on the hardware I was working on.
+
+00:35:47,610 --> 00:35:48,443
+All right.
+
+00:35:50,520 --> 00:35:53,740
+So this is the list of optimizations
+
+00:35:53,740 --> 00:35:55,150
+that I wanted to talk about.
+
+00:35:55,150 --> 00:35:59,587
+The final slide I have is just mentioning
+
+00:35:59,587 --> 00:36:01,170
+some of the next steps
+
+00:36:01,170 --> 00:36:03,903
+that we haven't done any experiments on yet,
+
+00:36:03,903 --> 00:36:08,220
+and we don't know exactly how it goes.
+
+00:36:08,220 --> 00:36:10,050
+So if you have questions for this,
+
+00:36:10,050 --> 00:36:11,650
+I think we should take it first.
+
+00:36:11,650 --> 00:36:12,780
+Otherwise I will explain to you
+
+00:36:12,780 --> 00:36:15,873
+what are the next steps in our agenda.
+
+00:36:19,670 --> 00:36:21,170
+I'll go on.
+
+00:36:21,170 --> 00:36:24,533
+You can ask later if you come up with something, of course.
+
+00:36:26,430 --> 00:36:31,430
+So if you look at the main page of the ip link
+
+00:36:31,490 --> 00:36:35,190
+and the implementation, there is a huge amount
+
+00:36:35,190 --> 00:36:39,160
+of flags that can be set through the bridge slaves
+
+00:36:39,160 --> 00:36:41,590
+in order to do all kinds of interesting stuff.
+
+00:36:41,590 --> 00:36:43,390
+So you can enable-disable flooding,
+
+00:36:43,390 --> 00:36:45,520
+you can enable-disable flooding for multicast frames,
+
+00:36:45,520 --> 00:36:48,060
+you can ask it to do learning, not do learning,
+
+00:36:48,060 --> 00:36:51,880
+you can do fdb_flush and all kinds of stuff.
+
+00:36:51,880 --> 00:36:55,800
+And all of these provinces is at the complete bridge domain.
+
+00:36:55,800 --> 00:36:58,960
+None of these operates at the VLAN domain.
+
+00:36:58,960 --> 00:37:02,803
+And we need a lot of this, but on a VLAN domain.
+
+00:37:03,742 --> 00:37:06,750
+So we would be very interested in working at trying
+
+00:37:06,750 --> 00:37:11,720
+to support many of these flags, tuning, whatever we call it
+
+00:37:11,720 --> 00:37:15,120
+to be able to apply only to a certain Port comma VLAN
+
+00:37:15,120 --> 00:37:16,313
+or just a VLAN.
+
+00:37:19,230 --> 00:37:21,900
+I'm not, I haven't followed the development of this
+
+00:37:21,900 --> 00:37:23,780
+long enough to actually have seen
+
+00:37:23,780 --> 00:37:26,200
+what were the motivations to let it go in here,
+
+00:37:26,200 --> 00:37:28,680
+but in the world I'm coming from
+
+00:37:28,680 --> 00:37:29,931
+everything is per VLAN,
+
+00:37:29,931 --> 00:37:31,820
+so we were a bit surprised to see that.
+
+00:37:31,820 --> 00:37:33,480
+That it's not, and the other thing
+
+00:37:33,480 --> 00:37:36,010
+that would be really interesting to do
+
+00:37:36,010 --> 00:37:39,678
+is to have at least that you can set the state
+
+00:37:39,678 --> 00:37:42,230
+in a Port comma VLAN mode
+
+00:37:42,230 --> 00:37:43,140
+because then you're at least,
+
+00:37:43,140 --> 00:37:45,890
+you could enable the existing userspace implementation
+
+00:37:45,890 --> 00:37:50,890
+of MSTP or maybe doing a kernel implementation of MSTP.
+
+00:37:52,020 --> 00:37:54,190
+So these are some shortcomings
+
+00:37:54,190 --> 00:37:57,730
+that would be very interesting to work on
+
+00:37:57,730 --> 00:38:01,320
+in order to support more of the use cases
+
+00:38:01,320 --> 00:38:02,373
+that we are seeing.
+
+00:38:04,040 --> 00:38:06,270
+Another effort that have slowly started
+
+00:38:06,270 --> 00:38:10,560
+is to do a kernel-level purely software-based implementation
+
+00:38:10,560 --> 00:38:15,560
+of DLR or MRP as an alternative to STP
+
+00:38:16,550 --> 00:38:17,963
+or at least a supplement.
+
+00:38:19,440 --> 00:38:23,430
+As I explained earlier, so this is some really common
+
+00:38:23,430 --> 00:38:25,730
+ring protocols that is used in this type of networks,
+
+00:38:25,730 --> 00:38:30,730
+and very important to us that all of you be very interested
+
+00:38:31,840 --> 00:38:34,390
+in working on adding those to the offscreen kernel.
+
+00:38:36,190 --> 00:38:37,350
+We have started working on it
+
+00:38:37,350 --> 00:38:40,790
+and hopefully in, I don't know, some time,
+
+00:38:40,790 --> 00:38:43,240
+I will not put any qualities on it.
+
+00:38:43,240 --> 00:38:44,700
+It depends on how things go.
+
+00:38:44,700 --> 00:38:47,660
+We will probably do some Git repository or something
+
+00:38:47,660 --> 00:38:50,610
+where we can show people what we are doing.
+
+00:38:50,610 --> 00:38:53,190
+It will take a long time until this hits states
+
+00:38:53,190 --> 00:38:55,210
+where we want to even try submitted,
+
+00:38:55,210 --> 00:38:58,910
+but we would very much like to give people an opportunity
+
+00:38:58,910 --> 00:39:00,880
+to see what are the directions we're going in,
+
+00:39:00,880 --> 00:39:04,550
+and with a bit of luck we will avoid
+
+00:39:04,550 --> 00:39:07,290
+some of the stupidest mistakes with that we could do.
+
+00:39:07,290 --> 00:39:10,870
+So this is our intent to do.
+
+00:39:10,870 --> 00:39:12,950
+And naturally when we get to a point
+
+00:39:12,950 --> 00:39:15,930
+where we have a good implementation of the software,
+
+00:39:15,930 --> 00:39:18,190
+it's some features that is extremely easy
+
+00:39:18,190 --> 00:39:19,130
+to offload in hardware
+
+00:39:19,130 --> 00:39:20,630
+because what these protocols do
+
+00:39:20,630 --> 00:39:24,700
+is they send out a test frame every whatever microseconds
+
+00:39:24,700 --> 00:39:26,610
+and they see if they receive it.
+
+00:39:26,610 --> 00:39:29,370
+And lots of hardware can actually generate these test frames
+
+00:39:29,370 --> 00:39:32,672
+on their own, and then they can erase and interrupt
+
+00:39:32,672 --> 00:39:36,950
+if the receiver detects that now a certain amount of time
+
+00:39:36,950 --> 00:39:40,133
+has passed and I have not seen two in a row, or something.
+
+00:39:41,120 --> 00:39:45,700
+And then that is kind of how these protocols are working.
+
+00:39:45,700 --> 00:39:48,370
+And there's a lot of details
+
+00:39:48,370 --> 00:39:52,060
+and weird state machines running that needs to addressed,
+
+00:39:52,060 --> 00:39:54,010
+so it's not like it's a simple implementation,
+
+00:39:54,010 --> 00:39:57,703
+but the overall concept is pretty simple to understand.
+
+00:39:59,590 --> 00:40:02,733
+Yeah, and MSTP I spoke about already.
+
+00:40:04,890 --> 00:40:06,260
+That's what I prepared for you.
+
+00:40:06,260 --> 00:40:07,253
+Any questions?
+
+00:40:08,480 --> 00:40:09,630
+- [Host] Any questions?
+
+00:40:10,496 --> 00:40:12,393
+About SwitchDev offloads.
+
+00:40:23,100 --> 00:40:25,050
+- I have a question, when you were talking about protocols,
+
+00:40:25,050 --> 00:40:29,490
+what about other protocols like LLDP offload.
+
+00:40:29,490 --> 00:40:31,630
+Because we have some ports now
+
+00:40:31,630 --> 00:40:35,663
+in the shell terminated that port, or.
+
+00:40:36,920 --> 00:40:38,549
+- Link Layer Discovery Protocol?
+
+00:40:38,549 --> 00:40:39,580
+- [Man] Yeah.
+
+00:40:39,580 --> 00:40:41,290
+- So, I think it's too low bandwidth
+
+00:40:41,290 --> 00:40:43,150
+to be worth it, to be honest.
+
+00:40:43,150 --> 00:40:47,623
+So it's a long time since I looked at the LLDPs.
+
+00:40:47,623 --> 00:40:48,620
+- [Man] But it's something that's running--
+
+00:40:48,620 --> 00:40:50,281
+- Pretty much once a second.
+
+00:40:50,281 --> 00:40:52,800
+- [Man] Yeah, it should be around
+
+00:40:52,800 --> 00:40:54,670
+every half a second or second.
+
+00:40:54,670 --> 00:40:57,040
+So you are talking here only about protocol
+
+00:40:57,040 --> 00:41:01,240
+which will add some performance by offloading them?
+
+00:41:01,240 --> 00:41:04,350
+- Yeah, so, hmm yeah.
+
+00:41:04,350 --> 00:41:08,330
+So the main motivation in order to do kernel-based protocols
+
+00:41:08,330 --> 00:41:09,723
+is that there's no,
+
+00:41:10,779 --> 00:41:12,720
+userspace will have a hard time doing the same.
+
+00:41:12,720 --> 00:41:14,340
+So that is kind of the first criteria.
+
+00:41:14,340 --> 00:41:16,810
+I don't want to do a kernel-based implementation
+
+00:41:16,810 --> 00:41:18,430
+of LLDP, it would be a nightmare
+
+00:41:18,430 --> 00:41:22,450
+in order to add a new TLV every time someone wants to do it.
+
+00:41:22,450 --> 00:41:24,770
+And userspace can probably do just as good a job
+
+00:41:24,770 --> 00:41:27,470
+because it needs to inject a frame every, I cannot remember,
+
+00:41:27,470 --> 00:41:29,250
+let's say every something
+
+00:41:29,250 --> 00:41:31,580
+between 100 milliseconds and a second
+
+00:41:31,580 --> 00:41:35,893
+and even with the slow CPUs that I'm working on
+
+00:41:35,893 --> 00:41:40,893
+I don't think I will see any real benefit in it.
+
+00:41:41,000 --> 00:41:43,863
+The reason why we are seeing it in MRP and DLR
+
+00:41:44,702 --> 00:41:49,490
+is that I think the goal is to do complete failover
+
+00:41:49,490 --> 00:41:51,640
+in less than a millisecond
+
+00:41:51,640 --> 00:41:54,903
+and in order to do this you need to inject or test frames
+
+00:41:54,903 --> 00:41:58,270
+in something like 100 microseconds into those.
+
+00:41:58,270 --> 00:42:00,400
+And then that's a lot.
+
+00:42:00,400 --> 00:42:03,180
+And then consider if you want to do a slightly bigger switch
+
+00:42:03,180 --> 00:42:06,560
+where you're serving, maybe you're serving 24 rings
+
+00:42:06,560 --> 00:42:08,650
+and then a 48-ported switch.
+
+00:42:08,650 --> 00:42:11,560
+Then it's times 24, the amount of packages
+
+00:42:11,560 --> 00:42:14,310
+you need to inject, and then it really starts to matter.
+
+00:42:14,310 --> 00:42:18,030
+So this is pretty much where we see the effort.
+
+00:42:18,030 --> 00:42:20,440
+Another place where you could apply this optimization,
+
+00:42:20,440 --> 00:42:25,310
+which we're doing in, so aside from doing a SwichDev driver
+
+00:42:25,310 --> 00:42:28,160
+we are also doing an MIT-based library
+
+00:42:28,160 --> 00:42:30,430
+in order to enable our switches to VxWorks
+
+00:42:30,430 --> 00:42:31,830
+and other customers.
+
+00:42:31,830 --> 00:42:33,420
+And it also has a lot of facilities
+
+00:42:33,420 --> 00:42:34,920
+to do it for PTP sync frames
+
+00:42:34,920 --> 00:42:37,790
+because if you happen to implement PTP in a switch,
+
+00:42:37,790 --> 00:42:40,463
+you need to send out a lot of these sync frames.
+
+00:42:41,820 --> 00:42:44,760
+And for that we have hardware that can do offloads
+
+00:42:44,760 --> 00:42:46,810
+but are not doing it.
+
+00:42:46,810 --> 00:42:49,700
+And the final place where at least we in Microchip
+
+00:42:49,700 --> 00:42:52,650
+are doing hardware offload, is in the OEM world
+
+00:42:52,650 --> 00:42:55,260
+where you are doing continuously monitored situation
+
+00:42:55,260 --> 00:42:57,730
+at interfaces and you're doing hardware-based tests.
+
+00:42:57,730 --> 00:43:00,720
+And for that we also have a lot of hardware.
+
+00:43:00,720 --> 00:43:03,380
+But this is for a different set of switches than this one,
+
+00:43:03,380 --> 00:43:07,033
+so that the PTP is used here but the OEM is not.
+
+00:43:08,581 --> 00:43:12,203
+LLDP, I think it's too much effort to gain too little.
+
+00:43:17,600 --> 00:43:19,050
+- [Host] Any other questions?
+
+00:43:20,770 --> 00:43:22,344
+All right, thank you Allan, very much.
+
+00:43:22,344 --> 00:43:23,177
+- Thank you.
+
+00:43:23,177 --> 00:43:24,624
+
+YouTube URL: https://www.youtube.com/watch?v=B1HhxEcU7Jg
+
+

@@ -1,0 +1,1181 @@
+Title: RAM is Getting More Complex by Dr. David Alan Gilbert
+Publication date: 2018-11-17
+Playlist: KVM Forum 2018
+Description: 
+	QEMU models 'RAMBlocks' which used to mostly actually be RAM or ROM; over time they've slowly got more complex. We've got huge pages, non volatile storage, devices, shared memory.
+I'll talk about the different types, and talk about some of the problems they can cause from migrations point of view.
+
+---
+
+Dr. David Alan Gilbert
+Principal Software Engineer
+Red Hat Limited
+
+I work on Red Hat's QEMU/KVM team on live migration. I've previously spoken at KVM Forum on how to avoid migration failures, and with Andrea Arcangeli on Postcopy migration.
+Captions: 
+	00:00:01,040 --> 00:00:11,130
+[Music]
+
+00:00:06,529 --> 00:00:14,630
+okay good afternoon my name is Dave
+
+00:00:11,130 --> 00:00:18,600
+Gilbert the wolf Red Hat's KVM team
+
+00:00:14,630 --> 00:00:23,640
+mostly migration today I'm going to talk
+
+00:00:18,600 --> 00:00:26,220
+about various aspects of RAM and just a
+
+00:00:23,640 --> 00:00:30,060
+few complexities that I've spotted as
+
+00:00:26,220 --> 00:00:32,219
+people are changing things and for those
+
+00:00:30,060 --> 00:00:36,149
+who are interested that's a one Meg run
+
+00:00:32,219 --> 00:00:42,390
+board from a 1982 UNIX workstation the
+
+00:00:36,149 --> 00:00:44,700
+ICL perk there quite a few things to
+
+00:00:42,390 --> 00:00:47,910
+talk about it's really a tour of
+
+00:00:44,700 --> 00:00:51,300
+structure corner cases and things to
+
+00:00:47,910 --> 00:00:53,699
+think about while adding new types of
+
+00:00:51,300 --> 00:00:57,870
+memory or interacting with the lists of
+
+00:00:53,699 --> 00:00:58,739
+memory and qmu and I'm not going to
+
+00:00:57,870 --> 00:01:01,320
+mention hot-plug
+
+00:00:58,739 --> 00:01:04,379
+and you can stick around for Natasha's
+
+00:01:01,320 --> 00:01:10,470
+talk and David's talk on vertigo men
+
+00:01:04,379 --> 00:01:12,180
+that are after this so let's start off
+
+00:01:10,470 --> 00:01:14,880
+with what types of memory do we have
+
+00:01:12,180 --> 00:01:19,049
+well obviously we've got one that's the
+
+00:01:14,880 --> 00:01:22,490
+easy bit we've got one we've got device
+
+00:01:19,049 --> 00:01:26,280
+memory so ramming devices like video ROM
+
+00:01:22,490 --> 00:01:28,500
+and they may have things like alignment
+
+00:01:26,280 --> 00:01:31,350
+or caching balls associated with them
+
+00:01:28,500 --> 00:01:35,840
+and then we've got device memory in
+
+00:01:31,350 --> 00:01:35,840
+emulated devices and in real devices
+
+00:01:35,960 --> 00:01:42,210
+we've got flash devices that mostly
+
+00:01:39,600 --> 00:01:44,100
+behave like warm except they've got
+
+00:01:42,210 --> 00:01:48,090
+special tricks that allow you to write
+
+00:01:44,100 --> 00:01:50,970
+to them behind the back and then we've
+
+00:01:48,090 --> 00:01:57,180
+got persistent memory which he's kind of
+
+00:01:50,970 --> 00:01:59,399
+like ROM but we'll get onto it and then
+
+00:01:57,180 --> 00:02:02,340
+we've got the types of memory as seen by
+
+00:01:59,399 --> 00:02:06,360
+the host well most things are normal and
+
+00:02:02,340 --> 00:02:09,599
+mapped anonymous memory but your memory
+
+00:02:06,360 --> 00:02:12,239
+might be backed by a files and in good
+
+00:02:09,599 --> 00:02:13,800
+old UNIX fashion a file can hide many
+
+00:02:12,239 --> 00:02:15,660
+things
+
+00:02:13,800 --> 00:02:20,310
+it could be real file which is pretty
+
+00:02:15,660 --> 00:02:23,760
+rare it could be an SH em FS temp of
+
+00:02:20,310 --> 00:02:28,500
+hezron file system fairly commonly it's
+
+00:02:23,760 --> 00:02:30,620
+UT o BFS backed pages it could be
+
+00:02:28,500 --> 00:02:32,760
+physical persistent memory on the host
+
+00:02:30,620 --> 00:02:36,630
+there's lots of different things that
+
+00:02:32,760 --> 00:02:38,940
+your guest room could be backed by one
+
+00:02:36,630 --> 00:02:41,550
+thing to know that guest roms like the
+
+00:02:38,940 --> 00:02:44,310
+BIOS are actually normally anonymous
+
+00:02:41,550 --> 00:02:49,550
+memory loaded from the file so they're
+
+00:02:44,310 --> 00:02:49,550
+not actually just an M mapped BIOS wall
+
+00:02:50,210 --> 00:02:57,540
+to tie this down to what people are a
+
+00:02:53,400 --> 00:03:00,690
+bit used to here is some normal easy to
+
+00:02:57,540 --> 00:03:04,890
+read q mu command lines so let's start
+
+00:03:00,690 --> 00:03:06,690
+at the top good old fashioned - m4 g4
+
+00:03:04,890 --> 00:03:07,290
+gig of ram thank you that's anonymous
+
+00:03:06,690 --> 00:03:10,980
+memory
+
+00:03:07,290 --> 00:03:14,580
+nice and simple moving down one we've
+
+00:03:10,980 --> 00:03:17,190
+got four gig of ram with three slots
+
+00:03:14,580 --> 00:03:20,520
+that we can ha plug stuff into to a
+
+00:03:17,190 --> 00:03:23,040
+total of maximum of one T of RAM and the
+
+00:03:20,520 --> 00:03:26,239
+maximum influences other things in the
+
+00:03:23,040 --> 00:03:31,100
+BIOS and the layout such as where
+
+00:03:26,239 --> 00:03:31,100
+physical PCI devices go
+
+00:03:31,410 --> 00:03:37,800
+then we've got mem path which is an old
+
+00:03:34,530 --> 00:03:39,870
+Q mu command-line option which you may
+
+00:03:37,800 --> 00:03:43,620
+want to avoid because of what I'm about
+
+00:03:39,870 --> 00:03:46,440
+to tell you - men path debuted pages
+
+00:03:43,620 --> 00:03:50,239
+will try and allocate your normal - M
+
+00:03:46,440 --> 00:03:53,730
+memory in a file in the given directory
+
+00:03:50,239 --> 00:03:58,230
+or in if you give it a file actually in
+
+00:03:53,730 --> 00:04:02,040
+that file if that file doesn't have the
+
+00:03:58,230 --> 00:04:04,140
+space in it it will silently or almost
+
+00:04:02,040 --> 00:04:06,660
+silently fall back to putting it in
+
+00:04:04,140 --> 00:04:08,430
+normal anonymous memory so if you were
+
+00:04:06,660 --> 00:04:09,840
+really dependent on it being in huge
+
+00:04:08,430 --> 00:04:12,840
+pages
+
+00:04:09,840 --> 00:04:15,720
+- Memphis is a bad idea unless you're
+
+00:04:12,840 --> 00:04:19,709
+using mem free a lock which forces
+
+00:04:15,720 --> 00:04:21,450
+allocation at the start of day well ok
+
+00:04:19,709 --> 00:04:25,590
+those were the short command lines so
+
+00:04:21,450 --> 00:04:27,660
+let's move up a level what we've got on
+
+00:04:25,590 --> 00:04:32,490
+the next one down
+
+00:04:27,660 --> 00:04:35,250
+is we've got a gig of ram I'm now with
+
+00:04:32,490 --> 00:04:38,160
+us for a memory back end file object and
+
+00:04:35,250 --> 00:04:40,590
+we've told it we want memory that's
+
+00:04:38,160 --> 00:04:43,320
+definitely in debute pages and memory
+
+00:04:40,590 --> 00:04:46,710
+back and file will fail if it can't get
+
+00:04:43,320 --> 00:04:50,640
+it of eight gig and we want to connect
+
+00:04:46,710 --> 00:04:52,710
+this back-end file object to it a Numa
+
+00:04:50,640 --> 00:04:56,400
+note and you see that we've connected
+
+00:04:52,710 --> 00:05:02,670
+the ID man on the - object to the mem
+
+00:04:56,400 --> 00:05:06,210
+Devi calls on the - Numa note and same
+
+00:05:02,670 --> 00:05:08,070
+type of thing going up one level instead
+
+00:05:06,210 --> 00:05:10,050
+of connecting it to an uma node what
+
+00:05:08,070 --> 00:05:14,040
+we've done on next line is we've created
+
+00:05:10,050 --> 00:05:18,270
+a pea seed in which we've connected the
+
+00:05:14,040 --> 00:05:21,840
+RAM - and you'll often see this used for
+
+00:05:18,270 --> 00:05:25,680
+hop logging ram into a system that you
+
+00:05:21,840 --> 00:05:29,600
+previously started with slots equals and
+
+00:05:25,680 --> 00:05:32,130
+the final one is basically the same
+
+00:05:29,600 --> 00:05:35,670
+except that what we've used here is
+
+00:05:32,130 --> 00:05:37,020
+device and read in to say that the guest
+
+00:05:35,670 --> 00:05:41,130
+is going to think that it's got a
+
+00:05:37,020 --> 00:05:43,040
+non-volatile dim in it and we've also
+
+00:05:41,130 --> 00:05:46,020
+used memory back and file in that case
+
+00:05:43,040 --> 00:05:51,180
+one thing to watch out for is that the
+
+00:05:46,020 --> 00:05:54,510
+ID fields in those objects present
+
+00:05:51,180 --> 00:05:56,970
+themselves in to the migration stream so
+
+00:05:54,510 --> 00:05:59,790
+you can't just assume they're convenient
+
+00:05:56,970 --> 00:06:01,080
+IDs that are used by the management
+
+00:05:59,790 --> 00:06:07,820
+layer they're actually visible in the
+
+00:06:01,080 --> 00:06:10,950
+migration stream now this is showing the
+
+00:06:07,820 --> 00:06:15,750
+structure of some of the data structures
+
+00:06:10,950 --> 00:06:18,150
+in qmu related to memory we're about you
+
+00:06:15,750 --> 00:06:21,360
+work on these structures depends on the
+
+00:06:18,150 --> 00:06:25,260
+type of thing you deal with over this
+
+00:06:21,360 --> 00:06:28,169
+side we have the creme you processes
+
+00:06:25,260 --> 00:06:30,270
+virtual address base hva and on this
+
+00:06:28,169 --> 00:06:33,960
+side we have guest physical addresses
+
+00:06:30,270 --> 00:06:36,300
+and I tend to work over there in
+
+00:06:33,960 --> 00:06:40,289
+migration I mostly think about run
+
+00:06:36,300 --> 00:06:41,550
+blocks run blocks represent a single
+
+00:06:40,289 --> 00:06:45,389
+malloc to them
+
+00:06:41,550 --> 00:06:47,819
+chunk of memory they are then connected
+
+00:06:45,389 --> 00:06:51,180
+up via memory regions a tree of memory
+
+00:06:47,819 --> 00:06:54,810
+regions which form an address space that
+
+00:06:51,180 --> 00:06:57,150
+the guest sees it's actually a more of a
+
+00:06:54,810 --> 00:06:59,550
+forest of memory region so you could
+
+00:06:57,150 --> 00:07:01,949
+have a memory region that's visible to
+
+00:06:59,550 --> 00:07:03,990
+the processor a memory region that might
+
+00:07:01,949 --> 00:07:09,440
+represent privileged address space
+
+00:07:03,990 --> 00:07:12,210
+another one visible to i/o space etc and
+
+00:07:09,440 --> 00:07:16,139
+you've also noticed that there's a
+
+00:07:12,210 --> 00:07:17,970
+variation in that in the examples we had
+
+00:07:16,139 --> 00:07:20,460
+on the previous slide where we used
+
+00:07:17,970 --> 00:07:22,590
+memory back and files these memory
+
+00:07:20,460 --> 00:07:26,099
+regions are connected to hosts memory
+
+00:07:22,590 --> 00:07:28,530
+back-end and front-end devices like PC
+
+00:07:26,099 --> 00:07:33,690
+dim again not everything is connected
+
+00:07:28,530 --> 00:07:36,990
+like that and memory regions can form
+
+00:07:33,690 --> 00:07:41,190
+aliases and combinations and all of the
+
+00:07:36,990 --> 00:07:43,500
+nasty things that you find in typical PC
+
+00:07:41,190 --> 00:07:46,020
+odd memory layouts and they can also
+
+00:07:43,500 --> 00:07:48,630
+dynamically change so you can get some
+
+00:07:46,020 --> 00:07:51,240
+evil pieces of hardware where you write
+
+00:07:48,630 --> 00:07:53,550
+to a register and it remaps your memory
+
+00:07:51,240 --> 00:07:58,860
+and you'll find that memory regions are
+
+00:07:53,550 --> 00:08:01,469
+created and destroyed persistent memory
+
+00:07:58,860 --> 00:08:04,259
+P map this is something which is pretty
+
+00:08:01,469 --> 00:08:06,659
+new persistent memory is memory that
+
+00:08:04,259 --> 00:08:09,750
+doesn't lose its state after you to a
+
+00:08:06,659 --> 00:08:14,279
+new power loss and is now something that
+
+00:08:09,750 --> 00:08:16,259
+you can buy and these NV dim devices
+
+00:08:14,279 --> 00:08:19,620
+which typically your persistent memory
+
+00:08:16,259 --> 00:08:22,139
+appears in have various rules applied to
+
+00:08:19,620 --> 00:08:24,419
+them about how you can access them they
+
+00:08:22,139 --> 00:08:26,729
+have rules on consistency to ensure that
+
+00:08:24,419 --> 00:08:29,159
+rights that have been made to the memory
+
+00:08:26,729 --> 00:08:32,099
+actually end up in the persistent memory
+
+00:08:29,159 --> 00:08:38,909
+if you were to pull the power or to
+
+00:08:32,099 --> 00:08:40,649
+reboot or something and they these tend
+
+00:08:38,909 --> 00:08:44,459
+to go through a library could let P mem
+
+00:08:40,649 --> 00:08:46,560
+and Q mu has to call that in certain
+
+00:08:44,459 --> 00:08:49,020
+cases where it accesses the memory undo
+
+00:08:46,560 --> 00:08:51,480
+its own steam for example when it does
+
+00:08:49,020 --> 00:08:54,140
+migration and writes a lot of data into
+
+00:08:51,480 --> 00:08:54,140
+memory
+
+00:08:54,870 --> 00:09:03,960
+the we can use host persistent memory we
+
+00:09:01,440 --> 00:09:07,589
+can expose persistent memory to a guest
+
+00:09:03,960 --> 00:09:09,690
+as a non-volatile den and those two
+
+00:09:07,589 --> 00:09:13,680
+operations are actually fairly
+
+00:09:09,690 --> 00:09:16,350
+independent so you can have persistent
+
+00:09:13,680 --> 00:09:19,350
+memory on the host which you just give
+
+00:09:16,350 --> 00:09:24,000
+to the guest as slightly slower normal
+
+00:09:19,350 --> 00:09:27,420
+memory you can emulate a non-volatile
+
+00:09:24,000 --> 00:09:30,750
+demoscene by the guest using normal host
+
+00:09:27,420 --> 00:09:33,570
+rom or you can do the same thing and
+
+00:09:30,750 --> 00:09:39,089
+give host persistent memory to the guest
+
+00:09:33,570 --> 00:09:40,620
+as a persistent and reading so there's
+
+00:09:39,089 --> 00:09:42,750
+all of those combinations and the
+
+00:09:40,620 --> 00:09:46,050
+various flags such as the flag on the
+
+00:09:42,750 --> 00:09:49,050
+run block to say that this is a
+
+00:09:46,050 --> 00:09:52,950
+persistent block and one of the problems
+
+00:09:49,050 --> 00:09:55,140
+that we get to is what you want to do in
+
+00:09:52,950 --> 00:09:58,140
+some cases with a block of run depend
+
+00:09:55,140 --> 00:10:00,390
+why you're using it have I used that
+
+00:09:58,140 --> 00:10:03,990
+persistent block of memory just a
+
+00:10:00,390 --> 00:10:07,260
+semester around or is it a file system I
+
+00:10:03,990 --> 00:10:09,690
+don't want to clear a file system but if
+
+00:10:07,260 --> 00:10:13,320
+I'm using just an extra block of memory
+
+00:10:09,690 --> 00:10:17,550
+I might want to clear it at boot which
+
+00:10:13,320 --> 00:10:20,310
+brings me onto all of ram and memory so
+
+00:10:17,550 --> 00:10:22,290
+when you do something and you're about
+
+00:10:20,310 --> 00:10:26,040
+to write something that is going to say
+
+00:10:22,290 --> 00:10:29,339
+clear all of memory do you mean all RAM
+
+00:10:26,040 --> 00:10:31,529
+blocks do you mean all run that's guest
+
+00:10:29,339 --> 00:10:33,480
+visible since not all run blocks are
+
+00:10:31,529 --> 00:10:37,380
+guest visible some of them contain
+
+00:10:33,480 --> 00:10:40,260
+things like a CPI tables do you mean all
+
+00:10:37,380 --> 00:10:43,680
+of wall address space do you want to
+
+00:10:40,260 --> 00:10:46,080
+include the persistent memory and based
+
+00:10:43,680 --> 00:10:50,510
+on what do you want to clear the roms
+
+00:10:46,080 --> 00:10:53,640
+and what about P flush like EF eyes
+
+00:10:50,510 --> 00:10:56,610
+variable flushes and what about video
+
+00:10:53,640 --> 00:10:59,610
+grab so whenever we talk about doing
+
+00:10:56,610 --> 00:11:01,920
+something to all of memory we have to
+
+00:10:59,610 --> 00:11:04,110
+think carefully about why we want to do
+
+00:11:01,920 --> 00:11:06,329
+something to all of memory and then
+
+00:11:04,110 --> 00:11:07,290
+decide which ones we actually want to do
+
+00:11:06,329 --> 00:11:09,060
+it to
+
+00:11:07,290 --> 00:11:12,240
+this was recently brought home by
+
+00:11:09,060 --> 00:11:15,860
+there's a series that in combination to
+
+00:11:12,240 --> 00:11:18,210
+with TPMS clears memory at boot and
+
+00:11:15,860 --> 00:11:22,190
+persistent memory in particular worries
+
+00:11:18,210 --> 00:11:22,190
+me that we might nuke a file system
+
+00:11:22,880 --> 00:11:28,110
+similarly it comes up in migration and
+
+00:11:26,310 --> 00:11:34,770
+it comes up when you ask for memory
+
+00:11:28,110 --> 00:11:37,860
+dumps and if you're doing this if you're
+
+00:11:34,770 --> 00:11:40,710
+walking all the memory we've got a run
+
+00:11:37,860 --> 00:11:44,070
+list which allows you to walk all of the
+
+00:11:40,710 --> 00:11:45,720
+run blocks and that'll include run
+
+00:11:44,070 --> 00:11:48,930
+blocks that aren't currently mapped into
+
+00:11:45,720 --> 00:11:51,840
+guest memory with run block for each and
+
+00:11:48,930 --> 00:11:53,760
+créme you run for each you can check
+
+00:11:51,840 --> 00:11:57,270
+blocks on run blocks like whether
+
+00:11:53,760 --> 00:11:58,860
+they're shared memory or migrate able or
+
+00:11:57,270 --> 00:12:02,940
+you might go the other way you can walk
+
+00:11:58,860 --> 00:12:04,830
+a memory region and walk all of the
+
+00:12:02,940 --> 00:12:09,330
+address space associated with a memory
+
+00:12:04,830 --> 00:12:13,050
+region you could also walk all of the PC
+
+00:12:09,330 --> 00:12:17,400
+dims by walking all objects or PC dim
+
+00:12:13,050 --> 00:12:19,980
+type and some of this should get better
+
+00:12:17,400 --> 00:12:22,890
+with the move towards the concept of
+
+00:12:19,980 --> 00:12:25,350
+memory devices which I think the aim is
+
+00:12:22,890 --> 00:12:27,570
+to make most a memory belong to a memory
+
+00:12:25,350 --> 00:12:29,430
+device and then has to be easier to see
+
+00:12:27,570 --> 00:12:32,940
+what's going on but there's too much
+
+00:12:29,430 --> 00:12:35,850
+variation because not every one block is
+
+00:12:32,940 --> 00:12:37,680
+associated with a memory region not MB
+
+00:12:35,850 --> 00:12:46,550
+memory region is associated with a
+
+00:12:37,680 --> 00:12:51,180
+back-end or front-end another common
+
+00:12:46,550 --> 00:12:55,590
+problem or complexity is huge pages huge
+
+00:12:51,180 --> 00:12:58,880
+pages or a system where a single TLB
+
+00:12:55,590 --> 00:13:02,220
+entry or page entry on in the TLB
+
+00:12:58,880 --> 00:13:05,820
+represents more than your typical 4k
+
+00:13:02,220 --> 00:13:08,960
+page so typically on x86 you have two
+
+00:13:05,820 --> 00:13:11,190
+Meg and I think one gigabyte you'd pages
+
+00:13:08,960 --> 00:13:16,680
+different architectures have different
+
+00:13:11,190 --> 00:13:18,100
+sizes and there were interesting mixes
+
+00:13:16,680 --> 00:13:20,130
+and rules
+
+00:13:18,100 --> 00:13:23,290
+all of which were architecture dependent
+
+00:13:20,130 --> 00:13:26,410
+and so on x86 you can mix and match
+
+00:13:23,290 --> 00:13:29,470
+however you like um you can map its
+
+00:13:26,410 --> 00:13:32,440
+memory as for K pages but the guest
+
+00:13:29,470 --> 00:13:35,290
+inside it can have four K and 2 Meg
+
+00:13:32,440 --> 00:13:37,480
+you'd pages for example similarly you
+
+00:13:35,290 --> 00:13:42,389
+can have the opposite you could have a
+
+00:13:37,480 --> 00:13:45,790
+query that has two Meg pages mapping its
+
+00:13:42,389 --> 00:13:47,860
+memory and inside the guest of course
+
+00:13:45,790 --> 00:13:50,949
+the guest still needs to be able to load
+
+00:13:47,860 --> 00:13:52,899
+normal executables so it has four K
+
+00:13:50,949 --> 00:13:57,100
+pages and Inc can also have its to make
+
+00:13:52,899 --> 00:13:59,740
+pages so when somebody says i bench
+
+00:13:57,100 --> 00:14:01,750
+marked it with you to pages did they
+
+00:13:59,740 --> 00:14:04,750
+mean they benchmarked it in the guest
+
+00:14:01,750 --> 00:14:08,740
+telling the guests to use huge pages did
+
+00:14:04,750 --> 00:14:15,970
+the sec um you were backed by you TLB FS
+
+00:14:08,740 --> 00:14:20,110
+or what and there were some fun
+
+00:14:15,970 --> 00:14:24,240
+interactions with migration so on x86 if
+
+00:14:20,110 --> 00:14:28,300
+you write a single byte into a huge page
+
+00:14:24,240 --> 00:14:30,639
+it will only dirty a single 4k page as
+
+00:14:28,300 --> 00:14:34,480
+seen by the migration count which is
+
+00:14:30,639 --> 00:14:36,310
+great if you do that on many of the
+
+00:14:34,480 --> 00:14:39,339
+other architectures writing that one
+
+00:14:36,310 --> 00:14:42,850
+bite into that huge page dirty is a 2
+
+00:14:39,339 --> 00:14:44,439
+mega a wonky chunk and that means that's
+
+00:14:42,850 --> 00:14:46,740
+something that's just occasionally
+
+00:14:44,439 --> 00:14:49,240
+flicking a page while your guest is idle
+
+00:14:46,740 --> 00:14:51,850
+means that you can you eat all of your
+
+00:14:49,240 --> 00:15:00,040
+migration bandwidth with no effort at
+
+00:14:51,850 --> 00:15:02,970
+all the other relatively new thing is
+
+00:15:00,040 --> 00:15:08,410
+that a run block can be marked as shared
+
+00:15:02,970 --> 00:15:11,800
+now the sharing is the EM map shared
+
+00:15:08,410 --> 00:15:14,050
+flag as opposed to private and the
+
+00:15:11,800 --> 00:15:17,500
+typical thing you do with that is then
+
+00:15:14,050 --> 00:15:21,370
+map it into some external black box
+
+00:15:17,500 --> 00:15:27,760
+another process and the typical use is a
+
+00:15:21,370 --> 00:15:30,220
+V host user process and that V host user
+
+00:15:27,760 --> 00:15:32,030
+process can then read and write the
+
+00:15:30,220 --> 00:15:35,120
+memory just as the cue em
+
+00:15:32,030 --> 00:15:37,040
+you is doing but the qmu doesn't
+
+00:15:35,120 --> 00:15:38,930
+actually have any way of keeping track
+
+00:15:37,040 --> 00:15:40,780
+of which other processes have actually
+
+00:15:38,930 --> 00:15:42,980
+mapped into that block of memory
+
+00:15:40,780 --> 00:15:47,810
+especially if it was passed by a
+
+00:15:42,980 --> 00:15:50,690
+firewall so qmu needs some help in dirty
+
+00:15:47,810 --> 00:15:54,160
+tracking and things like that and v host
+
+00:15:50,690 --> 00:16:01,580
+user explicitly provides dirty
+
+00:15:54,160 --> 00:16:04,670
+synchronization and as some of the talks
+
+00:16:01,580 --> 00:16:07,430
+from was that today i think it was today
+
+00:16:04,670 --> 00:16:10,070
+does encrypted memory on its way and
+
+00:16:07,430 --> 00:16:13,190
+even encrypted memory for example in the
+
+00:16:10,070 --> 00:16:17,690
+AMD said most of the guest memory is
+
+00:16:13,190 --> 00:16:19,040
+encrypted so guest memory can't be
+
+00:16:17,690 --> 00:16:21,500
+usefully dumped
+
+00:16:19,040 --> 00:16:25,280
+except when debug plugs are turned on
+
+00:16:21,500 --> 00:16:28,040
+and whenever you do i/o there has to be
+
+00:16:25,280 --> 00:16:30,710
+special operations for by the guest to
+
+00:16:28,040 --> 00:16:33,410
+let certain parts of memory be visible
+
+00:16:30,710 --> 00:16:36,200
+and then there were special mechanisms
+
+00:16:33,410 --> 00:16:38,060
+when the bios is initially loaded to
+
+00:16:36,200 --> 00:16:42,020
+load the bios and measure it at the
+
+00:16:38,060 --> 00:16:44,120
+start of the boot process and i think
+
+00:16:42,020 --> 00:16:46,610
+AMD's ICV is just one of a few
+
+00:16:44,120 --> 00:16:50,170
+encryption things that are coming all of
+
+00:16:46,610 --> 00:16:50,170
+which are interestingly different
+
+00:16:50,740 --> 00:16:59,330
+migration I already mentioned huge pages
+
+00:16:56,770 --> 00:17:02,360
+migration works with a set of dirty
+
+00:16:59,330 --> 00:17:05,960
+flags so that it repeatedly transmits a
+
+00:17:02,360 --> 00:17:07,880
+block of memory which has changed and
+
+00:17:05,960 --> 00:17:10,820
+that granularity is it I think or the
+
+00:17:07,880 --> 00:17:14,230
+target page granularity that may or may
+
+00:17:10,820 --> 00:17:17,420
+not be the same as the host page size
+
+00:17:14,230 --> 00:17:20,870
+the naming of run blocks is part of the
+
+00:17:17,420 --> 00:17:26,060
+migration stream if they change for
+
+00:17:20,870 --> 00:17:28,250
+example the because the one the memory
+
+00:17:26,060 --> 00:17:31,250
+front-end you used has a different one
+
+00:17:28,250 --> 00:17:33,680
+block naming scheme then the migration
+
+00:17:31,250 --> 00:17:37,040
+stream will be incompatible even though
+
+00:17:33,680 --> 00:17:38,990
+you apparently have the same memory you
+
+00:17:37,040 --> 00:17:41,810
+can also have a couple of augments like
+
+00:17:38,990 --> 00:17:45,600
+unnamed run blocks for example if you
+
+00:17:41,810 --> 00:17:47,970
+create a memory object but
+
+00:17:45,600 --> 00:17:51,539
+don't connect it to Adam or a Newman old
+
+00:17:47,970 --> 00:17:55,200
+it's unnamed and that ends up as on my
+
+00:17:51,539 --> 00:17:58,640
+great ball post copy can only support
+
+00:17:55,200 --> 00:18:01,049
+certain types of memory that are
+
+00:17:58,640 --> 00:18:06,620
+supported by the kernel um that could be
+
+00:18:01,049 --> 00:18:06,620
+freed and monitored using user fault
+
+00:18:07,429 --> 00:18:14,820
+here's a set of HMP commands I'm running
+
+00:18:11,250 --> 00:18:16,830
+out of time so I just put out info run
+
+00:18:14,820 --> 00:18:19,740
+block you could get the name you could
+
+00:18:16,830 --> 00:18:23,580
+get the sizes and page sizes entries
+
+00:18:19,740 --> 00:18:26,429
+showing you the set of memory memory
+
+00:18:23,580 --> 00:18:28,080
+regions that come together and then
+
+00:18:26,429 --> 00:18:30,990
+you've got mem dev and memory devices
+
+00:18:28,080 --> 00:18:33,690
+that are confusing there's anything to
+
+00:18:30,990 --> 00:18:35,100
+show the back ends and front ends that
+
+00:18:33,690 --> 00:18:39,570
+you've got and these are all pretty
+
+00:18:35,100 --> 00:18:41,909
+useful for start a Q mu which you think
+
+00:18:39,570 --> 00:18:46,500
+you know the config of and just check to
+
+00:18:41,909 --> 00:18:51,750
+see what you really have as shown by the
+
+00:18:46,500 --> 00:18:54,570
+system and really what I wanted to point
+
+00:18:51,750 --> 00:18:56,970
+out oh there's no lots of special cases
+
+00:18:54,570 --> 00:18:59,760
+I didn't want to go into the detail of
+
+00:18:56,970 --> 00:19:04,049
+anyone in particular but whenever you're
+
+00:18:59,760 --> 00:19:06,750
+working through all of memory or you're
+
+00:19:04,049 --> 00:19:09,360
+adding a new type of memory or changing
+
+00:19:06,750 --> 00:19:11,190
+the way memory is allocated just think
+
+00:19:09,360 --> 00:19:14,490
+about how they interact with the other
+
+00:19:11,190 --> 00:19:17,429
+cases and the problem we're getting is
+
+00:19:14,490 --> 00:19:19,860
+that they're all interacting so you do
+
+00:19:17,429 --> 00:19:21,929
+post copy and then you think oh I've got
+
+00:19:19,860 --> 00:19:23,730
+to do a post copy with youth pages I've
+
+00:19:21,929 --> 00:19:26,970
+got to do post copy with youth pages
+
+00:19:23,730 --> 00:19:28,350
+which is shared right and then you add
+
+00:19:26,970 --> 00:19:31,919
+some other type and you've got to think
+
+00:19:28,350 --> 00:19:34,260
+about how they all interact again so
+
+00:19:31,919 --> 00:19:35,909
+just take a little thought on how it
+
+00:19:34,260 --> 00:19:41,120
+goes together if you ever change any of
+
+00:19:35,909 --> 00:19:41,120
+them any questions
+
+00:19:44,760 --> 00:20:02,650
+well so I know it's not a question since
+
+00:20:00,310 --> 00:20:06,250
+we also talked quite a bit about
+
+00:20:02,650 --> 00:20:11,020
+deprecation at just KVM forum since you
+
+00:20:06,250 --> 00:20:14,020
+said that normal - men men should not be
+
+00:20:11,020 --> 00:20:20,110
+used do you think it would make sense -
+
+00:20:14,020 --> 00:20:22,060
+I think possibly wait until all I think
+
+00:20:20,110 --> 00:20:24,760
+all of the - object memory stuff is
+
+00:20:22,060 --> 00:20:27,700
+coming together and so I think check
+
+00:20:24,760 --> 00:20:29,620
+with derivate for that did that's also
+
+00:20:27,700 --> 00:20:31,900
+it but I think yes it probably should
+
+00:20:29,620 --> 00:20:45,210
+because it just got that weird side
+
+00:20:31,900 --> 00:20:50,140
+effect okay one more well you mentioned
+
+00:20:45,210 --> 00:20:52,150
+Ram that is not a device object yep
+
+00:20:50,140 --> 00:20:54,480
+should that special case go away
+
+00:20:52,150 --> 00:20:54,480
+yep
+
+00:21:04,980 --> 00:21:10,869
+[Applause]
+
+00:21:06,040 --> 00:21:10,869
+
+YouTube URL: https://www.youtube.com/watch?v=ngs6vyMLnkQ
+
+

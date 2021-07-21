@@ -1,0 +1,1774 @@
+Title: [2019] Firecracker: Lessons from the Trenches by Andreea Florescu and Alexandra Iordache
+Publication date: 2019-11-07
+Playlist: KVM Forum 2019
+Description: 
+	Firecracker is an open source VMM written in Rust, leveraging KVM to provide isolation for multi-tenant, serverless workloads like containers and functions. It is currently used in production by AWS Lambda and AWS Fargate.
+
+Each Firecracker process has a low memory overhead, it boots virtual machines in as little as 125 milliseconds and oversubscribes host resources in order to pack thousands of microVMs on a single host. But in a multi-tenant environment, the most important requirement is properly enforcing the security isolation of workloads.
+
+In this talk we will go over the design decisions we took when building Firecracker, showcasing the advantages as well as the limitations of this VMM. What does it take to run Firecracker at scale? Are Rust’s builtin protection mechanisms enough to ensure smooth sailing in production? Come and find out!
+
+---
+
+Andreea Florescu
+Amazon
+Software Development Engineer
+
+I am a software engineer with the Amazon Web Services Firecracker team. I am passionate about open source and, beyond Firecracker, I am also contributing to rust-vmm, a community effort to create a shared set of Rust-based Virtual Machine Monitor components. So far I’ve been talking about both rust-vmm and Firecracker at Fosdem, EdgeSys, Open Infrastructure Summit and KubeCon.
+
+Alexandra Iordache
+Amazon
+Software Development Engineer
+
+Alexandra is a software development engineer at AWS and one of the maintainers of the Firecracker project. Her work is centered on the Firecracker virtual machine monitor.
+
+Note: We apologize for lower video quality due to technical problems.
+Captions: 
+	00:00:00,390 --> 00:00:02,750
+[Music]
+
+00:00:06,649 --> 00:00:10,710
+hello I'm Andrea and together with
+
+00:00:09,330 --> 00:00:12,630
+Alexandra we are going to talk about
+
+00:00:10,710 --> 00:00:15,960
+firecracker and what we learn from
+
+00:00:12,630 --> 00:00:18,690
+running it in production so we are
+
+00:00:15,960 --> 00:00:32,279
+quickly going to go through fire cracker
+
+00:00:18,690 --> 00:00:34,640
+design okay this is not working I'm
+
+00:00:32,279 --> 00:00:34,640
+sorry
+
+00:00:42,539 --> 00:00:48,690
+there we go now we're going to talk even
+
+00:00:45,719 --> 00:00:51,420
+quicker about design decisions because
+
+00:00:48,690 --> 00:00:52,620
+we won't have enough time and then we
+
+00:00:51,420 --> 00:00:54,870
+are going to move to the interesting
+
+00:00:52,620 --> 00:00:58,559
+part of the presentation which is two of
+
+00:00:54,870 --> 00:01:00,780
+our inglorious bugs so firecracker is a
+
+00:00:58,559 --> 00:01:03,000
+lightweight virtual machine monitor it
+
+00:01:00,780 --> 00:01:04,949
+is written in rust and it was purpose
+
+00:01:03,000 --> 00:01:06,840
+built for running multi-tenant workloads
+
+00:01:04,949 --> 00:01:08,940
+in the cloud like containers and
+
+00:01:06,840 --> 00:01:11,190
+functions it is currently used in
+
+00:01:08,940 --> 00:01:13,049
+production by AWS lambda and it's open
+
+00:01:11,190 --> 00:01:16,200
+source so you can have you can find it
+
+00:01:13,049 --> 00:01:19,140
+on github the first thing is that
+
+00:01:16,200 --> 00:01:21,420
+firecracker is a process and as a
+
+00:01:19,140 --> 00:01:25,220
+security measure we decided for
+
+00:01:21,420 --> 00:01:28,080
+firecracker to only manage one micro via
+
+00:01:25,220 --> 00:01:32,009
+firecracker leverages KVM to provide
+
+00:01:28,080 --> 00:01:35,280
+isolation for cloud workloads so that
+
+00:01:32,009 --> 00:01:38,340
+means that it only runs on Linux and it
+
+00:01:35,280 --> 00:01:41,580
+only supports Linux guests we currently
+
+00:01:38,340 --> 00:01:44,009
+have support for x86 64 and we started
+
+00:01:41,580 --> 00:01:48,149
+adding experimental AR support as well
+
+00:01:44,009 --> 00:01:50,489
+AR 64 so firecracker threads first
+
+00:01:48,149 --> 00:01:54,030
+firecracker can be configured by an API
+
+00:01:50,489 --> 00:01:57,229
+server which is implemented with HTTP
+
+00:01:54,030 --> 00:02:00,690
+and communicates with HTTP clients via
+
+00:01:57,229 --> 00:02:02,099
+UNIX domain sockets then we have one
+
+00:02:00,690 --> 00:02:04,379
+thread for emulation and other
+
+00:02:02,099 --> 00:02:06,569
+miscellaneous things which is the vmm
+
+00:02:04,379 --> 00:02:12,150
+thread and then you can have one or
+
+00:02:06,569 --> 00:02:13,980
+multiple VCU threads so since I was
+
+00:02:12,150 --> 00:02:15,959
+talking about the VM thread we can look
+
+00:02:13,980 --> 00:02:18,440
+a bit more in-depth at this one because
+
+00:02:15,959 --> 00:02:22,950
+it's the most interesting one probably
+
+00:02:18,440 --> 00:02:26,659
+so firecracker does emulation using
+
+00:02:22,950 --> 00:02:30,920
+virtio and we have block and network
+
+00:02:26,659 --> 00:02:34,319
+these are implemented over mmm mmm i/o
+
+00:02:30,920 --> 00:02:36,540
+and the block device is backed by a file
+
+00:02:34,319 --> 00:02:39,450
+on the host well the net device is
+
+00:02:36,540 --> 00:02:43,170
+backed by a tap device under hosts we
+
+00:02:39,450 --> 00:02:46,050
+also have two legacy devices there is a
+
+00:02:43,170 --> 00:02:48,230
+serial and a very very minimal IAT 42
+
+00:02:46,050 --> 00:02:50,999
+that basically just supports reset and
+
+00:02:48,230 --> 00:02:55,219
+sending control-alt-delete which is
+
+00:02:50,999 --> 00:02:55,219
+actually the only way that you can know
+
+00:02:55,510 --> 00:03:05,409
+you can shut down a VM from from outside
+
+00:03:00,500 --> 00:03:07,459
+of the guest ok security boundaries so
+
+00:03:05,409 --> 00:03:13,189
+firecracker actually comes with a jailer
+
+00:03:07,459 --> 00:03:15,980
+as well and the jailer does the standard
+
+00:03:13,189 --> 00:03:18,470
+isolation of processes including share
+
+00:03:15,980 --> 00:03:21,230
+route and Seagram's and we also have
+
+00:03:18,470 --> 00:03:23,000
+second so we have second filters that
+
+00:03:21,230 --> 00:03:29,180
+are applied to every threads in
+
+00:03:23,000 --> 00:03:31,549
+firecracker so how what did we achieved
+
+00:03:29,180 --> 00:03:35,269
+with firecracker so far we have a very
+
+00:03:31,549 --> 00:03:38,389
+minimal boot time it is around 125
+
+00:03:35,269 --> 00:03:40,840
+milliseconds now we also have a low
+
+00:03:38,389 --> 00:03:44,930
+memory overhead around 3 megabytes and
+
+00:03:40,840 --> 00:03:48,049
+this is kind of like by default the
+
+00:03:44,930 --> 00:03:50,480
+other subscription out of host CPU and
+
+00:03:48,049 --> 00:03:52,730
+memory which is actually because we do
+
+00:03:50,480 --> 00:03:55,700
+not implement any kind of pass through
+
+00:03:52,730 --> 00:03:57,349
+and you will see the fine print there
+
+00:03:55,700 --> 00:04:00,349
+which I hope it's big enough actually
+
+00:03:57,349 --> 00:04:02,359
+for everybody to see these properties
+
+00:04:00,349 --> 00:04:04,849
+are actually dependent on the workload
+
+00:04:02,359 --> 00:04:06,500
+and configuration so if you want to
+
+00:04:04,849 --> 00:04:10,099
+actually use firecracker you will have
+
+00:04:06,500 --> 00:04:12,489
+to test it for your own use case now the
+
+00:04:10,099 --> 00:04:15,530
+interesting part of the presentation
+
+00:04:12,489 --> 00:04:19,190
+this is from a book turn the ship around
+
+00:04:15,530 --> 00:04:21,079
+and like in the first pages it says you
+
+00:04:19,190 --> 00:04:23,419
+are destined to fail and it really
+
+00:04:21,079 --> 00:04:25,180
+impressed me and it made me think about
+
+00:04:23,419 --> 00:04:28,220
+some other process that we are using
+
+00:04:25,180 --> 00:04:29,990
+which is called the co e so you are
+
+00:04:28,220 --> 00:04:32,210
+destined to fail and you're most likely
+
+00:04:29,990 --> 00:04:34,070
+going to fail but what is important
+
+00:04:32,210 --> 00:04:37,699
+actually is what do you do when you have
+
+00:04:34,070 --> 00:04:39,380
+failures and what we do at Amazonian
+
+00:04:37,699 --> 00:04:42,080
+firecracker is a process called
+
+00:04:39,380 --> 00:04:43,820
+correction of errors and we do this
+
+00:04:42,080 --> 00:04:47,810
+because we want to think long term
+
+00:04:43,820 --> 00:04:49,729
+versus short term so we really want to
+
+00:04:47,810 --> 00:04:53,060
+understand what is the root cause of a
+
+00:04:49,729 --> 00:04:54,880
+problem and make sure that we are not
+
+00:04:53,060 --> 00:04:57,680
+making the same mistakes in the future
+
+00:04:54,880 --> 00:04:59,479
+so to understand this and to actually
+
+00:04:57,680 --> 00:05:03,260
+get to the root cause we are actually
+
+00:04:59,479 --> 00:05:05,870
+doing the five whys and we are diving
+
+00:05:03,260 --> 00:05:07,610
+deeper and deeper into the problem this
+
+00:05:05,870 --> 00:05:08,840
+is also process that is available for
+
+00:05:07,610 --> 00:05:11,450
+you to check if you want to
+
+00:05:08,840 --> 00:05:13,970
+and now we can look at the actual bugs
+
+00:05:11,450 --> 00:05:18,139
+so we have inglourious release which was
+
+00:05:13,970 --> 00:05:20,780
+actually in glorious releases yeah so
+
+00:05:18,139 --> 00:05:23,419
+firecracker went a bit mad this time and
+
+00:05:20,780 --> 00:05:25,790
+the problem was that firecracker would
+
+00:05:23,419 --> 00:05:29,510
+in terminal in turn I can't say that
+
+00:05:25,790 --> 00:05:32,840
+work sorry it would crash with error
+
+00:05:29,510 --> 00:05:34,700
+code 128 and the problem was like super
+
+00:05:32,840 --> 00:05:36,650
+straightforward it was just like one sis
+
+00:05:34,700 --> 00:05:38,960
+coal that was not white listed but he
+
+00:05:36,650 --> 00:05:41,120
+had a really big impact because of the
+
+00:05:38,960 --> 00:05:42,770
+intermittent failures customers were not
+
+00:05:41,120 --> 00:05:45,620
+able to update with the newer fire
+
+00:05:42,770 --> 00:05:47,870
+cracker version the fix was again super
+
+00:05:45,620 --> 00:05:50,000
+straightforward straight forward just
+
+00:05:47,870 --> 00:05:53,030
+whitelist the Cisco but we had two
+
+00:05:50,000 --> 00:05:55,790
+versions that were actually affected and
+
+00:05:53,030 --> 00:05:57,410
+to understand why did this happened and
+
+00:05:55,790 --> 00:05:59,180
+what's with the error code and
+
+00:05:57,410 --> 00:06:01,370
+everything let's first look at how
+
+00:05:59,180 --> 00:06:03,350
+firecracker handled second so
+
+00:06:01,370 --> 00:06:05,990
+firecracker supports three types of
+
+00:06:03,350 --> 00:06:09,020
+succumb filters you can have none no
+
+00:06:05,990 --> 00:06:11,000
+second basic which only checks the Cisco
+
+00:06:09,020 --> 00:06:13,220
+number and then advanced which calls
+
+00:06:11,000 --> 00:06:16,220
+which checks the Cisco numbers but also
+
+00:06:13,220 --> 00:06:18,350
+the parameters used by the Cisco in
+
+00:06:16,220 --> 00:06:19,970
+firecracker this is the default and we
+
+00:06:18,350 --> 00:06:22,550
+are using a whitelist approach and
+
+00:06:19,970 --> 00:06:24,979
+whenever we have a Cisco that is not
+
+00:06:22,550 --> 00:06:28,570
+white listed we are trapping it updating
+
+00:06:24,979 --> 00:06:31,880
+metrics such as number of second fault
+
+00:06:28,570 --> 00:06:34,010
+and we log an error which contains the
+
+00:06:31,880 --> 00:06:39,410
+Cisco the faulty Cisco and we exit with
+
+00:06:34,010 --> 00:06:42,139
+that specific error code 128 now let's
+
+00:06:39,410 --> 00:06:46,190
+also look at the development firecracker
+
+00:06:42,139 --> 00:06:47,510
+is on github and too much code into
+
+00:06:46,190 --> 00:06:50,060
+firecracker you will have to submit a
+
+00:06:47,510 --> 00:06:51,530
+pull request then you will have to
+
+00:06:50,060 --> 00:06:54,139
+reviewers that are going to look at your
+
+00:06:51,530 --> 00:06:56,479
+code and the firecracker CI which takes
+
+00:06:54,139 --> 00:06:57,200
+around 20 minutes and if both of these
+
+00:06:56,479 --> 00:07:00,910
+are okay
+
+00:06:57,200 --> 00:07:04,310
+then we are going to merge the code
+
+00:07:00,910 --> 00:07:07,669
+awesome so for actually having a release
+
+00:07:04,310 --> 00:07:11,780
+we just tag a github comment and we
+
+00:07:07,669 --> 00:07:13,460
+create a github release I probably said
+
+00:07:11,780 --> 00:07:15,169
+that earlier I don't remember so AWS
+
+00:07:13,460 --> 00:07:16,789
+lambda is actually using firecracker in
+
+00:07:15,169 --> 00:07:19,580
+production so whenever we have a new
+
+00:07:16,789 --> 00:07:22,700
+release that is available lambda picks
+
+00:07:19,580 --> 00:07:25,160
+it up and now it runs
+
+00:07:22,700 --> 00:07:27,380
+through the lambda CI and the lambda CI
+
+00:07:25,160 --> 00:07:29,780
+unlike the firecracker CI is very very
+
+00:07:27,380 --> 00:07:31,790
+targeted at their use case so they are
+
+00:07:29,780 --> 00:07:33,830
+using in their CI a they are using
+
+00:07:31,790 --> 00:07:38,120
+workloads that are very specific to how
+
+00:07:33,830 --> 00:07:39,620
+they are operating lambda if everything
+
+00:07:38,120 --> 00:07:43,010
+is okay it goes to production obviously
+
+00:07:39,620 --> 00:07:45,320
+and then if not we have a bug report so
+
+00:07:43,010 --> 00:07:47,750
+for the second issue it actually and
+
+00:07:45,320 --> 00:07:51,020
+ended up on this pad and we had the bug
+
+00:07:47,750 --> 00:07:54,500
+report and so because it was impacting
+
+00:07:51,020 --> 00:07:57,610
+we started to understand the whys so why
+
+00:07:54,500 --> 00:08:00,020
+wasn't this met em advised whitelisted
+
+00:07:57,610 --> 00:08:02,960
+the problem is that for this particular
+
+00:08:00,020 --> 00:08:05,840
+release we do we did two things
+
+00:08:02,960 --> 00:08:08,990
+so we first added code which didn't need
+
+00:08:05,840 --> 00:08:12,110
+it any Siskel's actually but we also
+
+00:08:08,990 --> 00:08:15,050
+updated over the arrest version and the
+
+00:08:12,110 --> 00:08:19,070
+res version had a change in the memory
+
+00:08:15,050 --> 00:08:20,720
+handling which generated a new Cisco so
+
+00:08:19,070 --> 00:08:23,690
+why did that we catch it in firecracker
+
+00:08:20,720 --> 00:08:27,710
+because this was actually not happening
+
+00:08:23,690 --> 00:08:30,770
+all the time so it was a work low
+
+00:08:27,710 --> 00:08:32,810
+specific Cisco in which which was
+
+00:08:30,770 --> 00:08:36,170
+generated by the way that lambda is
+
+00:08:32,810 --> 00:08:38,180
+using firecracker and in fact rigueur we
+
+00:08:36,170 --> 00:08:41,270
+have to make a compromise between how
+
+00:08:38,180 --> 00:08:47,060
+long does the CI take and coverage so we
+
+00:08:41,270 --> 00:08:49,040
+cannot possibly cover every use case so
+
+00:08:47,060 --> 00:08:51,230
+everything must have been good because
+
+00:08:49,040 --> 00:08:53,930
+we had whitelisted only that it wasn't
+
+00:08:51,230 --> 00:08:56,270
+so in the middle of the night we were
+
+00:08:53,930 --> 00:08:59,870
+doing a patch release to fix a patch
+
+00:08:56,270 --> 00:09:03,020
+release to fix a broken release and the
+
+00:08:59,870 --> 00:09:05,810
+reason is because if a tiny tiny mistake
+
+00:09:03,020 --> 00:09:08,690
+so if you notice like the fix actually
+
+00:09:05,810 --> 00:09:10,400
+is very tiny the problem is that this
+
+00:09:08,690 --> 00:09:12,800
+syscall was actually only called
+
+00:09:10,400 --> 00:09:15,740
+using the muscle was only trigger with
+
+00:09:12,800 --> 00:09:17,600
+the muscle build and rust has these
+
+00:09:15,740 --> 00:09:19,340
+conditional compiling so we don't want
+
+00:09:17,600 --> 00:09:23,650
+white least the Cisco's if they are not
+
+00:09:19,340 --> 00:09:26,360
+used on platforms or on different builds
+
+00:09:23,650 --> 00:09:30,440
+the fix here was like super simple we
+
+00:09:26,360 --> 00:09:34,100
+just needed to update the target what
+
+00:09:30,440 --> 00:09:36,950
+did the muscle macro configuration so we
+
+00:09:34,100 --> 00:09:41,860
+had two broken releases
+
+00:09:36,950 --> 00:09:44,420
+and then we finally fixed it in 0:15 -
+
+00:09:41,860 --> 00:09:47,990
+and because of this we actually started
+
+00:09:44,420 --> 00:09:50,300
+to think about corrective actions so the
+
+00:09:47,990 --> 00:09:52,130
+first thing was we decided to add
+
+00:09:50,300 --> 00:09:55,130
+long-running tests which are not going
+
+00:09:52,130 --> 00:09:57,830
+to run along with the CI but was sort of
+
+00:09:55,130 --> 00:09:59,690
+like nightly testing because it's much
+
+00:09:57,830 --> 00:10:02,180
+easier this way to spot
+
+00:09:59,690 --> 00:10:04,160
+Cisco's that are not white listed we
+
+00:10:02,180 --> 00:10:06,230
+also started looking at improving
+
+00:10:04,160 --> 00:10:08,300
+secum so we had discussions whether
+
+00:10:06,230 --> 00:10:11,030
+white list is actually the good approach
+
+00:10:08,300 --> 00:10:14,210
+but we didn't really reach a conclusion
+
+00:10:11,030 --> 00:10:16,340
+here and then like the only thing that
+
+00:10:14,210 --> 00:10:19,310
+we wanted to actually merge was the
+
+00:10:16,340 --> 00:10:22,850
+auto-generated say comp white list and
+
+00:10:19,310 --> 00:10:24,290
+the problem was that fire cracker uses
+
+00:10:22,850 --> 00:10:26,720
+right now like 30
+
+00:10:24,290 --> 00:10:29,690
+Cisco's and with the auto-generated
+
+00:10:26,720 --> 00:10:32,290
+second white list is actually 60 so we
+
+00:10:29,690 --> 00:10:34,190
+actually dropped this this whole thing
+
+00:10:32,290 --> 00:10:36,050
+we are still discussing about
+
+00:10:34,190 --> 00:10:39,230
+improvements because seccomp is way
+
+00:10:36,050 --> 00:10:42,290
+harder than we initially thought and we
+
+00:10:39,230 --> 00:10:45,860
+added the second P improvements to our
+
+00:10:42,290 --> 00:10:49,130
+roadmap for 2020 to keep iterating over
+
+00:10:45,860 --> 00:10:52,190
+it so what did we learn we learned that
+
+00:10:49,130 --> 00:10:54,680
+testing is important so it's very
+
+00:10:52,190 --> 00:10:56,510
+important actually and it's also very
+
+00:10:54,680 --> 00:10:58,910
+important to test everything that you
+
+00:10:56,510 --> 00:11:01,630
+use all your dependencies with the
+
+00:10:58,910 --> 00:11:05,120
+workloads that are as close as possible
+
+00:11:01,630 --> 00:11:08,630
+to production use cases we also learned
+
+00:11:05,120 --> 00:11:10,520
+that we discover this issue so quickly
+
+00:11:08,630 --> 00:11:13,640
+because we actually have logs and
+
+00:11:10,520 --> 00:11:15,850
+metrics so without metrics you wouldn't
+
+00:11:13,640 --> 00:11:18,260
+have noticed the intermittent failures
+
+00:11:15,850 --> 00:11:20,390
+so log symmetric save the day and
+
+00:11:18,260 --> 00:11:21,680
+engineering time and now I will let
+
+00:11:20,390 --> 00:11:27,850
+Alexandre talk about yet another
+
+00:11:21,680 --> 00:11:31,160
+Inglourious bug thank you hey everyone
+
+00:11:27,850 --> 00:11:33,440
+so this isn't actually from a book it's
+
+00:11:31,160 --> 00:11:35,150
+something that I believe every one of us
+
+00:11:33,440 --> 00:11:38,480
+discovered at some point in time I did
+
+00:11:35,150 --> 00:11:40,580
+pretty early on math is hard it's hard
+
+00:11:38,480 --> 00:11:41,930
+to do right it's hard to do to do it
+
+00:11:40,580 --> 00:11:43,700
+right with equations and everything and
+
+00:11:41,930 --> 00:11:45,260
+it's also hard to do right in computing
+
+00:11:43,700 --> 00:11:47,810
+because something as simple as an
+
+00:11:45,260 --> 00:11:48,870
+addition can overflow and cause immense
+
+00:11:47,810 --> 00:11:51,140
+pain reduction
+
+00:11:48,870 --> 00:11:53,880
+that being said this is a success story
+
+00:11:51,140 --> 00:11:56,220
+this is about a bug that was discovered
+
+00:11:53,880 --> 00:11:58,590
+and fixed by a member of Firecracker
+
+00:11:56,220 --> 00:12:01,070
+open-source community it was an
+
+00:11:58,590 --> 00:12:03,480
+overflowing integral earth magic
+
+00:12:01,070 --> 00:12:05,610
+operation an addition that was replaced
+
+00:12:03,480 --> 00:12:10,740
+with graceful error handling and didn't
+
+00:12:05,610 --> 00:12:14,100
+lead to any to any pain but it did lead
+
+00:12:10,740 --> 00:12:15,720
+to an ongoing effort with the
+
+00:12:14,100 --> 00:12:17,850
+Firecracker team and with our community
+
+00:12:15,720 --> 00:12:19,280
+to harden our code base and improve her
+
+00:12:17,850 --> 00:12:21,900
+overall quality
+
+00:12:19,280 --> 00:12:25,770
+so yay successes and in start with the
+
+00:12:21,900 --> 00:12:28,470
+plus sign so the problem like I
+
+00:12:25,770 --> 00:12:30,600
+mentioned was just an addition super
+
+00:12:28,470 --> 00:12:32,940
+simple it was in the memory model crate
+
+00:12:30,600 --> 00:12:36,480
+which is supposed to read stuff into the
+
+00:12:32,940 --> 00:12:43,140
+guests memory the potential impact was
+
+00:12:36,480 --> 00:12:45,960
+if that addition were to overflow either
+
+00:12:43,140 --> 00:12:47,310
+the data could go somewhere undetermined
+
+00:12:45,960 --> 00:12:50,490
+at the guest memory and cause it to
+
+00:12:47,310 --> 00:12:52,500
+abruptly terminate or worse or it could
+
+00:12:50,490 --> 00:12:55,050
+cause the firecracker process to go down
+
+00:12:52,500 --> 00:12:56,580
+and obviously take the guest with it the
+
+00:12:55,050 --> 00:12:58,380
+fix was trivial replace the plus sign
+
+00:12:56,580 --> 00:13:01,290
+with a rest native operation called
+
+00:12:58,380 --> 00:13:04,740
+overflowing add and we merged that fixed
+
+00:13:01,290 --> 00:13:08,670
+and firecracker 0.12 point at have been
+
+00:13:04,740 --> 00:13:10,590
+affected so now let's look a bit into a
+
+00:13:08,670 --> 00:13:12,270
+potential code path for this error to
+
+00:13:10,590 --> 00:13:15,750
+manifest itself let's say you have a
+
+00:13:12,270 --> 00:13:19,380
+guest that wants to read something from
+
+00:13:15,750 --> 00:13:20,790
+its drive into memory its program is
+
+00:13:19,380 --> 00:13:23,940
+gonna call read I could have really used
+
+00:13:20,790 --> 00:13:25,770
+a pointer the read is gonna go under the
+
+00:13:23,940 --> 00:13:27,150
+guest of rely your block driver this is
+
+00:13:25,770 --> 00:13:29,460
+gonna trigger an event that eventually
+
+00:13:27,150 --> 00:13:32,190
+makes its way into firecracker into the
+
+00:13:29,460 --> 00:13:32,790
+Vertigo block device as under I
+
+00:13:32,190 --> 00:13:34,890
+mentioned
+
+00:13:32,790 --> 00:13:36,870
+block devices are emulated with files
+
+00:13:34,890 --> 00:13:39,150
+and firecrackers so what we're gonna do
+
+00:13:36,870 --> 00:13:41,610
+is gonna go read that information into
+
+00:13:39,150 --> 00:13:43,140
+an intermediary buffer and then pass it
+
+00:13:41,610 --> 00:13:44,760
+on to the memory model crate which is
+
+00:13:43,140 --> 00:13:48,570
+supposed to put it in the guests memory
+
+00:13:44,760 --> 00:13:50,550
+now if all goes well the operation that
+
+00:13:48,570 --> 00:13:53,460
+you see there in red offset plus count
+
+00:13:50,550 --> 00:13:55,110
+will not overflow and the data will be
+
+00:13:53,460 --> 00:13:58,700
+put somewhere where the guest driver can
+
+00:13:55,110 --> 00:14:01,460
+read it what about if it does overflow
+
+00:13:58,700 --> 00:14:04,190
+well one of two things can happen
+
+00:14:01,460 --> 00:14:06,710
+the first is undefined behavior you
+
+00:14:04,190 --> 00:14:08,839
+don't know where that data goes and it
+
+00:14:06,710 --> 00:14:10,279
+we have a few reasonable reasons to
+
+00:14:08,839 --> 00:14:12,890
+believe that the guest is eventually
+
+00:14:10,279 --> 00:14:16,820
+going to have to suffer from that and to
+
+00:14:12,890 --> 00:14:19,279
+die another thing that can happen is the
+
+00:14:16,820 --> 00:14:21,980
+overflow can be caught by the rust
+
+00:14:19,279 --> 00:14:25,010
+runtime and take down the firecracker
+
+00:14:21,980 --> 00:14:26,480
+process and the guest with it now as
+
+00:14:25,010 --> 00:14:27,830
+that would be a bit deep into that
+
+00:14:26,480 --> 00:14:30,800
+because I put a new word on it's called
+
+00:14:27,830 --> 00:14:33,560
+panic this is a rust native thing and
+
+00:14:30,800 --> 00:14:35,810
+let's uh talk a bit about our handling
+
+00:14:33,560 --> 00:14:38,200
+an arrest there are two ways you can do
+
+00:14:35,810 --> 00:14:40,910
+that gracefully and unless gracefully
+
+00:14:38,200 --> 00:14:43,490
+rust offers a result type which is kind
+
+00:14:40,910 --> 00:14:46,520
+of an enum it can even be okay with a
+
+00:14:43,490 --> 00:14:49,100
+payload or an error or the payload and
+
+00:14:46,520 --> 00:14:51,350
+the reason for that is to make it as
+
+00:14:49,100 --> 00:14:53,330
+robust to errors as possible you can
+
+00:14:51,350 --> 00:14:54,740
+propagate this result from the function
+
+00:14:53,330 --> 00:14:59,480
+that's airing out and handle it
+
+00:14:54,740 --> 00:15:01,670
+gracefully in the caller for this is
+
+00:14:59,480 --> 00:15:03,770
+used for problems that you kind of
+
+00:15:01,670 --> 00:15:05,450
+expect problems that you can see coming
+
+00:15:03,770 --> 00:15:07,160
+like for instance when you want to open
+
+00:15:05,450 --> 00:15:09,709
+a file if it's not there you're gonna
+
+00:15:07,160 --> 00:15:11,620
+return a result and to move it up the
+
+00:15:09,709 --> 00:15:15,650
+frame to wherever you want to handle it
+
+00:15:11,620 --> 00:15:17,570
+for unexpected problems like an array
+
+00:15:15,650 --> 00:15:22,100
+being about array index being out of
+
+00:15:17,570 --> 00:15:24,050
+bounds rust has a panic mechanism this
+
+00:15:22,100 --> 00:15:27,830
+will eventually lead to the process
+
+00:15:24,050 --> 00:15:29,480
+being terminated in one of two ways the
+
+00:15:27,830 --> 00:15:32,300
+default one is to unwind the stack of
+
+00:15:29,480 --> 00:15:34,970
+the panicking thread this is meant to be
+
+00:15:32,300 --> 00:15:36,770
+a recoverable error because it only
+
+00:15:34,970 --> 00:15:39,230
+takes down one thread and it leaves the
+
+00:15:36,770 --> 00:15:42,320
+user to maybe recover the program and
+
+00:15:39,230 --> 00:15:44,270
+not necessarily die and the second way
+
+00:15:42,320 --> 00:15:45,589
+is to just raise Singapore and unless
+
+00:15:44,270 --> 00:15:48,350
+you have a signal handler for that which
+
+00:15:45,589 --> 00:15:51,790
+we don't the program goes down with all
+
+00:15:48,350 --> 00:15:54,290
+of its sides firecracker uses the ladder
+
+00:15:51,790 --> 00:15:56,829
+we don't just let one thread die we take
+
+00:15:54,290 --> 00:15:59,959
+down the entire process but just before
+
+00:15:56,829 --> 00:16:03,020
+entering the panic runtime we install a
+
+00:15:59,959 --> 00:16:06,140
+panic okay this is also a rust internal
+
+00:16:03,020 --> 00:16:07,760
+mechanism it's meant to give you one
+
+00:16:06,140 --> 00:16:10,730
+last chance to run some custom code
+
+00:16:07,760 --> 00:16:13,130
+before terminating the program what we
+
+00:16:10,730 --> 00:16:14,810
+do is we flush the metrics to get one
+
+00:16:13,130 --> 00:16:16,100
+last snapshot at what for
+
+00:16:14,810 --> 00:16:18,620
+cracker was doing at the point of
+
+00:16:16,100 --> 00:16:23,290
+failure and the logon error message and
+
+00:16:18,620 --> 00:16:26,750
+then let us trace sig abort and goodbye
+
+00:16:23,290 --> 00:16:28,640
+so this is the actual problem that was
+
+00:16:26,750 --> 00:16:30,440
+the code snippet where the bug happened
+
+00:16:28,640 --> 00:16:33,890
+and the highlighted line is worthy
+
+00:16:30,440 --> 00:16:35,420
+overflowing operation was this is the
+
+00:16:33,890 --> 00:16:37,580
+read to memory function that is called
+
+00:16:35,420 --> 00:16:41,779
+from Verdejo device code among other
+
+00:16:37,580 --> 00:16:43,310
+things usually what happens is the Daiya
+
+00:16:41,779 --> 00:16:44,930
+device is compliant and the verdugo
+
+00:16:43,310 --> 00:16:46,640
+driver is nice and doesn't send us
+
+00:16:44,930 --> 00:16:48,529
+invalid input and that operation never
+
+00:16:46,640 --> 00:16:49,580
+overflows that it always goes into
+
+00:16:48,529 --> 00:16:52,640
+memory where you want it to go
+
+00:16:49,580 --> 00:16:54,589
+everything works fine what if the faulty
+
+00:16:52,640 --> 00:16:56,839
+or if you have a faulty driver and a
+
+00:16:54,589 --> 00:17:00,740
+non-compliant device and that operation
+
+00:16:56,839 --> 00:17:02,870
+can overflow well the behavior is
+
+00:17:00,740 --> 00:17:05,540
+dictated to have all things by the built
+
+00:17:02,870 --> 00:17:09,439
+configuration of firecracker so if
+
+00:17:05,540 --> 00:17:11,240
+you're earning in debug mode the rust
+
+00:17:09,439 --> 00:17:14,209
+runtime is going to detect the overflow
+
+00:17:11,240 --> 00:17:15,410
+and cause a panic that's as I explained
+
+00:17:14,209 --> 00:17:18,640
+earlier raises the keyboard the whole
+
+00:17:15,410 --> 00:17:21,230
+process dies but still it's pretty bad
+
+00:17:18,640 --> 00:17:24,400
+firecracker dies the guest dies and it's
+
+00:17:21,230 --> 00:17:26,929
+a semi controlled mode of termination
+
+00:17:24,400 --> 00:17:28,490
+but the thing is we don't ship the debug
+
+00:17:26,929 --> 00:17:33,020
+build in production we ship the release
+
+00:17:28,490 --> 00:17:35,179
+build and then release the because of
+
+00:17:33,020 --> 00:17:37,550
+the the optimizations by the rust
+
+00:17:35,179 --> 00:17:39,890
+runtime it doesn't detect the overflow
+
+00:17:37,550 --> 00:17:42,710
+and doesn't panic understand address
+
+00:17:39,890 --> 00:17:44,810
+standard dictates that this is undefined
+
+00:17:42,710 --> 00:17:46,820
+behavior in other words you don't know
+
+00:17:44,810 --> 00:17:48,500
+where they get data goes into memory and
+
+00:17:46,820 --> 00:17:51,070
+it can go somewhere where you really
+
+00:17:48,500 --> 00:17:54,140
+don't want it to wind up and cause
+
+00:17:51,070 --> 00:17:56,300
+hopefully the guest to abruptly
+
+00:17:54,140 --> 00:18:00,320
+terminate and this is worse than
+
+00:17:56,300 --> 00:18:02,750
+firecracker panicking the solution was
+
+00:18:00,320 --> 00:18:05,060
+absolutely trivial the plus sign was
+
+00:18:02,750 --> 00:18:07,280
+replaced with the rest native
+
+00:18:05,060 --> 00:18:09,230
+overflowing add which is nice enough to
+
+00:18:07,280 --> 00:18:11,780
+return a boolean which marks and whether
+
+00:18:09,230 --> 00:18:13,730
+an overflow did occur and on the lines
+
+00:18:11,780 --> 00:18:15,590
+right after that we turned that boolean
+
+00:18:13,730 --> 00:18:17,630
+into a result which we propagated the
+
+00:18:15,590 --> 00:18:20,660
+caller function and eventually makes its
+
+00:18:17,630 --> 00:18:22,340
+way into a log being printed and an
+
+00:18:20,660 --> 00:18:23,990
+error metric being incremented and
+
+00:18:22,340 --> 00:18:28,850
+nobody dies anymore and everything is
+
+00:18:23,990 --> 00:18:31,460
+fine so why didn't we catch this
+
+00:18:28,850 --> 00:18:32,980
+seems like an obvious problem now why
+
+00:18:31,460 --> 00:18:35,420
+were there no overflows in checks
+
+00:18:32,980 --> 00:18:38,750
+overflow checks in place where we had
+
+00:18:35,420 --> 00:18:40,160
+Integra rithmetic well this is kind of
+
+00:18:38,750 --> 00:18:42,650
+embarrassing but we didn't actually look
+
+00:18:40,160 --> 00:18:44,690
+at that code a lot that particular
+
+00:18:42,650 --> 00:18:45,980
+snippet was unchanged since the revision
+
+00:18:44,690 --> 00:18:49,340
+one of firecracker
+
+00:18:45,980 --> 00:18:53,270
+it was pretty hidden error condition and
+
+00:18:49,340 --> 00:18:57,050
+we just didn't spot it why didn't the CI
+
+00:18:53,270 --> 00:19:00,140
+spot it because even even though in our
+
+00:18:57,050 --> 00:19:02,900
+CI system we do run actual guests and
+
+00:19:00,140 --> 00:19:05,540
+they do run several workloads and we
+
+00:19:02,900 --> 00:19:08,690
+test as much as we can as close to real
+
+00:19:05,540 --> 00:19:12,280
+use cases as we can their drivers worked
+
+00:19:08,690 --> 00:19:15,200
+fine and Verdejo devices were compliant
+
+00:19:12,280 --> 00:19:18,410
+so the overflow never happened because
+
+00:19:15,200 --> 00:19:22,430
+that input was never invalid a member of
+
+00:19:18,410 --> 00:19:24,020
+the community spotted this and submitted
+
+00:19:22,430 --> 00:19:27,770
+the report along with the fixed in a
+
+00:19:24,020 --> 00:19:30,800
+pull request and we're very grateful for
+
+00:19:27,770 --> 00:19:33,710
+that and we took immediate action after
+
+00:19:30,800 --> 00:19:35,330
+that to see what we can do to spot this
+
+00:19:33,710 --> 00:19:37,910
+kind of errors before they get a chance
+
+00:19:35,330 --> 00:19:39,710
+to manifest themselves and we wondered
+
+00:19:37,910 --> 00:19:41,240
+if the Ross compiler didn't catch it we
+
+00:19:39,710 --> 00:19:43,100
+didn't notice that maybe a linter would
+
+00:19:41,240 --> 00:19:48,410
+have caught it thing is we didn't have
+
+00:19:43,100 --> 00:19:50,900
+one enter rust Clippy it's a linter for
+
+00:19:48,410 --> 00:19:53,720
+rust code it's also integrated in rusts
+
+00:19:50,900 --> 00:19:56,540
+cargo ecosystem build command and tool
+
+00:19:53,720 --> 00:19:59,030
+chain and it turns out that Clippy did
+
+00:19:56,540 --> 00:20:01,100
+have one category category of linter
+
+00:19:59,030 --> 00:20:04,970
+errors that caught this operation and
+
+00:20:01,100 --> 00:20:06,950
+others and at the moment we ran it when
+
+00:20:04,970 --> 00:20:10,190
+this pull request was submitted there
+
+00:20:06,950 --> 00:20:11,750
+were over 200 linter warnings pertaining
+
+00:20:10,190 --> 00:20:14,210
+to several inter categories like
+
+00:20:11,750 --> 00:20:18,110
+correctness restriction and style and
+
+00:20:14,210 --> 00:20:20,510
+more so we figured out that that was
+
+00:20:18,110 --> 00:20:23,570
+kind of a problem and we kick-started an
+
+00:20:20,510 --> 00:20:27,800
+effort in the form of github issues to
+
+00:20:23,570 --> 00:20:30,200
+clean up our code and hard add we added
+
+00:20:27,800 --> 00:20:31,970
+a test in the firecracker CI suit that
+
+00:20:30,200 --> 00:20:35,780
+once cargo clip eight rated warnings as
+
+00:20:31,970 --> 00:20:37,880
+errors so if any of the code looks weird
+
+00:20:35,780 --> 00:20:40,430
+and the lender doesn't like it the CI
+
+00:20:37,880 --> 00:20:40,800
+will fail and the pull request will not
+
+00:20:40,430 --> 00:20:43,710
+go
+
+00:20:40,800 --> 00:20:45,900
+through this is allowed us to find and
+
+00:20:43,710 --> 00:20:48,720
+fix some more obscure conditions before
+
+00:20:45,900 --> 00:20:52,440
+shipping anything to production some
+
+00:20:48,720 --> 00:20:55,610
+more overflowing arithmetic some Pointer
+
+00:20:52,440 --> 00:20:59,640
+castes some non Poynter castes and
+
+00:20:55,610 --> 00:21:02,160
+several others we found them we fixed
+
+00:20:59,640 --> 00:21:04,290
+them well most of them at least we left
+
+00:21:02,160 --> 00:21:05,340
+some cyclomatic complexity warnings
+
+00:21:04,290 --> 00:21:09,120
+there because some functions are just
+
+00:21:05,340 --> 00:21:10,950
+big and since we were at the episode of
+
+00:21:09,120 --> 00:21:13,620
+hardening our codebase we took another
+
+00:21:10,950 --> 00:21:15,870
+look at all the ways fire cracker can a
+
+00:21:13,620 --> 00:21:17,790
+blob abruptly terminate by calling
+
+00:21:15,870 --> 00:21:20,370
+either unwrapped or expected to resonate
+
+00:21:17,790 --> 00:21:23,010
+functions on result objects these
+
+00:21:20,370 --> 00:21:26,280
+usually take out the value from an the
+
+00:21:23,010 --> 00:21:30,120
+ok enum but if the UNAM is actually an
+
+00:21:26,280 --> 00:21:31,470
+error the restful panic we took another
+
+00:21:30,120 --> 00:21:33,510
+look through these and replaced
+
+00:21:31,470 --> 00:21:36,030
+everything that was not a serious
+
+00:21:33,510 --> 00:21:39,120
+program error with error propagation of
+
+00:21:36,030 --> 00:21:41,340
+result objects we also put Verdejo
+
+00:21:39,120 --> 00:21:43,770
+device input fuzzing on a road map this
+
+00:21:41,340 --> 00:21:47,490
+we didn't have this at the time we did
+
+00:21:43,770 --> 00:21:49,770
+buzz our code before open sourcing it
+
+00:21:47,490 --> 00:21:53,400
+and before releasing it first but it's
+
+00:21:49,770 --> 00:21:57,240
+not integrated with CI so we're working
+
+00:21:53,400 --> 00:21:59,130
+on in that support as well what do we
+
+00:21:57,240 --> 00:22:00,870
+learned we went to a testing is
+
+00:21:59,130 --> 00:22:02,850
+important again that's a lesson that we
+
+00:22:00,870 --> 00:22:05,760
+just seem to relearn every once in a
+
+00:22:02,850 --> 00:22:07,620
+while when linting is important too
+
+00:22:05,760 --> 00:22:09,360
+because some things are not caught by a
+
+00:22:07,620 --> 00:22:11,910
+visual inspection and they're not caught
+
+00:22:09,360 --> 00:22:14,790
+by testing and they're not caught by the
+
+00:22:11,910 --> 00:22:17,010
+rest compiler in the beginning we asked
+
+00:22:14,790 --> 00:22:18,510
+ourselves if the choice of rust as a
+
+00:22:17,010 --> 00:22:20,760
+programming language for fire crack
+
+00:22:18,510 --> 00:22:23,550
+would be enough to ensure smooth sailing
+
+00:22:20,760 --> 00:22:26,190
+into production and it turned out that
+
+00:22:23,550 --> 00:22:28,560
+it wasn't the RUS compiler didn't catch
+
+00:22:26,190 --> 00:22:31,590
+this and the CI didn't catch this but
+
+00:22:28,560 --> 00:22:33,060
+the linter did so there are a lot of
+
+00:22:31,590 --> 00:22:35,250
+things that you need to do to make sure
+
+00:22:33,060 --> 00:22:37,500
+that your code is good good enough for
+
+00:22:35,250 --> 00:22:41,750
+customers and we're still working it's
+
+00:22:37,500 --> 00:22:44,100
+an ongoing effort so to wrap things up
+
+00:22:41,750 --> 00:22:47,190
+seconds hard math is hard
+
+00:22:44,100 --> 00:22:49,620
+this industry is hard and whenever this
+
+00:22:47,190 --> 00:22:51,120
+hardship leads to issues we revert to
+
+00:22:49,620 --> 00:22:52,700
+this piece of wisdom by Captain Jack
+
+00:22:51,120 --> 00:22:54,720
+Sparrow from Pirates of the Caribbean
+
+00:22:52,700 --> 00:22:56,280
+says that the problem is not the
+
+00:22:54,720 --> 00:22:57,929
+problem with your attitude about it and
+
+00:22:56,280 --> 00:23:00,960
+our attitude about problems when they do
+
+00:22:57,929 --> 00:23:03,120
+show up because they do is to understand
+
+00:23:00,960 --> 00:23:04,980
+them to dive deep to ask the five why's
+
+00:23:03,120 --> 00:23:08,130
+just keep asking why some until we get
+
+00:23:04,980 --> 00:23:10,850
+to root cause of it to fix it and to
+
+00:23:08,130 --> 00:23:13,170
+make sure that doesn't happen again
+
+00:23:10,850 --> 00:23:21,900
+thank you
+
+00:23:13,170 --> 00:23:21,900
+[Applause]
+
+00:23:29,010 --> 00:23:39,880
+what what if any problems did seccomp
+
+00:23:33,929 --> 00:23:44,710
+prevent or find so the question is what
+
+00:23:39,880 --> 00:23:46,870
+did any problems ii prevent yes well i
+
+00:23:44,710 --> 00:23:48,990
+provides your breakouts or what have you
+
+00:23:46,870 --> 00:23:52,480
+well we put it there as a preventive
+
+00:23:48,990 --> 00:23:56,710
+security mechanism we're not aware of
+
+00:23:52,480 --> 00:23:59,890
+any problems having showed up that would
+
+00:23:56,710 --> 00:24:02,799
+have been caught by seccomp but we do we
+
+00:23:59,890 --> 00:24:04,990
+only whitelist the bare minimum of sis
+
+00:24:02,799 --> 00:24:09,730
+calls and arguments that firecracker
+
+00:24:04,990 --> 00:24:16,570
+needs to to run so dangerous stuff like
+
+00:24:09,730 --> 00:24:18,730
+clone for instance or blacklisted I have
+
+00:24:16,570 --> 00:24:21,190
+a question about the it's more about oh
+
+00:24:18,730 --> 00:24:23,530
+sorry it's a it was more about
+
+00:24:21,190 --> 00:24:27,250
+firecracker to begin with so you you do
+
+00:24:23,530 --> 00:24:29,770
+you're vert I Oh for x86 as MMA oh so I
+
+00:24:27,250 --> 00:24:31,360
+assume you don't do PCI because of for
+
+00:24:29,770 --> 00:24:33,340
+performance reasons right for speed
+
+00:24:31,360 --> 00:24:38,260
+because P size would be slower than a
+
+00:24:33,340 --> 00:24:40,840
+mile why do you do it over MMA oh it was
+
+00:24:38,260 --> 00:24:42,929
+the easiest way for us to get started
+
+00:24:40,840 --> 00:24:44,919
+that is one of the reasons it's also
+
+00:24:42,929 --> 00:24:49,390
+performance but we actually didn't look
+
+00:24:44,919 --> 00:24:51,039
+into how it will play out with PCI for
+
+00:24:49,390 --> 00:24:52,440
+PCI we don't want pass through or
+
+00:24:51,039 --> 00:24:57,030
+anything like that so
+
+00:24:52,440 --> 00:24:57,030
+mm IO is just more
+
+00:25:01,350 --> 00:25:09,210
+I another set comp question so I've hit
+
+00:25:07,170 --> 00:25:11,220
+similar issues in the past and it's
+
+00:25:09,210 --> 00:25:13,620
+always always a pain and the kind of
+
+00:25:11,220 --> 00:25:15,690
+conclusion that I'm starting to come to
+
+00:25:13,620 --> 00:25:18,930
+is that if you have a dynamically linked
+
+00:25:15,690 --> 00:25:22,260
+binary you basically can't use set comp
+
+00:25:18,930 --> 00:25:23,820
+whitelists especially if it's deployed
+
+00:25:22,260 --> 00:25:25,500
+an environment that you don't control
+
+00:25:23,820 --> 00:25:27,060
+because those library versions they
+
+00:25:25,500 --> 00:25:30,060
+might call new syscalls and things like
+
+00:25:27,060 --> 00:25:32,610
+that so you already listed I think on
+
+00:25:30,060 --> 00:25:34,650
+your slides a few ways to overcome this
+
+00:25:32,610 --> 00:25:36,120
+whether you're you know you try to get
+
+00:25:34,650 --> 00:25:39,690
+tools that figure out what the Syst
+
+00:25:36,120 --> 00:25:41,700
+calls are one thing have you thought
+
+00:25:39,690 --> 00:25:45,510
+about that maybe the configuration file
+
+00:25:41,700 --> 00:25:48,000
+needs to allow basically as a short-term
+
+00:25:45,510 --> 00:25:50,130
+workaround when this happens so you
+
+00:25:48,000 --> 00:25:52,770
+don't need to roll another release just
+
+00:25:50,130 --> 00:25:53,370
+allow you to add things to the sacrum
+
+00:25:52,770 --> 00:25:54,600
+whitelist
+
+00:25:53,370 --> 00:25:55,620
+I mean there's obviously a danger in
+
+00:25:54,600 --> 00:25:58,320
+that have you thought about that the
+
+00:25:55,620 --> 00:26:01,530
+pros and cons we haven't thought about
+
+00:25:58,320 --> 00:26:03,600
+that but sounds like a reasonable choice
+
+00:26:01,530 --> 00:26:05,730
+and we will look into that thank you and
+
+00:26:03,600 --> 00:26:07,710
+by the way I forgot to mention that but
+
+00:26:05,730 --> 00:26:09,630
+FAC record in production is actually
+
+00:26:07,710 --> 00:26:18,930
+statically linked so that's why we use
+
+00:26:09,630 --> 00:26:20,930
+muscle any other questions if no thank
+
+00:26:18,930 --> 00:26:24,709
+you
+
+00:26:20,930 --> 00:26:24,709
+[Applause]
+
+00:26:26,659 --> 00:26:28,720
+
+YouTube URL: https://www.youtube.com/watch?v=yULy6IFy49o
+
+

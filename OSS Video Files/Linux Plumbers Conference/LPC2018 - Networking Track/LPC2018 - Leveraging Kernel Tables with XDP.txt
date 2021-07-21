@@ -1,0 +1,2208 @@
+Title: LPC2018 - Leveraging Kernel Tables with XDP
+Publication date: 2018-12-04
+Playlist: LPC2018 - Networking Track
+Description: 
+	url:  https://linuxplumbersconf.org/event/2/contributions/93/
+speaker:  David Ahern (Cumulus Networks)
+
+
+XDP is a framework for running BPF programs in the NIC driver to allow
+decisions about the fate of a received packet at the earliest point in
+the Linux networking stack. For the most part the BPF programs rely on
+maps to drive packet decisions, maps that are managed for example by a
+userspace agent. This architecture has implications on how the system is
+configured, monitored and debugged.
+
+An alternative approach is to make the kernel networking tables
+accessible by BPF programs. This approach allows the use of standard
+Linux APIs and tools to manage networking configuration and state while
+still achieving the higher performance provided by XDP. An example of
+providing access to kernel tables is the recently added helper to allow
+IPv4 and IPv6 FIB (and nexthop) lookups in XDP programs. Routing suites
+such as FRR manage the FIB tables, and the XDP packet path benefits by
+automatically adapting to the FIB updates in real time. While a huge
+first step, a FIB lookup alone is not sufficient for general networking
+deployments.
+
+This talk discusses the advantages of making kernel tables available to
+XDP programs to create a programmable packet pipeline, what features
+have been implemented as of October 2018, key missing features, and
+current challenges.
+Captions: 
+	00:00:05,670 --> 00:00:13,809
+all right so
+
+00:00:08,470 --> 00:00:16,450
+stage on XDP one of the comments was
+
+00:00:13,809 --> 00:00:18,730
+about you know XDP being a more linux
+
+00:00:16,450 --> 00:00:22,140
+friendly alternative to specialized tool
+
+00:00:18,730 --> 00:00:25,119
+kits like DP DK i would actually argue
+
+00:00:22,140 --> 00:00:28,180
+given the current limitations of X DP is
+
+00:00:25,119 --> 00:00:30,369
+it really any different than DP DK right
+
+00:00:28,180 --> 00:00:32,110
+and so that's kind of the the premise of
+
+00:00:30,369 --> 00:00:34,360
+what I'm getting at with this talk is
+
+00:00:32,110 --> 00:00:38,170
+how to make things better so let's set
+
+00:00:34,360 --> 00:00:41,140
+some context what does it mean to do
+
+00:00:38,170 --> 00:00:43,960
+something in x DP okay so X DP is really
+
+00:00:41,140 --> 00:00:46,420
+referring to running BPF programs in the
+
+00:00:43,960 --> 00:00:48,280
+Nick driver packet comes in if you've
+
+00:00:46,420 --> 00:00:50,440
+installed are attached to be PF program
+
+00:00:48,280 --> 00:00:52,030
+to it run the BPF program against that
+
+00:00:50,440 --> 00:00:54,640
+packet and decide the fate of what's
+
+00:00:52,030 --> 00:00:57,550
+gonna happen okay but when you look at
+
+00:00:54,640 --> 00:00:59,500
+how those programs are driven currently
+
+00:00:57,550 --> 00:01:01,510
+you're very limited in what you can do
+
+00:00:59,500 --> 00:01:03,640
+from the xep context there's not a whole
+
+00:01:01,510 --> 00:01:05,470
+lot of kernel helpers you're basically
+
+00:01:03,640 --> 00:01:09,070
+having to drive everything through maps
+
+00:01:05,470 --> 00:01:13,240
+and or you can reload your BPF program
+
+00:01:09,070 --> 00:01:15,220
+with new constants right so while you
+
+00:01:13,240 --> 00:01:17,590
+can argue that it's not a kernel bypass
+
+00:01:15,220 --> 00:01:23,590
+technique it is a networking stack
+
+00:01:17,590 --> 00:01:25,150
+bypass technique so I'm you know I work
+
+00:01:23,590 --> 00:01:27,640
+for a company that does switching an OS
+
+00:01:25,150 --> 00:01:29,770
+for switches so I want to focus on l2
+
+00:01:27,640 --> 00:01:31,450
+and l3 forwarding what's the current
+
+00:01:29,770 --> 00:01:36,700
+state and how can we make things better
+
+00:01:31,450 --> 00:01:39,040
+when X DP so if you wanted to do fast
+
+00:01:36,700 --> 00:01:41,350
+path forwarding and xdp today again
+
+00:01:39,040 --> 00:01:44,110
+you're limited to maps and BPF programs
+
+00:01:41,350 --> 00:01:46,270
+okay so you could have some agent
+
+00:01:44,110 --> 00:01:49,000
+running in user space it talks to some
+
+00:01:46,270 --> 00:01:51,010
+Sdn controller to pull down updates push
+
+00:01:49,000 --> 00:01:52,990
+those updates into the maps as packets
+
+00:01:51,010 --> 00:01:55,780
+come in look at the DMACC look at the
+
+00:01:52,990 --> 00:01:58,590
+destination IP or whatever and rewrite
+
+00:01:55,780 --> 00:02:02,170
+the headers and send it out very limited
+
+00:01:58,590 --> 00:02:05,020
+in terms of how its it integrates in
+
+00:02:02,170 --> 00:02:07,780
+with Lennox Lennox api's Lennox
+
+00:02:05,020 --> 00:02:10,299
+debugging tools any kind of local events
+
+00:02:07,780 --> 00:02:12,099
+like link event happening and how fast
+
+00:02:10,299 --> 00:02:15,489
+it's going to update those Maps to get
+
+00:02:12,099 --> 00:02:18,190
+the right data in okay so effectively in
+
+00:02:15,489 --> 00:02:20,349
+this kind of a design you've made Lennox
+
+00:02:18,190 --> 00:02:22,660
+just nothing more than a boot OS which
+
+00:02:20,349 --> 00:02:24,850
+is really sons on par
+
+00:02:22,660 --> 00:02:27,100
+- howdy BDK solutions work you've
+
+00:02:24,850 --> 00:02:29,050
+modified that driver to push the packets
+
+00:02:27,100 --> 00:02:32,230
+to your program as fast as possible but
+
+00:02:29,050 --> 00:02:34,030
+a lot of similarities to it right so
+
+00:02:32,230 --> 00:02:37,150
+again coming back to that comparison of
+
+00:02:34,030 --> 00:02:39,160
+X DP and DP DK if if I'm running this
+
+00:02:37,150 --> 00:02:41,950
+you know custom agent and updating maps
+
+00:02:39,160 --> 00:02:43,300
+I can't use IP to look at my route
+
+00:02:41,950 --> 00:02:46,150
+listing look at my forwarding database
+
+00:02:43,300 --> 00:02:48,580
+look at my you know features and an
+
+00:02:46,150 --> 00:02:51,730
+address list or link are featureless
+
+00:02:48,580 --> 00:02:53,530
+like VLANs and bonds and stuff right if
+
+00:02:51,730 --> 00:02:55,480
+I'm trying to debug something happening
+
+00:02:53,530 --> 00:02:58,300
+you know I don't have TCP Dom I don't
+
+00:02:55,480 --> 00:03:00,700
+have any kind of packet counters or or
+
+00:02:58,300 --> 00:03:02,740
+you have to have customized tools that
+
+00:03:00,700 --> 00:03:06,130
+know how to understand that specialized
+
+00:03:02,740 --> 00:03:10,420
+xdv program so what we need is a better
+
+00:03:06,130 --> 00:03:13,360
+integration of xdp with linux so
+
+00:03:10,420 --> 00:03:15,960
+certainly you could do something like we
+
+00:03:13,360 --> 00:03:18,400
+have with our switch D and you listen to
+
+00:03:15,960 --> 00:03:20,080
+notifications from the kernel the
+
+00:03:18,400 --> 00:03:22,780
+neighbor entries the route entries and
+
+00:03:20,080 --> 00:03:24,870
+use that as a way to have a local agent
+
+00:03:22,780 --> 00:03:31,209
+responding to events and updating maps
+
+00:03:24,870 --> 00:03:32,709
+but XDP unlike Hardware offload does it
+
+00:03:31,209 --> 00:03:36,070
+have a whole lot of smarts you have to
+
+00:03:32,709 --> 00:03:38,140
+build everything into the HDP program so
+
+00:03:36,070 --> 00:03:39,430
+this kind of a set up is going to be
+
+00:03:38,140 --> 00:03:41,950
+very limited in how it can handle
+
+00:03:39,430 --> 00:03:43,530
+millions how can handle lag devices how
+
+00:03:41,950 --> 00:03:47,110
+it can scale with the number of hops
+
+00:03:43,530 --> 00:03:49,540
+doing things like in caps the current
+
+00:03:47,110 --> 00:03:52,270
+state of X DP if you've got custom data
+
+00:03:49,540 --> 00:03:54,790
+in the Maps separate data then the
+
+00:03:52,270 --> 00:03:56,830
+kernel stack if you need a cyst from the
+
+00:03:54,790 --> 00:03:59,050
+kernel stack you know for flight for em
+
+00:03:56,830 --> 00:04:00,910
+to you or fragmentation things like that
+
+00:03:59,050 --> 00:04:03,610
+you know you've got to repeat all that
+
+00:04:00,910 --> 00:04:05,380
+stuff in X DP or you have to kind of
+
+00:04:03,610 --> 00:04:06,489
+work extra hard to get that data to be
+
+00:04:05,380 --> 00:04:08,860
+the same between the two environments
+
+00:04:06,489 --> 00:04:11,739
+okay and really what you're doing is
+
+00:04:08,860 --> 00:04:15,670
+you're reimplemented X in X DP and
+
+00:04:11,739 --> 00:04:16,900
+that's what we don't want to do so over
+
+00:04:15,670 --> 00:04:19,120
+the past Wed I guess three and a half
+
+00:04:16,900 --> 00:04:22,450
+four years a lot of effort has been put
+
+00:04:19,120 --> 00:04:26,260
+into switched off making Linux a more
+
+00:04:22,450 --> 00:04:29,770
+scalable feature-rich network operating
+
+00:04:26,260 --> 00:04:31,780
+system okay with x DP we're just kind of
+
+00:04:29,770 --> 00:04:34,030
+throwing all that work away and starting
+
+00:04:31,780 --> 00:04:36,780
+over again right if we continue down
+
+00:04:34,030 --> 00:04:40,840
+this path of just Maps
+
+00:04:36,780 --> 00:04:43,090
+so why not think of XDP is kind of a
+
+00:04:40,840 --> 00:04:44,620
+software offload it's not really an
+
+00:04:43,090 --> 00:04:47,530
+offload but it's in the sense that
+
+00:04:44,620 --> 00:04:50,289
+you're trying to fast path packets that
+
+00:04:47,530 --> 00:04:52,930
+fast path forwarding of packets and you
+
+00:04:50,289 --> 00:04:54,639
+want to have these BPF programs be able
+
+00:04:52,930 --> 00:04:57,039
+to look up into these networking data
+
+00:04:54,639 --> 00:04:58,479
+structures and use that information to
+
+00:04:57,039 --> 00:05:02,610
+decide what it's going to do with a
+
+00:04:58,479 --> 00:05:02,610
+packet as opposed to re-implement
+
+00:05:05,280 --> 00:05:10,569
+encountered Esper made it's not just
+
+00:05:08,440 --> 00:05:12,580
+about creating a whole bunch of BPF
+
+00:05:10,569 --> 00:05:15,759
+helpers you want to do this in kind of a
+
+00:05:12,580 --> 00:05:18,220
+smart way you know so when you think
+
+00:05:15,759 --> 00:05:20,139
+about a forwarding pipeline that can be
+
+00:05:18,220 --> 00:05:22,599
+done in hardware right how do you create
+
+00:05:20,139 --> 00:05:24,490
+something some building blocks in Linux
+
+00:05:22,599 --> 00:05:27,669
+where you can you can get some
+
+00:05:24,490 --> 00:05:30,069
+equivalent capability where you plug and
+
+00:05:27,669 --> 00:05:31,780
+play as you as you want so you're not
+
+00:05:30,069 --> 00:05:32,229
+having to do all these features all the
+
+00:05:31,780 --> 00:05:34,389
+time
+
+00:05:32,229 --> 00:05:36,879
+which is some of the scalability issues
+
+00:05:34,389 --> 00:05:39,669
+with Linux but you you build this as you
+
+00:05:36,879 --> 00:05:41,259
+as you have for specific deployment but
+
+00:05:39,669 --> 00:05:43,389
+yet you can still maintain the
+
+00:05:41,259 --> 00:05:44,620
+management of these Maps through FRR
+
+00:05:43,389 --> 00:05:47,139
+we're not management of the maps
+
+00:05:44,620 --> 00:05:48,849
+management of the data through FRR
+
+00:05:47,139 --> 00:05:51,370
+through if' up down to through those
+
+00:05:48,849 --> 00:05:55,120
+kinds of things so generically
+
+00:05:51,370 --> 00:05:58,360
+what you have is ACLs policing filters
+
+00:05:55,120 --> 00:06:01,870
+for example on ingress the ability to
+
+00:05:58,360 --> 00:06:05,169
+have those ACLs or filters on multiple
+
+00:06:01,870 --> 00:06:08,500
+levels of devices be at the ingress port
+
+00:06:05,169 --> 00:06:10,409
+or the l2 interface you know what plugs
+
+00:06:08,500 --> 00:06:14,889
+into the bridge which be used for your
+
+00:06:10,409 --> 00:06:16,690
+l2 forwarding lookup or on an l3 or
+
+00:06:14,889 --> 00:06:18,219
+router interface right so you can put
+
+00:06:16,690 --> 00:06:20,229
+these ACLs and filters and a whole bunch
+
+00:06:18,219 --> 00:06:22,690
+of different locations but essentially
+
+00:06:20,229 --> 00:06:25,120
+it's the same concept multiple times and
+
+00:06:22,690 --> 00:06:27,219
+if you in your deployment you only have
+
+00:06:25,120 --> 00:06:29,830
+an ACL on the port or you only have an
+
+00:06:27,219 --> 00:06:32,650
+ACL on the elderly interface then you
+
+00:06:29,830 --> 00:06:34,750
+can build an X DP program or BPF program
+
+00:06:32,650 --> 00:06:37,539
+that only calls those helpers for
+
+00:06:34,750 --> 00:06:40,120
+specific locations ok so that's kind of
+
+00:06:37,539 --> 00:06:43,839
+the intention is to create some building
+
+00:06:40,120 --> 00:06:45,130
+blocks with a expected kind of a path
+
+00:06:43,839 --> 00:06:48,540
+that you're walking down but yet
+
+00:06:45,130 --> 00:06:51,430
+customized for a specific deployment
+
+00:06:48,540 --> 00:06:54,610
+right so to come back to this in summary
+
+00:06:51,430 --> 00:06:56,320
+it's you want to let I F up down to or
+
+00:06:54,610 --> 00:06:58,419
+whatever network manager using for your
+
+00:06:56,320 --> 00:06:59,889
+OS be able to configure VLANs
+
+00:06:58,419 --> 00:07:01,570
+we had to configure bonds to be able to
+
+00:06:59,889 --> 00:07:03,880
+create the bridges and then to have the
+
+00:07:01,570 --> 00:07:05,889
+bridge manage the FDB for example to
+
+00:07:03,880 --> 00:07:08,050
+better use MacNeill and for BRR you
+
+00:07:05,889 --> 00:07:10,180
+don't want to recreate all that in xdp
+
+00:07:08,050 --> 00:07:12,220
+or BPF form you want to leverage the
+
+00:07:10,180 --> 00:07:14,590
+stuff that exists today that that's been
+
+00:07:12,220 --> 00:07:15,669
+you know enhanced and scaled and all the
+
+00:07:14,590 --> 00:07:17,470
+stuff and then all the work that's been
+
+00:07:15,669 --> 00:07:22,840
+done over the past few years but now
+
+00:07:17,470 --> 00:07:25,240
+bring it into this XDP context all right
+
+00:07:22,840 --> 00:07:26,919
+so you've got this feature list of
+
+00:07:25,240 --> 00:07:30,430
+things you want to do be able to build
+
+00:07:26,919 --> 00:07:33,820
+in an xdp program or XDP environment and
+
+00:07:30,430 --> 00:07:36,820
+then you you map this into what linux is
+
+00:07:33,820 --> 00:07:39,400
+doing today right so you have the packet
+
+00:07:36,820 --> 00:07:40,870
+that arrives on a port NIC driver
+
+00:07:39,400 --> 00:07:43,300
+handles that throws it into the queue
+
+00:07:40,870 --> 00:07:46,240
+and it looks at things like is there a
+
+00:07:43,300 --> 00:07:48,580
+VLAN tagging there's a VLAN tag on the
+
+00:07:46,240 --> 00:07:50,620
+port is it on a bond is it somewhere up
+
+00:07:48,580 --> 00:07:52,870
+in the stack and so this loop is
+
+00:07:50,620 --> 00:07:55,539
+basically going through it and saying if
+
+00:07:52,870 --> 00:07:57,699
+I've put an ingress ACL or an ingress
+
+00:07:55,539 --> 00:07:59,979
+filter or maybe it's a net filter right
+
+00:07:57,699 --> 00:08:02,110
+multiple locations multiple options for
+
+00:07:59,979 --> 00:08:04,389
+how you configure these these features
+
+00:08:02,110 --> 00:08:06,490
+but essentially this loop is kind of
+
+00:08:04,389 --> 00:08:09,400
+walking up a feature stack and saying I
+
+00:08:06,490 --> 00:08:11,860
+have an ACL on my my ingress port have
+
+00:08:09,400 --> 00:08:13,360
+an ACL on my VLAN port have an ACL on my
+
+00:08:11,860 --> 00:08:15,880
+bridge have an ACL on my router
+
+00:08:13,360 --> 00:08:18,880
+interfaces right and so this is the kind
+
+00:08:15,880 --> 00:08:22,539
+of the loop that we want to mimic the
+
+00:08:18,880 --> 00:08:24,099
+capabilities of in xdp ok and then this
+
+00:08:22,539 --> 00:08:26,139
+is the egress side of that you do the
+
+00:08:24,099 --> 00:08:28,830
+forwarding lookup you've got some more
+
+00:08:26,139 --> 00:08:32,950
+hooks that you can do filtering ACLs
+
+00:08:28,830 --> 00:08:34,659
+packet queuing for example so again this
+
+00:08:32,950 --> 00:08:39,339
+is kind of where that the target is
+
+00:08:34,659 --> 00:08:41,709
+going with BPF helpers all right so
+
+00:08:39,339 --> 00:08:44,260
+first up is going to be device table
+
+00:08:41,709 --> 00:08:46,990
+right to be able to have more things on
+
+00:08:44,260 --> 00:08:49,000
+that that ingress port than just
+
+00:08:46,990 --> 00:08:50,350
+forwarding on an ingress port right so
+
+00:08:49,000 --> 00:08:51,490
+one hundred eight hundred gig neck you
+
+00:08:50,350 --> 00:08:53,770
+really want to be able to do VLAN
+
+00:08:51,490 --> 00:08:55,600
+trunking for example or you want to be
+
+00:08:53,770 --> 00:08:57,970
+able to put a lag device on that port
+
+00:08:55,600 --> 00:09:00,430
+and have multiple VLANs on top of the
+
+00:08:57,970 --> 00:09:01,750
+bond device so essentially what that
+
+00:09:00,430 --> 00:09:04,480
+means from
+
+00:09:01,750 --> 00:09:05,709
+the the processing perspective is you
+
+00:09:04,480 --> 00:09:08,829
+have a bunch of features that are
+
+00:09:05,709 --> 00:09:11,740
+layered on the port and then the xcp
+
+00:09:08,829 --> 00:09:14,399
+programs are executed on that baseline
+
+00:09:11,740 --> 00:09:16,899
+network interface as opposed to
+
+00:09:14,399 --> 00:09:18,490
+executing some programs on multiple
+
+00:09:16,899 --> 00:09:20,560
+layers of interface right so that gets
+
+00:09:18,490 --> 00:09:22,060
+into that performance killer of running
+
+00:09:20,560 --> 00:09:23,709
+these things doing multiple lookups
+
+00:09:22,060 --> 00:09:29,439
+trying to figure out which device is
+
+00:09:23,709 --> 00:09:31,600
+relevant for a particular packet so
+
+00:09:29,439 --> 00:09:33,279
+specifically if you look at like VLANs
+
+00:09:31,600 --> 00:09:36,009
+you know like I said those VLANs can be
+
+00:09:33,279 --> 00:09:38,560
+in any number of locations or if you
+
+00:09:36,009 --> 00:09:41,889
+look at the bonds or bridges rather and
+
+00:09:38,560 --> 00:09:43,360
+the VLANs going into a bridge or it
+
+00:09:41,889 --> 00:09:45,160
+could be a VLAN aware bridge at which
+
+00:09:43,360 --> 00:09:46,930
+case you don't have an explicit VLAN
+
+00:09:45,160 --> 00:09:49,120
+device you just have the network
+
+00:09:46,930 --> 00:09:51,519
+interface trunked into a bridge so
+
+00:09:49,120 --> 00:09:57,490
+you've got some challenges in how you
+
+00:09:51,519 --> 00:10:00,279
+handle these lookups similar with
+
+00:09:57,490 --> 00:10:02,709
+bonding same kind of idea bonding brings
+
+00:10:00,279 --> 00:10:05,019
+in a whole nother example the egress
+
+00:10:02,709 --> 00:10:07,660
+side you also have to walk down that
+
+00:10:05,019 --> 00:10:10,779
+feature stack so if the forwarding
+
+00:10:07,660 --> 00:10:13,750
+lookup says go out you know eath one dot
+
+00:10:10,779 --> 00:10:15,459
+100 meaning VLAN device 100 you've got
+
+00:10:13,750 --> 00:10:17,829
+to get that back down to the NIC port
+
+00:10:15,459 --> 00:10:19,149
+which has the actual xdv program and
+
+00:10:17,829 --> 00:10:21,250
+then you've got to make sure you include
+
+00:10:19,149 --> 00:10:23,800
+all those tags on the packet as it goes
+
+00:10:21,250 --> 00:10:26,019
+down the stack bonding for example you
+
+00:10:23,800 --> 00:10:27,970
+got to pick the leg so if you want the
+
+00:10:26,019 --> 00:10:30,639
+bond driver to have all this logic that
+
+00:10:27,970 --> 00:10:33,220
+decides what bonding means you need to
+
+00:10:30,639 --> 00:10:34,809
+export something for BPF programs to be
+
+00:10:33,220 --> 00:10:42,279
+able to figure out well which leg does
+
+00:10:34,809 --> 00:10:44,379
+this come out of all right I do tend to
+
+00:10:42,279 --> 00:10:48,029
+talk fast when I get out there that's
+
+00:10:44,379 --> 00:10:48,029
+why I said 25 minutes more than enough
+
+00:10:48,389 --> 00:10:54,080
+all right
+
+00:10:50,800 --> 00:10:55,760
+so again the biggest thing is we do not
+
+00:10:54,080 --> 00:10:57,950
+want to have to re-implement all these
+
+00:10:55,760 --> 00:11:00,050
+networking features that linux has
+
+00:10:57,950 --> 00:11:02,690
+developed over the years and redo this
+
+00:11:00,050 --> 00:11:05,860
+up in BPF we want to be able to do this
+
+00:11:02,690 --> 00:11:08,720
+in XTP we want better synergy between
+
+00:11:05,860 --> 00:11:14,420
+the BPF environment XDP environment and
+
+00:11:08,720 --> 00:11:17,290
+the full linux dock so first up is again
+
+00:11:14,420 --> 00:11:20,960
+the device table and I do have
+
+00:11:17,290 --> 00:11:23,450
+prototypes now for handling VLAN
+
+00:11:20,960 --> 00:11:26,630
+trunking on ports and even handling
+
+00:11:23,450 --> 00:11:30,860
+bonds and I don't think I've tested that
+
+00:11:26,630 --> 00:11:33,890
+combination yet of VLANs on bonds on
+
+00:11:30,860 --> 00:11:36,620
+ports but I definitely have tested of
+
+00:11:33,890 --> 00:11:37,690
+bonds on a port and VLANs on a port and
+
+00:11:36,620 --> 00:11:39,980
+all that stuff is working fine
+
+00:11:37,690 --> 00:11:42,730
+algorithmically since I'm trying to
+
+00:11:39,980 --> 00:11:45,620
+mimic that loop in the Escobedo receive
+
+00:11:42,730 --> 00:11:47,240
+it should work today what I have on
+
+00:11:45,620 --> 00:11:49,310
+github and pushed out for the for that
+
+00:11:47,240 --> 00:11:53,060
+fellow in Poland who's doing awesome
+
+00:11:49,310 --> 00:11:55,250
+some crazy forwarding stuff so anyway
+
+00:11:53,060 --> 00:11:57,470
+what this did is doing these prototypes
+
+00:11:55,250 --> 00:12:00,680
+are doing is kind of exposing some
+
+00:11:57,470 --> 00:12:03,050
+next-level challenges and those
+
+00:12:00,680 --> 00:12:05,750
+challenges are you've got core code
+
+00:12:03,050 --> 00:12:08,060
+filter dot C needing to access module
+
+00:12:05,750 --> 00:12:10,910
+specific stuff how are we gonna handle
+
+00:12:08,060 --> 00:12:13,550
+that right so one option is what ipv6
+
+00:12:10,910 --> 00:12:16,400
+has which is a bunch of stubs and if the
+
+00:12:13,550 --> 00:12:18,200
+modules not loaded the stub the stub
+
+00:12:16,400 --> 00:12:20,600
+ones are on it basically says no support
+
+00:12:18,200 --> 00:12:22,100
+but that gets kind of clumsy right we
+
+00:12:20,600 --> 00:12:25,120
+really gotta find something else because
+
+00:12:22,100 --> 00:12:28,490
+just in handling VLANs and bonds and
+
+00:12:25,120 --> 00:12:31,220
+MPLS I've got some MPLS patches as well
+
+00:12:28,490 --> 00:12:33,140
+I think I'm at something like six or
+
+00:12:31,220 --> 00:12:35,300
+seven different stubs that have to be
+
+00:12:33,140 --> 00:12:38,090
+done so it's kind of an awkward solution
+
+00:12:35,300 --> 00:12:41,300
+so that is a generic challenge that has
+
+00:12:38,090 --> 00:12:43,400
+to be dealt with to make some of these
+
+00:12:41,300 --> 00:12:47,810
+BPF helpers to tap into something like
+
+00:12:43,400 --> 00:12:50,300
+the device table the other problem is
+
+00:12:47,810 --> 00:12:53,270
+two different contacts wanting to access
+
+00:12:50,300 --> 00:12:55,700
+the same code so xdp doesn't have an skb
+
+00:12:53,270 --> 00:12:58,520
+most of the networking stack expects an
+
+00:12:55,700 --> 00:13:00,500
+skb so ton of refactoring I think I've
+
+00:12:58,520 --> 00:13:02,060
+spent more time refactoring than
+
+00:13:00,500 --> 00:13:03,360
+thinking about what I want to do or
+
+00:13:02,060 --> 00:13:07,350
+thinking about how to get this
+
+00:13:03,360 --> 00:13:10,049
+done so being able to split this code
+
+00:13:07,350 --> 00:13:12,029
+out and do things with you know the xgp
+
+00:13:10,049 --> 00:13:13,889
+buffers as opposed to the skb you
+
+00:13:12,029 --> 00:13:16,199
+mentioned moving SK B's up a little bit
+
+00:13:13,889 --> 00:13:19,519
+maybe that would help help with some of
+
+00:13:16,199 --> 00:13:19,519
+this this overhead that I've hit so far
+
+00:13:22,339 --> 00:13:27,480
+so after devices the next thing and I
+
+00:13:25,110 --> 00:13:29,699
+was really hoping to have gone down this
+
+00:13:27,480 --> 00:13:34,350
+this ACL and policing path a little bit
+
+00:13:29,699 --> 00:13:37,319
+more but lack of time today that the fib
+
+00:13:34,350 --> 00:13:39,269
+helper exists and you can do ACLs and
+
+00:13:37,319 --> 00:13:40,860
+fib rules and that part is that that
+
+00:13:39,269 --> 00:13:43,649
+piece comes in as a part of the filled
+
+00:13:40,860 --> 00:13:47,670
+lookup but if you wanted to do ACLs in
+
+00:13:43,649 --> 00:13:49,769
+TC for example or in that filter it's a
+
+00:13:47,670 --> 00:13:51,509
+lot more work needs to be done and when
+
+00:13:49,769 --> 00:13:53,759
+you start looking at you know the fact
+
+00:13:51,509 --> 00:13:56,519
+that you can do ACLs and film roles and
+
+00:13:53,759 --> 00:13:58,319
+netfilter and TC you know trying to
+
+00:13:56,519 --> 00:13:58,769
+tackle all those at once is gonna be a
+
+00:13:58,319 --> 00:14:00,720
+nightmare
+
+00:13:58,769 --> 00:14:03,569
+but if you focus on something like say
+
+00:14:00,720 --> 00:14:06,809
+TC TC already has a bunch of SK I mean a
+
+00:14:03,569 --> 00:14:08,339
+bunch of BPF capability as it is and the
+
+00:14:06,809 --> 00:14:11,069
+fact that it gives you packet scheduling
+
+00:14:08,339 --> 00:14:14,100
+on the egress perhaps that's the one to
+
+00:14:11,069 --> 00:14:17,879
+to kind of tackle next is to see how do
+
+00:14:14,100 --> 00:14:20,100
+you allow some of these features from TC
+
+00:14:17,879 --> 00:14:22,049
+to be accessible from an ex CP
+
+00:14:20,100 --> 00:14:27,179
+environment through these BPF helpers
+
+00:14:22,049 --> 00:14:29,369
+that have to be created l2 and l3
+
+00:14:27,179 --> 00:14:31,829
+forwarding so the l3 forward the film
+
+00:14:29,369 --> 00:14:34,290
+lookup helper exists today but it's very
+
+00:14:31,829 --> 00:14:36,839
+limited you can only do forwarding from
+
+00:14:34,290 --> 00:14:39,419
+one port to another no features no upper
+
+00:14:36,839 --> 00:14:42,110
+level devices for support for that yet
+
+00:14:39,419 --> 00:14:44,069
+that's what I have of the prototypes for
+
+00:14:42,110 --> 00:14:46,860
+bridges is another one needs to be
+
+00:14:44,069 --> 00:14:50,509
+tackled someone had written a paper and
+
+00:14:46,860 --> 00:14:54,389
+had hinted that they were doing
+
+00:14:50,509 --> 00:14:57,089
+re-implementing 802 dot 1d 802 dot 1d
+
+00:14:54,389 --> 00:14:58,860
+bridges in BPF form you know and
+
+00:14:57,089 --> 00:15:01,499
+creating some of these maps to do like
+
+00:14:58,860 --> 00:15:03,629
+FDB aging you know I would argue that
+
+00:15:01,499 --> 00:15:04,559
+okay it's a cute little prototype but
+
+00:15:03,629 --> 00:15:06,480
+that's really kind of the wrong
+
+00:15:04,559 --> 00:15:08,519
+direction because you're reimplemented
+
+00:15:06,480 --> 00:15:10,470
+things and you don't get this whole
+
+00:15:08,519 --> 00:15:12,480
+linux ecosystem you're just throwing
+
+00:15:10,470 --> 00:15:14,279
+that out the door because you want to do
+
+00:15:12,480 --> 00:15:16,259
+something in this XDP environment I
+
+00:15:14,279 --> 00:15:16,830
+would argue the better the better a path
+
+00:15:16,259 --> 00:15:19,950
+here
+
+00:15:16,830 --> 00:15:22,260
+is to open up the bridge you know create
+
+00:15:19,950 --> 00:15:24,360
+some helpers so that a BPF program can
+
+00:15:22,260 --> 00:15:27,030
+say I have a packet that came in from
+
+00:15:24,360 --> 00:15:28,860
+this port on this VLAN headed to this
+
+00:15:27,030 --> 00:15:31,290
+Mac where should it go
+
+00:15:28,860 --> 00:15:33,240
+right do the f DB lookup and if it has
+
+00:15:31,290 --> 00:15:35,430
+learning on it then learn this new
+
+00:15:33,240 --> 00:15:36,810
+source Mac in that port as well so do
+
+00:15:35,430 --> 00:15:38,670
+all of that in the bridge code that
+
+00:15:36,810 --> 00:15:40,620
+exists today and then just give me the
+
+00:15:38,670 --> 00:15:42,780
+answer so I can redirect that packet to
+
+00:15:40,620 --> 00:15:45,180
+the next port so bridges would be
+
+00:15:42,780 --> 00:15:50,150
+another you know a good next step for
+
+00:15:45,180 --> 00:15:54,150
+some basic features all right in summary
+
+00:15:50,150 --> 00:15:56,370
+really for XD p2 to be this big win for
+
+00:15:54,150 --> 00:15:58,320
+Linux it needs to integrate better with
+
+00:15:56,370 --> 00:16:00,210
+the stack right we need to be able to
+
+00:15:58,320 --> 00:16:02,730
+use our existing tools and our existing
+
+00:16:00,210 --> 00:16:04,980
+processes our existing workflow and not
+
+00:16:02,730 --> 00:16:06,690
+have to reinvent the entire world to
+
+00:16:04,980 --> 00:16:11,700
+just to be able to get this enhanced
+
+00:16:06,690 --> 00:16:13,500
+performance of xep environment and also
+
+00:16:11,700 --> 00:16:16,290
+it enables Linux to be that slow path
+
+00:16:13,500 --> 00:16:17,910
+assist so for example if a large packet
+
+00:16:16,290 --> 00:16:20,550
+comes in and the film look obsessed
+
+00:16:17,910 --> 00:16:22,890
+that's bigger than the the egress path
+
+00:16:20,550 --> 00:16:24,840
+can handle I need a full stack assist on
+
+00:16:22,890 --> 00:16:26,520
+this then the packet goes up the stack
+
+00:16:24,840 --> 00:16:28,860
+the stack can split it into the
+
+00:16:26,520 --> 00:16:30,240
+fragments needed to send it out or if
+
+00:16:28,860 --> 00:16:31,590
+you need to do something like neighbor
+
+00:16:30,240 --> 00:16:33,930
+learning because the next hop isn't
+
+00:16:31,590 --> 00:16:35,460
+resolved yet then the full stack can
+
+00:16:33,930 --> 00:16:37,110
+come in and so you get this good
+
+00:16:35,460 --> 00:16:39,120
+synergistic play between the two
+
+00:16:37,110 --> 00:16:41,390
+environments fast path when you can get
+
+00:16:39,120 --> 00:16:43,740
+it slow path assist when you need it
+
+00:16:41,390 --> 00:16:45,540
+alright just want to harp on one point
+
+00:16:43,740 --> 00:16:47,400
+thank you yes touched upon which I think
+
+00:16:45,540 --> 00:16:51,000
+is extremely interesting especially in
+
+00:16:47,400 --> 00:16:52,530
+the long term is looking at elements of
+
+00:16:51,000 --> 00:16:54,240
+the stack that we want to use for this
+
+00:16:52,530 --> 00:16:57,210
+little path assistant whatever you want
+
+00:16:54,240 --> 00:17:01,590
+to call it and converting them to handle
+
+00:16:57,210 --> 00:17:05,070
+SKB Listia objects mm-hmm and I think
+
+00:17:01,590 --> 00:17:06,330
+that is the that would be the rigorous
+
+00:17:05,070 --> 00:17:08,070
+area where we need to think very
+
+00:17:06,330 --> 00:17:11,190
+carefully about everything because in my
+
+00:17:08,070 --> 00:17:12,900
+mind once you get past the point of we
+
+00:17:11,190 --> 00:17:17,160
+have we have EBP if it works as a
+
+00:17:12,900 --> 00:17:21,420
+technology and the verifier is solid the
+
+00:17:17,160 --> 00:17:25,170
+next layer is help or design yes that is
+
+00:17:21,420 --> 00:17:27,750
+really the most difficult challenging
+
+00:17:25,170 --> 00:17:30,120
+important aspect of BPF moving forward
+
+00:17:27,750 --> 00:17:32,730
+picking helpers designing them properly
+
+00:17:30,120 --> 00:17:34,890
+and making sure we don't expose more
+
+00:17:32,730 --> 00:17:36,090
+than we should and give enough so that
+
+00:17:34,890 --> 00:17:38,550
+people can implement what they want to
+
+00:17:36,090 --> 00:17:40,410
+do right I think exploring all these
+
+00:17:38,550 --> 00:17:41,970
+issues with going up and down the stack
+
+00:17:40,410 --> 00:17:43,740
+and finding out what a port really is
+
+00:17:41,970 --> 00:17:47,370
+and where does it Mac I was it's really
+
+00:17:43,740 --> 00:17:49,290
+important and so for example with BP
+
+00:17:47,370 --> 00:17:54,210
+filter we run into this because you have
+
+00:17:49,290 --> 00:17:55,980
+to pass xdp source packets into the
+
+00:17:54,210 --> 00:17:57,180
+connection tracker so I'm suddenly you
+
+00:17:55,980 --> 00:17:59,340
+have to teach a connection tracker how
+
+00:17:57,180 --> 00:18:01,080
+to handle s keeping those buffers right
+
+00:17:59,340 --> 00:18:03,360
+you're talking about this with the
+
+00:18:01,080 --> 00:18:05,490
+packet scheduler and the classifier so I
+
+00:18:03,360 --> 00:18:06,660
+think this is where a lot of work is
+
+00:18:05,490 --> 00:18:09,510
+gonna happen over the next couple years
+
+00:18:06,660 --> 00:18:11,700
+yeah and that's why I laid out that
+
+00:18:09,510 --> 00:18:13,890
+packet pipeline as you know I've
+
+00:18:11,700 --> 00:18:15,060
+suggested kind of uh it's not like we're
+
+00:18:13,890 --> 00:18:17,430
+doing things kind of willy-nilly but
+
+00:18:15,060 --> 00:18:19,290
+kind of approach this from what are some
+
+00:18:17,430 --> 00:18:22,170
+relevant features that you want to bring
+
+00:18:19,290 --> 00:18:24,900
+into XDP so essentially allow someone to
+
+00:18:22,170 --> 00:18:26,250
+tap into and not have to reinvent I also
+
+00:18:24,900 --> 00:18:29,160
+want to emphasize one more point which
+
+00:18:26,250 --> 00:18:32,760
+is that we have to be careful how much
+
+00:18:29,160 --> 00:18:34,740
+of this slow path assist we add because
+
+00:18:32,760 --> 00:18:38,880
+one of the meet just the main selling
+
+00:18:34,740 --> 00:18:42,210
+points is that xep allows you to do not
+
+00:18:38,880 --> 00:18:44,940
+only fast stuff but custom stuff yes so
+
+00:18:42,210 --> 00:18:46,320
+it needs to coexist with the framework
+
+00:18:44,940 --> 00:18:47,820
+that we're creating which is that if you
+
+00:18:46,320 --> 00:18:49,710
+need to do interesting stuff that's
+
+00:18:47,820 --> 00:18:52,110
+unique to your situation here's how you
+
+00:18:49,710 --> 00:18:53,610
+do it if you need to take advantage of
+
+00:18:52,110 --> 00:18:54,870
+existing infrastructure and things like
+
+00:18:53,610 --> 00:18:56,610
+that here it is over here with these
+
+00:18:54,870 --> 00:19:00,240
+right words so I think these two needs
+
+00:18:56,610 --> 00:19:01,920
+need to be handled at the same time yeah
+
+00:19:00,240 --> 00:19:03,690
+from the forwarding perspective I wasn't
+
+00:19:01,920 --> 00:19:06,780
+even thinking of adding more features to
+
+00:19:03,690 --> 00:19:08,430
+the full stack it was simply the xdp
+
+00:19:06,780 --> 00:19:11,310
+limited environment can't handle
+
+00:19:08,430 --> 00:19:13,200
+something okay kind of like the hardware
+
+00:19:11,310 --> 00:19:14,700
+punting something to the CPU for assist
+
+00:19:13,200 --> 00:19:16,980
+from the control plane it's kind of that
+
+00:19:14,700 --> 00:19:18,510
+mentality of well I know the full stack
+
+00:19:16,980 --> 00:19:20,550
+can do it we're both operating on the
+
+00:19:18,510 --> 00:19:22,410
+same data because X DP is actually
+
+00:19:20,550 --> 00:19:25,830
+tapping into that same data it's like it
+
+00:19:22,410 --> 00:19:28,220
+then it's a cache for the slow path yeah
+
+00:19:25,830 --> 00:19:28,220
+anyway
+
+00:19:29,880 --> 00:19:37,950
+all right any questions questions anyone
+
+00:19:33,940 --> 00:19:39,880
+for a TV come on
+
+00:19:37,950 --> 00:19:41,380
+decisions need to be made in this area
+
+00:19:39,880 --> 00:19:44,980
+it's gotta be someone who's has some
+
+00:19:41,380 --> 00:19:52,090
+issues they want to discuss David talk
+
+00:19:44,980 --> 00:19:55,030
+really fast we have time so are you
+
+00:19:52,090 --> 00:20:00,179
+intending to implement also the kind of
+
+00:19:55,030 --> 00:20:03,370
+header partial part in the XDP epa for
+
+00:20:00,179 --> 00:20:05,799
+how do i have thought about what what we
+
+00:20:03,370 --> 00:20:08,710
+could do to kind of not have to have
+
+00:20:05,799 --> 00:20:10,809
+every program doing that same it seems
+
+00:20:08,710 --> 00:20:11,980
+kind of tricky I don't know the one
+
+00:20:10,809 --> 00:20:14,860
+thing that's interesting is that now
+
+00:20:11,980 --> 00:20:17,200
+that we have BPF function calls like
+
+00:20:14,860 --> 00:20:18,820
+real function calls not tail calls one
+
+00:20:17,200 --> 00:20:21,100
+way we can move is to have actually
+
+00:20:18,820 --> 00:20:22,960
+libraries BPF libraries in the kernel
+
+00:20:21,100 --> 00:20:25,110
+and that's the area where you can remove
+
+00:20:22,960 --> 00:20:27,910
+code duplication and you could say oh
+
+00:20:25,110 --> 00:20:28,650
+parse a VLAN header or parse an IP give
+
+00:20:27,910 --> 00:20:30,790
+me the source and destination
+
+00:20:28,650 --> 00:20:32,590
+destination address and we can actually
+
+00:20:30,790 --> 00:20:34,059
+have like real infrastructure for
+
+00:20:32,590 --> 00:20:36,340
+building programs instead of everyone
+
+00:20:34,059 --> 00:20:38,140
+writes their own packet processor which
+
+00:20:36,340 --> 00:20:39,700
+is what happens right now right right
+
+00:20:38,140 --> 00:20:42,130
+right now everything is custom
+
+00:20:39,700 --> 00:20:44,650
+everything is done you know for each
+
+00:20:42,130 --> 00:20:47,620
+unique deployment think what's cool is
+
+00:20:44,650 --> 00:20:49,750
+that I'm not so sure if we have enough
+
+00:20:47,620 --> 00:20:51,309
+experience yet to know exactly what we
+
+00:20:49,750 --> 00:20:53,410
+need as far as infrastructure right
+
+00:20:51,309 --> 00:20:55,299
+people it's new people are starting to
+
+00:20:53,410 --> 00:20:58,030
+get used to the technology and what you
+
+00:20:55,299 --> 00:20:59,559
+can do with it so we're learning so it's
+
+00:20:58,030 --> 00:21:01,299
+gonna take some time to know what kind
+
+00:20:59,559 --> 00:21:04,090
+of infrastructure we really need yeah
+
+00:21:01,299 --> 00:21:06,760
+and things like the tapping the device
+
+00:21:04,090 --> 00:21:10,270
+table to figure out you know given up
+
+00:21:06,760 --> 00:21:12,580
+work Beale and eMac Triplett what is the
+
+00:21:10,270 --> 00:21:14,590
+l2 interface or the l3 interface meaning
+
+00:21:12,580 --> 00:21:16,990
+what do I ask the bridge to do it uses
+
+00:21:14,590 --> 00:21:21,160
+its lookup or what I asked the fib table
+
+00:21:16,990 --> 00:21:23,290
+the field lookup to use you really have
+
+00:21:21,160 --> 00:21:25,299
+to get more than just a couple of use
+
+00:21:23,290 --> 00:21:27,370
+cases that I've got you know thought out
+
+00:21:25,299 --> 00:21:29,559
+and program and working because once
+
+00:21:27,370 --> 00:21:30,700
+that API goes in you know you know it
+
+00:21:29,559 --> 00:21:32,320
+screw it on your on your future
+
+00:21:30,700 --> 00:21:35,080
+progression so it's almost like you have
+
+00:21:32,320 --> 00:21:36,850
+to get prototypes working for a whole
+
+00:21:35,080 --> 00:21:37,809
+bunch of you cases at once to say okay
+
+00:21:36,850 --> 00:21:40,710
+this is how everything plays together
+
+00:21:37,809 --> 00:21:46,140
+okay now we can commit this as our ep
+
+00:21:40,710 --> 00:21:46,140
+and all of my code is on github Steven
+
+00:21:47,400 --> 00:21:54,490
+have you thought about having the
+
+00:21:50,140 --> 00:21:56,920
+ability to have some BPF hooks in the
+
+00:21:54,490 --> 00:21:58,630
+same places that dead link event happens
+
+00:21:56,920 --> 00:22:03,400
+so that you don't have to have a user
+
+00:21:58,630 --> 00:22:05,890
+space monitor so that you know like Oh
+
+00:22:03,400 --> 00:22:07,750
+link goes down we don't have to monitor
+
+00:22:05,890 --> 00:22:10,780
+that from user space and then do
+
+00:22:07,750 --> 00:22:13,090
+something to tweak the BPF program so
+
+00:22:10,780 --> 00:22:14,980
+the intention from my perspective was
+
+00:22:13,090 --> 00:22:16,390
+you've already got FRR it already knows
+
+00:22:14,980 --> 00:22:18,490
+how to manage routes it already knows
+
+00:22:16,390 --> 00:22:20,560
+how to listen to link events so if a net
+
+00:22:18,490 --> 00:22:22,390
+if a link goes down it'll you know the
+
+00:22:20,560 --> 00:22:24,490
+routes get kicked out it knows that and
+
+00:22:22,390 --> 00:22:27,040
+it can make decisions on how it wants to
+
+00:22:24,490 --> 00:22:29,290
+update the fit and you don't have to do
+
+00:22:27,040 --> 00:22:31,780
+anything in the BPF Maps the fact that
+
+00:22:29,290 --> 00:22:33,490
+the FRR manages the FIB and updates the
+
+00:22:31,780 --> 00:22:35,800
+fed on a link event means
+
+00:22:33,490 --> 00:22:42,850
+xdp immediately the very next packet it
+
+00:22:35,800 --> 00:22:45,360
+gets that update anyone else you're
+
+00:22:42,850 --> 00:22:48,940
+talking about offloading the fee for FTP
+
+00:22:45,360 --> 00:22:53,440
+tables providing some helpers to from
+
+00:22:48,940 --> 00:22:55,930
+the BPA programs to get the yes right so
+
+00:22:53,440 --> 00:23:01,570
+how do they how are we expecting those
+
+00:22:55,930 --> 00:23:03,100
+tables to be populated exception well so
+
+00:23:01,570 --> 00:23:04,810
+it's gonna be like IP if you're doing
+
+00:23:03,100 --> 00:23:06,280
+static routes it's gonna be I F up down
+
+00:23:04,810 --> 00:23:09,120
+to for example your whatever your
+
+00:23:06,280 --> 00:23:13,600
+favorite and that interface manager is
+
+00:23:09,120 --> 00:23:16,120
+200 bridge FTB updates so in that case
+
+00:23:13,600 --> 00:23:18,760
+the the the the bridge helper would have
+
+00:23:16,120 --> 00:23:20,470
+to say is learning on so the you know
+
+00:23:18,760 --> 00:23:23,110
+the BPF helper that exposes bridge
+
+00:23:20,470 --> 00:23:25,060
+functionality says yes I've got learning
+
+00:23:23,110 --> 00:23:27,280
+enabled so the lookup would have to
+
+00:23:25,060 --> 00:23:30,100
+include the source Mac for example and
+
+00:23:27,280 --> 00:23:32,230
+that that port VLAN D Mac combination
+
+00:23:30,100 --> 00:23:34,930
+then also the source Mac so that it can
+
+00:23:32,230 --> 00:23:37,950
+do the FTB learning as it's giving the
+
+00:23:34,930 --> 00:23:37,950
+answer about word for word
+
+00:23:43,000 --> 00:23:46,600
+so for bridge lookups all of them would
+
+00:23:45,100 --> 00:23:47,860
+still go through that helper so we'd
+
+00:23:46,600 --> 00:23:50,080
+have to go do this they wouldn't have to
+
+00:23:47,860 --> 00:23:52,720
+go to a full stack assist because the
+
+00:23:50,080 --> 00:23:53,860
+helper itself can say I've got you know
+
+00:23:52,720 --> 00:23:55,840
+this is the interface
+
+00:23:53,860 --> 00:23:57,700
+it goes into this bridge so this is the
+
+00:23:55,840 --> 00:23:59,440
+bridge board information so
+
+00:23:57,700 --> 00:24:01,570
+oh that Bridgeport has learning enabled
+
+00:23:59,440 --> 00:24:05,280
+so while I'm doing a lookup I will also
+
+00:24:01,570 --> 00:24:10,090
+add a new entry for this the source map
+
+00:24:05,280 --> 00:24:11,380
+connects so while we're throwing that
+
+00:24:10,090 --> 00:24:13,570
+around so one other thing that did come
+
+00:24:11,380 --> 00:24:15,790
+up is each one of these different
+
+00:24:13,570 --> 00:24:18,970
+networking features for example bonding
+
+00:24:15,790 --> 00:24:21,340
+has unique processing that it does on
+
+00:24:18,970 --> 00:24:24,280
+ingress for example so if you receive a
+
+00:24:21,340 --> 00:24:26,530
+packet on an ingress slave on a slave
+
+00:24:24,280 --> 00:24:28,720
+that is inactive most of those packets
+
+00:24:26,530 --> 00:24:30,640
+get dropped so that is another kind of
+
+00:24:28,720 --> 00:24:32,830
+little subtle detail that has to somehow
+
+00:24:30,640 --> 00:24:35,110
+be managed for these hoppers it's almost
+
+00:24:32,830 --> 00:24:38,650
+like you need a if I'm going through a
+
+00:24:35,110 --> 00:24:40,570
+bond is this XDP compatible you know
+
+00:24:38,650 --> 00:24:42,309
+that's kind of a simple call and again
+
+00:24:40,570 --> 00:24:43,990
+it's doing all this with the fewest
+
+00:24:42,309 --> 00:24:47,620
+number of instructions to decide full
+
+00:24:43,990 --> 00:24:49,090
+stack forwarding or whatever so you
+
+00:24:47,620 --> 00:24:50,950
+talked it a little bit about for example
+
+00:24:49,090 --> 00:24:53,110
+like the bond slave selection sorts of
+
+00:24:50,950 --> 00:24:54,400
+logic have you taken the sort of thing
+
+00:24:53,110 --> 00:24:57,250
+thought about taking it to the extreme
+
+00:24:54,400 --> 00:25:00,250
+where the native implementation is XDP
+
+00:24:57,250 --> 00:25:02,559
+and the upper layer stack calls XDP and
+
+00:25:00,250 --> 00:25:04,240
+so there is no sort of slow path up call
+
+00:25:02,559 --> 00:25:08,020
+but it's the other way around
+
+00:25:04,240 --> 00:25:09,910
+I have not know I'm thinking about it
+
+00:25:08,020 --> 00:25:11,770
+more of getting this fast path
+
+00:25:09,910 --> 00:25:14,080
+forwarding without reinventing what
+
+00:25:11,770 --> 00:25:16,660
+already exists but if the bond
+
+00:25:14,080 --> 00:25:18,490
+maintainer wants to redo that
+
+00:25:16,660 --> 00:25:20,980
+implementation in BPO that was just the
+
+00:25:18,490 --> 00:25:25,690
+example that came to mind but sure sure
+
+00:25:20,980 --> 00:25:28,600
+I got that yeah I guess it's still kind
+
+00:25:25,690 --> 00:25:31,630
+of early and so start off by making the
+
+00:25:28,600 --> 00:25:34,510
+existing code reachable from the HTTP
+
+00:25:31,630 --> 00:25:39,480
+context and then maybe it flops to it's
+
+00:25:34,510 --> 00:25:39,480
+an implementation in BPF that yeah
+
+00:25:41,059 --> 00:25:48,630
+so just trying to think about some cards
+
+00:25:45,690 --> 00:25:52,380
+that do hard work offload for exist
+
+00:25:48,630 --> 00:25:56,309
+wanted you know if you can call random
+
+00:25:52,380 --> 00:25:59,190
+Linux stuff at any point in that case mu
+
+00:25:56,309 --> 00:26:01,440
+now because it never actually makes its
+
+00:25:59,190 --> 00:26:02,790
+way into the the criminal contacts if
+
+00:26:01,440 --> 00:26:04,320
+it's being offloaded to the hardware
+
+00:26:02,790 --> 00:26:11,700
+then all that all that information has
+
+00:26:04,320 --> 00:26:12,540
+to be pushed down to the hardware sure
+
+00:26:11,700 --> 00:26:15,090
+sure
+
+00:26:12,540 --> 00:26:17,370
+I'm thinking about strictly from you
+
+00:26:15,090 --> 00:26:18,780
+know if we have a six you know if like
+
+00:26:17,370 --> 00:26:20,280
+four switches we already have a six so
+
+00:26:18,780 --> 00:26:22,799
+it's already doing Hardware offload and
+
+00:26:20,280 --> 00:26:24,150
+it's got a much more capabilities so if
+
+00:26:22,799 --> 00:26:25,799
+the packet is gonna be like you're
+
+00:26:24,150 --> 00:26:28,020
+trying to do x86 server kind of
+
+00:26:25,799 --> 00:26:29,730
+forwarding and you want some similar
+
+00:26:28,020 --> 00:26:32,250
+speeds and similar functionalities and
+
+00:26:29,730 --> 00:26:35,130
+really keeping this this management
+
+00:26:32,250 --> 00:26:36,870
+model consistent right which whether
+
+00:26:35,130 --> 00:26:38,730
+it's x86 forwarding full stack
+
+00:26:36,870 --> 00:26:40,650
+forwarding Hardware offload forwarding
+
+00:26:38,730 --> 00:26:43,230
+you've got a consistent operational
+
+00:26:40,650 --> 00:26:45,600
+model so when your customer support
+
+00:26:43,230 --> 00:26:47,640
+people log in to that forwarding node
+
+00:26:45,600 --> 00:26:48,990
+they're not scratching their heads going
+
+00:26:47,640 --> 00:26:51,510
+wait a minute what does this implement
+
+00:26:48,990 --> 00:26:52,950
+it as how do i how do i figure out where
+
+00:26:51,510 --> 00:26:54,540
+the package drops are happening how do i
+
+00:26:52,950 --> 00:26:56,220
+figure out how to how to even analyze
+
+00:26:54,540 --> 00:27:02,370
+the system right there's some
+
+00:26:56,220 --> 00:27:08,549
+consistency to it has any more questions
+
+00:27:02,370 --> 00:27:11,309
+I was wondering how this ties into the
+
+00:27:08,549 --> 00:27:15,450
+there are some things that HDPE is never
+
+00:27:11,309 --> 00:27:17,490
+going to do discretion because I went
+
+00:27:15,450 --> 00:27:18,870
+when we were working was one of the
+
+00:27:17,490 --> 00:27:21,840
+things that came out was someone was
+
+00:27:18,870 --> 00:27:24,240
+trying to do full network function
+
+00:27:21,840 --> 00:27:25,950
+virtualization in HTTP mm-hm and it
+
+00:27:24,240 --> 00:27:28,110
+became quite an extensive set of
+
+00:27:25,950 --> 00:27:29,880
+different maps and updates and all these
+
+00:27:28,110 --> 00:27:32,400
+kinds of thing right and there's like a
+
+00:27:29,880 --> 00:27:34,230
+gray area here where where do we draw
+
+00:27:32,400 --> 00:27:38,700
+the line what do we write when do we say
+
+00:27:34,230 --> 00:27:42,299
+no I hope you do see I would argue that
+
+00:27:38,700 --> 00:27:44,640
+if someone wants to do that then sure
+
+00:27:42,299 --> 00:27:48,960
+like they're creating their own custom
+
+00:27:44,640 --> 00:27:50,610
+whatever just like a FX DP is enabling
+
+00:27:48,960 --> 00:27:52,770
+someone to just punch everything up to
+
+00:27:50,610 --> 00:27:54,000
+user space and do what they want my
+
+00:27:52,770 --> 00:27:56,040
+argument
+
+00:27:54,000 --> 00:27:58,620
+be more from it's a it's a support
+
+00:27:56,040 --> 00:28:00,120
+nightmare to if you know if you're doing
+
+00:27:58,620 --> 00:28:01,770
+general forwarding it's a support
+
+00:28:00,120 --> 00:28:03,900
+nightmare to figure out what's going on
+
+00:28:01,770 --> 00:28:07,220
+I think one way to look at especially
+
+00:28:03,900 --> 00:28:10,620
+what he's bringing to the forefront is
+
+00:28:07,220 --> 00:28:12,390
+what we're extending xdp to do and BPF
+
+00:28:10,620 --> 00:28:15,120
+more generally speaking is to access
+
+00:28:12,390 --> 00:28:17,070
+objects that exist in the kernel already
+
+00:28:15,120 --> 00:28:19,350
+so that is the main framework by which
+
+00:28:17,070 --> 00:28:23,130
+we extend EBP up to new areas of
+
+00:28:19,350 --> 00:28:26,700
+functionality to the extreme to show you
+
+00:28:23,130 --> 00:28:29,880
+what isn't reasonable is trying to
+
+00:28:26,700 --> 00:28:33,170
+implement a TCP stack in XDP you're not
+
+00:28:29,880 --> 00:28:36,120
+getting there we don't want timers yet
+
+00:28:33,170 --> 00:28:38,100
+it's not what it's designed for so they
+
+00:28:36,120 --> 00:28:39,660
+will probably put the brakes on if
+
+00:28:38,100 --> 00:28:41,880
+someone tries to go down that road so
+
+00:28:39,660 --> 00:28:43,710
+that's why I keep bringing up the fact
+
+00:28:41,880 --> 00:28:45,750
+that designing the helpers and how we
+
+00:28:43,710 --> 00:28:48,480
+access access objects and what objects
+
+00:28:45,750 --> 00:28:51,900
+we give access to is the key for keeping
+
+00:28:48,480 --> 00:28:53,100
+EBP F sane in moving forward so I hope
+
+00:28:51,900 --> 00:28:56,640
+that kind of gives you the idea of what
+
+00:28:53,100 --> 00:28:57,600
+what our kind of rules are so far so
+
+00:28:56,640 --> 00:29:00,510
+it's kind of like someone who wants to
+
+00:28:57,600 --> 00:29:03,630
+implement the bridge in BPF and have to
+
+00:29:00,510 --> 00:29:05,160
+manage the aging of FTB entries so the
+
+00:29:03,630 --> 00:29:06,930
+new maps were just added to allow that
+
+00:29:05,160 --> 00:29:09,480
+to happen if someone really wants get on
+
+00:29:06,930 --> 00:29:11,490
+that path more power to you you know I
+
+00:29:09,480 --> 00:29:13,440
+would argue from a debugging perspective
+
+00:29:11,490 --> 00:29:16,350
+from a maintenance perspective it's it's
+
+00:29:13,440 --> 00:29:19,170
+it's it's not a it's not going to be a
+
+00:29:16,350 --> 00:29:23,670
+great end path but if someone wants to
+
+00:29:19,170 --> 00:29:25,890
+do it if somebody has a whole lot of
+
+00:29:23,670 --> 00:29:28,350
+time and a whole lot of motivation a
+
+00:29:25,890 --> 00:29:34,740
+very useful thing would be to do
+
+00:29:28,350 --> 00:29:36,240
+equivalent to OBS DB DK and OVS xdp so
+
+00:29:34,740 --> 00:29:39,620
+but if somebody's doing it and
+
+00:29:36,240 --> 00:29:39,620
+announcing it they'll be great
+
+00:29:41,780 --> 00:29:46,140
+now this has been discussed so as you
+
+00:29:44,310 --> 00:29:49,710
+can imagine we have this whole TC flower
+
+00:29:46,140 --> 00:29:51,840
+thing and it's what the recommended way
+
+00:29:49,710 --> 00:29:54,900
+to offload OBS and stuff but what if TC
+
+00:29:51,840 --> 00:29:57,930
+flower generated XDP programs and then
+
+00:29:54,900 --> 00:29:58,920
+the driver got attached to that and then
+
+00:29:57,930 --> 00:30:01,410
+all of a sudden we have some really
+
+00:29:58,920 --> 00:30:02,940
+awesome situations where like the
+
+00:30:01,410 --> 00:30:03,930
+national guys have multiple firmwares
+
+00:30:02,940 --> 00:30:06,030
+they have to decide whether they're
+
+00:30:03,930 --> 00:30:07,320
+doing OBS or BPF and they wouldn't have
+
+00:30:06,030 --> 00:30:08,250
+to make a decision anymore and they
+
+00:30:07,320 --> 00:30:10,470
+wouldn't have to support multiple
+
+00:30:08,250 --> 00:30:12,030
+farmers anymore just moving forward that
+
+00:30:10,470 --> 00:30:13,500
+seems like such a better approach to
+
+00:30:12,030 --> 00:30:15,390
+handling this kind of situation
+
+00:30:13,500 --> 00:30:17,670
+especially if we're really really
+
+00:30:15,390 --> 00:30:19,350
+committed to EBP F and X EP as a
+
+00:30:17,670 --> 00:30:21,120
+technology that hardware will offload
+
+00:30:19,350 --> 00:30:22,800
+either now or in the future so like
+
+00:30:21,120 --> 00:30:30,260
+that's kind of the thinking right now on
+
+00:30:22,800 --> 00:30:36,000
+that okay thank you very much David
+
+00:30:30,260 --> 00:30:36,000
+
+YouTube URL: https://www.youtube.com/watch?v=_NJg-zzRIBo
+
+

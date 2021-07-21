@@ -1,0 +1,2247 @@
+Title: L1TF and KVM by Alexander Graf (Friday session)
+Publication date: 2018-11-17
+Playlist: KVM Forum 2018
+Description: 
+	Recently a new speculative execution side channel was unvealed, which
+could potentially result in leakage of arbitrary memory contents into
+unprivileged virtual machines on most recent Intel CPUs. This
+presentation will give insights as to what the L1 Terminal Fault (L1TF)
+Spectre vulnerability is. It will show how it can be exploited and based
+on that knowledge it will take a look at how KVM mitigates those
+issues. It will also show performance penalties these mitigations incur.
+
+On top of that, the presentation will present an alternative work in
+progress approach to mitigate L1TF that may recover some of the
+performance penalties by leveraging unrelated CPU features.
+
+---
+
+
+Alexander Graf
+Principal Software Engineer
+SUSE
+
+Alexander started working for SUSE about 10 years ago. Since then he worked on fancy things like SUSE Studio, QEMU, KVM, openSUSE and SLES on ARM and U-Boot. Whenever something really useful comes to his mind, he tends to implement it. Among others he did Mac OS X virtualization using KVM, nested SVM, KVM on PowerPC, a lot of work in QEMU for openSUSE on ARM and the UEFI compatibility layer in U-Boot.
+Captions: 
+	00:00:01,040 --> 00:00:11,190
+[Music]
+
+00:00:06,540 --> 00:00:13,170
+I'm Alex Graf I work on my basic pattern
+
+00:00:11,190 --> 00:00:15,389
+is I work on things that I think should
+
+00:00:13,170 --> 00:00:17,400
+be useful going forward I tend to
+
+00:00:15,389 --> 00:00:21,769
+implement them and then everybody else
+
+00:00:17,400 --> 00:00:25,769
+follows suit nesting that worked
+
+00:00:21,769 --> 00:00:29,300
+KVM empower that worked EFI even on
+
+00:00:25,769 --> 00:00:31,349
+embedded that seems to work out well I'm
+
+00:00:29,300 --> 00:00:34,200
+not always sticking around to see the
+
+00:00:31,349 --> 00:00:37,020
+end of that game but I try to initiate
+
+00:00:34,200 --> 00:00:38,910
+and I saw a few cool things this one is
+
+00:00:37,020 --> 00:00:40,320
+not thanks to me through this is thanks
+
+00:00:38,910 --> 00:00:42,960
+to Intel so thank you and Tara for
+
+00:00:40,320 --> 00:00:45,600
+giving these talk or allowing me to talk
+
+00:00:42,960 --> 00:00:49,800
+about something really cool so what a
+
+00:00:45,600 --> 00:00:51,300
+speculation as you saw all the spectra
+
+00:00:49,800 --> 00:00:52,079
+things and meltdown and all the other
+
+00:00:51,300 --> 00:00:54,780
+things in the news
+
+00:00:52,079 --> 00:00:56,730
+speculation is something that's been
+
+00:00:54,780 --> 00:00:58,890
+around with us forever so imagine this
+
+00:00:56,730 --> 00:01:02,579
+piece of code there that's C code but
+
+00:00:58,890 --> 00:01:04,170
+just a simple function it goes adds one
+
+00:01:02,579 --> 00:01:08,490
+piece of variable to a global variable
+
+00:01:04,170 --> 00:01:10,320
+and then it returns the dereference of
+
+00:01:08,490 --> 00:01:15,689
+another piece of variable with another
+
+00:01:10,320 --> 00:01:18,090
+addition usually what you see when you
+
+00:01:15,689 --> 00:01:20,070
+execute code is assembly code or op
+
+00:01:18,090 --> 00:01:22,200
+codes even so there's CPU for this the
+
+00:01:20,070 --> 00:01:25,020
+spy pod is pretty far this is Paulie
+
+00:01:22,200 --> 00:01:26,670
+awesome you see these these numbers here
+
+00:01:25,020 --> 00:01:28,200
+this is what your CPU reads right this
+
+00:01:26,670 --> 00:01:31,590
+is this is the binary code that you CPU
+
+00:01:28,200 --> 00:01:33,329
+it's the human readable form is the one
+
+00:01:31,590 --> 00:01:34,829
+down here it's very human readable
+
+00:01:33,329 --> 00:01:38,220
+because it's actually six n text syntax
+
+00:01:34,829 --> 00:01:41,850
+so everybody knows that obviously the
+
+00:01:38,220 --> 00:01:44,490
+the basic idea is you add this number to
+
+00:01:41,850 --> 00:01:45,930
+this pointer dereference and then you
+
+00:01:44,490 --> 00:01:48,210
+move this boat registration to this
+
+00:01:45,930 --> 00:01:50,280
+register and then you dereference again
+
+00:01:48,210 --> 00:01:53,520
+an indirect pointer over into that
+
+00:01:50,280 --> 00:01:56,790
+variable and return now well yeah at in
+
+00:01:53,520 --> 00:01:58,740
+between also do nad and AD in between to
+
+00:01:56,790 --> 00:02:01,439
+to actually do the addition that we saw
+
+00:01:58,740 --> 00:02:03,390
+on the C code what is important in that
+
+00:02:01,439 --> 00:02:06,270
+piece of code is it's not the extra
+
+00:02:03,390 --> 00:02:09,450
+semantics because they actually want but
+
+00:02:06,270 --> 00:02:10,800
+is that what you see as a programmer if
+
+00:02:09,450 --> 00:02:11,940
+you're working with the CPU is that
+
+00:02:10,800 --> 00:02:13,950
+everything works
+
+00:02:11,940 --> 00:02:15,180
+happens one thing after another right
+
+00:02:13,950 --> 00:02:16,140
+you have one instruction and then you
+
+00:02:15,180 --> 00:02:18,000
+have another instruction you have
+
+00:02:16,140 --> 00:02:20,130
+another instruction and all of these
+
+00:02:18,000 --> 00:02:22,050
+instructions run sequentially and you
+
+00:02:20,130 --> 00:02:23,760
+don't really see any interim stage it's
+
+00:02:22,050 --> 00:02:26,010
+just all these things have met ami CLE
+
+00:02:23,760 --> 00:02:28,860
+and one at another but that it's not
+
+00:02:26,010 --> 00:02:30,120
+quite true in the real world what really
+
+00:02:28,860 --> 00:02:31,950
+happens is that some of these
+
+00:02:30,120 --> 00:02:33,600
+instructions might take longer right
+
+00:02:31,950 --> 00:02:35,790
+some of these instructions might need to
+
+00:02:33,600 --> 00:02:39,330
+dereference memory which can take
+
+00:02:35,790 --> 00:02:42,120
+forever and because they take so long
+
+00:02:39,330 --> 00:02:44,370
+you have a lot of time in between rake
+
+00:02:42,120 --> 00:02:46,860
+and basically do something else as a CPU
+
+00:02:44,370 --> 00:02:49,140
+and what CPUs do is they basically open
+
+00:02:46,860 --> 00:02:50,910
+this other speculative context where
+
+00:02:49,140 --> 00:02:53,450
+they just go and keep executing
+
+00:02:50,910 --> 00:02:55,200
+instructions along the side while
+
+00:02:53,450 --> 00:02:57,120
+they're waiting for this other
+
+00:02:55,200 --> 00:02:59,340
+instruction to finish so that by the
+
+00:02:57,120 --> 00:03:01,290
+time you're done you basically
+
+00:02:59,340 --> 00:03:03,000
+calculated everything already or you at
+
+00:03:01,290 --> 00:03:04,580
+least have everything cache hard or you
+
+00:03:03,000 --> 00:03:07,230
+hope that you have things cache hard
+
+00:03:04,580 --> 00:03:09,170
+when you're at a later point in time in
+
+00:03:07,230 --> 00:03:11,340
+your instruction stream so this
+
+00:03:09,170 --> 00:03:12,600
+speculation a nutshell that's a lot more
+
+00:03:11,340 --> 00:03:14,670
+detailed to use and a lot more
+
+00:03:12,600 --> 00:03:16,920
+complexity but basically it means your
+
+00:03:14,670 --> 00:03:18,120
+CPU wants things that go beyond the code
+
+00:03:16,920 --> 00:03:21,450
+that you're actually running without
+
+00:03:18,120 --> 00:03:23,670
+telling you and most of time does that
+
+00:03:21,450 --> 00:03:26,730
+really well it's just that all the
+
+00:03:23,670 --> 00:03:28,890
+spectral things showed you that it might
+
+00:03:26,730 --> 00:03:30,120
+have side effects so what what is the
+
+00:03:28,890 --> 00:03:31,380
+point of this why why do we do
+
+00:03:30,120 --> 00:03:33,600
+speculation in the first place we do
+
+00:03:31,380 --> 00:03:35,610
+speculation because accessing memory is
+
+00:03:33,600 --> 00:03:38,010
+slow so these numbers are from a website
+
+00:03:35,610 --> 00:03:39,360
+you can see the website down there where
+
+00:03:38,010 --> 00:03:40,590
+they show you how what the performance
+
+00:03:39,360 --> 00:03:43,170
+numbers look like for sky like for
+
+00:03:40,590 --> 00:03:46,290
+typical skylake server system and you
+
+00:03:43,170 --> 00:03:49,519
+see that you need about 250 CPU cycles
+
+00:03:46,290 --> 00:03:52,530
+just to access a single piece of memory
+
+00:03:49,519 --> 00:03:54,209
+imagine you would not have anything in
+
+00:03:52,530 --> 00:03:55,440
+between that memory and your CPU it
+
+00:03:54,209 --> 00:03:57,630
+would basically mean your CPU is
+
+00:03:55,440 --> 00:04:01,230
+constantly waiting for everything so
+
+00:03:57,630 --> 00:04:03,510
+what people did is they added caches so
+
+00:04:01,230 --> 00:04:05,459
+you have multiple tiers of caches
+
+00:04:03,510 --> 00:04:07,350
+there's usually a level three cache that
+
+00:04:05,459 --> 00:04:09,060
+is reasonably big but that one is not
+
+00:04:07,350 --> 00:04:11,459
+too fast to access that's a little too
+
+00:04:09,060 --> 00:04:13,440
+cuz it's a bit smaller faster to access
+
+00:04:11,459 --> 00:04:16,799
+and then there's a level one cache that
+
+00:04:13,440 --> 00:04:19,290
+is really really fast to access but very
+
+00:04:16,799 --> 00:04:21,359
+very small there's another caveat to
+
+00:04:19,290 --> 00:04:22,229
+this the reason you have all these
+
+00:04:21,359 --> 00:04:23,640
+different layers with all these
+
+00:04:22,229 --> 00:04:25,440
+different things is one they have
+
+00:04:23,640 --> 00:04:27,360
+different processes which make them
+
+00:04:25,440 --> 00:04:28,140
+which indicate the performance so the
+
+00:04:27,360 --> 00:04:29,210
+reason you have the different
+
+00:04:28,140 --> 00:04:31,320
+performance numbers is because
+
+00:04:29,210 --> 00:04:34,350
+fabrication wise they're just the bigger
+
+00:04:31,320 --> 00:04:36,840
+they become the smaller and individual
+
+00:04:34,350 --> 00:04:39,750
+entities so you can fit more into the
+
+00:04:36,840 --> 00:04:42,660
+same space but they're also at different
+
+00:04:39,750 --> 00:04:44,850
+levels in your hierarchy so level one is
+
+00:04:42,660 --> 00:04:47,220
+close to your core level two is usually
+
+00:04:44,850 --> 00:04:49,800
+close to your core cluster and ever
+
+00:04:47,220 --> 00:04:52,680
+three is usually close to your Numa node
+
+00:04:49,800 --> 00:04:57,000
+or maybe a combination of clusters
+
+00:04:52,680 --> 00:04:58,590
+depends on your CPU topology and that
+
+00:04:57,000 --> 00:05:02,070
+memory is obviously again they have new
+
+00:04:58,590 --> 00:05:04,500
+mind all these other weird things but
+
+00:05:02,070 --> 00:05:07,230
+this presentation is called l1 TF and
+
+00:05:04,500 --> 00:05:09,690
+KVM for reason L 1 TF basically talks
+
+00:05:07,230 --> 00:05:13,080
+about this l1 thing of there that's
+
+00:05:09,690 --> 00:05:16,770
+that's what we're talking about so if
+
+00:05:13,080 --> 00:05:17,850
+we're looking at memory you can't really
+
+00:05:16,770 --> 00:05:19,700
+talk about memory without talking about
+
+00:05:17,850 --> 00:05:21,480
+paging too because in reality if we
+
+00:05:19,700 --> 00:05:24,090
+dereferencing this point that we not
+
+00:05:21,480 --> 00:05:25,950
+actually dereferencing a pointer from
+
+00:05:24,090 --> 00:05:31,320
+our memory that we're talking about we
+
+00:05:25,950 --> 00:05:34,250
+dereferencing the pointer from a virtual
+
+00:05:31,320 --> 00:05:37,800
+address that does not actually live in
+
+00:05:34,250 --> 00:05:38,940
+our physical address or that does live
+
+00:05:37,800 --> 00:05:40,530
+in our physical address space but
+
+00:05:38,940 --> 00:05:43,410
+there's a mapping between those two so
+
+00:05:40,530 --> 00:05:45,870
+what we see as a process is as a process
+
+00:05:43,410 --> 00:05:47,790
+we do see this really really big linear
+
+00:05:45,870 --> 00:05:49,710
+address space where we can just roam
+
+00:05:47,790 --> 00:05:54,150
+freely and we are there on our own as an
+
+00:05:49,710 --> 00:05:55,680
+application but as a cpu what we really
+
+00:05:54,150 --> 00:05:57,410
+want to know is if we're talking to
+
+00:05:55,680 --> 00:06:00,480
+memory which address should we talk on
+
+00:05:57,410 --> 00:06:02,430
+and in between those two there's a
+
+00:06:00,480 --> 00:06:04,740
+mapping called page table entries it's
+
+00:06:02,430 --> 00:06:07,380
+basically the paging mechanism in any
+
+00:06:04,740 --> 00:06:09,180
+modern CPU you have so you have this
+
+00:06:07,380 --> 00:06:10,470
+mapping between your virtual address
+
+00:06:09,180 --> 00:06:13,050
+space down here and your physical
+
+00:06:10,470 --> 00:06:14,330
+address space down there and these page
+
+00:06:13,050 --> 00:06:17,940
+table entries are actually pretty cool
+
+00:06:14,330 --> 00:06:20,250
+they because you find the page to the
+
+00:06:17,940 --> 00:06:23,160
+entry that's this radix tree there that
+
+00:06:20,250 --> 00:06:25,620
+basically allows you to walk through a
+
+00:06:23,160 --> 00:06:27,480
+couple of levels depending on your
+
+00:06:25,620 --> 00:06:29,130
+virtual address you dereference up here
+
+00:06:27,480 --> 00:06:30,630
+so by the time you find that entry you
+
+00:06:29,130 --> 00:06:32,820
+already know which address this is about
+
+00:06:30,630 --> 00:06:34,310
+and then in there you just have to write
+
+00:06:32,820 --> 00:06:37,979
+down what the physical address of
+
+00:06:34,310 --> 00:06:38,529
+physical frame number the page entry
+
+00:06:37,979 --> 00:06:41,619
+here
+
+00:06:38,529 --> 00:06:43,299
+is and then on top of these there's
+
+00:06:41,619 --> 00:06:46,449
+there's the state of China Patel tells
+
+00:06:43,299 --> 00:06:48,429
+you what the physical address is you
+
+00:06:46,449 --> 00:06:51,939
+also have a couple of attributes like it
+
+00:06:48,429 --> 00:06:53,709
+says it's this user-accessible it's at
+
+00:06:51,939 --> 00:06:55,299
+writeable should I do right through like
+
+00:06:53,709 --> 00:06:58,509
+should I go through Cash's when I write
+
+00:06:55,299 --> 00:06:59,859
+or shouldn't I and the present bit so is
+
+00:06:58,509 --> 00:07:03,309
+this an actual page table entries as
+
+00:06:59,859 --> 00:07:05,139
+valid or is it not valid if you're
+
+00:07:03,309 --> 00:07:06,789
+looking at meltdown which we're probably
+
+00:07:05,139 --> 00:07:08,169
+gonna have like next or the one after
+
+00:07:06,789 --> 00:07:11,919
+remember
+
+00:07:08,169 --> 00:07:13,689
+the problem with Pelt down is the U bit
+
+00:07:11,919 --> 00:07:15,909
+that Intel in speculation just basically
+
+00:07:13,689 --> 00:07:19,569
+toss the the the Ubud that that is what
+
+00:07:15,909 --> 00:07:24,119
+meltdown is about l1 CF is about the P
+
+00:07:19,569 --> 00:07:29,349
+bit the pbut when you don't set the pbut
+
+00:07:24,119 --> 00:07:31,479
+it usually akut actually it gives you a
+
+00:07:29,349 --> 00:07:32,829
+page fault so what is a page fault a
+
+00:07:31,479 --> 00:07:35,069
+page fault means you stop your
+
+00:07:32,829 --> 00:07:37,719
+instruction flow at the instruction that
+
+00:07:35,069 --> 00:07:41,109
+faulted that was accessing memory well
+
+00:07:37,719 --> 00:07:44,110
+it shouldn't have and you're going into
+
+00:07:41,109 --> 00:07:45,549
+a clean up process to do something with
+
+00:07:44,110 --> 00:07:47,199
+that exception with the with a page
+
+00:07:45,549 --> 00:07:49,089
+fault this is a pretty common process
+
+00:07:47,199 --> 00:07:50,829
+you do that every day it's used for
+
+00:07:49,089 --> 00:07:54,009
+copy-on-write for example it's used to
+
+00:07:50,829 --> 00:07:56,110
+slowly page pages into your memory and
+
+00:07:54,009 --> 00:07:58,360
+when you load a binary for example you
+
+00:07:56,110 --> 00:08:00,579
+don't necessarily load the whole binary
+
+00:07:58,360 --> 00:08:01,809
+at once you load it in chunks it slowly
+
+00:08:00,579 --> 00:08:03,419
+one after another because you might not
+
+00:08:01,809 --> 00:08:05,769
+need to use that you load all that
+
+00:08:03,419 --> 00:08:11,589
+binary into your address space or into
+
+00:08:05,769 --> 00:08:14,979
+your memory at immediately so how does
+
+00:08:11,589 --> 00:08:17,229
+paging work with our caches we have our
+
+00:08:14,979 --> 00:08:18,639
+l1 cache in our and now inside our l1
+
+00:08:17,229 --> 00:08:20,649
+cache we have this piece of data now
+
+00:08:18,639 --> 00:08:23,169
+right but what does that piece of data
+
+00:08:20,649 --> 00:08:26,979
+actually contain so on Intel we have
+
+00:08:23,169 --> 00:08:28,839
+physically tacked caches which means we
+
+00:08:26,979 --> 00:08:31,629
+have our data down here and then we have
+
+00:08:28,839 --> 00:08:33,789
+a tag that says this data belongs to
+
+00:08:31,629 --> 00:08:35,889
+this physical address and the world is
+
+00:08:33,789 --> 00:08:38,019
+really really easy and fun if we only
+
+00:08:35,889 --> 00:08:39,669
+have a single page table entry because
+
+00:08:38,019 --> 00:08:41,649
+there we just basically write this
+
+00:08:39,669 --> 00:08:47,439
+physical address down there so this is
+
+00:08:41,649 --> 00:08:50,769
+the host case right and we know exactly
+
+00:08:47,439 --> 00:08:51,850
+what physical address this piece of data
+
+00:08:50,769 --> 00:08:53,800
+belongs to
+
+00:08:51,850 --> 00:08:55,360
+now when you add virtual machines to
+
+00:08:53,800 --> 00:08:57,460
+that game we usually have two levels of
+
+00:08:55,360 --> 00:09:00,370
+page tables so what does the level one
+
+00:08:57,460 --> 00:09:02,230
+cache do with those so now we suddenly
+
+00:09:00,370 --> 00:09:03,610
+actually what happens on the interviews
+
+00:09:02,230 --> 00:09:06,640
+on what I measured but I could be wrong
+
+00:09:03,610 --> 00:09:08,140
+is that this tag down here actually
+
+00:09:06,640 --> 00:09:10,900
+still stays that tag so we have a
+
+00:09:08,140 --> 00:09:13,450
+virtual physical address and then you
+
+00:09:10,900 --> 00:09:16,000
+get another entry in your page in your
+
+00:09:13,450 --> 00:09:19,090
+l1 cache that contains your host
+
+00:09:16,000 --> 00:09:20,680
+physical address as attack so these two
+
+00:09:19,090 --> 00:09:23,170
+things live side by side and they just
+
+00:09:20,680 --> 00:09:24,430
+basically don't conflict don't ask me
+
+00:09:23,170 --> 00:09:29,620
+how they did that in hardware but they
+
+00:09:24,430 --> 00:09:32,080
+you you don't get to see this host
+
+00:09:29,620 --> 00:09:36,370
+things from guest things because you're
+
+00:09:32,080 --> 00:09:37,810
+usually overlapping there now what does
+
+00:09:36,370 --> 00:09:42,520
+what does this l1 T everything about
+
+00:09:37,810 --> 00:09:45,370
+them so imagine you have a CPU let's
+
+00:09:42,520 --> 00:09:47,490
+take it easily a single CPU and the
+
+00:09:45,370 --> 00:09:50,560
+single CPU is running some secure code
+
+00:09:47,490 --> 00:09:53,800
+that contains some some security talk
+
+00:09:50,560 --> 00:09:55,000
+secure token like SSH blind write some
+
+00:09:53,800 --> 00:09:58,630
+something that basically does something
+
+00:09:55,000 --> 00:10:00,880
+secure because it is running on that CPU
+
+00:09:58,630 --> 00:10:03,910
+it wants to access that token really
+
+00:10:00,880 --> 00:10:05,290
+fast which means it needs to it has that
+
+00:10:03,910 --> 00:10:08,190
+in your in it's a level 1 cache because
+
+00:10:05,290 --> 00:10:12,580
+that's the only way to access data fast
+
+00:10:08,190 --> 00:10:15,640
+excess memory fast now on that same CPU
+
+00:10:12,580 --> 00:10:18,850
+we can then context switch and have some
+
+00:10:15,640 --> 00:10:20,770
+other malicious code running and that
+
+00:10:18,850 --> 00:10:24,670
+malicious code then could execute
+
+00:10:20,770 --> 00:10:27,190
+something like this imagine you have a
+
+00:10:24,670 --> 00:10:32,260
+pointer to some page that you control
+
+00:10:27,190 --> 00:10:36,160
+and then you dereference another big
+
+00:10:32,260 --> 00:10:39,070
+list of Oracle pointers to depending
+
+00:10:36,160 --> 00:10:40,690
+based on the value of that number this
+
+00:10:39,070 --> 00:10:42,610
+this is public code this is actually you
+
+00:10:40,690 --> 00:10:44,320
+can see that in the Microsoft spec for
+
+00:10:42,610 --> 00:10:47,440
+l1 TFT they basically write that down
+
+00:10:44,320 --> 00:10:49,750
+there now what happens is this is
+
+00:10:47,440 --> 00:10:52,390
+obviously assembly code for your CPU and
+
+00:10:49,750 --> 00:10:53,860
+what happens is you're reading out ud
+
+00:10:52,390 --> 00:10:55,960
+referencing that pointer you write that
+
+00:10:53,860 --> 00:10:57,460
+into it into register then you shift
+
+00:10:55,960 --> 00:10:59,260
+that register over and then you
+
+00:10:57,460 --> 00:11:02,410
+dereference the Oracle based on that
+
+00:10:59,260 --> 00:11:04,450
+value into another register so you're
+
+00:11:02,410 --> 00:11:05,769
+just reading data from memory into
+
+00:11:04,450 --> 00:11:08,659
+register
+
+00:11:05,769 --> 00:11:10,099
+what happens in a normal case so this is
+
+00:11:08,659 --> 00:11:11,539
+the normal page in case of you hat right
+
+00:11:10,099 --> 00:11:13,249
+we have a page table to enter you the
+
+00:11:11,539 --> 00:11:13,969
+page table entry is there everything's
+
+00:11:13,249 --> 00:11:17,509
+fine
+
+00:11:13,969 --> 00:11:20,359
+we are valid then what happens is we
+
+00:11:17,509 --> 00:11:22,339
+actually are accessing memory that is
+
+00:11:20,359 --> 00:11:23,839
+valid right we actually accessing a real
+
+00:11:22,339 --> 00:11:26,539
+pointer which means we now certainly
+
+00:11:23,839 --> 00:11:29,719
+have two entries with the same tag in
+
+00:11:26,539 --> 00:11:32,269
+there and we can just in as soon as we
+
+00:11:29,719 --> 00:11:33,859
+execute this instruction we actually see
+
+00:11:32,269 --> 00:11:35,979
+our own data in this so this doesn't
+
+00:11:33,859 --> 00:11:35,979
+help
+
+00:11:36,339 --> 00:11:44,149
+what l1 TF is about too is that we doing
+
+00:11:42,259 --> 00:11:46,639
+something that is not normal and not
+
+00:11:44,149 --> 00:11:49,249
+normal in our case means we basically
+
+00:11:46,639 --> 00:11:50,629
+just saying this page is not present but
+
+00:11:49,249 --> 00:11:52,129
+we keep all the other information we
+
+00:11:50,629 --> 00:11:54,829
+still say we want to access this
+
+00:11:52,129 --> 00:11:56,749
+physical page which means we're now
+
+00:11:54,829 --> 00:11:58,609
+getting a page fault right we're getting
+
+00:11:56,749 --> 00:12:01,899
+a page fault because the page is not
+
+00:11:58,609 --> 00:12:04,429
+present but we still have this malicious
+
+00:12:01,899 --> 00:12:06,409
+physical address written in there what
+
+00:12:04,429 --> 00:12:10,489
+what does that actually do well turns
+
+00:12:06,409 --> 00:12:11,809
+out thanks to that page fault page
+
+00:12:10,489 --> 00:12:13,309
+faults take a long time you just
+
+00:12:11,809 --> 00:12:14,899
+synchronize all of your stage you need
+
+00:12:13,309 --> 00:12:17,779
+to make sure the CPUs on the same level
+
+00:12:14,899 --> 00:12:19,429
+everything's everything's aligned they
+
+00:12:17,779 --> 00:12:20,899
+take a long time what do you do when
+
+00:12:19,429 --> 00:12:24,499
+something takes a long time if is your
+
+00:12:20,899 --> 00:12:26,389
+CPU your speculate right so why
+
+00:12:24,499 --> 00:12:29,109
+shouldn't we speculate because we have a
+
+00:12:26,389 --> 00:12:32,599
+page fault well we do that as a CPU so
+
+00:12:29,109 --> 00:12:34,459
+we happen to also have that register
+
+00:12:32,599 --> 00:12:36,769
+that that physical number in our
+
+00:12:34,459 --> 00:12:38,479
+speculation context now because we found
+
+00:12:36,769 --> 00:12:41,479
+this page table entry it just triggered
+
+00:12:38,479 --> 00:12:43,579
+an exception but we can speculate based
+
+00:12:41,479 --> 00:12:48,259
+on that which means we now certainly in
+
+00:12:43,579 --> 00:12:52,459
+speculation context we have our secret
+
+00:12:48,259 --> 00:12:55,039
+in this register anybody follow that one
+
+00:12:52,459 --> 00:12:58,759
+that's that's the crux of l1 TF you
+
+00:12:55,039 --> 00:13:01,219
+cannot follow good also so we now have
+
+00:12:58,759 --> 00:13:03,379
+our secret in in the register which
+
+00:13:01,219 --> 00:13:06,349
+means only to do to expose that back is
+
+00:13:03,379 --> 00:13:08,209
+we shifted in speculation we shifted
+
+00:13:06,349 --> 00:13:10,009
+into another register or in we shifted
+
+00:13:08,209 --> 00:13:12,109
+by a couple of bits and then we
+
+00:13:10,009 --> 00:13:15,889
+dereference our Oracle based on that
+
+00:13:12,109 --> 00:13:17,929
+which means we now prefetch our Oracle
+
+00:13:15,889 --> 00:13:18,680
+into our level 1 cache because that's
+
+00:13:17,929 --> 00:13:20,240
+the whole point of spec
+
+00:13:18,680 --> 00:13:23,930
+you want to prefetch things into our
+
+00:13:20,240 --> 00:13:28,910
+caches to be faster so we now have some
+
+00:13:23,930 --> 00:13:30,649
+data we control with in switch which is
+
+00:13:28,910 --> 00:13:33,110
+dereference based on information that we
+
+00:13:30,649 --> 00:13:35,120
+really shouldn't have had in our level 1
+
+00:13:33,110 --> 00:13:36,680
+cache so how do we get that information
+
+00:13:35,120 --> 00:13:38,779
+out of that other one cache again well
+
+00:13:36,680 --> 00:13:40,070
+that's really easy and we getting an
+
+00:13:38,779 --> 00:13:42,740
+exception we're getting our page fault
+
+00:13:40,070 --> 00:13:45,110
+and after that what we need to do is we
+
+00:13:42,740 --> 00:13:47,330
+need to see what takes longer does it
+
+00:13:45,110 --> 00:13:49,880
+take a long to Tay to read these couple
+
+00:13:47,330 --> 00:13:51,709
+of oracle array entries or does it take
+
+00:13:49,880 --> 00:13:53,870
+long to take to read this one oracle
+
+00:13:51,709 --> 00:13:55,310
+array entry and one of our regular
+
+00:13:53,870 --> 00:13:57,920
+entries is probably going to be fast
+
+00:13:55,310 --> 00:14:01,000
+because it's cached and there we have
+
+00:13:57,920 --> 00:14:03,649
+just leaked a couple of bits of data and
+
+00:14:01,000 --> 00:14:05,240
+if you loop that all over again and you
+
+00:14:03,649 --> 00:14:06,410
+loop through your address space you I
+
+00:14:05,240 --> 00:14:08,540
+mean you add one on one and you
+
+00:14:06,410 --> 00:14:10,310
+basically have or you can read anything
+
+00:14:08,540 --> 00:14:13,459
+that is in your level 1 cache from
+
+00:14:10,310 --> 00:14:17,779
+another score from from this malicious
+
+00:14:13,459 --> 00:14:20,089
+program now there's another really
+
+00:14:17,779 --> 00:14:23,000
+really cool feature on Intel CPUs called
+
+00:14:20,089 --> 00:14:23,750
+hyper threading so what does hyper
+
+00:14:23,000 --> 00:14:25,730
+threading doing
+
+00:14:23,750 --> 00:14:27,560
+hyper threading basically means you
+
+00:14:25,730 --> 00:14:30,140
+don't have one CPU you actually have two
+
+00:14:27,560 --> 00:14:33,380
+CPUs that in reality actually are one
+
+00:14:30,140 --> 00:14:35,600
+CPU so you have two views on to the same
+
+00:14:33,380 --> 00:14:38,089
+entities of a CPU because in most cases
+
+00:14:35,600 --> 00:14:39,650
+you don't make use of every single unit
+
+00:14:38,089 --> 00:14:41,959
+your CPU core has you have a lot of
+
+00:14:39,650 --> 00:14:45,350
+different units that can be leveraged in
+
+00:14:41,959 --> 00:14:47,240
+CPU core and speculation is one way to
+
+00:14:45,350 --> 00:14:48,800
+fill those up with other work but
+
+00:14:47,240 --> 00:14:50,630
+another way is to just basically have a
+
+00:14:48,800 --> 00:14:52,720
+second CPU exposed and every time that
+
+00:14:50,630 --> 00:14:56,180
+one core one thread doesn't actually
+
+00:14:52,720 --> 00:14:57,830
+make use of your SS II unit and the
+
+00:14:56,180 --> 00:15:01,880
+other thread might just make use of it
+
+00:14:57,830 --> 00:15:04,870
+and you happen to to multiply the amount
+
+00:15:01,880 --> 00:15:08,630
+of code you can run on that single core
+
+00:15:04,870 --> 00:15:12,350
+so however because they are running on
+
+00:15:08,630 --> 00:15:13,970
+the same core really virtually they are
+
+00:15:12,350 --> 00:15:15,740
+sharing everything there is to that one
+
+00:15:13,970 --> 00:15:17,660
+core which includes your level 1 cache
+
+00:15:15,740 --> 00:15:19,940
+so you now have not just one single
+
+00:15:17,660 --> 00:15:21,649
+entity that runs against that other one
+
+00:15:19,940 --> 00:15:23,899
+cache but two entities that one against
+
+00:15:21,649 --> 00:15:26,329
+at level 1 cache which means if we now
+
+00:15:23,899 --> 00:15:28,400
+have our secure application running on
+
+00:15:26,329 --> 00:15:30,440
+one thread of one core and our evil
+
+00:15:28,400 --> 00:15:32,480
+application running on another thread of
+
+00:15:30,440 --> 00:15:37,240
+that same core the
+
+00:15:32,480 --> 00:15:39,500
+a secure application can write data into
+
+00:15:37,240 --> 00:15:41,120
+it so everyone casual prefetch data
+
+00:15:39,500 --> 00:15:45,050
+intercept one cache because its
+
+00:15:41,120 --> 00:15:47,690
+operating on some secure data and the
+
+00:15:45,050 --> 00:15:50,060
+other thread could just loop in a page
+
+00:15:47,690 --> 00:15:51,380
+fault loop and directly read it out what
+
+00:15:50,060 --> 00:15:52,579
+we don't even need the context which we
+
+00:15:51,380 --> 00:15:55,970
+don't need anything in between we can
+
+00:15:52,579 --> 00:16:04,480
+immediately see that data in that level
+
+00:15:55,970 --> 00:16:07,790
+one cache as it flows into its cache so
+
+00:16:04,480 --> 00:16:09,410
+how do we mitigate all of this we it's
+
+00:16:07,790 --> 00:16:11,000
+fun to write exploits and it's really
+
+00:16:09,410 --> 00:16:11,870
+fun to know how I want EF works but at
+
+00:16:11,000 --> 00:16:14,149
+the end of day you want to be secure
+
+00:16:11,870 --> 00:16:17,060
+like we don't want to have other suite
+
+00:16:14,149 --> 00:16:18,500
+our secure data if I know my own secure
+
+00:16:17,060 --> 00:16:20,690
+data I'm happy for others too
+
+00:16:18,500 --> 00:16:22,820
+I'm usually not so how do you mitigate
+
+00:16:20,690 --> 00:16:26,630
+this so usually if we're looking at the
+
+00:16:22,820 --> 00:16:29,779
+single core environment it's pretty easy
+
+00:16:26,630 --> 00:16:31,490
+because if you're doing if you're
+
+00:16:29,779 --> 00:16:33,949
+running your secure stuff and then you
+
+00:16:31,490 --> 00:16:35,510
+running your evil stuff you have a
+
+00:16:33,949 --> 00:16:37,130
+context switch in between them you you
+
+00:16:35,510 --> 00:16:39,470
+can't run two things at the same time on
+
+00:16:37,130 --> 00:16:42,110
+a CPU really unless you have threats but
+
+00:16:39,470 --> 00:16:45,079
+that's a different so you you have this
+
+00:16:42,110 --> 00:16:47,089
+this context switch there and this
+
+00:16:45,079 --> 00:16:50,420
+context which really means we won in KVM
+
+00:16:47,089 --> 00:16:52,910
+in between because that guy can only run
+
+00:16:50,420 --> 00:16:55,550
+inside of a virtual machine to control
+
+00:16:52,910 --> 00:16:59,600
+its on page tables so in here we have k
+
+00:16:55,550 --> 00:17:01,370
+vm & k vm can just do something to clean
+
+00:16:59,600 --> 00:17:03,529
+it up which basically means we can just
+
+00:17:01,370 --> 00:17:06,110
+flush our l1 cache when we go in and
+
+00:17:03,529 --> 00:17:08,839
+then we're good we just don't expose our
+
+00:17:06,110 --> 00:17:11,150
+secret anymore so we can leverage k vm
+
+00:17:08,839 --> 00:17:14,919
+to just clear all over one caches
+
+00:17:11,150 --> 00:17:19,010
+whenever we know that we would leak data
+
+00:17:14,919 --> 00:17:21,380
+however that multi-threaded case is
+
+00:17:19,010 --> 00:17:24,770
+pretty complicated how do you make sure
+
+00:17:21,380 --> 00:17:26,660
+that this one entity that writes stuff
+
+00:17:24,770 --> 00:17:28,820
+without wrapping and this other entity
+
+00:17:26,660 --> 00:17:31,040
+that reads stuff without wrapping how do
+
+00:17:28,820 --> 00:17:32,540
+you ensure that you can actually do
+
+00:17:31,040 --> 00:17:35,240
+anything about them because you never
+
+00:17:32,540 --> 00:17:38,450
+get to see what they do well the easy
+
+00:17:35,240 --> 00:17:40,309
+answer is you just don't that's what we
+
+00:17:38,450 --> 00:17:42,860
+do today so the curl mitigation for
+
+00:17:40,309 --> 00:17:45,260
+hyper threat things is basically don't
+
+00:17:42,860 --> 00:17:45,860
+do it if you if you want to be secure
+
+00:17:45,260 --> 00:17:48,529
+today
+
+00:17:45,860 --> 00:17:51,950
+do not run hyper threats just disable
+
+00:17:48,529 --> 00:17:54,679
+them straight away but what does that
+
+00:17:51,950 --> 00:17:56,149
+mean performance-wise so obviously
+
+00:17:54,679 --> 00:17:58,580
+everybody of us loves to build kernels
+
+00:17:56,149 --> 00:18:00,830
+and my benchmark here is it's a kernel
+
+00:17:58,580 --> 00:18:02,990
+build it's not a conclusive benchmark
+
+00:18:00,830 --> 00:18:05,330
+it's not a really deep down in depth
+
+00:18:02,990 --> 00:18:06,950
+benchmark but it gives you a rough idea
+
+00:18:05,330 --> 00:18:09,080
+on what the normal world application
+
+00:18:06,950 --> 00:18:11,929
+would benefit from from hyper threading
+
+00:18:09,080 --> 00:18:14,149
+and and what it would cost so this is
+
+00:18:11,929 --> 00:18:15,620
+basically the same kernel build once run
+
+00:18:14,149 --> 00:18:17,600
+with SMT one and once one less twenty
+
+00:18:15,620 --> 00:18:19,370
+two so this is with without hyper hyper
+
+00:18:17,600 --> 00:18:22,190
+threads and this is with hyper threads
+
+00:18:19,370 --> 00:18:23,659
+enabled and the kernel built here took
+
+00:18:22,190 --> 00:18:26,450
+about 90 seconds the kernel bolt here
+
+00:18:23,659 --> 00:18:28,880
+took about seventy five which means
+
+00:18:26,450 --> 00:18:31,870
+we're having fifteen to twenty percent
+
+00:18:28,880 --> 00:18:33,889
+speed up by using hyper threading so
+
+00:18:31,870 --> 00:18:37,639
+just the fact that you disable hyper
+
+00:18:33,889 --> 00:18:38,870
+threats in some workloads you can assume
+
+00:18:37,639 --> 00:18:40,669
+it would basically would you see
+
+00:18:38,870 --> 00:18:41,809
+performance by about thirty two and zero
+
+00:18:40,669 --> 00:18:44,840
+percent that's that's roughly the
+
+00:18:41,809 --> 00:18:46,820
+boundary you get some some work loss
+
+00:18:44,840 --> 00:18:49,130
+benefit a lot from it some don't I think
+
+00:18:46,820 --> 00:18:51,169
+I could create a really contrived
+
+00:18:49,130 --> 00:18:54,679
+example where this number would be fifty
+
+00:18:51,169 --> 00:18:56,299
+percent but that would really be a micro
+
+00:18:54,679 --> 00:18:58,100
+benchmark that is only to show that type
+
+00:18:56,299 --> 00:18:59,600
+of a disabling could actually hurt a lot
+
+00:18:58,100 --> 00:19:01,220
+but in real world applications it
+
+00:18:59,600 --> 00:19:04,549
+wouldn't be about applications assume up
+
+00:19:01,220 --> 00:19:06,169
+to thirty percent now one thing I did is
+
+00:19:04,549 --> 00:19:08,029
+for this benchmark I just basically said
+
+00:19:06,169 --> 00:19:12,649
+let's just always flush that along cache
+
+00:19:08,029 --> 00:19:15,380
+on on on VM entry and that one is about
+
+00:19:12,649 --> 00:19:17,570
+one second slow down with a kernel build
+
+00:19:15,380 --> 00:19:19,460
+because we don't exit too often but
+
+00:19:17,570 --> 00:19:20,809
+still it is it is just simply fast to
+
+00:19:19,460 --> 00:19:23,539
+catch to flush it at one cache if you
+
+00:19:20,809 --> 00:19:25,250
+saw the slide earlier the difference
+
+00:19:23,539 --> 00:19:27,320
+between your l1 cache and your l2 cache
+
+00:19:25,250 --> 00:19:29,000
+was really just a couple of cycles yeah
+
+00:19:27,320 --> 00:19:32,840
+one cache is false I can see l2 caches
+
+00:19:29,000 --> 00:19:33,799
+12 cycles so the CPU is really really
+
+00:19:32,840 --> 00:19:36,049
+good at doing things asynchronously
+
+00:19:33,799 --> 00:19:40,100
+anyways and speculatively we saw all
+
+00:19:36,049 --> 00:19:41,570
+that so it can paper over the fact that
+
+00:19:40,100 --> 00:19:43,669
+we don't have everything have a casual
+
+00:19:41,570 --> 00:19:45,950
+dinner one anyways plus if we are
+
+00:19:43,669 --> 00:19:47,779
+outside of our VM we already did dirty a
+
+00:19:45,950 --> 00:19:49,309
+couple of our l1 cache so not everything
+
+00:19:47,779 --> 00:19:51,710
+that is in the l1 cache actually does
+
+00:19:49,309 --> 00:19:54,559
+belong to data inside the VM anyways so
+
+00:19:51,710 --> 00:19:56,720
+flashing the l1 cache is not too bad in
+
+00:19:54,559 --> 00:19:58,760
+my measurements I heard of people that
+
+00:19:56,720 --> 00:19:59,510
+basically measured a 50 percent slower
+
+00:19:58,760 --> 00:20:02,660
+on the
+
+00:19:59,510 --> 00:20:04,850
+f l1 caches cache flushes so take that
+
+00:20:02,660 --> 00:20:10,490
+with a grain of salt it's very heavily
+
+00:20:04,850 --> 00:20:13,220
+workload dependent now maybe not
+
+00:20:10,490 --> 00:20:16,550
+everybody wants to lose 70% performance
+
+00:20:13,220 --> 00:20:18,620
+in the worst case so what can we do
+
+00:20:16,550 --> 00:20:22,400
+instead well that's a couple of
+
+00:20:18,620 --> 00:20:23,810
+alternative ideas one is if you have
+
+00:20:22,400 --> 00:20:26,240
+this scenario right
+
+00:20:23,810 --> 00:20:28,520
+you basically have these two threats
+
+00:20:26,240 --> 00:20:30,770
+there I said there's no event we can
+
+00:20:28,520 --> 00:20:32,780
+trap on well that's that's semi true
+
+00:20:30,770 --> 00:20:34,190
+right there is an event there's this
+
+00:20:32,780 --> 00:20:35,690
+whole thing only works because we're
+
+00:20:34,190 --> 00:20:38,420
+doing a page fault without a page fault
+
+00:20:35,690 --> 00:20:42,560
+there is no way you can trigger that
+
+00:20:38,420 --> 00:20:44,870
+speculation based on bogus data so the
+
+00:20:42,560 --> 00:20:47,480
+guest actually the the malicious guest
+
+00:20:44,870 --> 00:20:49,490
+actually has to read out that data using
+
+00:20:47,480 --> 00:20:52,840
+the page fault and after that run again
+
+00:20:49,490 --> 00:20:56,480
+to read to measure based on its l1 cache
+
+00:20:52,840 --> 00:20:58,700
+information now if in between or this is
+
+00:20:56,480 --> 00:21:01,220
+all running in a VM so in between what
+
+00:20:58,700 --> 00:21:03,980
+we can do is as KVM why don't we just go
+
+00:21:01,220 --> 00:21:05,630
+and in here fix things up and basically
+
+00:21:03,980 --> 00:21:08,150
+just flush our l1 cache every time we
+
+00:21:05,630 --> 00:21:10,250
+see a page full on the guest well that's
+
+00:21:08,150 --> 00:21:12,110
+two caveats one is that is obviously
+
+00:21:10,250 --> 00:21:14,270
+overhead you would still slow down you
+
+00:21:12,110 --> 00:21:18,500
+know your guest and the second even
+
+00:21:14,270 --> 00:21:21,860
+worse one is well there's another really
+
+00:21:18,500 --> 00:21:24,020
+nice feature called tiers X that's
+
+00:21:21,860 --> 00:21:26,090
+transaction memory so it's print actual
+
+00:21:24,020 --> 00:21:28,040
+memory what happens is your CPU gives
+
+00:21:26,090 --> 00:21:31,010
+you this ability that you can run a
+
+00:21:28,040 --> 00:21:33,250
+sequence of instructions and you only
+
+00:21:31,010 --> 00:21:35,390
+ever get to see it happen atomically
+
+00:21:33,250 --> 00:21:37,550
+which means either all of those
+
+00:21:35,390 --> 00:21:39,740
+instructions take place virtually take
+
+00:21:37,550 --> 00:21:41,750
+place at the same time or none of them
+
+00:21:39,740 --> 00:21:43,760
+do there's a couple of technical ways to
+
+00:21:41,750 --> 00:21:46,010
+do that but one side effect of that is
+
+00:21:43,760 --> 00:21:49,550
+that if you happen to take a page fault
+
+00:21:46,010 --> 00:21:53,060
+in between the transaction just the
+
+00:21:49,550 --> 00:21:55,160
+boards without anybody noticing that
+
+00:21:53,060 --> 00:21:57,740
+outside you cannot trap on that from a
+
+00:21:55,160 --> 00:21:59,210
+KVM point of view so KVM has no idea
+
+00:21:57,740 --> 00:22:00,290
+that inside here there was a page fault
+
+00:21:59,210 --> 00:22:03,260
+which means you don't have that event
+
+00:22:00,290 --> 00:22:07,640
+anymore in there you go right you can
+
+00:22:03,260 --> 00:22:10,250
+read whatever so that doesn't work oh I
+
+00:22:07,640 --> 00:22:12,320
+forgot to mention one thing that doesn't
+
+00:22:10,250 --> 00:22:13,850
+work because you you could potentially
+
+00:22:12,320 --> 00:22:15,860
+disable tsx you could just
+
+00:22:13,850 --> 00:22:17,270
+say CPU please just don't expose
+
+00:22:15,860 --> 00:22:19,429
+transaction memory nobody is using that
+
+00:22:17,270 --> 00:22:22,610
+anyways and then trap on the page fault
+
+00:22:19,429 --> 00:22:24,230
+and you're safe but modern Intel CPUs no
+
+00:22:22,610 --> 00:22:26,000
+longer give you the ability to do that
+
+00:22:24,230 --> 00:22:28,370
+so with modern Intel CPUs you cannot
+
+00:22:26,000 --> 00:22:29,840
+disable intersection anymore so scar
+
+00:22:28,370 --> 00:22:32,570
+like and debuff don't have anything to
+
+00:22:29,840 --> 00:22:36,289
+do that and that's probably what people
+
+00:22:32,570 --> 00:22:39,039
+want to buy today there's no chicken bit
+
+00:22:36,289 --> 00:22:40,669
+anymore so from from sky like on
+
+00:22:39,039 --> 00:22:45,049
+transactional media is considered a
+
+00:22:40,669 --> 00:22:47,049
+legacy feature yeah I agree I I had that
+
+00:22:45,049 --> 00:22:49,370
+look too
+
+00:22:47,049 --> 00:22:52,520
+nobody's using it but it's legacy which
+
+00:22:49,370 --> 00:22:56,090
+probably actually aligns pretty well so
+
+00:22:52,520 --> 00:22:58,340
+the other the other idea is well the the
+
+00:22:56,090 --> 00:23:00,320
+other entry path we have into making
+
+00:22:58,340 --> 00:23:02,780
+things break is we have to have this
+
+00:23:00,320 --> 00:23:05,720
+page fold which means we have to have a
+
+00:23:02,780 --> 00:23:07,520
+page that actually does not have the
+
+00:23:05,720 --> 00:23:12,020
+present bit set but still a physical
+
+00:23:07,520 --> 00:23:14,690
+address that exposes a real physical
+
+00:23:12,020 --> 00:23:18,590
+address that we can align with on the
+
+00:23:14,690 --> 00:23:23,350
+level one cache side now what we usually
+
+00:23:18,590 --> 00:23:26,630
+do is we have our nested page flow we're
+
+00:23:23,350 --> 00:23:28,760
+up here we have our virtual machine that
+
+00:23:26,630 --> 00:23:31,010
+has yes it's own control of its own page
+
+00:23:28,760 --> 00:23:34,220
+table entries and then hypervisor can
+
+00:23:31,010 --> 00:23:36,350
+only control this is a nested page but
+
+00:23:34,220 --> 00:23:38,140
+they used to be another approach back in
+
+00:23:36,350 --> 00:23:40,700
+the day when the CPUs did not implement
+
+00:23:38,140 --> 00:23:43,190
+EPT yet and that was called chedda
+
+00:23:40,700 --> 00:23:47,799
+paging where basically we are fixing up
+
+00:23:43,190 --> 00:23:52,429
+everything or we be translating from our
+
+00:23:47,799 --> 00:23:54,830
+guest virtual address all the way to our
+
+00:23:52,429 --> 00:23:56,240
+host physical address using shadow pages
+
+00:23:54,830 --> 00:23:58,179
+so we basically do the translation that
+
+00:23:56,240 --> 00:24:03,080
+the CPU would do for you with those two
+
+00:23:58,179 --> 00:24:04,669
+page tables in one go as skvm
+
+00:24:03,080 --> 00:24:07,429
+and in the site there we can obviously
+
+00:24:04,669 --> 00:24:09,650
+fix everything up we like now there is a
+
+00:24:07,429 --> 00:24:11,809
+caveat with fellow paging shell Patrick
+
+00:24:09,650 --> 00:24:13,280
+was was basically not used anymore as
+
+00:24:11,809 --> 00:24:15,620
+soon as he PT came around because he PT
+
+00:24:13,280 --> 00:24:19,870
+was just way faster so that one alone
+
+00:24:15,620 --> 00:24:24,700
+basically lost about 30% performance and
+
+00:24:19,870 --> 00:24:26,600
+one of the reasons for that is that on
+
+00:24:24,700 --> 00:24:27,620
+context switch when you have one
+
+00:24:26,600 --> 00:24:29,540
+application
+
+00:24:27,620 --> 00:24:31,910
+switching to another application you
+
+00:24:29,540 --> 00:24:34,400
+need to switch your page table entry
+
+00:24:31,910 --> 00:24:38,420
+which is now a privileged instruction
+
+00:24:34,400 --> 00:24:41,150
+because your hypervisor needs to instead
+
+00:24:38,420 --> 00:24:43,250
+of setting that page table entry to your
+
+00:24:41,150 --> 00:24:45,020
+real page table that you provide as a
+
+00:24:43,250 --> 00:24:46,400
+guest it needs to set it to a shadow
+
+00:24:45,020 --> 00:24:48,440
+page table that where it actually
+
+00:24:46,400 --> 00:24:54,320
+combines your guest page table with its
+
+00:24:48,440 --> 00:24:56,750
+host page table right what's oh there we
+
+00:24:54,320 --> 00:24:59,809
+need to switch over to basically loop at
+
+00:24:56,750 --> 00:25:03,050
+the wire KBM now what's worse is that
+
+00:24:59,809 --> 00:25:05,570
+thanks to meltdown we not only do that
+
+00:25:03,050 --> 00:25:07,670
+on every context which we even do it on
+
+00:25:05,570 --> 00:25:09,590
+every sis call because every time you're
+
+00:25:07,670 --> 00:25:11,270
+going into the kernel you now need to
+
+00:25:09,590 --> 00:25:13,400
+switch to a page table between the
+
+00:25:11,270 --> 00:25:16,100
+kernel view of the world and the user
+
+00:25:13,400 --> 00:25:18,200
+space view of the world which ideally
+
+00:25:16,100 --> 00:25:20,470
+shouldn't be the same because Intel CPUs
+
+00:25:18,200 --> 00:25:28,130
+forget to check the you bit in
+
+00:25:20,470 --> 00:25:29,809
+speculation so so one idea to oh wait
+
+00:25:28,130 --> 00:25:31,550
+actually it's not just one that I think
+
+00:25:29,809 --> 00:25:33,740
+three times or that we change the the
+
+00:25:31,550 --> 00:25:38,270
+CRF three value the page table entry the
+
+00:25:33,740 --> 00:25:41,300
+page table pointer during sis call every
+
+00:25:38,270 --> 00:25:43,280
+time we go in and out so what we could
+
+00:25:41,300 --> 00:25:44,870
+do is that's an ID from Paulo it's a
+
+00:25:43,280 --> 00:25:46,880
+pretty cool one there is a feature in
+
+00:25:44,870 --> 00:25:48,500
+vmx that allows you to creates your
+
+00:25:46,880 --> 00:25:52,250
+three wide lists so you can actually
+
+00:25:48,500 --> 00:25:54,530
+tell vmx look these pointers these these
+
+00:25:52,250 --> 00:25:56,960
+page table pointers over there these you
+
+00:25:54,530 --> 00:25:58,820
+can just write 2 Co 3 and I wouldn't
+
+00:25:56,960 --> 00:26:01,100
+trap and everything else would still
+
+00:25:58,820 --> 00:26:03,590
+trap so you don't give guest access to
+
+00:26:01,100 --> 00:26:05,059
+page tables that it can modify itself
+
+00:26:03,590 --> 00:26:06,770
+but you give the guest the ability to
+
+00:26:05,059 --> 00:26:12,380
+switch between page tables that you know
+
+00:26:06,770 --> 00:26:15,500
+are same and you can use that feature to
+
+00:26:12,380 --> 00:26:18,170
+basically imagine you would power
+
+00:26:15,500 --> 00:26:21,980
+virtualize your guest colonel to not
+
+00:26:18,170 --> 00:26:24,890
+switch the FCO 3 when on context switch
+
+00:26:21,980 --> 00:26:27,679
+directly but do a hyper call where KVM
+
+00:26:24,890 --> 00:26:31,550
+would then return the shadow paging co 3
+
+00:26:27,679 --> 00:26:34,220
+value forward which means you can have
+
+00:26:31,550 --> 00:26:38,500
+the guest directly switch page tables
+
+00:26:34,220 --> 00:26:40,910
+for kpti because it is aware of the
+
+00:26:38,500 --> 00:26:42,380
+shadow paging pointer
+
+00:26:40,910 --> 00:26:44,390
+should a page to a pointer that it was
+
+00:26:42,380 --> 00:26:47,510
+actually trying to access I guess I lost
+
+00:26:44,390 --> 00:26:50,180
+you guys but this is fine so this is one
+
+00:26:47,510 --> 00:26:54,710
+idea we'd to hurry up a bit the other
+
+00:26:50,180 --> 00:27:01,210
+idea is what if the other thing that
+
+00:26:54,710 --> 00:27:03,230
+slows down shadow paging is PML is our
+
+00:27:01,210 --> 00:27:06,260
+modification so every time we modify the
+
+00:27:03,230 --> 00:27:09,080
+page table down here we need to down
+
+00:27:06,260 --> 00:27:11,210
+here we need to notify KVM to actually
+
+00:27:09,080 --> 00:27:13,580
+change the setup page table entry as
+
+00:27:11,210 --> 00:27:15,500
+well and what we could use for that is a
+
+00:27:13,580 --> 00:27:18,140
+feature called PML the page notification
+
+00:27:15,500 --> 00:27:19,340
+log which is useful for life migration
+
+00:27:18,140 --> 00:27:21,860
+really so when live migration what we
+
+00:27:19,340 --> 00:27:23,750
+have is we have a guest running we want
+
+00:27:21,860 --> 00:27:26,210
+to know what did the guest actually
+
+00:27:23,750 --> 00:27:27,590
+modify in between the last time I
+
+00:27:26,210 --> 00:27:29,330
+transferred its pages over to my
+
+00:27:27,590 --> 00:27:31,220
+destination and we could use the same
+
+00:27:29,330 --> 00:27:33,110
+feature to know that the guest actually
+
+00:27:31,220 --> 00:27:35,000
+modify any of our page table entries
+
+00:27:33,110 --> 00:27:37,370
+because that way we don't have to ever
+
+00:27:35,000 --> 00:27:40,640
+write protect our page table entries
+
+00:27:37,370 --> 00:27:44,320
+because we can just lazily to adapt our
+
+00:27:40,640 --> 00:27:46,400
+shadow page according to TLB flushes
+
+00:27:44,320 --> 00:27:47,450
+there are more alternative medications
+
+00:27:46,400 --> 00:27:50,330
+that people are thinking of yet this
+
+00:27:47,450 --> 00:27:52,040
+buff yesterday where people are working
+
+00:27:50,330 --> 00:27:55,010
+on course scheduling so you only ever
+
+00:27:52,040 --> 00:27:57,110
+run a VM based on course and never on
+
+00:27:55,010 --> 00:27:58,940
+FETs with a couple of different ideas on
+
+00:27:57,110 --> 00:28:00,530
+how to do it you could either expose
+
+00:27:58,940 --> 00:28:02,270
+threats in the hospital or even just
+
+00:28:00,530 --> 00:28:05,360
+completely not expose house stats in the
+
+00:28:02,270 --> 00:28:08,930
+holes and but only expose stats and the
+
+00:28:05,360 --> 00:28:10,880
+guest like we do for power and another
+
+00:28:08,930 --> 00:28:13,280
+thing people are working on is to hide
+
+00:28:10,880 --> 00:28:15,230
+host secrets so you just simply could
+
+00:28:13,280 --> 00:28:17,630
+never load anything secret inside the
+
+00:28:15,230 --> 00:28:20,810
+host while you're treating a couple of
+
+00:28:17,630 --> 00:28:22,280
+VM exits so this is all happening in the
+
+00:28:20,810 --> 00:28:24,800
+background so expect more things to
+
+00:28:22,280 --> 00:28:26,690
+happen for l1 TF and then I have a demo
+
+00:28:24,800 --> 00:28:28,340
+that we're already 10 minutes over time
+
+00:28:26,690 --> 00:28:29,870
+no actually not we have 1 minute over
+
+00:28:28,340 --> 00:28:32,090
+time less less than 2 over time whoo
+
+00:28:29,870 --> 00:28:33,440
+awesome so I will just quickly show you
+
+00:28:32,090 --> 00:28:34,970
+the demo run it in the background and
+
+00:28:33,440 --> 00:28:37,340
+you can raise your hand and I think we
+
+00:28:34,970 --> 00:28:41,810
+have one question also or two that we
+
+00:28:37,340 --> 00:28:46,640
+can work on hence three hands no hands
+
+00:28:41,810 --> 00:28:48,320
+okay so this is a machine I have flying
+
+00:28:46,640 --> 00:28:51,290
+around I didn't change the host name
+
+00:28:48,320 --> 00:28:53,970
+again oh well this is a machine I got
+
+00:28:51,290 --> 00:28:58,020
+where I just knew this garlic and
+
+00:28:53,970 --> 00:28:59,970
+exploitable where I'm running this on
+
+00:28:58,020 --> 00:29:04,740
+the host so you see I'm what I'm root
+
+00:28:59,970 --> 00:29:08,220
+over here I'm running on my one thread
+
+00:29:04,740 --> 00:29:09,960
+of core one I'm running a program that
+
+00:29:08,220 --> 00:29:12,270
+basically just goes and reads a secret
+
+00:29:09,960 --> 00:29:15,180
+in a pretty simple it could as well be
+
+00:29:12,270 --> 00:29:18,120
+uses each client and on the other thread
+
+00:29:15,180 --> 00:29:21,180
+of that same core which is here right
+
+00:29:18,120 --> 00:29:23,190
+it's a four core system first the second
+
+00:29:21,180 --> 00:29:26,610
+thread of the first course and CPU five
+
+00:29:23,190 --> 00:29:30,150
+in Linux I'm wanting a KVM virtual
+
+00:29:26,610 --> 00:29:32,340
+machine that is trying to read that data
+
+00:29:30,150 --> 00:29:33,780
+out using tsx and I'll just run it in
+
+00:29:32,340 --> 00:29:36,600
+the background I hope it's not crashing
+
+00:29:33,780 --> 00:29:37,610
+again and then in the background like
+
+00:29:36,600 --> 00:29:42,690
+like while that happens
+
+00:29:37,610 --> 00:29:49,500
+did anybody raise the hand now no all
+
+00:29:42,690 --> 00:29:50,850
+right yeah doesn't work it doesn't even
+
+00:29:49,500 --> 00:29:53,720
+start the VM right now because there's
+
+00:29:50,850 --> 00:29:57,710
+an NFS cuddle oops on this on the system
+
+00:29:53,720 --> 00:29:57,710
+so that didn't work I
+
+00:29:59,520 --> 00:30:02,710
+[Music]
+
+00:30:09,610 --> 00:30:13,490
+so I guess I can just show you that
+
+00:30:11,750 --> 00:30:15,020
+running is rude instead of as a user but
+
+00:30:13,490 --> 00:30:19,210
+it works the same as a user if you're
+
+00:30:15,020 --> 00:30:21,710
+NFS infrastructure would actually work
+
+00:30:19,210 --> 00:30:24,170
+so here we found oh we actually already
+
+00:30:21,710 --> 00:30:26,600
+found the other secret there you go we
+
+00:30:24,170 --> 00:30:29,120
+could just read the secret in no time
+
+00:30:26,600 --> 00:30:31,130
+from that other thread on the same house
+
+00:30:29,120 --> 00:30:33,290
+I want TF basically means you have
+
+00:30:31,130 --> 00:30:38,570
+immediate exposure to all data that
+
+00:30:33,290 --> 00:30:45,140
+happens on the other thread thank you
+
+00:30:38,570 --> 00:30:45,140
+
+YouTube URL: https://www.youtube.com/watch?v=xKjig6kvXQc
+
+

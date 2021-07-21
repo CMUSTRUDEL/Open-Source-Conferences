@@ -1,0 +1,1757 @@
+Title: LPC2019 - CPU controller on a single runqueue
+Publication date: 2019-11-18
+Playlist: LPC2019 - LPC Main Track
+Description: 
+	CPU controller on a single runqueue
+
+Speaker
+ Rik van Riel (Facebook)
+
+Description
+The cgroups CPU controller in the Linux scheduler is implemented using hierarchical runqueues, which introduces a lot of complexity, and incurs a large overhead with frequently scheduling workloads. This presentation is about a new design for the cgroups CPU controller, which uses just one runqueue, and instead scales the vruntime by the inverse of the task priority. The goal is to make people familiar with the new design, so they know what is going on, and do not need to spend a month examining kernel/sched/fair.c to figure things out.
+Captions: 
+	00:00:00,220 --> 00:00:03,310
+- Presentation is about how CFS v-time stuff,
+
+00:00:03,310 --> 00:00:04,830
+vruntime stuff works.
+
+00:00:04,830 --> 00:00:06,003
+So that still applies.
+
+00:00:08,260 --> 00:00:13,260
+So spend some time explaining how CFS works,
+
+00:00:13,370 --> 00:00:18,370
+and how the current cgroup CPU controller design works.
+
+00:00:18,870 --> 00:00:21,890
+The redesign that we've been working on for a while,
+
+00:00:21,890 --> 00:00:26,890
+and various little bits of performance numbers.
+
+00:00:29,940 --> 00:00:33,010
+Mostly from workloads that are easy to set up and run,
+
+00:00:33,010 --> 00:00:34,763
+relatively easy to set up and run.
+
+00:00:37,050 --> 00:00:42,050
+In CFS, everything revolves around vruntime.
+
+00:00:46,269 --> 00:00:51,269
+vruntime basically is a kind of a mix of priority number
+
+00:00:52,280 --> 00:00:57,280
+and CPU time used, merged into one number.
+
+00:01:00,260 --> 00:01:04,220
+Every task and every group has a sched_entity,
+
+00:01:04,220 --> 00:01:08,070
+which is a data structure in CFS that tracks
+
+00:01:08,070 --> 00:01:10,560
+all kinds of statistics about a task,
+
+00:01:10,560 --> 00:01:14,360
+including the priority of that task or cgroup,
+
+00:01:14,360 --> 00:01:17,300
+and the amount of time that it has been running,
+
+00:01:17,300 --> 00:01:20,400
+and from the amount of time that it has been running,
+
+00:01:20,400 --> 00:01:25,400
+it calculates vruntime, and basically the higher
+
+00:01:26,400 --> 00:01:30,940
+the priority of a task is, the lower the vruntime
+
+00:01:30,940 --> 00:01:33,120
+number will be for a given amount of time
+
+00:01:33,120 --> 00:01:35,300
+that the task has been running,
+
+00:01:35,300 --> 00:01:37,330
+and the lower priority a task is,
+
+00:01:37,330 --> 00:01:40,173
+the more that every microsecond of CPU time
+
+00:01:40,173 --> 00:01:43,280
+that has been used counts.
+
+00:01:43,280 --> 00:01:46,600
+So if you a nice 20 task, and it uses a little bit
+
+00:01:46,600 --> 00:01:49,970
+of CPU time, it'll count as a big block of vruntime
+
+00:01:50,810 --> 00:01:53,870
+to give higher priority tasks the chance to run
+
+00:01:53,870 --> 00:01:55,513
+and take more of the CPU.
+
+00:01:57,730 --> 00:02:01,500
+And it's basically calculated by
+
+00:02:03,790 --> 00:02:06,290
+multiplying the amount of recently runtime
+
+00:02:08,377 --> 00:02:09,390
+by some big nice number,
+
+00:02:09,390 --> 00:02:14,390
+and dividing it by the priority of the task or the cgroup.
+
+00:02:18,400 --> 00:02:22,420
+The runqueue, or every runqueue in CFS,
+
+00:02:22,420 --> 00:02:24,800
+it's a bunch of schedule entities
+
+00:02:24,800 --> 00:02:29,487
+sorted by vruntime, and in most cases,
+
+00:02:33,820 --> 00:02:37,744
+CFS will run the task that has smallest vruntime number
+
+00:02:37,744 --> 00:02:40,073
+on that particular CPU.
+
+00:02:41,340 --> 00:02:44,270
+And the task that has the smallest vruntime number,
+
+00:02:44,270 --> 00:02:47,260
+it gets to run for a bit, and eventually
+
+00:02:47,260 --> 00:02:49,870
+the vruntime number of that task
+
+00:02:49,870 --> 00:02:53,260
+will be larger than the next task on the list,
+
+00:02:53,260 --> 00:02:56,970
+if there is one, because while this task is running,
+
+00:02:56,970 --> 00:02:59,050
+its vruntime just keeps getting bigger and bigger
+
+00:02:59,050 --> 00:03:02,410
+and bigger, and at some point it will exceed the vruntime
+
+00:03:02,410 --> 00:03:05,806
+of whatever other task was second in the runqueue,
+
+00:03:05,806 --> 00:03:07,520
+and then that task gets to run.
+
+00:03:07,520 --> 00:03:12,520
+And as all the tasks' vruntimes just progress
+
+00:03:13,030 --> 00:03:15,720
+over and over, they're gonna leapfrog each other,
+
+00:03:15,720 --> 00:03:18,310
+there is another number called the min_vruntime,
+
+00:03:18,310 --> 00:03:20,810
+which gets dragged along the last one
+
+00:03:20,810 --> 00:03:23,273
+of the running tasks on the CPU,
+
+00:03:24,360 --> 00:03:25,920
+and that means every time
+
+00:03:28,730 --> 00:03:33,170
+the task with smallest vruntime on the CPU
+
+00:03:34,490 --> 00:03:39,090
+moves its vruntime ahead, then a min_vruntime
+
+00:03:39,090 --> 00:03:42,313
+gets pulled along and increased as well.
+
+00:03:45,420 --> 00:03:48,000
+And lower priority tasks,
+
+00:03:48,000 --> 00:03:49,863
+they make the vruntime run faster.
+
+00:03:51,050 --> 00:03:55,320
+Higher priority tasks make the vruntime run smaller,
+
+00:03:55,320 --> 00:03:59,940
+so the vruntime can advance at totally different rates
+
+00:03:59,940 --> 00:04:04,940
+on different CPUs, and you can't really compare
+
+00:04:05,880 --> 00:04:07,980
+the vruntime outside of a CPU,
+
+00:04:07,980 --> 00:04:12,980
+but inside a CPU, it is a useful, meaningful number.
+
+00:04:14,500 --> 00:04:18,009
+And the min_vruntime also never decreases,
+
+00:04:18,009 --> 00:04:21,170
+which matters a lot for wakeup.
+
+00:04:21,170 --> 00:04:23,323
+At wakeup, some special things happen.
+
+00:04:25,170 --> 00:04:28,667
+When tasks are always running, vruntime just keeps going up,
+
+00:04:28,667 --> 00:04:31,210
+but if you have one task goes to sleep,
+
+00:04:31,210 --> 00:04:33,650
+and other tasks that continues running,
+
+00:04:33,650 --> 00:04:35,890
+there might be an enormous vruntime gap
+
+00:04:35,890 --> 00:04:37,590
+between the tasks that are still running
+
+00:04:37,590 --> 00:04:39,850
+and the task that gets woken up,
+
+00:04:39,850 --> 00:04:44,850
+and there is some code in CFS that limits that amount
+
+00:04:45,430 --> 00:04:49,470
+to be no more half a time slice by default
+
+00:04:49,470 --> 00:04:52,227
+behind the min_vruntime.
+
+00:04:54,350 --> 00:04:57,626
+So a task that gets woken up
+
+00:04:57,626 --> 00:04:59,860
+will get some vruntime advantage
+
+00:04:59,860 --> 00:05:03,463
+over the running tasks on the CPU,
+
+00:05:05,000 --> 00:05:08,350
+mostly because its vruntime was stopped
+
+00:05:08,350 --> 00:05:09,450
+while it was sleeping.
+
+00:05:12,840 --> 00:05:15,423
+But if multiple tasks wake up at the same time,
+
+00:05:15,423 --> 00:05:18,350
+you may end up with a situation where
+
+00:05:18,350 --> 00:05:23,350
+they all get the chance to run for some amount of time
+
+00:05:23,380 --> 00:05:27,623
+before their vruntimes are larger than min_vruntime,
+
+00:05:28,700 --> 00:05:31,620
+and only at that point will min_vruntime
+
+00:05:31,620 --> 00:05:34,220
+start advancing again, and whatever task
+
+00:05:34,220 --> 00:05:37,120
+was on the CPU originally, will get a chance to run again.
+
+00:05:38,310 --> 00:05:40,230
+It's probably not that big of an issue,
+
+00:05:40,230 --> 00:05:45,230
+because the more tasks you have on a CPU,
+
+00:05:46,820 --> 00:05:49,070
+the shorter of a time slice they end up getting,
+
+00:05:49,070 --> 00:05:50,153
+down to some minimum.
+
+00:05:51,760 --> 00:05:56,760
+And secondly, on most systems, the number of running tasks
+
+00:05:56,760 --> 00:05:58,903
+on the CPU is typically zero or one.
+
+00:06:05,270 --> 00:06:07,170
+There's another decision of course.
+
+00:06:07,170 --> 00:06:11,608
+When we wake up a task, should that task
+
+00:06:11,608 --> 00:06:15,640
+stop the execution of the currently running task,
+
+00:06:15,640 --> 00:06:19,350
+and should it just start running immediately
+
+00:06:19,350 --> 00:06:23,280
+or should a newly wakened up task wait a little bit
+
+00:06:23,280 --> 00:06:25,730
+until the current task is done with a time slice?
+
+00:06:29,250 --> 00:06:32,893
+This code is interesting,
+
+00:06:35,400 --> 00:06:38,530
+since nobody seems entirely sure what it should be doing.
+
+00:06:38,530 --> 00:06:39,911
+Go ahead.
+
+00:06:39,911 --> 00:06:40,744
+(audience member speaks indistinctly)
+
+00:06:40,744 --> 00:06:41,577
+- [Man] Just a second.
+
+00:06:44,850 --> 00:06:46,070
+- I was just gonna make a comment
+
+00:06:46,070 --> 00:06:47,620
+to try and add to what Rick's saying.
+
+00:06:47,620 --> 00:06:50,029
+What we're trying to do with vruntime
+
+00:06:50,029 --> 00:06:52,670
+is vruntime is an invariant quantity,
+
+00:06:52,670 --> 00:06:55,830
+so that old tasks get the same amount of vruntime
+
+00:06:55,830 --> 00:06:59,850
+units of time, and we handle what the time normalization
+
+00:06:59,850 --> 00:07:03,630
+of that relative to their weight is, underneath vruntime.
+
+00:07:03,630 --> 00:07:06,157
+So when Rik's talking about all these things
+
+00:07:06,157 --> 00:07:08,440
+and what the vruntime timeline looks like
+
+00:07:08,440 --> 00:07:11,550
+and what the gaps look like, the entire idea here is,
+
+00:07:11,550 --> 00:07:13,570
+we can be invariant of what the underlying
+
+00:07:13,570 --> 00:07:15,830
+actual physical time that maps down to,
+
+00:07:15,830 --> 00:07:17,890
+and we can consistently make these comparisons
+
+00:07:17,890 --> 00:07:20,803
+with this priority invariant representation.
+
+00:07:25,160 --> 00:07:28,842
+- And whether we should preempt the currently running task,
+
+00:07:28,842 --> 00:07:33,842
+it depends a lot on how long the task that has woken up
+
+00:07:35,960 --> 00:07:40,960
+has been sleeping, and also on how much
+
+00:07:41,420 --> 00:07:43,930
+the other tasks on the CPU have been running
+
+00:07:43,930 --> 00:07:45,080
+since it went to sleep.
+
+00:07:46,700 --> 00:07:51,240
+So if a task goes to sleep, and the CPU is idle
+
+00:07:51,240 --> 00:07:53,800
+for some amount of time, and another task
+
+00:07:53,800 --> 00:07:55,830
+just starts running a little bit before
+
+00:07:55,830 --> 00:08:00,350
+this new task wakes up, then the vruntime on the CPU
+
+00:08:00,350 --> 00:08:03,140
+has not really moved at all,
+
+00:08:03,140 --> 00:08:08,140
+and that running task is continuous running for a bit,
+
+00:08:09,300 --> 00:08:11,920
+until it's time slice is done, or until a task
+
+00:08:11,920 --> 00:08:13,340
+decides it wants to go to sleep,
+
+00:08:13,340 --> 00:08:16,220
+and then the woken up task gets to run.
+
+00:08:16,220 --> 00:08:21,023
+On the other hand, if the tasks that are running on the CPU
+
+00:08:21,023 --> 00:08:23,290
+have just been running a whole bunch,
+
+00:08:23,290 --> 00:08:26,330
+and a task wakes up after a long sleep,
+
+00:08:26,330 --> 00:08:29,270
+then there is a really big difference in vruntime
+
+00:08:30,690 --> 00:08:34,599
+between that of the running tasks on the CPU
+
+00:08:34,599 --> 00:08:36,730
+and the that of the newly woken up task,
+
+00:08:36,730 --> 00:08:41,730
+and then task that just woke up will preempt
+
+00:08:43,150 --> 00:08:44,843
+the other tasks on the CPU.
+
+00:08:46,470 --> 00:08:47,723
+This has some issues.
+
+00:08:49,020 --> 00:08:52,500
+Most notably that vruntime can get moved around
+
+00:08:52,500 --> 00:08:55,160
+by other tasks as well, and not just the one
+
+00:08:55,160 --> 00:08:57,363
+that is running at the moment of wakeup.
+
+00:08:59,040 --> 00:09:01,670
+So it's possible that you still do end up
+
+00:09:02,630 --> 00:09:07,630
+waking up a task that started running relatively recently.
+
+00:09:10,340 --> 00:09:12,290
+But it's mostly with some corner cases
+
+00:09:12,290 --> 00:09:14,180
+with task migration that I'm not really
+
+00:09:14,180 --> 00:09:16,030
+gonna get into right now, and I think
+
+00:09:17,430 --> 00:09:20,279
+Paul is actually working on a solution for that,
+
+00:09:20,279 --> 00:09:23,010
+where he wants to keep the vruntime equal
+
+00:09:23,010 --> 00:09:24,683
+between all CPUs somehow.
+
+00:09:27,710 --> 00:09:31,240
+Another issue is that the preemption is really only affected
+
+00:09:31,240 --> 00:09:35,053
+by the priority of the task that is waking up,
+
+00:09:35,053 --> 00:09:36,810
+and not by the priority of the task
+
+00:09:36,810 --> 00:09:38,940
+that is currently running.
+
+00:09:38,940 --> 00:09:43,940
+So if have a CPU that, a task goes to sleep,
+
+00:09:45,060 --> 00:09:48,100
+a task that is running at a deep nice level
+
+00:09:48,100 --> 00:09:52,450
+is running for a while, then you have nice minus 20 task
+
+00:09:52,450 --> 00:09:54,300
+that just pops up and starts running,
+
+00:09:55,360 --> 00:09:56,820
+and there is tasks that go to sleep,
+
+00:09:56,820 --> 00:09:59,150
+which might be nice level zero, it can come in
+
+00:09:59,150 --> 00:10:01,240
+and it can take the CPU away from that nice
+
+00:10:01,240 --> 00:10:06,210
+level 20 task, because the priority of the currently
+
+00:10:06,210 --> 00:10:08,700
+running task is not considered at all
+
+00:10:08,700 --> 00:10:10,333
+in the preemption code.
+
+00:10:14,280 --> 00:10:17,463
+- You seem to say that the priorities should give you,
+
+00:10:19,170 --> 00:10:23,000
+the priorities just used to evaluate how much time
+
+00:10:23,000 --> 00:10:25,800
+you allow in the CPU, but that doesn't say that
+
+00:10:25,800 --> 00:10:27,730
+you will run before.
+
+00:10:27,730 --> 00:10:30,640
+It's not because your nice 20 that you should run
+
+00:10:30,640 --> 00:10:32,850
+before nice zero, just a matter of how much time
+
+00:10:32,850 --> 00:10:33,900
+you have already run.
+
+00:10:35,040 --> 00:10:36,500
+Yeah, just the share.
+
+00:10:36,500 --> 00:10:39,330
+So you can't really say it's a problem.
+
+00:10:39,330 --> 00:10:40,600
+It's not a problem,
+
+00:10:40,600 --> 00:10:45,290
+if it mean that, if it's because the lower priority tasks
+
+00:10:45,290 --> 00:10:46,693
+haven't run for a while.
+
+00:10:49,210 --> 00:10:51,999
+- To some extent, but a higher priority task
+
+00:10:51,999 --> 00:10:54,420
+might also not have run for a while,
+
+00:10:54,420 --> 00:10:57,480
+and might have recently woken up and started running,
+
+00:10:57,480 --> 00:10:59,963
+and then get preempted by a low priority task,
+
+00:11:01,068 --> 00:11:03,380
+or by a medium priority, because a low priority task
+
+00:11:03,380 --> 00:11:05,650
+has moved the vruntime by a lot.
+
+00:11:05,650 --> 00:11:10,280
+- Yeah because I mean, the mean vruntime
+
+00:11:10,280 --> 00:11:12,980
+will be aligned to the currently running task.
+
+00:11:12,980 --> 00:11:16,097
+The new woken up will use this mean and have
+
+00:11:17,320 --> 00:11:20,100
+the scheduled period, but if you're high priority,
+
+00:11:20,100 --> 00:11:23,530
+you will not be preempted until the diff
+
+00:11:23,530 --> 00:11:25,350
+is larger than your sched slice.
+
+00:11:25,350 --> 00:11:29,160
+So that prevents you to be preempted too earlier.
+
+00:11:29,160 --> 00:11:33,240
+- No the sched slice length of the currently running
+
+00:11:33,240 --> 00:11:36,210
+higher priority task is not used at all
+
+00:11:36,210 --> 00:11:38,010
+by wakeup preempt entity.
+
+00:11:38,010 --> 00:11:42,303
+It only looks at the priority of the recently woken up task.
+
+00:11:45,530 --> 00:11:46,363
+- Are you sure?
+
+00:11:47,770 --> 00:11:50,040
+I'm pretty sure too that we are looking
+
+00:11:50,040 --> 00:11:53,523
+at the min priority of the currently running task as well.
+
+00:11:55,440 --> 00:11:59,000
+- Except the currently running task's vruntime
+
+00:11:59,000 --> 00:12:03,090
+may have been pushed ahead some amount
+
+00:12:03,929 --> 00:12:08,929
+by coming off a different CPU where it had
+
+00:12:09,480 --> 00:12:12,530
+no difference with the min_vruntime,
+
+00:12:12,530 --> 00:12:15,440
+and when it gets migrated, its min_vruntime
+
+00:12:15,440 --> 00:12:17,913
+will be the same as that optimized level 20 task.
+
+00:12:20,218 --> 00:12:21,051
+- [Audience Member] Yes.
+
+00:12:21,051 --> 00:12:23,680
+- And then that nice level zero task gets woken up
+
+00:12:23,680 --> 00:12:26,823
+and it gets to preempt the nice minus 20 task.
+
+00:12:28,970 --> 00:12:31,068
+- Okay, probably have to go back, because I'm pretty sure
+
+00:12:31,068 --> 00:12:32,880
+that it will have this guaranteed runtime
+
+00:12:32,880 --> 00:12:34,163
+before being preempted.
+
+00:12:35,430 --> 00:12:37,820
+- That seems like it will be a good idea,
+
+00:12:37,820 --> 00:12:40,751
+but I don't think the current code does that.
+
+00:12:40,751 --> 00:12:44,860
+- Because we have this tree, there is this wakeup function
+
+00:12:44,860 --> 00:12:47,700
+with tree value which is, you are far before,
+
+00:12:47,700 --> 00:12:50,453
+you are after or you are in the middle.
+
+00:12:53,040 --> 00:12:53,873
+- Good.
+
+00:12:54,752 --> 00:12:58,150
+- [Audience Member] That is how you need to go.
+
+00:12:58,150 --> 00:12:59,600
+- Move on to load and weight.
+
+00:13:00,770 --> 00:13:04,270
+For tasks, the nice level determines the value
+
+00:13:04,270 --> 00:13:09,270
+of the load.weight variable in the sched_entity.
+
+00:13:09,860 --> 00:13:14,653
+For groups, you could say the cgroup cpu.weight value.
+
+00:13:16,040 --> 00:13:20,523
+And derived from the weight is the load.
+
+00:13:21,670 --> 00:13:25,403
+If you have a weight 1000 task that's busy 1% of the time,
+
+00:13:26,250 --> 00:13:28,410
+the load of that one will be much lower
+
+00:13:28,410 --> 00:13:32,083
+than a lower priority task that is busy all the time.
+
+00:13:33,640 --> 00:13:38,640
+Then we have three different values in the runqueue.
+
+00:13:38,640 --> 00:13:43,640
+The load.weight is simply, we add up the sum
+
+00:13:44,080 --> 00:13:48,711
+of the weights that are currently on the runqueue.
+
+00:13:48,711 --> 00:13:53,050
+The runnable load average comes suspiciously close to that,
+
+00:13:53,050 --> 00:13:54,513
+but is not quite that.
+
+00:13:57,900 --> 00:13:59,980
+- So the runnable load average is the sum
+
+00:13:59,980 --> 00:14:02,410
+of the load average of the runnable task?
+
+00:14:02,410 --> 00:14:03,243
+- [Rik] Yep.
+
+00:14:04,230 --> 00:14:07,003
+- And you say that almost the sum of the entity weight?
+
+00:14:07,950 --> 00:14:09,280
+But that can be quite different.
+
+00:14:09,280 --> 00:14:12,840
+Why are you saying that the runnable average of the CFS
+
+00:14:12,840 --> 00:14:15,000
+is the sum of the entity weight?
+
+00:14:15,000 --> 00:14:19,680
+- Because if you look at how things are added up,
+
+00:14:19,680 --> 00:14:23,520
+if you have two tasks under the same group,
+
+00:14:23,520 --> 00:14:25,290
+then the weight that gets propagated up
+
+00:14:25,290 --> 00:14:27,240
+should just be the weight of the group,
+
+00:14:30,150 --> 00:14:32,510
+regardless of how many tasks you have under the group,
+
+00:14:32,510 --> 00:14:34,370
+the weight that goes up should never be more
+
+00:14:34,370 --> 00:14:36,783
+than the weight of the group itself.
+
+00:14:43,744 --> 00:14:46,063
+- Okay, we're probably not speaking about the same value.
+
+00:14:51,010 --> 00:14:52,670
+Yeah, it's okay for me for that.
+
+00:14:52,670 --> 00:14:54,408
+We are not speaking about the same
+
+00:14:54,408 --> 00:14:55,241
+runnable load average.
+
+00:14:55,241 --> 00:14:56,074
+- Okay.
+
+00:14:58,530 --> 00:15:01,850
+Yeah I think it was calculated in a different way,
+
+00:15:01,850 --> 00:15:05,013
+and I changed it in one of the patches in my series.
+
+00:15:06,830 --> 00:15:09,600
+- So you mean this what your patch is doing,
+
+00:15:09,600 --> 00:15:12,150
+or that's what was done before your patch?
+
+00:15:12,150 --> 00:15:14,060
+- What was done before is--
+
+00:15:14,060 --> 00:15:16,530
+- Okay, okay - it's pretty close
+
+00:15:16,530 --> 00:15:17,633
+at the root level.
+
+00:15:23,710 --> 00:15:26,780
+The load average is similar, which is the sum
+
+00:15:26,780 --> 00:15:30,713
+of the load averages of the entities on the runqueue.
+
+00:15:32,980 --> 00:15:36,220
+CPU controller, the current implementation.
+
+00:15:36,220 --> 00:15:38,000
+The runqueues are hierarchical,
+
+00:15:38,000 --> 00:15:41,763
+which is somewhat complicated.
+
+00:15:43,480 --> 00:15:48,350
+Every task has a sched_entity, every group has both
+
+00:15:48,350 --> 00:15:52,443
+a sched_entity and a CFS runqueue on every CPU,
+
+00:15:53,280 --> 00:15:55,990
+so every time the pulseaudio process
+
+00:15:55,990 --> 00:15:58,173
+all the way at the bottom gets woken up,
+
+00:15:59,301 --> 00:16:04,301
+the task gets enqueued on the group runqueue,
+
+00:16:04,640 --> 00:16:07,870
+then the pulseaudio service group
+
+00:16:07,870 --> 00:16:12,590
+gets enqueued on the user1000 service group,
+
+00:16:12,590 --> 00:16:16,770
+which gets enqueued on the user1000.slice,
+
+00:16:16,770 --> 00:16:19,320
+which gets enqueued on the user.slice group,
+
+00:16:19,320 --> 00:16:22,090
+which then gets enqueued on the root cfs_rq
+
+00:16:22,090 --> 00:16:23,153
+for that CPU.
+
+00:16:25,240 --> 00:16:28,980
+Every time pulseaudio wakes up and goes back to sleep,
+
+00:16:28,980 --> 00:16:33,980
+we look at how much CPU time has been used
+
+00:16:35,230 --> 00:16:37,750
+by every entity at each level of the group,
+
+00:16:37,750 --> 00:16:41,320
+we calculate the vruntime for each of these things,
+
+00:16:41,320 --> 00:16:46,260
+we update the number of runnable tasks at every level,
+
+00:16:46,260 --> 00:16:51,260
+we add the sched_entity of the task to the group,
+
+00:16:53,700 --> 00:16:56,000
+and of the group all the way up,
+
+00:16:56,000 --> 00:17:01,000
+so we do five runqueue adds every time pulseaudio wakes up,
+
+00:17:03,680 --> 00:17:05,780
+and then we do five runqueue removals
+
+00:17:05,780 --> 00:17:07,130
+when it goes back to sleep,
+
+00:17:09,015 --> 00:17:13,180
+and for most workloads it is not too big a deal,
+
+00:17:13,180 --> 00:17:16,330
+but there are some messaging services out there,
+
+00:17:16,330 --> 00:17:20,130
+some message parsing things and memcache tile stuff,
+
+00:17:20,130 --> 00:17:23,200
+and some other transactional workloads,
+
+00:17:23,200 --> 00:17:27,000
+where you might be doing 20,000 context switches
+
+00:17:27,000 --> 00:17:31,193
+per second per CPU, and this stuff really starts to hurt,
+
+00:17:33,310 --> 00:17:37,830
+and we've seen a few cases where it takes quite a few
+
+00:17:39,610 --> 00:17:44,610
+percent of CPU time just to go up and down the tree
+
+00:17:46,940 --> 00:17:49,520
+and rebuild the whole tree and tear it back down
+
+00:17:49,520 --> 00:17:52,063
+every time a task wakes up and goes back to sleep.
+
+00:17:54,050 --> 00:17:58,263
+And we would like to simplify this.
+
+00:18:01,870 --> 00:18:04,064
+The way things work here, the load average
+
+00:18:04,064 --> 00:18:09,064
+at each level is computed as simply a product
+
+00:18:10,680 --> 00:18:14,301
+of the weight of the group and how busy that group is.
+
+00:18:14,301 --> 00:18:17,440
+You cannot just add up all the runnable tasks
+
+00:18:17,440 --> 00:18:22,440
+in the system, because if you have two tasks in a group
+
+00:18:22,700 --> 00:18:27,590
+that are each busy 50% of the time,
+
+00:18:27,590 --> 00:18:31,490
+but they somehow happen to be busy at roughly the same time,
+
+00:18:31,490 --> 00:18:33,343
+because they get woken up together,
+
+00:18:34,570 --> 00:18:37,970
+at that point a group will also be only 50% busy.
+
+00:18:37,970 --> 00:18:40,714
+If you just add 'em up, you would count the load
+
+00:18:40,714 --> 00:18:44,180
+of that group double of what you actually want to count.
+
+00:18:44,180 --> 00:18:46,460
+So we do need to walk up the tree,
+
+00:18:46,460 --> 00:18:48,800
+and we do need to know whether or not
+
+00:18:48,800 --> 00:18:52,930
+there is something running in each of those groups
+
+00:18:52,930 --> 00:18:56,843
+when we walk up to figure out the load average.
+
+00:18:57,811 --> 00:18:59,680
+On the other hand, the load average is,
+
+00:18:59,680 --> 00:19:00,890
+it's done periodically.
+
+00:19:00,890 --> 00:19:05,030
+It's limited to no more than once per timer take
+
+00:19:05,030 --> 00:19:07,433
+for each group.
+
+00:19:13,430 --> 00:19:16,060
+Another fun thing is that you can configure
+
+00:19:16,060 --> 00:19:21,060
+the priorities of all the tasks in the system.
+
+00:19:22,070 --> 00:19:24,720
+in this case, it was not done, everything was left
+
+00:19:24,720 --> 00:19:27,963
+at the default weight of 1,024,
+
+00:19:29,410 --> 00:19:34,410
+and you can see that in the runqueues
+
+00:19:34,713 --> 00:19:36,533
+that have two things on them,
+
+00:19:37,770 --> 00:19:42,283
+the weight in that runqueue is doubled, so it's 2,048.
+
+00:19:44,010 --> 00:19:48,763
+But at the bottom, you see three tasks of the same priority,
+
+00:19:49,610 --> 00:19:52,910
+which is not quite what you want,
+
+00:19:52,910 --> 00:19:54,720
+because both of the groups are supposed to get
+
+00:19:54,720 --> 00:19:59,260
+the same priority, and that means that
+
+00:19:59,260 --> 00:20:04,170
+the final test priorities will be on the right-hand side.
+
+00:20:04,170 --> 00:20:06,100
+They'll just divide the priority of the group
+
+00:20:06,100 --> 00:20:10,640
+between themselves, and you end up with one task
+
+00:20:10,640 --> 00:20:13,260
+that has the same priority as its parent group
+
+00:20:13,260 --> 00:20:16,010
+because it's the only thing in that group,
+
+00:20:16,010 --> 00:20:19,690
+and the other two tasks are dividing the weight
+
+00:20:20,541 --> 00:20:22,483
+of the group.
+
+00:20:25,490 --> 00:20:26,633
+Check the time.
+
+00:20:27,668 --> 00:20:29,210
+Ah, okay.
+
+00:20:29,210 --> 00:20:34,210
+And for the function that calculates this for load
+
+00:20:35,340 --> 00:20:37,740
+already exist, the task_h_load function,
+
+00:20:37,740 --> 00:20:40,430
+and I introduced a task_h_weight
+
+00:20:40,430 --> 00:20:42,380
+for the code that I've been working on.
+
+00:20:44,150 --> 00:20:46,680
+So okay, we have a lot of the information already
+
+00:20:49,440 --> 00:20:50,293
+as a plan.
+
+00:20:52,162 --> 00:20:56,420
+CFS already knows how to split CPU time fairly
+
+00:20:56,420 --> 00:20:58,543
+between tasks of different priorities.
+
+00:20:59,830 --> 00:21:02,860
+We know how to calculate the hierarchical priority
+
+00:21:02,860 --> 00:21:04,173
+of different tasks,
+
+00:21:06,233 --> 00:21:08,120
+and almost everything that we need
+
+00:21:08,120 --> 00:21:10,950
+to get rid of the hierarchical runqueues
+
+00:21:10,950 --> 00:21:14,893
+is already in place, so what could possibly go wrong?
+
+00:21:16,380 --> 00:21:18,570
+The new design that I've been working on
+
+00:21:18,570 --> 00:21:23,160
+on but I'll probably have to throw it out, (laughs)
+
+00:21:23,160 --> 00:21:25,950
+it puts the hierarchy off to the side,
+
+00:21:25,950 --> 00:21:29,973
+and all the tasks are directly enqueued in the root CFS RQ.
+
+00:21:32,110 --> 00:21:34,543
+Groups are not enqueued at all,
+
+00:21:35,620 --> 00:21:38,620
+and the walking of the hierarchy
+
+00:21:38,620 --> 00:21:41,290
+is just rate limited as much as possible
+
+00:21:41,290 --> 00:21:45,520
+to keep the overhead down to some manageable amount
+
+00:21:45,520 --> 00:21:50,170
+even for tasks that have 10s of 1000s
+
+00:21:50,170 --> 00:21:52,453
+of context switches a second on every CPU.
+
+00:21:54,700 --> 00:21:57,930
+And the vruntime gets scaled with the hierarchical
+
+00:21:57,930 --> 00:22:01,190
+task weight, which comes back to almost the same formula
+
+00:22:01,190 --> 00:22:05,760
+that we had earlier, where the vruntime was multiplied
+
+00:22:05,760 --> 00:22:10,683
+or divided by the priority coming out at the nice level,
+
+00:22:11,690 --> 00:22:16,363
+but now we simply use the hierarchical weight instead.
+
+00:22:20,000 --> 00:22:21,700
+There are some pitfalls with this.
+
+00:22:25,090 --> 00:22:26,590
+One of the first ones I noticed is,
+
+00:22:26,590 --> 00:22:30,080
+if you do things in the wrong order in enqueue_task_fair,
+
+00:22:30,080 --> 00:22:32,943
+you end up with tasks that have zero hierarchical weight,
+
+00:22:33,980 --> 00:22:37,670
+which breaks all sorts of things in amusing ways.
+
+00:22:37,670 --> 00:22:40,200
+The vruntime goes very, very fast
+
+00:22:40,200 --> 00:22:41,550
+when a task is zero weight.
+
+00:22:47,800 --> 00:22:49,960
+Another thing that happens is that
+
+00:22:49,960 --> 00:22:53,860
+the load balancer gets a little confused.
+
+00:22:53,860 --> 00:22:57,160
+If it moves a task from one CPU to another,
+
+00:22:57,160 --> 00:22:59,743
+and the amount of load did not change at all,
+
+00:23:01,060 --> 00:23:03,449
+it could keep moving tasks forever.
+
+00:23:03,449 --> 00:23:05,940
+(laughs) The load will never change.
+
+00:23:05,940 --> 00:23:06,983
+It's not ideal.
+
+00:23:10,820 --> 00:23:14,040
+Another thing is that I've been basing
+
+00:23:14,040 --> 00:23:19,040
+the hierarchical weight off the hierarchical
+
+00:23:19,390 --> 00:23:21,890
+load averages of the groups which we already have,
+
+00:23:24,890 --> 00:23:26,800
+which is not quite ideal,
+
+00:23:26,800 --> 00:23:30,333
+as a lot weight end up with zero weight tasks.
+
+00:23:31,710 --> 00:23:34,110
+I've got a quick hack to get around that.
+
+00:23:34,110 --> 00:23:34,950
+It's wrong.
+
+00:23:34,950 --> 00:23:36,650
+I'm looking for better ideas here.
+
+00:23:39,260 --> 00:23:41,500
+Another thing that we run into is if you have
+
+00:23:41,500 --> 00:23:45,560
+a really deep hierarchy, and you have a high priority group
+
+00:23:45,560 --> 00:23:48,040
+and a low priority group on each side,
+
+00:23:48,040 --> 00:23:52,740
+eventually you divide your task weight enough times
+
+00:23:52,740 --> 00:23:57,100
+that you end up with a task that again has zero priority,
+
+00:23:57,100 --> 00:23:59,310
+and in this case, it's not due to any bug
+
+00:23:59,310 --> 00:24:02,130
+in the code per se, but simply due to the resolution
+
+00:24:02,130 --> 00:24:03,543
+of the fixed point math.
+
+00:24:09,160 --> 00:24:12,390
+Oh, another thing that we discussed briefly earlier,
+
+00:24:12,390 --> 00:24:14,690
+wakeup_preempt_entity only takes the priority
+
+00:24:14,690 --> 00:24:16,723
+of the woken up task into account,
+
+00:24:17,760 --> 00:24:20,020
+and not necessarily that of other,
+
+00:24:20,020 --> 00:24:21,370
+of currently running tasks.
+
+00:24:22,870 --> 00:24:25,920
+I've got an ugly hack in place to work around that.
+
+00:24:25,920 --> 00:24:27,630
+It's probably wrong as well.
+
+00:24:27,630 --> 00:24:30,403
+We're looking at various ways of doing that.
+
+00:24:34,310 --> 00:24:37,233
+We still walk the hierarchy on every enqueue_task_fair.
+
+00:24:41,890 --> 00:24:44,190
+I don't think we need to do that all the time,
+
+00:24:45,470 --> 00:24:50,290
+and I think even in the new ideas that Paul came up with
+
+00:24:50,290 --> 00:24:52,490
+we do not have to do that a lot of the time.
+
+00:24:56,100 --> 00:24:58,610
+CFS bandwidth control needs to be re-implemented
+
+00:24:58,610 --> 00:24:59,443
+in a new way.
+
+00:25:00,350 --> 00:25:01,853
+I've got an idea for that,
+
+00:25:03,630 --> 00:25:07,833
+but it might no longer apply, (laughs)
+
+00:25:09,972 --> 00:25:12,580
+and most CPU use difference that's remaining
+
+00:25:12,580 --> 00:25:15,240
+in the benchmarks that I've been running
+
+00:25:16,120 --> 00:25:19,043
+have not been in kernel space at all, but in user space.
+
+00:25:19,910 --> 00:25:21,920
+Having the scheduler take slightly different
+
+00:25:21,920 --> 00:25:25,630
+scheduling decisions might impact the amount
+
+00:25:25,630 --> 00:25:30,630
+of CPU time the user space takes by two or 3%, maybe,
+
+00:25:31,990 --> 00:25:35,703
+if you have two servers getting the exact same workload,
+
+00:25:36,790 --> 00:25:39,340
+just scheduling the tasks a little bit differently
+
+00:25:40,270 --> 00:25:42,770
+is a few percent CPU time difference,
+
+00:25:42,770 --> 00:25:45,520
+while the amount of overhead that I'm trying to work with
+
+00:25:45,520 --> 00:25:50,520
+and get rid of is below 1% for this kind of workload.
+
+00:25:51,230 --> 00:25:54,170
+So the kernel path that I'm trying to optimize
+
+00:25:54,170 --> 00:25:58,810
+are already taking less CPU time than just the difference
+
+00:25:58,810 --> 00:26:01,850
+in user space CPU time, by scheduling the programs
+
+00:26:01,850 --> 00:26:03,350
+in a slightly different order,
+
+00:26:04,810 --> 00:26:07,260
+and it's been making it difficult to figure out
+
+00:26:07,260 --> 00:26:08,460
+what the code should do.
+
+00:26:10,270 --> 00:26:11,780
+I've got a few early performance results
+
+00:26:11,780 --> 00:26:13,283
+ready for some workloads.
+
+00:26:14,610 --> 00:26:17,550
+The workloads are all running about three levels deep
+
+00:26:17,550 --> 00:26:20,040
+because that's what systemd does,
+
+00:26:20,040 --> 00:26:22,070
+and the workloads that I have used
+
+00:26:22,070 --> 00:26:27,070
+are ones that are easy to set up inside of Facebook.
+
+00:26:27,210 --> 00:26:29,430
+We have some other good workloads as well,
+
+00:26:29,430 --> 00:26:32,480
+but some of them are apparently a lot of hassle
+
+00:26:32,480 --> 00:26:34,560
+to work with, so I've been sticking with the easy ones
+
+00:26:34,560 --> 00:26:37,253
+for now and getting plenty of data out of those.
+
+00:26:40,790 --> 00:26:43,150
+For something like a memcache style workload,
+
+00:26:43,150 --> 00:26:46,020
+somewhere between 10 and 20,000 context switches
+
+00:26:46,020 --> 00:26:51,020
+per second per CPU, the old CPU controller had about
+
+00:26:51,400 --> 00:26:56,400
+two to 4% overhead, and the new code is down to about 0.7%,
+
+00:26:58,657 --> 00:27:02,410
+and most of the overhead is simply still
+
+00:27:02,410 --> 00:27:05,720
+walking the hierarchy when a task is woken up
+
+00:27:05,720 --> 00:27:08,000
+and placed on the runqueue to make sure that
+
+00:27:08,000 --> 00:27:09,893
+the weights are somewhat same.
+
+00:27:12,020 --> 00:27:15,073
+And for a web serving workload,
+
+00:27:16,520 --> 00:27:19,290
+with the new CPU controller code,
+
+00:27:19,290 --> 00:27:22,820
+the amount of CPU time that a system uses
+
+00:27:22,820 --> 00:27:27,820
+to serve identical requests that another server gets
+
+00:27:28,220 --> 00:27:33,220
+with the old scheduler code, is reduced by about 1%,
+
+00:27:34,320 --> 00:27:38,180
+but most of this time difference is in user space,
+
+00:27:38,180 --> 00:27:39,423
+not in kernel space.
+
+00:27:41,390 --> 00:27:45,760
+I don't know whether it's due to better scheduling decisions
+
+00:27:45,760 --> 00:27:48,930
+for this workload, or whether it is due to
+
+00:27:48,930 --> 00:27:52,730
+the scheduler simply touching less memory,
+
+00:27:52,730 --> 00:27:54,863
+and user space having fewer cache misses.
+
+00:27:57,550 --> 00:28:00,100
+I don't even know if I can really figure out
+
+00:28:00,100 --> 00:28:02,970
+which of the two it is, since user space
+
+00:28:02,970 --> 00:28:06,310
+uses an overwhelming amount of CPU on the system,
+
+00:28:06,310 --> 00:28:11,310
+and there may not be an easy way to measure
+
+00:28:11,370 --> 00:28:13,620
+where the difference comes from in this case.
+
+00:28:15,140 --> 00:28:16,970
+And there are apparently some workloads out there
+
+00:28:16,970 --> 00:28:21,040
+where we have about a 10% performance overhead
+
+00:28:21,040 --> 00:28:25,610
+with old code, and I have to figure out ways
+
+00:28:25,610 --> 00:28:28,753
+to really get the overhead down for those workloads.
+
+00:28:32,150 --> 00:28:35,700
+It sounds like implementation adds a lot of complexity
+
+00:28:35,700 --> 00:28:37,980
+to the kernel, but the diffstats suggest
+
+00:28:37,980 --> 00:28:39,253
+that it's not too bad,
+
+00:28:40,260 --> 00:28:42,963
+removing about 200 more lines than I had.
+
+00:28:46,440 --> 00:28:49,680
+Well, the CPU controller seems to have
+
+00:28:49,680 --> 00:28:51,290
+a lot of unnecessary overhead.
+
+00:28:51,290 --> 00:28:53,610
+It's something where everybody seems to agree,
+
+00:28:53,610 --> 00:28:56,923
+including the people who wrote most of the code originally.
+
+00:28:59,860 --> 00:29:01,940
+We may be able to reduce the overhead
+
+00:29:01,940 --> 00:29:04,320
+in a way that simplifies CFS a little.
+
+00:29:04,320 --> 00:29:06,320
+That would be great,
+
+00:29:06,320 --> 00:29:10,440
+'cause right now the CFS code is so complex
+
+00:29:10,440 --> 00:29:13,640
+that I feel stupid about once a day,
+
+00:29:13,640 --> 00:29:15,110
+and it would be great if we could get that down
+
+00:29:15,110 --> 00:29:18,210
+to once a week. (laughs)
+
+00:29:18,210 --> 00:29:19,810
+Well, there are some unsolved questions,
+
+00:29:19,810 --> 00:29:23,060
+when talking about this a whole bunch this week.
+
+00:29:23,060 --> 00:29:25,810
+If you guys have any questions, now is the time to ask.
+
+00:29:33,620 --> 00:29:36,450
+- Does that, when you have an SMP system,
+
+00:29:36,450 --> 00:29:39,342
+does it make the code logic any easier
+
+00:29:39,342 --> 00:29:44,342
+that distributes the weight part of the cgroup
+
+00:29:45,800 --> 00:29:46,900
+to the different CPUs?
+
+00:29:48,020 --> 00:29:53,020
+- That code stays pretty much identical with my rework,
+
+00:29:53,700 --> 00:29:58,390
+but that code is definitely one of the more complicated
+
+00:29:58,390 --> 00:30:00,540
+things, that took me a while to figure out.
+
+00:30:04,440 --> 00:30:08,290
+- On your V4 patch set I run, like not a workload,
+
+00:30:08,290 --> 00:30:10,270
+but like a test with rdup.
+
+00:30:11,340 --> 00:30:13,400
+So my question is, have you done any tests
+
+00:30:13,400 --> 00:30:18,180
+on verifying that the fairness between groups
+
+00:30:19,140 --> 00:30:20,500
+is still in place?
+
+00:30:20,500 --> 00:30:24,470
+- I have not yet, and I'm pretty sure
+
+00:30:24,470 --> 00:30:27,190
+that it's currently broken in the code.
+
+00:30:27,190 --> 00:30:30,490
+- Because we talked about this already.
+
+00:30:30,490 --> 00:30:32,870
+I mean it's also, it's about fairness
+
+00:30:32,870 --> 00:30:36,170
+if you have for instance, let's say four tasks
+
+00:30:36,170 --> 00:30:40,020
+in one group, two tasks in the other group,
+
+00:30:40,020 --> 00:30:44,280
+they all run eight milliseconds per 16 milliseconds.
+
+00:30:44,280 --> 00:30:48,360
+You want those two guys essentially progress faster
+
+00:30:48,360 --> 00:30:52,260
+than the other ones, and even though maybe we don't need
+
+00:30:52,260 --> 00:30:53,950
+this nice pattern we get right now
+
+00:30:53,950 --> 00:30:55,909
+with the current implementation,
+
+00:30:55,909 --> 00:30:57,470
+but the forward progress and the fairness
+
+00:30:57,470 --> 00:31:00,113
+should be still there, I guess.
+
+00:31:01,350 --> 00:31:04,470
+- Yep, and I think one of the things that may be
+
+00:31:04,470 --> 00:31:09,470
+biting you there is that when a task gets woken up,
+
+00:31:11,290 --> 00:31:16,290
+place entity is capping the amount of vruntime
+
+00:31:18,870 --> 00:31:23,247
+that the task can be ahead of the main vruntime
+
+00:31:23,247 --> 00:31:27,450
+of the CPU, and I think that may be breaking fairness
+
+00:31:27,450 --> 00:31:28,713
+for that particular test.
+
+00:31:31,607 --> 00:31:34,380
+- I just learnt that it's not only about
+
+00:31:34,380 --> 00:31:35,660
+flattening the whole structure,
+
+00:31:35,660 --> 00:31:40,313
+it's also about replacing the vruntime approach.
+
+00:31:40,313 --> 00:31:43,920
+You can't just do what's done in the current implementation
+
+00:31:43,920 --> 00:31:47,890
+because you lost the hierarchy, and so...
+
+00:31:49,720 --> 00:31:52,950
+- Typically, with the current implementation,
+
+00:31:52,950 --> 00:31:56,670
+you are enqueuing the sched group or the sched
+
+00:31:56,670 --> 00:31:58,780
+on particular runqueue.
+
+00:31:58,780 --> 00:32:01,000
+So you only have to deal with this vruntime
+
+00:32:01,840 --> 00:32:03,140
+in order to sched between group,
+
+00:32:03,140 --> 00:32:05,220
+and then inside you're selecting a task.
+
+00:32:05,220 --> 00:32:08,600
+In your flattening, everything is put at the same time,
+
+00:32:08,600 --> 00:32:12,070
+and you can easily, when you're updating
+
+00:32:12,070 --> 00:32:15,700
+the vruntime of each task, you can easily give
+
+00:32:15,700 --> 00:32:19,820
+more fairness to the task of a group,
+
+00:32:19,820 --> 00:32:21,540
+compared to the other one,
+
+00:32:21,540 --> 00:32:23,370
+and that's something quite difficult, to make sure
+
+00:32:23,370 --> 00:32:26,590
+that all the task of a group will not wake up
+
+00:32:26,590 --> 00:32:28,933
+and run before the task of the other group.
+
+00:32:29,830 --> 00:32:31,300
+That the difficult part for you, I think.
+
+00:32:31,300 --> 00:32:32,810
+- Yeah.
+
+00:32:32,810 --> 00:32:34,530
+Paul and I talked about that for a bit
+
+00:32:34,530 --> 00:32:38,060
+over yesterday and today, and it may not be fixable
+
+00:32:38,060 --> 00:32:39,440
+in this implementation.
+
+00:32:39,440 --> 00:32:42,190
+It may need totally different design to make this work.
+
+00:32:43,110 --> 00:32:44,720
+- [Audience Member] Okay, maybe not.
+
+00:32:44,720 --> 00:32:46,580
+- Something I would have loved to have known
+
+00:32:46,580 --> 00:32:49,950
+half a year ago, but... (laughs)
+
+00:32:49,950 --> 00:32:51,250
+That's how it goes.
+
+00:32:51,250 --> 00:32:52,123
+- [Audience Member] Yeah.
+
+00:32:54,526 --> 00:32:57,670
+And what could be the right implementation in this case?
+
+00:32:57,670 --> 00:33:02,200
+- Paul has an idea on how we can effectively skip levels
+
+00:33:03,050 --> 00:33:04,750
+when enqueuing a task.
+
+00:33:04,750 --> 00:33:08,353
+So we enqueue a task, and it's the only task on the CPU,
+
+00:33:09,880 --> 00:33:11,610
+we don't really have to calculate
+
+00:33:11,610 --> 00:33:13,700
+things like vruntime in between.
+
+00:33:13,700 --> 00:33:17,020
+All we need to do is periodically propagate
+
+00:33:17,020 --> 00:33:19,070
+the exec...
+
+00:33:21,650 --> 00:33:22,483
+What's that?
+
+00:33:22,483 --> 00:33:25,780
+Just the exec, the difference in executed time
+
+00:33:25,780 --> 00:33:28,260
+up the tree, so we could track it over time,
+
+00:33:28,260 --> 00:33:30,050
+and give the statistics for that,
+
+00:33:30,050 --> 00:33:35,050
+and we need to track the vruntime of the top entity
+
+00:33:37,120 --> 00:33:38,170
+that is on the queue.
+
+00:33:41,090 --> 00:33:43,120
+Or we might not even have to do anything about that.
+
+00:33:43,120 --> 00:33:45,930
+- The method of the overhead that comes
+
+00:33:45,930 --> 00:33:47,713
+from the enqueuing, right?
+
+00:33:48,595 --> 00:33:49,428
+Or then--
+
+00:33:49,428 --> 00:33:50,720
+- I think it's, I suspect that it's mostly
+
+00:33:50,720 --> 00:33:52,420
+from the enqueuing.
+
+00:33:52,420 --> 00:33:54,730
+- Right, so I mean, you can do the calculations
+
+00:33:54,730 --> 00:33:56,680
+maybe against even without the enqueuing,
+
+00:33:56,680 --> 00:33:58,713
+so you save the enqueuing part, yeah.
+
+00:34:00,930 --> 00:34:03,100
+- But I mean there are still some open questions
+
+00:34:03,100 --> 00:34:05,400
+with his ideas as well,
+
+00:34:05,400 --> 00:34:10,400
+where when a task wakes up, we need to make sure
+
+00:34:11,840 --> 00:34:14,540
+the vruntime is advanced at that point
+
+00:34:14,540 --> 00:34:16,180
+at all the levels that matter,
+
+00:34:16,180 --> 00:34:18,310
+when the second task wakes up.
+
+00:34:18,310 --> 00:34:23,310
+But maybe also when this task goes to sleep,
+
+00:34:24,820 --> 00:34:28,620
+and then another first task wakes up,
+
+00:34:28,620 --> 00:34:31,250
+is the only thing running, we might still have to
+
+00:34:31,250 --> 00:34:33,360
+adjust the vruntime at that point,
+
+00:34:33,360 --> 00:34:36,760
+in case a third task, which just ran a whole bunch,
+
+00:34:36,760 --> 00:34:37,623
+wakes up again.
+
+00:34:38,860 --> 00:34:41,620
+There's some open questions on what we need to do exactly
+
+00:34:41,620 --> 00:34:43,000
+for that design as well.
+
+00:34:52,165 --> 00:34:53,430
+- [Man] Thank you.
+
+00:34:53,430 --> 00:34:54,650
+Thank you very much.
+
+00:34:54,650 --> 00:34:55,802
+- [Rik] Thank you.
+
+00:34:55,802 --> 00:34:58,198
+
+YouTube URL: https://www.youtube.com/watch?v=3dXhRb30dag
+
+

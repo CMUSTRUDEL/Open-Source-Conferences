@@ -1,0 +1,1907 @@
+Title: LPC2019 - XDP bulk packet processing
+Publication date: 2019-09-17
+Playlist: Linux Plumbers Conference 2019
+Description: 
+	XDP bulk packet processing
+
+It is well known that batching can often improve software performance. This is
+mainly because it utilizes the instruction cache in a more efficient way.
+From the networking perspective, the size of driver's packet processing
+pipeline is larger than the sizes of instruction caches. Even though NAPI
+batches packets over the full stack and driver execution, they are processed
+one by one by many large sub systems in the processing path. Initially this
+was raised by Jesper Brouer. With Edward Cree's listifying SKBs idea, the
+first implementation results look promising. How can we take this a step
+further and apply this technique to the XDP processing pipeline?
+
+To do that, the proposition is to back down from preparing xdp_buff struct
+one-by-one, passing it to XDP program and then acting on it, but instead we
+would prepare in driver an array of XDP buffers to be processed. Then, we
+would have only a single call per NAPI budget to XDP program, which would give
+us back a list of actions that driver needs to take. Furthermore, the number
+of indirect function calls, gets reduced, as driver gets to jited BPF program
+via indirect function call.
+
+In this talk I would like to present the proof-of-concept of described idea,
+which was yielding around 20% better XDP performance for dropping packets with
+touching headers memory (modified xdp1 from linux kernel's bpf samples).
+
+However, the main focus of this presentation should be a discussion about a
+proper, generic implementation, which should take place after showing out the
+POC, instead of the current POC. I would like to consider implementation
+details, such as:
+- would it be better to provide an additional BPF verifier logic, that when
+properly instrumented (make use of prologue/epilogue?), would emit BPF
+instructions responsible for looping over XDP program, or should we have the
+loop within the XDP programs?
+- the mentioned POC has a whole new NAPI clean Rx interrupt routine; what
+should we do to make it more generic in order to make driver changes
+smaller?
+- How about batching the XDP actions? Do all the drops first, then Tx/redirect,
+then the passes. Would that pay off?
+Captions: 
+	00:00:00,850 --> 00:00:02,800
+- Okay, I think it's time to get going.
+
+00:00:05,670 --> 00:00:08,540
+There's been a lot of effort in the XDP world
+
+00:00:08,540 --> 00:00:13,130
+to facilitate not only making it useful
+
+00:00:13,130 --> 00:00:15,120
+in terms of passing around information
+
+00:00:15,120 --> 00:00:16,070
+like metadata or whatever,
+
+00:00:16,070 --> 00:00:17,780
+but also, the most important reason
+
+00:00:17,780 --> 00:00:18,613
+that we implement it,
+
+00:00:18,613 --> 00:00:19,970
+which was performance.
+
+00:00:19,970 --> 00:00:22,230
+And one area that's important for performance
+
+00:00:22,230 --> 00:00:23,760
+can be bulk processing.
+
+00:00:23,760 --> 00:00:24,800
+So that's how, no doubt,
+
+00:00:24,800 --> 00:00:27,200
+Maciej from Intel is gonna discuss.
+
+00:00:27,200 --> 00:00:29,112
+Please give him a round of applause.
+
+00:00:29,112 --> 00:00:32,279
+(audience applauding)
+
+00:00:33,300 --> 00:00:35,650
+- So, oh, the mic is on.
+
+00:00:35,650 --> 00:00:37,050
+I need to watch my language.
+
+00:00:38,770 --> 00:00:42,010
+Okay, so my name is Maciej Fijalkowski,
+
+00:00:42,010 --> 00:00:46,403
+and I'm here to talk about XDP packet processing.
+
+00:00:47,830 --> 00:00:52,340
+And, at first, let's ask ourselves,
+
+00:00:52,340 --> 00:00:55,170
+how can we apply the batching
+
+00:00:55,170 --> 00:00:57,960
+to the XDP processing pipeline?
+
+00:00:57,960 --> 00:01:00,163
+Are there any places that we could do that?
+
+00:01:01,430 --> 00:01:02,773
+Because, as we know,
+
+00:01:05,050 --> 00:01:07,670
+and as they've said batching can improve
+
+00:01:07,670 --> 00:01:11,410
+their software performance in a significant way.
+
+00:01:11,410 --> 00:01:16,410
+So what if we would be batching the XDP buffers
+
+00:01:17,200 --> 00:01:20,550
+in the driver and we would be passing it
+
+00:01:22,320 --> 00:01:24,580
+to the XDP program.
+
+00:01:24,580 --> 00:01:26,500
+So we would have one on every single call
+
+00:01:26,500 --> 00:01:28,420
+to the XDP program,
+
+00:01:28,420 --> 00:01:33,403
+and the XDP program would be iterating over those frames.
+
+00:01:34,640 --> 00:01:39,640
+So it turns out that the results are pretty good,
+
+00:01:41,120 --> 00:01:42,523
+or, I would say, great.
+
+00:01:43,430 --> 00:01:47,683
+Because, from what I saw on my setup,
+
+00:01:49,000 --> 00:01:52,440
+I had even two times bigger performance
+
+00:01:52,440 --> 00:01:56,290
+for the TX, almost two times bigger,
+
+00:01:56,290 --> 00:01:59,773
+for the TX and the redirect case actions.
+
+00:02:00,610 --> 00:02:05,170
+And so, the test setup was that I had
+
+00:02:05,170 --> 00:02:10,170
+the FVL 10-Gig cards, which we're using the i40 driver
+
+00:02:12,340 --> 00:02:15,423
+with some changes that I was mentioning.
+
+00:02:16,420 --> 00:02:21,420
+And there were no particular performance-specific settings.
+
+00:02:22,960 --> 00:02:27,473
+It was just a 5.3 kernel with Retpoline turned on.
+
+00:02:29,798 --> 00:02:31,465
+So having said that,
+
+00:02:34,420 --> 00:02:38,230
+let's go over to the agenda of this talk.
+
+00:02:38,230 --> 00:02:41,920
+First, let's have a few more words
+
+00:02:41,920 --> 00:02:46,060
+about the source of performance improvements.
+
+00:02:46,060 --> 00:02:51,060
+And then, I'm gonna talk about the POC itself.
+
+00:02:53,610 --> 00:02:55,673
+It consists of two parts,
+
+00:02:56,650 --> 00:03:01,650
+the driver changes, and eBPF verifier changes,
+
+00:03:02,410 --> 00:03:07,310
+because we need to enable the BPF program
+
+00:03:07,310 --> 00:03:11,023
+to work over the array of XDP buffs.
+
+00:03:12,960 --> 00:03:15,680
+And there are some things yet still to be solved
+
+00:03:15,680 --> 00:03:18,883
+because it's still a work in progress.
+
+00:03:20,060 --> 00:03:24,310
+There are some, also, questions on my thoughts on this.
+
+00:03:24,310 --> 00:03:29,310
+So, as I said, the source of performance improvements
+
+00:03:31,830 --> 00:03:36,383
+come from bulking and, to be more specific,
+
+00:03:37,890 --> 00:03:40,600
+bulking utilizes the instruction cache
+
+00:03:40,600 --> 00:03:43,270
+in a much better way.
+
+00:03:43,270 --> 00:03:45,760
+I see that my slides are broken a bit,
+
+00:03:45,760 --> 00:03:50,157
+because I was doing it on Windows, so sorry.
+
+00:03:50,157 --> 00:03:52,407
+(laughing)
+
+00:03:53,990 --> 00:03:56,730
+But, yeah, anyway, you get the idea.
+
+00:03:56,730 --> 00:03:59,413
+So we are, we're doing the bulking.
+
+00:04:00,450 --> 00:04:03,080
+We're making better use of the instruction cache
+
+00:04:04,170 --> 00:04:05,590
+because there's a big chance that,
+
+00:04:05,590 --> 00:04:10,590
+if you are processing the X-plus-one element from the array,
+
+00:04:11,542 --> 00:04:16,370
+there's a big chance that the instructions
+
+00:04:16,370 --> 00:04:20,260
+for its processing are already in the cache,
+
+00:04:20,260 --> 00:04:22,703
+because you are just processing the X element.
+
+00:04:25,350 --> 00:04:29,170
+The second thing that improves the performance
+
+00:04:29,170 --> 00:04:32,850
+is that we have less indirect calls
+
+00:04:32,850 --> 00:04:36,750
+because the XDP program is called only once,
+
+00:04:36,750 --> 00:04:40,063
+not per each XDP buff.
+
+00:04:41,020 --> 00:04:45,690
+So in case, where you have the standard NAPI budget of 64,
+
+00:04:45,690 --> 00:04:50,690
+there are 63 less indirect calls in that approach.
+
+00:04:53,750 --> 00:04:58,750
+So we can, before we start talking about
+
+00:05:00,170 --> 00:05:01,653
+the driver changes,
+
+00:05:04,580 --> 00:05:08,820
+there's a thing that, right now,
+
+00:05:08,820 --> 00:05:12,380
+the driver is relying on what
+
+00:05:12,380 --> 00:05:15,270
+the XDP program returns, right?
+
+00:05:15,270 --> 00:05:19,250
+So we look at the return value
+
+00:05:19,250 --> 00:05:21,790
+of the XDP program and we know what actions
+
+00:05:21,790 --> 00:05:24,220
+should be taken on the XDP buff.
+
+00:05:24,220 --> 00:05:25,330
+And with such an approach,
+
+00:05:25,330 --> 00:05:28,143
+we lose this ability to,
+
+00:05:29,500 --> 00:05:32,310
+basically, we don't know what to do
+
+00:05:32,310 --> 00:05:35,700
+with each XDP buff from the array
+
+00:05:35,700 --> 00:05:40,500
+that BPF program has processed, right?
+
+00:05:40,500 --> 00:05:45,500
+So there are two approaches that I've considered.
+
+00:05:49,140 --> 00:05:54,140
+One would be that we extend the XDP buff
+
+00:05:54,730 --> 00:05:57,620
+with a new field calls Act,
+
+00:05:57,620 --> 00:06:00,629
+and the BPF program would be writing
+
+00:06:00,629 --> 00:06:03,463
+the return value to this field.
+
+00:06:05,660 --> 00:06:09,620
+And the second approach is that we would
+
+00:06:09,620 --> 00:06:11,570
+be passing the whole array to be filled
+
+00:06:13,530 --> 00:06:15,273
+as a standalone argument.
+
+00:06:17,160 --> 00:06:20,960
+But, from my short performance tests,
+
+00:06:20,960 --> 00:06:23,020
+I saw that the second approach
+
+00:06:23,020 --> 00:06:27,530
+was a bit worse so I took the first one,
+
+00:06:27,530 --> 00:06:29,560
+which is more naive, I would say.
+
+00:06:29,560 --> 00:06:32,980
+But the rest of this talk will be focused
+
+00:06:32,980 --> 00:06:36,180
+on the first approach presented here.
+
+00:06:36,180 --> 00:06:41,180
+So I think that I already said that about,
+
+00:06:43,280 --> 00:06:48,280
+here we have what is going on on the driver side.
+
+00:06:49,840 --> 00:06:54,713
+So the XDP program would be fed with the whole
+
+00:06:56,140 --> 00:06:58,100
+XDP buff array,
+
+00:06:58,100 --> 00:07:03,100
+and then, after the XDP program would end its job,
+
+00:07:06,718 --> 00:07:09,397
+we would be looking at the Act field,
+
+00:07:10,630 --> 00:07:13,580
+which was set by the BPF program.
+
+00:07:13,580 --> 00:07:18,580
+So this is the simplified pseudo code
+
+00:07:19,310 --> 00:07:24,310
+of the whole new clean receive interrupt that I provided.
+
+00:07:26,900 --> 00:07:29,473
+So we can divide it into three stages.
+
+00:07:30,510 --> 00:07:33,400
+The first one is that we are looking over
+
+00:07:33,400 --> 00:07:38,400
+the receive descriptors and look
+
+00:07:38,840 --> 00:07:41,600
+for the frames that are ready to be processed,
+
+00:07:41,600 --> 00:07:46,290
+and we basically set the XDP buffers
+
+00:07:47,350 --> 00:07:49,043
+from the XDP buff array.
+
+00:07:51,830 --> 00:07:53,170
+Then, on the second stage,
+
+00:07:53,170 --> 00:07:56,443
+we would have only a single XDP program, as I said,
+
+00:07:58,380 --> 00:08:03,220
+where we will be passing the XDP buffs array.
+
+00:08:03,220 --> 00:08:08,000
+So after that, the third stage will be
+
+00:08:08,860 --> 00:08:13,860
+going over the array and look for the XDP Act field
+
+00:08:16,410 --> 00:08:17,773
+that we introduced.
+
+00:08:18,830 --> 00:08:23,830
+So the eBPF changes are consisting of, basically,
+
+00:08:27,590 --> 00:08:32,590
+enabling the BPF program to work over
+
+00:08:34,530 --> 00:08:37,940
+the array of XDP buffs.
+
+00:08:37,940 --> 00:08:42,940
+So I will be referring to this as a trampoline.
+
+00:08:45,720 --> 00:08:47,253
+Oh, it's broken a little bit.
+
+00:08:49,499 --> 00:08:52,290
+But anyway, on the left side,
+
+00:08:54,850 --> 00:08:59,290
+we see that there's a BPF program
+
+00:08:59,290 --> 00:09:02,500
+that came from user space,
+
+00:09:02,500 --> 00:09:07,500
+and it was compiled with Clang and,
+
+00:09:08,330 --> 00:09:11,730
+right now, we can compile to GCC, as well.
+
+00:09:11,730 --> 00:09:14,670
+So it's represented in the BPF assembly
+
+00:09:14,670 --> 00:09:16,760
+and in that representation,
+
+00:09:16,760 --> 00:09:21,117
+the eBPF verifier works on this and,
+
+00:09:25,070 --> 00:09:29,203
+if the verifier tells that us that the program is safe,
+
+00:09:30,270 --> 00:09:33,533
+we would be generating the trampoline.
+
+00:09:36,835 --> 00:09:40,677
+And the trampoline consists of two parts.
+
+00:09:43,500 --> 00:09:46,690
+There's a prologue and epilogue section,
+
+00:09:46,690 --> 00:09:48,690
+and the prologue would be placed
+
+00:09:50,040 --> 00:09:54,730
+before the first instruction of the BPF program,
+
+00:09:54,730 --> 00:09:59,730
+and the epilogue would be placed before the second-last,
+
+00:10:00,490 --> 00:10:04,500
+sorry, between the second-last and last instructions.
+
+00:10:04,500 --> 00:10:09,500
+There's a reason for this which I will explain later.
+
+00:10:10,430 --> 00:10:14,710
+And then, program in such form
+
+00:10:16,453 --> 00:10:19,110
+is jittered onto the machine code
+
+00:10:19,110 --> 00:10:21,380
+of the underlying CPU architecture.
+
+00:10:21,380 --> 00:10:23,910
+And then, we attach it to the NIC.
+
+00:10:23,910 --> 00:10:28,910
+And the little JIT change will also be required
+
+00:10:29,160 --> 00:10:31,223
+beside the file changes.
+
+00:10:32,570 --> 00:10:37,123
+Okay, so before going over to the,
+
+00:10:40,790 --> 00:10:43,300
+describing the prologue and epilogue section
+
+00:10:43,300 --> 00:10:45,013
+in a detailed way,
+
+00:10:46,420 --> 00:10:51,147
+let's tell us, what's the purpose
+
+00:10:52,040 --> 00:10:55,580
+of particular eBPF registers?
+
+00:10:55,580 --> 00:10:59,030
+So we are interesting in the R0
+
+00:10:59,030 --> 00:11:03,380
+because it is holding the return value of the program,
+
+00:11:03,380 --> 00:11:07,150
+and we'll be storing this register
+
+00:11:07,150 --> 00:11:11,240
+to the Act field that we introduced
+
+00:11:11,240 --> 00:11:15,950
+per each XDP buff from the array.
+
+00:11:15,950 --> 00:11:18,780
+The next thing is that the R1 is holding
+
+00:11:18,780 --> 00:11:20,633
+the XDP buff pointer,
+
+00:11:21,610 --> 00:11:25,253
+which is also important to us.
+
+00:11:26,620 --> 00:11:30,340
+And then, the R10 is of our interest
+
+00:11:30,340 --> 00:11:33,940
+because we will be making use of the BPF stack,
+
+00:11:33,940 --> 00:11:35,333
+and let me tell you why.
+
+00:11:37,910 --> 00:11:39,460
+Oh, it's the next slide, sorry.
+
+00:11:41,000 --> 00:11:46,000
+But that's the, your eBPF program layout
+
+00:11:47,440 --> 00:11:49,530
+after we generate the trampoline.
+
+00:11:49,530 --> 00:11:53,600
+So as you can see,
+
+00:11:53,600 --> 00:11:58,520
+the prologue section consists only of three instructions
+
+00:11:59,773 --> 00:12:03,440
+and it will be, sorry,
+
+00:12:03,440 --> 00:12:05,953
+it will be executed only once.
+
+00:12:08,320 --> 00:12:10,140
+On the other hand, the epilogue section
+
+00:12:10,140 --> 00:12:14,480
+will be executed on each iteration
+
+00:12:14,480 --> 00:12:18,183
+of the loop that BPF program would take.
+
+00:12:19,639 --> 00:12:23,360
+And it's a bit longer, but I will talk about it later.
+
+00:12:23,360 --> 00:12:26,083
+So the trampoline section,
+
+00:12:28,724 --> 00:12:33,263
+at first, we are initializing our loop counter,
+
+00:12:34,370 --> 00:12:38,463
+and then, we are storing it to the BPF stack.
+
+00:12:40,670 --> 00:12:45,330
+Because we need to be able to refer to that value
+
+00:12:45,330 --> 00:12:49,560
+from the epilogue section and there's no guarantee
+
+00:12:49,560 --> 00:12:54,560
+that a BPF register wouldn't be overwritten
+
+00:12:54,750 --> 00:12:56,793
+by the program itself.
+
+00:12:57,640 --> 00:13:00,250
+And we need to do another thing
+
+00:13:00,250 --> 00:13:02,560
+with the XDP buff pointer,
+
+00:13:02,560 --> 00:13:05,833
+so the initial R1 content,
+
+00:13:06,770 --> 00:13:10,110
+to be able to basically iterate
+
+00:13:10,110 --> 00:13:12,543
+over the XDP buff array.
+
+00:13:13,696 --> 00:13:15,363
+So with stack usage,
+
+00:13:17,530 --> 00:13:20,803
+there comes some responsibility.
+
+00:13:21,680 --> 00:13:26,680
+Basically, we need to go over the instructions
+
+00:13:28,470 --> 00:13:33,470
+from the initial BPF program and, basically,
+
+00:13:37,670 --> 00:13:40,880
+offset them with the 12 bytes that we are consuming
+
+00:13:40,880 --> 00:13:42,500
+from the BPF stack.
+
+00:13:42,500 --> 00:13:47,260
+So the first thing on that we should look for
+
+00:13:47,260 --> 00:13:51,733
+is the store or load operations where the R10 is,
+
+00:13:55,660 --> 00:13:59,580
+is used as a source or destination register.
+
+00:13:59,580 --> 00:14:04,090
+And the second thing is that you might have
+
+00:14:04,090 --> 00:14:09,090
+a BPF helper function call where you set up
+
+00:14:11,000 --> 00:14:13,610
+a particular register to pointing
+
+00:14:13,610 --> 00:14:16,720
+to the variable on the stack.
+
+00:14:16,720 --> 00:14:21,720
+So we need to look for the operations where the R10
+
+00:14:25,570 --> 00:14:27,640
+is stored onto another register,
+
+00:14:27,640 --> 00:14:32,640
+and then, there is an LAU operation on such registers
+
+00:14:33,920 --> 00:14:38,920
+so that the register becomes the point of the stack.
+
+00:14:40,240 --> 00:14:44,950
+So we need to offset them with the 12 bytes,
+
+00:14:44,950 --> 00:14:49,897
+so our values that we pushed on the prologue
+
+00:14:53,760 --> 00:14:55,883
+wouldn't get overwritten by the program.
+
+00:14:57,060 --> 00:15:02,060
+So I was also mentioning that there is
+
+00:15:02,210 --> 00:15:07,210
+a needed JIT change and we need to subtract
+
+00:15:08,900 --> 00:15:12,137
+the stack pointer so that we make a space
+
+00:15:14,300 --> 00:15:15,833
+for our two variables.
+
+00:15:18,710 --> 00:15:20,763
+And, if we wouldn't do that,
+
+00:15:22,910 --> 00:15:26,020
+I had a situation where I was overwriting
+
+00:15:26,020 --> 00:15:31,020
+the driver's stack variables if I wasn't doing it.
+
+00:15:31,170 --> 00:15:36,170
+So it's, here we are subtracting the 16
+
+00:15:38,200 --> 00:15:41,977
+because the verifier, sorry,
+
+00:15:43,970 --> 00:15:48,770
+the JIT for the x86 is rounding up.
+
+00:15:48,770 --> 00:15:53,023
+We call that stack depth up to eight.
+
+00:15:54,150 --> 00:15:57,160
+So this is an example of the program
+
+00:15:57,160 --> 00:16:00,480
+where there was no stack usage,
+
+00:16:00,480 --> 00:16:02,770
+but we need to, anyway,
+
+00:16:02,770 --> 00:16:05,243
+round out the 12 bytes to 16.
+
+00:16:06,750 --> 00:16:09,891
+I don't know what it is that
+
+00:16:09,891 --> 00:16:12,113
+but I kept it that way.
+
+00:16:15,422 --> 00:16:18,089
+So this is the epilogue section.
+
+00:16:23,860 --> 00:16:27,250
+So I was telling you that there
+
+00:16:27,250 --> 00:16:32,250
+was a reason why we patch it between two last instructions,
+
+00:16:36,020 --> 00:16:40,297
+and the second-last instruction is, usually,
+
+00:16:40,297 --> 00:16:44,050
+the one that is initializing the R0.
+
+00:16:44,050 --> 00:16:45,770
+So, after that instruction,
+
+00:16:45,770 --> 00:16:49,510
+we know what the return value is,
+
+00:16:49,510 --> 00:16:54,320
+but the case is that it could be the return,
+
+00:16:54,320 --> 00:16:56,510
+for example, XDP_TX,
+
+00:16:56,510 --> 00:17:01,510
+but it can also be the return bpf_redirect_map().
+
+00:17:02,120 --> 00:17:05,890
+So it's a BPF helper call
+
+00:17:05,890 --> 00:17:10,890
+which is using the R1 and R2 as its arguments.
+
+00:17:12,630 --> 00:17:16,593
+So if we have lowered our loop counter
+
+00:17:18,530 --> 00:17:21,510
+and XDP buff from the stack,
+
+00:17:21,510 --> 00:17:24,730
+we would override the R1 and R2 and we, basically,
+
+00:17:24,730 --> 00:17:26,680
+broke the call to the bpf_redirect_map.
+
+00:17:28,148 --> 00:17:33,148
+So these are the first instructions
+
+00:17:33,430 --> 00:17:37,520
+of the epilogue section.
+
+00:17:37,520 --> 00:17:42,520
+So we loaded R1 and R2 with our XDP buff pointer
+
+00:17:45,930 --> 00:17:48,993
+and the loop counter.
+
+00:17:50,770 --> 00:17:55,770
+So once we have the XDP buff in the R1,
+
+00:17:57,170 --> 00:18:00,502
+we are good to store the R0.
+
+00:18:00,502 --> 00:18:02,580
+And I see that I have a bug in my slide.
+
+00:18:02,580 --> 00:18:05,750
+This should be Act, not retval.
+
+00:18:05,750 --> 00:18:08,660
+I was changing the name for this field.
+
+00:18:08,660 --> 00:18:10,960
+But, anyway, the tell instruction
+
+00:18:10,960 --> 00:18:15,960
+is the one that is storing the return value
+
+00:18:16,420 --> 00:18:21,420
+under the XDP buff that was being processed by the program,
+
+00:18:22,160 --> 00:18:24,930
+and then, we are good to go with going
+
+00:18:24,930 --> 00:18:29,880
+to the next entry of the XDP buff array.
+
+00:18:29,880 --> 00:18:34,880
+So we just add the size of the extracted XDP buff to the R1,
+
+00:18:36,160 --> 00:18:41,160
+and we end up with R1 pointing to the next element
+
+00:18:42,520 --> 00:18:43,563
+of the array.
+
+00:18:44,510 --> 00:18:46,800
+And, basically, that's the whole idea of this.
+
+00:18:46,800 --> 00:18:51,800
+We will be going over in a loop in the BPF program,
+
+00:18:51,960 --> 00:18:56,940
+and we'll be, basically, pushing that along
+
+00:18:56,940 --> 00:19:01,400
+to the next XDP buffs.
+
+00:19:01,400 --> 00:19:06,400
+So after that, we would bump our loop counter.
+
+00:19:11,730 --> 00:19:16,163
+Then, we would store back to the stack, the values,
+
+00:19:20,000 --> 00:19:24,450
+the updated values of counter and XDP buff so that,
+
+00:19:24,450 --> 00:19:27,143
+on the next iteration of the loop,
+
+00:19:29,070 --> 00:19:34,050
+we would be looking at the value from the previous loop.
+
+00:19:34,050 --> 00:19:35,090
+You get it?
+
+00:19:35,090 --> 00:19:38,180
+And the last instruction is the one
+
+00:19:38,180 --> 00:19:43,180
+that is comparing the loop counter against the 64.
+
+00:19:45,090 --> 00:19:49,293
+I have it as an immediate value right now.
+
+00:19:50,720 --> 00:19:55,130
+Because the 64 is a, sorry,
+
+00:19:55,130 --> 00:20:00,130
+64 is the size of our XDP buffs array
+
+00:20:00,560 --> 00:20:02,980
+and it seems that the performance
+
+00:20:02,980 --> 00:20:07,980
+was better to compare it against the immediate value
+
+00:20:08,430 --> 00:20:13,010
+instead of having, basically,
+
+00:20:13,010 --> 00:20:17,090
+providing the size or count of the frames
+
+00:20:18,690 --> 00:20:23,690
+that the driver has filled onto the XDP buffs,
+
+00:20:24,020 --> 00:20:27,370
+and loading it up onto this instruction
+
+00:20:27,370 --> 00:20:31,083
+to be compared against the loop counter.
+
+00:20:32,910 --> 00:20:37,253
+So to sum this up,
+
+00:20:39,700 --> 00:20:44,383
+at first, there are some things to be solved.
+
+00:20:46,290 --> 00:20:50,420
+So the first one I have listed as the prefetch instruction
+
+00:20:50,420 --> 00:20:55,420
+in the BPF assembly because, just like we lost the ability
+
+00:20:55,870 --> 00:21:00,870
+to know the return value per each XDP buff,
+
+00:21:04,500 --> 00:21:09,500
+we can't right now prefetch all of the XDP buffs, right?
+
+00:21:10,060 --> 00:21:15,060
+We can just prefetch the first entry from the array.
+
+00:21:16,000 --> 00:21:21,000
+So the perf was showing that the first instruction
+
+00:21:23,550 --> 00:21:26,472
+that was accessing, actually,
+
+00:21:26,472 --> 00:21:31,070
+the XDP data was pretty expensive.
+
+00:21:31,070 --> 00:21:34,050
+So I think that it makes sense
+
+00:21:34,050 --> 00:21:39,040
+to have a prefetch in a BPF assembly
+
+00:21:39,040 --> 00:21:44,040
+that would be later jittered onto the machine code.
+
+00:21:45,100 --> 00:21:49,230
+The next thing is that the selftests are broken.
+
+00:21:49,230 --> 00:21:52,303
+They need to be taken care of.
+
+00:21:54,070 --> 00:21:59,070
+The third thing, and we'll start with a question.
+
+00:21:59,540 --> 00:22:04,540
+So how do we distinguish between the driver
+
+00:22:06,290 --> 00:22:10,590
+that is able to provide the XDP buff array
+
+00:22:10,590 --> 00:22:12,790
+and the one that is not?
+
+00:22:12,790 --> 00:22:17,790
+Because we can't do a thing where we would
+
+00:22:18,410 --> 00:22:23,410
+be always generating the trampoline
+
+00:22:23,470 --> 00:22:26,410
+because we would be hurting the performance for the drivers
+
+00:22:26,410 --> 00:22:31,410
+that are still processing the XDP buffs one by one.
+
+00:22:31,830 --> 00:22:35,563
+So this needs to be solved, as well.
+
+00:22:37,510 --> 00:22:41,957
+Another question is whether processing the actions
+
+00:22:44,310 --> 00:22:49,310
+in the sorted way so that we will be, for example,
+
+00:22:49,940 --> 00:22:53,250
+processing all of the XDP drops,
+
+00:22:53,250 --> 00:22:56,893
+then, all of the XDP_TXs and so on,
+
+00:22:57,910 --> 00:23:02,883
+would it also make a better performance?
+
+00:23:04,800 --> 00:23:06,100
+The next question is that,
+
+00:23:08,440 --> 00:23:11,300
+will AF_XDP benefit from it?
+
+00:23:11,300 --> 00:23:15,077
+Because I was only focusing this work
+
+00:23:16,670 --> 00:23:18,403
+on the standard XDP.
+
+00:23:19,400 --> 00:23:21,963
+And I have some thoughts on this.
+
+00:23:22,940 --> 00:23:25,380
+Basically, in my opinion,
+
+00:23:25,380 --> 00:23:27,210
+the driver changes are required.
+
+00:23:27,210 --> 00:23:31,380
+We need to step away from the one-by-one processing,
+
+00:23:31,380 --> 00:23:36,380
+but instead, act on the batches of data.
+
+00:23:38,390 --> 00:23:41,900
+I think that, without driver changes,
+
+00:23:41,900 --> 00:23:46,900
+the performance wouldn't been so good as it is.
+
+00:23:50,560 --> 00:23:55,520
+And, in my opinion, we need to have
+
+00:23:55,520 --> 00:23:57,880
+this implemented in one way or another
+
+00:23:57,880 --> 00:24:02,880
+because the Tx/Redirect boost is speaking for itself and,
+
+00:24:04,620 --> 00:24:09,620
+basically, this was some proposed implementation on this.
+
+00:24:12,220 --> 00:24:13,860
+Let's do the Q&A.
+
+00:24:22,090 --> 00:24:24,180
+- So I can totally see the need
+
+00:24:24,180 --> 00:24:26,810
+for bulk, okay, I can totally see the need
+
+00:24:26,810 --> 00:24:28,450
+for bulk processing,
+
+00:24:28,450 --> 00:24:32,400
+but I'm wondering why you went the route
+
+00:24:32,400 --> 00:24:35,910
+of changing the jittered program
+
+00:24:35,910 --> 00:24:38,060
+instead of just running the same jittered program
+
+00:24:38,060 --> 00:24:38,893
+in a loop?
+
+00:24:38,893 --> 00:24:43,893
+- It's not that, the changes, a bit earlier
+
+00:24:44,600 --> 00:24:46,123
+than the jittered program.
+
+00:24:47,010 --> 00:24:51,250
+We are doing it in the BPF assembly, alright?
+
+00:24:51,250 --> 00:24:52,083
+Before--
+
+00:24:52,083 --> 00:24:54,080
+- Right, yeah, but why can't you simply run
+
+00:24:54,080 --> 00:24:57,127
+the existing program multiple times--
+
+00:24:57,127 --> 00:24:58,917
+(overlapping discussion)
+
+00:24:58,917 --> 00:25:01,413
+- It's an indirect call to the program, right?
+
+00:25:01,413 --> 00:25:03,770
+- [Announcer] He's getting rid of that indirection.
+
+00:25:03,770 --> 00:25:07,590
+So you process 16 packets and you don't do 16 Retpolines.
+
+00:25:07,590 --> 00:25:11,970
+- Yep, and that's, I guess, is the one part
+
+00:25:11,970 --> 00:25:15,417
+where the performance boost is coming from, right?
+
+00:25:15,417 --> 00:25:19,100
+You just have a single call, single indirect call,
+
+00:25:19,100 --> 00:25:24,100
+per each NAPI budget, instead of 64 calls.
+
+00:25:25,780 --> 00:25:30,780
+So that, I was showing this on, I would say,
+
+00:25:30,920 --> 00:25:32,820
+this slide, right?
+
+00:25:32,820 --> 00:25:36,373
+You basically have a single XDP program call.
+
+00:25:43,270 --> 00:25:44,110
+- Two questions.
+
+00:25:44,110 --> 00:25:45,480
+First one is, if you're gonna,
+
+00:25:45,480 --> 00:25:46,776
+if you have to change the driver
+
+00:25:46,776 --> 00:25:48,780
+and you have to change the JIT code,
+
+00:25:48,780 --> 00:25:50,320
+why not change the API?
+
+00:25:50,320 --> 00:25:52,270
+You're already changing the structure.
+
+00:25:52,270 --> 00:25:55,240
+Why not just change the API and make the normal call
+
+00:25:55,240 --> 00:25:57,000
+the trivial one?
+
+00:25:57,000 --> 00:26:02,000
+- But this might be less incremental.
+
+00:26:02,260 --> 00:26:05,240
+Because I was watching his presentation.
+
+00:26:05,240 --> 00:26:07,810
+I was thinking, what you could do
+
+00:26:07,810 --> 00:26:10,480
+is not bulk when the device doesn't support
+
+00:26:10,480 --> 00:26:12,053
+the bulking infrastructure.
+
+00:26:13,078 --> 00:26:13,911
+- [Maciej] Yeah, exactly.
+
+00:26:13,911 --> 00:26:15,347
+- And, if you change the API,
+
+00:26:15,347 --> 00:26:19,260
+that's kind of imposing it on everyone all at once,
+
+00:26:19,260 --> 00:26:20,800
+whereas, you could do it incrementally
+
+00:26:20,800 --> 00:26:23,240
+if you do it his approach, is my understanding.
+
+00:26:23,240 --> 00:26:24,977
+- Couldn't you always just pass (speaking faintly off mic)?
+
+00:26:25,866 --> 00:26:28,480
+- So the best thing would be--
+
+00:26:28,480 --> 00:26:30,759
+- He has to decide which way you'd have the loop--
+
+00:26:30,759 --> 00:26:32,130
+(overlapping discussion)
+
+00:26:32,130 --> 00:26:34,470
+Before he pushes down to the device.
+
+00:26:34,470 --> 00:26:35,420
+That's the problem.
+
+00:26:36,285 --> 00:26:38,860
+- So the best way would be to, maybe,
+
+00:26:38,860 --> 00:26:43,860
+have some other layer where it would
+
+00:26:44,940 --> 00:26:47,900
+be guttering the XDP buffs.
+
+00:26:47,900 --> 00:26:52,330
+- So you could do a software-bulking layer,
+
+00:26:52,330 --> 00:26:55,140
+something like this that understands the new format
+
+00:26:56,400 --> 00:27:00,369
+until the drivers can bring it to the direct thing.
+
+00:27:00,369 --> 00:27:02,360
+- And then, the second question was the,
+
+00:27:02,360 --> 00:27:04,670
+you kept two variables and you're certain,
+
+00:27:04,670 --> 00:27:05,620
+when you used an immediate,
+
+00:27:05,620 --> 00:27:07,610
+it was faster than we used a counter.
+
+00:27:07,610 --> 00:27:09,360
+Would it be faster to use one,
+
+00:27:09,360 --> 00:27:11,980
+an end-pointer as we only had one store
+
+00:27:11,980 --> 00:27:16,300
+and one load, and then, a comparison against a register?
+
+00:27:16,300 --> 00:27:18,090
+- He can't update anything and register across
+
+00:27:18,090 --> 00:27:21,200
+the program execution because they all get--
+
+00:27:21,200 --> 00:27:23,810
+- Understood, you have one store and one load
+
+00:27:23,810 --> 00:27:25,470
+instead of storing a counter and a pointer.
+
+00:27:25,470 --> 00:27:26,900
+- Oh, I see what you're saying.
+
+00:27:26,900 --> 00:27:29,130
+- And that might offset the advantage of the immediate.
+
+00:27:29,130 --> 00:27:30,540
+- It could be.
+
+00:27:30,540 --> 00:27:31,373
+I agree.
+
+00:27:33,960 --> 00:27:38,572
+- One thing is, with this bulk processing,
+
+00:27:38,572 --> 00:27:43,572
+you're targeting a redirect action if we pack it.
+
+00:27:44,580 --> 00:27:48,000
+But, if I recall correctly,
+
+00:27:48,000 --> 00:27:50,710
+the redirect BPF program
+
+00:27:50,710 --> 00:27:54,423
+actually stores internal state somewhere,
+
+00:27:55,618 --> 00:28:00,618
+and that internal state is then (mumbling).
+
+00:28:00,997 --> 00:28:03,575
+- So I think that, yes, we can answer this.
+
+00:28:03,575 --> 00:28:04,408
+(laughing)
+
+00:28:04,408 --> 00:28:07,983
+But, yeah, (speaking faintly) or--
+
+00:28:07,983 --> 00:28:08,820
+- Yeah, I also want--
+
+00:28:08,820 --> 00:28:10,470
+- About bulking?
+
+00:28:10,470 --> 00:28:12,331
+- I think you solved that.
+
+00:28:12,331 --> 00:28:14,580
+(audience laughing)
+
+00:28:14,580 --> 00:28:16,580
+Just saw something like that.
+
+00:28:16,580 --> 00:28:20,520
+They're going to have to go back to the other design where,
+
+00:28:20,520 --> 00:28:25,520
+instead of breaking up the XDP buffs,
+
+00:28:25,730 --> 00:28:27,250
+that you're going to have another
+
+00:28:27,250 --> 00:28:29,500
+separate erase state where, like,
+
+00:28:29,500 --> 00:28:32,270
+if you're forwarding or redirecting all
+
+00:28:32,270 --> 00:28:33,600
+of that internal state,
+
+00:28:33,600 --> 00:28:35,050
+they'll be kept in that then?
+
+00:28:36,368 --> 00:28:37,540
+And that way, I think you're going to have
+
+00:28:37,540 --> 00:28:38,853
+to go to that approach.
+
+00:28:42,270 --> 00:28:45,220
+- Yeah, so I'm not sure you handled the redirect correctly.
+
+00:28:46,440 --> 00:28:47,370
+- [Maciej] Why?
+
+00:28:47,370 --> 00:28:49,530
+- Because we have a per-CPU store,
+
+00:28:49,530 --> 00:28:53,230
+so the redirect writes something into the index.
+
+00:28:53,230 --> 00:28:55,140
+- [Maciej] And carefully redirecting for, why?
+
+00:28:55,140 --> 00:28:57,200
+- And then, afterwards, we do--
+
+00:28:57,200 --> 00:29:01,360
+- Oh, okay, so it, one, I will,
+
+00:29:01,360 --> 00:29:04,500
+yeah, the redirect might be broken a bit.
+
+00:29:04,500 --> 00:29:05,490
+I was--
+
+00:29:05,490 --> 00:29:07,311
+(audience laughing)
+
+00:29:07,311 --> 00:29:09,490
+(speaking faintly)
+
+00:29:09,490 --> 00:29:12,485
+Yeah, but I was looking,
+
+00:29:12,485 --> 00:29:14,650
+I hadn't had much time,
+
+00:29:14,650 --> 00:29:18,805
+but I was looking lately at the perf reports
+
+00:29:18,805 --> 00:29:23,805
+of the redirect and it was kind of broken
+
+00:29:25,020 --> 00:29:30,000
+because the Do XDP Redirect Slow was appearing.
+
+00:29:30,000 --> 00:29:33,100
+So I don't know why.
+
+00:29:33,100 --> 00:29:34,007
+But, yeah--
+
+00:29:34,007 --> 00:29:36,036
+(speaking faintly off mic) Sorry?
+
+00:29:36,036 --> 00:29:41,036
+- [Man] That's because the (speaking faintly).
+
+00:29:41,081 --> 00:29:42,230
+- Can we talk about this?
+
+00:29:42,230 --> 00:29:46,417
+- So it falls back to the non-Mac version if it sees that--
+
+00:29:48,189 --> 00:29:49,306
+- You know what?
+
+00:29:49,306 --> 00:29:54,266
+That was, even that, it was a lot faster, right?
+
+00:29:54,266 --> 00:29:57,266
+(audience laughing)
+
+00:30:05,860 --> 00:30:10,860
+- Did I understand correctly that your epilogue
+
+00:30:12,110 --> 00:30:15,540
+assumes that the BPF program answers
+
+00:30:15,540 --> 00:30:19,947
+the returning statement and there are no returns
+
+00:30:20,920 --> 00:30:22,493
+in the middle of the program?
+
+00:30:24,180 --> 00:30:29,180
+- So, yeah, but even if you have the return
+
+00:30:32,170 --> 00:30:34,563
+at the middle of the program,
+
+00:30:36,800 --> 00:30:40,370
+it would be in the BPF assembly,
+
+00:30:40,370 --> 00:30:42,910
+the jump to the second-last instruction.
+
+00:30:42,910 --> 00:30:44,840
+- [Man] That is what it looks like in the verifier.
+
+00:30:44,840 --> 00:30:47,293
+- So that's why I can base it on this.
+
+00:30:48,270 --> 00:30:49,123
+- Yeah, okay.
+
+00:30:51,155 --> 00:30:54,750
+That's the goal, that they're so generate it by C lag.
+
+00:30:54,750 --> 00:30:59,750
+But I myself was able to feed the BPF program
+
+00:31:01,140 --> 00:31:04,760
+with multiple exit instruction into the verifier
+
+00:31:04,760 --> 00:31:07,160
+and I think it worked.
+
+00:31:07,160 --> 00:31:09,010
+- [Announcer] Okay, so--
+
+00:31:09,010 --> 00:31:14,010
+- So if I write the BPF assembly goal manually and,
+
+00:31:14,310 --> 00:31:19,247
+just like we have in NIH-BIHB-BEE-UH for AF XDP,
+
+00:31:21,351 --> 00:31:26,351
+it's still validated correctly by the verifier.
+
+00:31:28,220 --> 00:31:30,720
+And we can end with multiple exit instructions.
+
+00:31:30,720 --> 00:31:33,570
+So, usually, we have to enforce this requirement
+
+00:31:33,570 --> 00:31:36,440
+in validator or invent something else.
+
+00:31:36,440 --> 00:31:40,250
+- [Man] Or rewrite sort of right to the end of the--
+
+00:31:40,250 --> 00:31:41,713
+- Yeah, possibly, yeah.
+
+00:31:43,030 --> 00:31:46,440
+- Yeah, I was basing it on the samples
+
+00:31:46,440 --> 00:31:48,110
+from the kernel directory.
+
+00:31:48,110 --> 00:31:51,743
+So they were acting like this, all of them.
+
+00:31:55,140 --> 00:31:57,493
+- [Man] Can I see the structure definition again?
+
+00:31:59,770 --> 00:32:01,660
+The change in the--
+
+00:32:01,660 --> 00:32:02,493
+- Sorry.
+
+00:32:02,493 --> 00:32:04,670
+- [Man] The rewrite of the return code.
+
+00:32:04,670 --> 00:32:05,503
+- Yep.
+
+00:32:07,120 --> 00:32:08,170
+- [Man] Okay, thanks.
+
+00:32:09,010 --> 00:32:10,300
+Sorry, this is a pet peeve,
+
+00:32:10,300 --> 00:32:12,728
+but we lost for bytes at the end of the structure.
+
+00:32:12,728 --> 00:32:13,737
+(laughing)
+
+00:32:13,737 --> 00:32:17,610
+- Yeah, yeah, that was, it was a naive approach,
+
+00:32:17,610 --> 00:32:19,170
+as I said.
+
+00:32:19,170 --> 00:32:22,153
+- So to go back to the other question,
+
+00:32:24,020 --> 00:32:27,070
+the JIT compiler should just handle it fine because it,
+
+00:32:27,070 --> 00:32:31,630
+all the exit paths jump to the epilogue at the end.
+
+00:32:31,630 --> 00:32:35,420
+So you could insert yourself right before that.
+
+00:32:35,420 --> 00:32:38,260
+So I think it should be handled transparently
+
+00:32:38,260 --> 00:32:39,720
+from the JIT side even.
+
+00:32:39,720 --> 00:32:43,260
+- So, okay, I was taking this part
+
+00:32:43,260 --> 00:32:45,530
+in order not to mess with every JIT.
+
+00:32:45,530 --> 00:32:48,496
+So I thought that maybe it would be possible in the--
+
+00:32:48,496 --> 00:32:49,346
+- [Man] Oh, okay.
+
+00:32:50,230 --> 00:32:51,760
+- BPF assembly, right?
+
+00:32:51,760 --> 00:32:55,723
+So then, I get the generated JIT.
+
+00:33:01,411 --> 00:33:02,340
+- So I had another question
+
+00:33:02,340 --> 00:33:04,250
+that goes back to one of your other ones.
+
+00:33:04,250 --> 00:33:06,170
+Like, instead of rewriting the program,
+
+00:33:06,170 --> 00:33:08,280
+but someone who has a better understanding
+
+00:33:08,280 --> 00:33:10,710
+of how exactly indirect calls work,
+
+00:33:10,710 --> 00:33:14,460
+it's impossible to do the indirect pointer to the program,
+
+00:33:14,460 --> 00:33:16,140
+to de-reference that, and then,
+
+00:33:16,140 --> 00:33:17,223
+call it in a loop?
+
+00:33:18,100 --> 00:33:21,733
+Or will that be rewritten with Retpoline every time?
+
+00:33:22,660 --> 00:33:25,880
+And if we know that, we will sort of do the,
+
+00:33:25,880 --> 00:33:29,970
+the speculation magic once,
+
+00:33:29,970 --> 00:33:33,210
+but then, just re-jump to the same point multiple times.
+
+00:33:33,210 --> 00:33:34,663
+Can we do that or?
+
+00:33:36,260 --> 00:33:38,370
+- Yeah, I'm wondering if, I mean,
+
+00:33:38,370 --> 00:33:40,620
+we don't change XDP programs all that often.
+
+00:33:40,620 --> 00:33:42,440
+Why don't we just binary patch the kernel
+
+00:33:42,440 --> 00:33:43,623
+with a static jump?
+
+00:33:44,590 --> 00:33:45,990
+We have jump labels and all that.
+
+00:33:45,990 --> 00:33:47,850
+Can't we just statically jump instead
+
+00:33:47,850 --> 00:33:49,585
+of doing indirect jumps?
+
+00:33:49,585 --> 00:33:51,004
+- [Announcer] Well, we kind of do that.
+
+00:33:51,004 --> 00:33:53,300
+We have this If statement tree thing
+
+00:33:53,300 --> 00:33:56,940
+in the macro right now for ops and stuff.
+
+00:33:56,940 --> 00:33:58,921
+- Right, but that's not here, right?
+
+00:33:58,921 --> 00:34:01,770
+- These are totally dynamic pointers, right?
+
+00:34:01,770 --> 00:34:03,670
+It's a different situation.
+
+00:34:03,670 --> 00:34:07,970
+So are you saying that, in the driver receive path,
+
+00:34:07,970 --> 00:34:12,970
+we would have a static call to a XDP program address
+
+00:34:13,530 --> 00:34:14,740
+just patched in?
+
+00:34:14,740 --> 00:34:15,573
+- Yeah.
+
+00:34:16,727 --> 00:34:17,560
+- Oh, that's cool.
+
+00:34:17,560 --> 00:34:18,755
+Can we do that.
+
+00:34:18,755 --> 00:34:20,770
+- I think, I think we can.
+
+00:34:20,770 --> 00:34:22,346
+- [Man] And this should also resolve the
+
+00:34:22,346 --> 00:34:26,580
+(speaking faintly off mic).
+
+00:34:26,580 --> 00:34:27,543
+- Yes.
+
+00:34:27,543 --> 00:34:30,620
+A unary non-batching execution would help us a lot.
+
+00:34:30,620 --> 00:34:31,655
+- [Man] Yeah. - It would be like, yeah,
+
+00:34:31,655 --> 00:34:34,120
+and, if this build-up is coming from a (mumbling) or retval,
+
+00:34:34,120 --> 00:34:36,510
+then maybe, we just solve it that way.
+
+00:34:36,510 --> 00:34:37,940
+- Maybe.
+
+00:34:37,940 --> 00:34:39,300
+It's something to look into, for sure.
+
+00:34:39,300 --> 00:34:40,630
+It needs to be measured.
+
+00:34:40,630 --> 00:34:41,463
+- Yeah.
+
+00:34:41,463 --> 00:34:42,296
+And the other thing,
+
+00:34:42,296 --> 00:34:45,690
+so the thing about patching the return code,
+
+00:34:45,690 --> 00:34:47,393
+we'll also be doing that tomorrow.
+
+00:34:49,031 --> 00:34:51,190
+If we continue with this to have it compatible,
+
+00:34:51,190 --> 00:34:54,420
+because what we wanna do is also chain different programs.
+
+00:34:54,420 --> 00:34:59,070
+So that might also be interesting with this bulking.
+
+00:34:59,070 --> 00:35:00,960
+- [Announcer] Chaining programs and then bulking them.
+
+00:35:00,960 --> 00:35:01,793
+- Yes, exactly.
+
+00:35:01,793 --> 00:35:04,142
+So we can do the whole code tree--
+
+00:35:04,142 --> 00:35:04,975
+(speaking faintly)
+
+00:35:04,975 --> 00:35:05,866
+Yeah.
+
+00:35:05,866 --> 00:35:06,699
+(laughing)
+
+00:35:06,699 --> 00:35:07,990
+That'd be fun.
+
+00:35:07,990 --> 00:35:08,823
+- Oh.
+
+00:35:09,750 --> 00:35:11,520
+I don't know how this plays with tell calls
+
+00:35:11,520 --> 00:35:12,910
+or BPF function calls but,
+
+00:35:12,910 --> 00:35:15,520
+instead of having to rewrite all the stack accesses,
+
+00:35:15,520 --> 00:35:17,740
+could we just reserve some space at the end of the stack,
+
+00:35:17,740 --> 00:35:18,990
+at the bottom of the stack to store
+
+00:35:18,990 --> 00:35:20,550
+the metadata for the bulking.
+
+00:35:20,550 --> 00:35:25,160
+- We can, yeah, but I was short on time--
+
+00:35:25,160 --> 00:35:28,190
+- Doesn't it, the verifier analyzes the stack,
+
+00:35:28,190 --> 00:35:30,940
+uses it to program, and only allocates the largest,
+
+00:35:30,940 --> 00:35:33,802
+so we could just add 12 or whatever to the end, right?
+
+00:35:33,802 --> 00:35:35,867
+- [Man] Yeah, we could do that for (speaking faintly).
+
+00:35:38,760 --> 00:35:40,460
+- Okay, so it's definitely doable.
+
+00:35:46,460 --> 00:35:47,460
+- On the thought section,
+
+00:35:47,460 --> 00:35:49,270
+one of the things you did is you presented it,
+
+00:35:49,270 --> 00:35:51,190
+you had the 64 packets.
+
+00:35:51,190 --> 00:35:52,410
+One of things you'll have to deal with
+
+00:35:52,410 --> 00:35:53,310
+is being able to time out
+
+00:35:53,310 --> 00:35:55,290
+if you're short of 64 packets.
+
+00:35:55,290 --> 00:35:56,580
+So one of the things you're gonna have
+
+00:35:56,580 --> 00:35:58,330
+to worry about at some point is draining
+
+00:35:58,330 --> 00:36:00,137
+when you're short of full (mumbling).
+
+00:36:01,171 --> 00:36:02,004
+- Yeah.
+
+00:36:03,100 --> 00:36:04,797
+Right now, I was just--
+
+00:36:06,290 --> 00:36:08,680
+(speaking faintly off mic)
+
+00:36:08,680 --> 00:36:09,513
+Yep.
+
+00:36:12,985 --> 00:36:15,235
+(laughing)
+
+00:36:16,100 --> 00:36:17,750
+- I wonder about that.
+
+00:36:17,750 --> 00:36:19,870
+Instead of doing such rewriting
+
+00:36:19,870 --> 00:36:24,350
+and doing all those gymnastics,
+
+00:36:24,350 --> 00:36:25,440
+that it wouldn't be better
+
+00:36:25,440 --> 00:36:29,350
+to just introduce the new kind of active programs
+
+00:36:29,350 --> 00:36:34,350
+that just expects an array of XDP buffs.
+
+00:36:34,350 --> 00:36:38,097
+(speaking faintly) flag or something and,
+
+00:36:38,097 --> 00:36:40,280
+for backwards compatibility,
+
+00:36:40,280 --> 00:36:44,180
+if the old com work is provided or the program
+
+00:36:44,180 --> 00:36:45,380
+is just calling a little bit,
+
+00:36:45,380 --> 00:36:46,860
+all apart from this penalty.
+
+00:36:46,860 --> 00:36:48,950
+- But you would like to have a look
+
+00:36:48,950 --> 00:36:50,330
+into the XDP program.
+
+00:36:50,330 --> 00:36:51,163
+- [Man] Yes, yes.
+
+00:36:51,163 --> 00:36:54,810
+- So we'd have to rewrite all the XDP programs.
+
+00:36:54,810 --> 00:36:55,643
+- [Man] Oh, yeah, sure.
+
+00:36:55,643 --> 00:36:57,260
+But you can provide, also,
+
+00:36:57,260 --> 00:36:59,180
+the old one for the compatibility
+
+00:36:59,180 --> 00:37:00,630
+and it will be just called in loop
+
+00:37:00,630 --> 00:37:01,720
+by the kernel.
+
+00:37:01,720 --> 00:37:04,110
+I think it's a really simple solution.
+
+00:37:04,110 --> 00:37:06,313
+- So I was trying it initially,
+
+00:37:07,150 --> 00:37:12,150
+and the thing is that I wasn't skipping
+
+00:37:12,500 --> 00:37:15,570
+the verifier in that approach
+
+00:37:15,570 --> 00:37:18,833
+and the programs were too big.
+
+00:37:20,860 --> 00:37:23,240
+- I imagine that, on more complex programs,
+
+00:37:23,240 --> 00:37:24,317
+you might also have--
+
+00:37:24,317 --> 00:37:25,150
+- [Maciej] Say it again?
+
+00:37:25,150 --> 00:37:27,180
+- I imagine that, on more complex programs,
+
+00:37:27,180 --> 00:37:29,870
+you might have benefits from doing stuff in bulk,
+
+00:37:29,870 --> 00:37:32,150
+even within the program itself.
+
+00:37:32,150 --> 00:37:33,360
+So doing both, basically--
+
+00:37:33,360 --> 00:37:35,000
+- [Announcer] Staged programs.
+
+00:37:35,000 --> 00:37:35,833
+- Yeah.
+
+00:37:37,200 --> 00:37:39,250
+- [Announcer] This is a VPP.
+
+00:37:39,250 --> 00:37:41,500
+(laughing)
+
+00:37:43,057 --> 00:37:43,890
+- [Maciej] Okay.
+
+00:37:43,890 --> 00:37:44,822
+- [Man] HVPP.
+
+00:37:44,822 --> 00:37:45,655
+(laughing)
+
+00:37:45,655 --> 00:37:47,540
+- [Announcer] Yeah, that's right.
+
+00:37:47,540 --> 00:37:49,123
+Anyone else have any questions?
+
+00:37:50,200 --> 00:37:51,754
+Alright, thank you very much.
+
+00:37:51,754 --> 00:37:53,206
+
+YouTube URL: https://www.youtube.com/watch?v=82WT6gdVAPw
+
+

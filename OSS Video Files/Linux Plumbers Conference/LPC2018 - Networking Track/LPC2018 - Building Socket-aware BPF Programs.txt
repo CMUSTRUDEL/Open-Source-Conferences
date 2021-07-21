@@ -1,0 +1,2167 @@
+Title: LPC2018 - Building Socket-aware BPF Programs
+Publication date: 2018-12-04
+Playlist: LPC2018 - Networking Track
+Description: 
+	url:  https://linuxplumbersconf.org/event/2/contributions/94/
+speaker:  Joe Stringer (Cilium)
+
+
+Over the past several years, BPF has steadily become more powerful in multiple
+ways: Through building more intelligence into the verifier which allows more
+complex programs to be loaded, and through extension of the API such as by
+adding new map types and new native BPF function calls. While BPF has its roots
+in applying filters at the socket layer, the ability to introspect the sockets
+relating to traffic being filtered has been limited.
+
+To build such awareness into a BPF helper, the verifier needs the ability to
+track the safety of the calls, including appropriate reference counting upon
+the underlying socket. This talk walks through extensions to the verifier to
+perform tracking of references in a BPF program. This allows BPF developers to
+extend the UAPI with functions that allocate and release resources within the
+execution lifetime of a BPF program, and the verifier will validate that the
+resources are released exactly once prior to program completion.
+
+Using this new reference tracking ability in the verifier, we add socket lookup
+and release function calls to the BPF API, allowing BPF programs to safely find
+a socket and build logic upon the presence or attributes of a socket. This can
+be used to load-balance traffic based on the presence of a listening
+application, or to implement stateful firewalling primitives to understand
+whether traffic for this connection has been seen before. With this new
+functionality, BPF programs can integrate more closely with the networking
+stack's understanding of the traffic transiting the kernel.
+Captions: 
+	00:00:04,840 --> 00:00:09,850
+yeah so so while I think David was maybe
+
+00:00:08,050 --> 00:00:12,100
+focuses sort of the l2 l3 of how we
+
+00:00:09,850 --> 00:00:13,750
+access kernel objects from from BPF and
+
+00:00:12,100 --> 00:00:14,920
+the previous talk this is maybe going
+
+00:00:13,750 --> 00:00:17,500
+slightly further up were looking at
+
+00:00:14,920 --> 00:00:20,350
+sockets and basically what can we do
+
+00:00:17,500 --> 00:00:23,769
+with sockets at the from the BPF packet
+
+00:00:20,350 --> 00:00:26,289
+path and so for a bit of background if
+
+00:00:23,769 --> 00:00:28,509
+you can't tell by my t-shirt I work on a
+
+00:00:26,289 --> 00:00:30,429
+project called psyllium so psyllium
+
+00:00:28,509 --> 00:00:33,460
+provides networking and security for
+
+00:00:30,429 --> 00:00:36,460
+containers it plugs into orchestration
+
+00:00:33,460 --> 00:00:38,620
+systems such as kubernetes and it's
+
+00:00:36,460 --> 00:00:40,240
+divided up into mainly two components so
+
+00:00:38,620 --> 00:00:43,900
+you've got a user space daemon written
+
+00:00:40,240 --> 00:00:44,890
+and go which provides the de
+
+00:00:43,900 --> 00:00:47,620
+coordination with the orchestration
+
+00:00:44,890 --> 00:00:50,620
+system for wind containers of being
+
+00:00:47,620 --> 00:00:54,780
+deployed onto a system it provides a
+
+00:00:50,620 --> 00:00:58,120
+policy API which allows you to configure
+
+00:00:54,780 --> 00:01:00,160
+what's allowed to talk to one and it
+
+00:00:58,120 --> 00:01:03,390
+provides things like visibility into the
+
+00:01:00,160 --> 00:01:06,939
+data path using all of this kind of
+
+00:01:03,390 --> 00:01:07,890
+state information the user space daemon
+
+00:01:06,939 --> 00:01:10,359
+compiles
+
+00:01:07,890 --> 00:01:11,890
+what generates the code for the data
+
+00:01:10,359 --> 00:01:14,469
+path and injects that into the kernel in
+
+00:01:11,890 --> 00:01:16,359
+the form of BPF and then it'll attach
+
+00:01:14,469 --> 00:01:20,289
+that to physical devices or attach it to
+
+00:01:16,359 --> 00:01:22,149
+logical devices so so yeah the main
+
+00:01:20,289 --> 00:01:26,770
+thing is that so it's providing the
+
+00:01:22,149 --> 00:01:29,530
+plumbing for containers and the network
+
+00:01:26,770 --> 00:01:31,179
+policy so when we talk about network
+
+00:01:29,530 --> 00:01:34,240
+policy basically what we're trying to
+
+00:01:31,179 --> 00:01:38,049
+establish is some endpoint a is allowed
+
+00:01:34,240 --> 00:01:41,229
+to talk to some in point B and you can
+
+00:01:38,049 --> 00:01:44,380
+do this via IP address and do it IP
+
+00:01:41,229 --> 00:01:47,289
+addresses and ports maybe you have other
+
+00:01:44,380 --> 00:01:48,429
+ways to specify the policy of how you
+
+00:01:47,289 --> 00:01:51,130
+actually want these two things to be
+
+00:01:48,429 --> 00:01:53,229
+able to communicate but fundamentally
+
+00:01:51,130 --> 00:01:55,030
+when when you say endpoint a can talk to
+
+00:01:53,229 --> 00:01:56,920
+in point B what you're trying to say is
+
+00:01:55,030 --> 00:01:59,649
+that that session is is allowed and
+
+00:01:56,920 --> 00:02:01,799
+therefore packets from endpoint a are
+
+00:01:59,649 --> 00:02:03,850
+allowed to go to packet two in point B
+
+00:02:01,799 --> 00:02:06,189
+and then packets in the reverse
+
+00:02:03,850 --> 00:02:09,009
+direction for that same session are
+
+00:02:06,189 --> 00:02:10,420
+allowed to go from in point B back to in
+
+00:02:09,009 --> 00:02:14,500
+point a so there's sort of like
+
+00:02:10,420 --> 00:02:16,689
+implication so how do we actually do
+
+00:02:14,500 --> 00:02:18,410
+this today so if you look at a lot of
+
+00:02:16,689 --> 00:02:20,660
+implementations out there
+
+00:02:18,410 --> 00:02:21,680
+basically take packets off the device we
+
+00:02:20,660 --> 00:02:24,530
+run it through this thing called a
+
+00:02:21,680 --> 00:02:28,730
+connection tracker which stores five
+
+00:02:24,530 --> 00:02:31,040
+triples of sessions at the scene and
+
+00:02:28,730 --> 00:02:34,730
+then based on that connection tracker
+
+00:02:31,040 --> 00:02:39,140
+you can turn the basically packet five
+
+00:02:34,730 --> 00:02:42,050
+to Bowl and in possibly either direction
+
+00:02:39,140 --> 00:02:43,880
+into a unidirectional flow that says in
+
+00:02:42,050 --> 00:02:46,490
+point a is talking to em point B rather
+
+00:02:43,880 --> 00:02:48,110
+than the reverse so using that
+
+00:02:46,490 --> 00:02:50,240
+information now that you say okay this
+
+00:02:48,110 --> 00:02:52,520
+is ingressing or egressing for this
+
+00:02:50,240 --> 00:02:54,800
+particular five tuple we look at our
+
+00:02:52,520 --> 00:02:58,160
+policy we say okay is this thing
+
+00:02:54,800 --> 00:03:00,500
+actually allowed based on our policy so
+
+00:02:58,160 --> 00:03:03,410
+okay so let's let's do this with PDF so
+
+00:03:00,500 --> 00:03:05,060
+you can attach BPF to a packet hook so
+
+00:03:03,410 --> 00:03:08,150
+it'll allow you access into the into the
+
+00:03:05,060 --> 00:03:11,960
+packets for the connection tracking we
+
+00:03:08,150 --> 00:03:13,190
+can basically build a BPF map and maybe
+
+00:03:11,960 --> 00:03:16,220
+you'll kind of see where I'm going with
+
+00:03:13,190 --> 00:03:19,250
+this based on the earlier talks today so
+
+00:03:16,220 --> 00:03:22,280
+yeah if we put a BPF map here we can
+
+00:03:19,250 --> 00:03:24,260
+could key this by the five tuple then in
+
+00:03:22,280 --> 00:03:26,450
+the value of this map of these map
+
+00:03:24,260 --> 00:03:28,160
+entries we can soar the ingress egress
+
+00:03:26,450 --> 00:03:31,250
+direction maybe you want to a site
+
+00:03:28,160 --> 00:03:32,480
+associated some counters there maybe you
+
+00:03:31,250 --> 00:03:34,310
+are performing some kind of network
+
+00:03:32,480 --> 00:03:35,690
+address translation and you want to
+
+00:03:34,310 --> 00:03:38,600
+associate that kind of information with
+
+00:03:35,690 --> 00:03:40,010
+the with the connection there's a little
+
+00:03:38,600 --> 00:03:43,250
+bit of tuple flipping logic that you'll
+
+00:03:40,010 --> 00:03:45,050
+need in the BPF to reverse the direction
+
+00:03:43,250 --> 00:03:46,640
+of the tuple that you're looking up so
+
+00:03:45,050 --> 00:03:48,770
+that if you're getting a reply Direction
+
+00:03:46,640 --> 00:03:50,450
+packet you can tell that the original
+
+00:03:48,770 --> 00:03:52,880
+direction within the original direction
+
+00:03:50,450 --> 00:03:57,709
+had a corresponding connection tracking
+
+00:03:52,880 --> 00:03:59,120
+entry so that's good okay policy you
+
+00:03:57,709 --> 00:04:01,400
+know however it is that you define your
+
+00:03:59,120 --> 00:04:03,830
+policy you can create a PPF map maybe
+
+00:04:01,400 --> 00:04:08,030
+you look at the IP addresses and that
+
+00:04:03,830 --> 00:04:09,590
+tells you yes allow or no disallow and
+
+00:04:08,030 --> 00:04:11,840
+again you could have counters associated
+
+00:04:09,590 --> 00:04:15,410
+with that so okay great let's let's
+
+00:04:11,840 --> 00:04:17,510
+deploy this so if any of you have done
+
+00:04:15,410 --> 00:04:18,620
+any kind of scalability testing with
+
+00:04:17,510 --> 00:04:20,570
+knit filter you've probably hit this
+
+00:04:18,620 --> 00:04:24,050
+message before this in of contract table
+
+00:04:20,570 --> 00:04:25,550
+full dropping packet so you know the
+
+00:04:24,050 --> 00:04:27,020
+fundamental problem is like what happens
+
+00:04:25,550 --> 00:04:29,390
+when your connection tracking table
+
+00:04:27,020 --> 00:04:30,979
+becomes full and if you're building
+
+00:04:29,390 --> 00:04:32,150
+something like a firewall kind of a
+
+00:04:30,979 --> 00:04:34,340
+solution
+
+00:04:32,150 --> 00:04:36,020
+you're not gonna want to just fail open
+
+00:04:34,340 --> 00:04:38,570
+and allow these packets through you want
+
+00:04:36,020 --> 00:04:40,010
+to drop these packets so there's a
+
+00:04:38,570 --> 00:04:41,870
+couple of kind of things that I'm gonna
+
+00:04:40,010 --> 00:04:42,980
+bring up here so one is like you have to
+
+00:04:41,870 --> 00:04:45,889
+figure out what the size of this thing
+
+00:04:42,980 --> 00:04:47,660
+is going to be one one aspect to this is
+
+00:04:45,889 --> 00:04:50,090
+that from a BPF perspective we don't
+
+00:04:47,660 --> 00:04:51,560
+have recycle resizable naps so there's
+
+00:04:50,090 --> 00:04:53,840
+no way we could just dynamically sized
+
+00:04:51,560 --> 00:04:55,370
+these things but even if we had
+
+00:04:53,840 --> 00:04:56,870
+something like that like it's also
+
+00:04:55,370 --> 00:04:59,720
+another question do you want to be able
+
+00:04:56,870 --> 00:05:01,160
+to allow your traffic to govern how big
+
+00:04:59,720 --> 00:05:04,340
+your table is going to be for your
+
+00:05:01,160 --> 00:05:05,570
+connection tracking and then there's a
+
+00:05:04,340 --> 00:05:08,660
+question of how do we actually clean up
+
+00:05:05,570 --> 00:05:10,880
+these entries so if your clothes are all
+
+00:05:08,660 --> 00:05:13,100
+like reasonably short-lived well-behaved
+
+00:05:10,880 --> 00:05:14,690
+TCP connections you know maybe you can
+
+00:05:13,100 --> 00:05:16,130
+just look at the Fingal in one way thing
+
+00:05:14,690 --> 00:05:18,020
+go the other way and say okay we can
+
+00:05:16,130 --> 00:05:22,370
+clean up our connection tracking table
+
+00:05:18,020 --> 00:05:23,720
+and and we're done but if you start
+
+00:05:22,370 --> 00:05:25,669
+doing some more interesting stuff you
+
+00:05:23,720 --> 00:05:26,720
+start hitting UDP things like this we
+
+00:05:25,669 --> 00:05:30,530
+don't actually have this information
+
+00:05:26,720 --> 00:05:32,720
+that the connection is done then that
+
+00:05:30,530 --> 00:05:34,610
+can sort of introduce some basically
+
+00:05:32,720 --> 00:05:37,160
+makes it a bit more complicated now
+
+00:05:34,610 --> 00:05:41,600
+there are things like LRU map in the in
+
+00:05:37,160 --> 00:05:45,410
+the BPF api today so you can just bounce
+
+00:05:41,600 --> 00:05:49,100
+out old entries from the map we have had
+
+00:05:45,410 --> 00:05:52,280
+some trouble with this because if you
+
+00:05:49,100 --> 00:05:54,410
+want your user space implementation to
+
+00:05:52,280 --> 00:05:56,210
+also take a look at this map then simply
+
+00:05:54,410 --> 00:05:57,700
+by iterating through and taking a look
+
+00:05:56,210 --> 00:06:01,340
+at the map it was touching these
+
+00:05:57,700 --> 00:06:03,530
+elements in the map and so basically
+
+00:06:01,340 --> 00:06:04,639
+your ally yours is completely messed up
+
+00:06:03,530 --> 00:06:07,460
+at that point you don't actually know
+
+00:06:04,639 --> 00:06:13,820
+what was the last packet that was seeing
+
+00:06:07,460 --> 00:06:16,490
+with us FRU so that this kind of stuff
+
+00:06:13,820 --> 00:06:18,260
+gave us enough pause to to think okay
+
+00:06:16,490 --> 00:06:23,510
+well like is there some other way that
+
+00:06:18,260 --> 00:06:26,120
+we could do this but before we do that
+
+00:06:23,510 --> 00:06:28,070
+like it's worth asking the question why
+
+00:06:26,120 --> 00:06:29,360
+do we actually model like this why do we
+
+00:06:28,070 --> 00:06:31,729
+have this connection tracker in place
+
+00:06:29,360 --> 00:06:33,770
+and what's the kind of advantages of
+
+00:06:31,729 --> 00:06:37,639
+that and just make sure that we're not
+
+00:06:33,770 --> 00:06:40,370
+gonna just violate our assumptions when
+
+00:06:37,639 --> 00:06:42,020
+we when we try to build something new so
+
+00:06:40,370 --> 00:06:43,550
+an obvious thing would be that like
+
+00:06:42,020 --> 00:06:45,900
+firewalls and no delays co-located with
+
+00:06:43,550 --> 00:06:47,430
+the workload so certainly use
+
+00:06:45,900 --> 00:06:49,169
+you know you put this box in the middle
+
+00:06:47,430 --> 00:06:50,610
+you network that is your firewall you
+
+00:06:49,169 --> 00:06:52,080
+route all your traffic into this thing
+
+00:06:50,610 --> 00:06:54,389
+you have your so device you know safe
+
+00:06:52,080 --> 00:06:56,789
+zone unsafe zone and you you pipe
+
+00:06:54,389 --> 00:06:58,520
+everything through this firewall even
+
+00:06:56,789 --> 00:07:03,509
+more recently I think there's a lot of
+
+00:06:58,520 --> 00:07:06,690
+solutions which will push the security
+
+00:07:03,509 --> 00:07:08,009
+out to nodes in the network but maybe
+
+00:07:06,690 --> 00:07:10,560
+you're still running with VMs and so
+
+00:07:08,009 --> 00:07:13,199
+your actual kernel implementation or
+
+00:07:10,560 --> 00:07:15,030
+instance that is applying the security
+
+00:07:13,199 --> 00:07:19,020
+may not be the kernel instance where
+
+00:07:15,030 --> 00:07:21,660
+your workload is running so another
+
+00:07:19,020 --> 00:07:24,680
+aspect to this is that firewall should
+
+00:07:21,660 --> 00:07:27,060
+drop packets as quickly as possible
+
+00:07:24,680 --> 00:07:28,350
+there's no point in paying the cost of
+
+00:07:27,060 --> 00:07:31,590
+receiving the packet all the way up the
+
+00:07:28,350 --> 00:07:34,770
+stack if you can trivially figure out at
+
+00:07:31,590 --> 00:07:38,250
+a much lower level this is something we
+
+00:07:34,770 --> 00:07:40,080
+don't want to pass up this is definitely
+
+00:07:38,250 --> 00:07:41,639
+historically been this kind of problem
+
+00:07:40,080 --> 00:07:43,080
+with flaky stacks where if you send it
+
+00:07:41,639 --> 00:07:45,449
+the wrong kind of packet it just kind of
+
+00:07:43,080 --> 00:07:46,949
+folds over I'd like to think that
+
+00:07:45,449 --> 00:07:49,229
+hopefully we're we're in a much better
+
+00:07:46,949 --> 00:07:51,810
+state than we were say 20 years ago
+
+00:07:49,229 --> 00:07:53,340
+where this kind of thing but even if
+
+00:07:51,810 --> 00:07:55,500
+something like this came up I also think
+
+00:07:53,340 --> 00:07:57,930
+that these days the life cycle between
+
+00:07:55,500 --> 00:08:00,870
+you know finding a bug reporting it
+
+00:07:57,930 --> 00:08:02,490
+putting a fixed upstream vendor is
+
+00:08:00,870 --> 00:08:04,650
+getting their hands on then and passing
+
+00:08:02,490 --> 00:08:07,770
+it to a Chilean users is much tighter
+
+00:08:04,650 --> 00:08:09,270
+than it than it used to be so so based
+
+00:08:07,770 --> 00:08:10,699
+on these things you can kind of see well
+
+00:08:09,270 --> 00:08:13,080
+it makes a lot of sense that you would
+
+00:08:10,699 --> 00:08:15,240
+build up State on demand while
+
+00:08:13,080 --> 00:08:16,680
+processing packets so you get the packet
+
+00:08:15,240 --> 00:08:18,599
+in you take a look at this packet you
+
+00:08:16,680 --> 00:08:22,250
+store up some state what what state you
+
+00:08:18,599 --> 00:08:30,090
+need to be able to apply your firewall
+
+00:08:22,250 --> 00:08:33,479
+and then ya move on so so a couple of
+
+00:08:30,090 --> 00:08:36,360
+recent trends that may change this these
+
+00:08:33,479 --> 00:08:41,190
+assumptions so one is the distribution
+
+00:08:36,360 --> 00:08:42,750
+of network implementation to nodes
+
+00:08:41,190 --> 00:08:45,420
+around your network so rather than put
+
+00:08:42,750 --> 00:08:46,950
+in the firewall in the middle you want
+
+00:08:45,420 --> 00:08:49,470
+to put firewalling
+
+00:08:46,950 --> 00:08:50,760
+on each node in your network and this
+
+00:08:49,470 --> 00:08:52,110
+doesn't necessarily just apply to
+
+00:08:50,760 --> 00:08:55,490
+firewall and could be the routing and so
+
+00:08:52,110 --> 00:08:59,250
+on and then the other one is the
+
+00:08:55,490 --> 00:09:02,220
+increasing use of containerization
+
+00:08:59,250 --> 00:09:04,050
+where the actual the workload is
+
+00:09:02,220 --> 00:09:06,360
+packaged up in this image where you
+
+00:09:04,050 --> 00:09:08,400
+deploy this and the the workload may
+
+00:09:06,360 --> 00:09:11,460
+actually be co-located on the same
+
+00:09:08,400 --> 00:09:14,610
+kernel instance as where your network
+
+00:09:11,460 --> 00:09:17,880
+plumbing is so if we're now getting to
+
+00:09:14,610 --> 00:09:20,700
+this this place where the the workload
+
+00:09:17,880 --> 00:09:23,850
+is co-located with your routing and
+
+00:09:20,700 --> 00:09:26,280
+filtering implementation then that means
+
+00:09:23,850 --> 00:09:30,300
+that your sockets are also co-located
+
+00:09:26,280 --> 00:09:32,430
+with with the the implementation that's
+
+00:09:30,300 --> 00:09:33,840
+providing the security around that so if
+
+00:09:32,430 --> 00:09:35,820
+we're co-located with the sockets like
+
+00:09:33,840 --> 00:09:37,680
+why would we build up this connection
+
+00:09:35,820 --> 00:09:39,210
+tracking table so well the connection
+
+00:09:37,680 --> 00:09:40,350
+tracking table is doing right it's like
+
+00:09:39,210 --> 00:09:42,240
+it looks at the package that says like
+
+00:09:40,350 --> 00:09:45,870
+ok that went that way that went that way
+
+00:09:42,240 --> 00:09:48,150
+and based on these packets of seeing in
+
+00:09:45,870 --> 00:09:50,040
+the middle it's trying to say this stack
+
+00:09:48,150 --> 00:09:51,150
+over here and this stack over here looks
+
+00:09:50,040 --> 00:09:53,330
+like this and they have some
+
+00:09:51,150 --> 00:09:55,680
+understanding of what this connection is
+
+00:09:53,330 --> 00:09:57,210
+so if you're something in the middle
+
+00:09:55,680 --> 00:10:00,630
+that doesn't have introspection into
+
+00:09:57,210 --> 00:10:02,970
+those remote stacks that that makes a
+
+00:10:00,630 --> 00:10:04,410
+lot of sense but if we're increasingly
+
+00:10:02,970 --> 00:10:08,310
+getting into this world we're actually
+
+00:10:04,410 --> 00:10:10,200
+one of those sockets is on the same node
+
+00:10:08,310 --> 00:10:13,830
+and even in the same kernel instance
+
+00:10:10,200 --> 00:10:14,940
+then why do we try to infer what is
+
+00:10:13,830 --> 00:10:16,890
+happening with this connection tracking
+
+00:10:14,940 --> 00:10:21,330
+table why not just find that information
+
+00:10:16,890 --> 00:10:23,220
+that's already available so yeah I have
+
+00:10:21,330 --> 00:10:25,130
+the same diagram but I just replaced the
+
+00:10:23,220 --> 00:10:27,330
+contract table with a socket table here
+
+00:10:25,130 --> 00:10:30,240
+this is not necessarily a one-to-one
+
+00:10:27,330 --> 00:10:33,770
+kind of correspondence connection
+
+00:10:30,240 --> 00:10:36,630
+tracking can often an implementation may
+
+00:10:33,770 --> 00:10:38,850
+have additional pieces on top of it
+
+00:10:36,630 --> 00:10:40,770
+rather than just what I've said so far
+
+00:10:38,850 --> 00:10:42,870
+so there may be things like TCP window
+
+00:10:40,770 --> 00:10:44,610
+tracking things like that I'm more or
+
+00:10:42,870 --> 00:10:47,250
+less assuming that that kind of logic
+
+00:10:44,610 --> 00:10:50,339
+could be wrapped around this sloka table
+
+00:10:47,250 --> 00:10:52,260
+lookup so how do we do this so
+
+00:10:50,339 --> 00:10:53,250
+fundamentally we need to make sure that
+
+00:10:52,260 --> 00:10:54,530
+if we're going to reference that if
+
+00:10:53,250 --> 00:10:58,740
+we're going to make use of these sockets
+
+00:10:54,530 --> 00:11:00,570
+that that access is going to be safe so
+
+00:10:58,740 --> 00:11:03,930
+soft that's a reference counted there is
+
+00:11:00,570 --> 00:11:05,910
+some memory management like ICU deferral
+
+00:11:03,930 --> 00:11:09,630
+with the free I'll touch on that a bit
+
+00:11:05,910 --> 00:11:13,110
+more later on so if we look at what's
+
+00:11:09,630 --> 00:11:14,880
+there say I think six months ago so
+
+00:11:13,110 --> 00:11:19,470
+we had this BPF program type where you
+
+00:11:14,880 --> 00:11:22,110
+can attach a BPF program to a socket in
+
+00:11:19,470 --> 00:11:23,430
+that case because it's operating the
+
+00:11:22,110 --> 00:11:25,800
+socket context there's already a
+
+00:11:23,430 --> 00:11:28,530
+reference held on the socket for the
+
+00:11:25,800 --> 00:11:30,930
+duration of executing the DPF program so
+
+00:11:28,530 --> 00:11:34,770
+the access safety is provided by that
+
+00:11:30,930 --> 00:11:38,400
+mechanism and then there was bounced
+
+00:11:34,770 --> 00:11:39,900
+safety for when you access that pointer
+
+00:11:38,400 --> 00:11:43,320
+and you want to index into it
+
+00:11:39,900 --> 00:11:44,850
+ensuring that the the indexing is within
+
+00:11:43,320 --> 00:11:47,730
+the bounds of the object that's pointed
+
+00:11:44,850 --> 00:11:51,150
+to from that pointer so when we look at
+
+00:11:47,730 --> 00:11:55,440
+trying to do this from a packet hook we
+
+00:11:51,150 --> 00:11:58,200
+don't have those same guarantees so
+
+00:11:55,440 --> 00:12:00,630
+there may or may not be a socket
+
+00:11:58,200 --> 00:12:10,530
+associated with the packet that you're
+
+00:12:00,630 --> 00:12:12,540
+inspecting so when we look this up we
+
+00:12:10,530 --> 00:12:16,860
+need to somehow provide the safety or on
+
+00:12:12,540 --> 00:12:19,860
+these lookup so that's where we get to
+
+00:12:16,860 --> 00:12:23,880
+okay extending the BPF verifier so a
+
+00:12:19,860 --> 00:12:27,240
+quick recap of the the general way that
+
+00:12:23,880 --> 00:12:29,550
+this this BPF programs work so some
+
+00:12:27,240 --> 00:12:30,840
+hacker in a room doctrine room with a
+
+00:12:29,550 --> 00:12:34,290
+hoodie he's like writing some source
+
+00:12:30,840 --> 00:12:36,630
+code he puts that into the into a
+
+00:12:34,290 --> 00:12:38,970
+compiler that generates DPF byte code
+
+00:12:36,630 --> 00:12:41,070
+that BPF byte code can then be loaded
+
+00:12:38,970 --> 00:12:43,860
+into the kernel when we loaded into the
+
+00:12:41,070 --> 00:12:46,710
+kernel we go through this the step
+
+00:12:43,860 --> 00:12:50,550
+called the verification so we go through
+
+00:12:46,710 --> 00:12:52,680
+all of the pods in this program we
+
+00:12:50,550 --> 00:12:55,020
+validate that this program will be safe
+
+00:12:52,680 --> 00:12:57,870
+to run when we attach it to some point
+
+00:12:55,020 --> 00:12:58,680
+in the coma and then there'll be a Jets
+
+00:12:57,870 --> 00:13:02,100
+tip there as well
+
+00:12:58,680 --> 00:13:03,960
+so this diagram is is highlighting with
+
+00:13:02,100 --> 00:13:04,740
+TCU ingress egress but it works the same
+
+00:13:03,960 --> 00:13:09,360
+way for the other
+
+00:13:04,740 --> 00:13:11,400
+vpf is so yeah so at load time basically
+
+00:13:09,360 --> 00:13:13,200
+what we're trying to check loop over all
+
+00:13:11,400 --> 00:13:16,020
+the instructions validate that the
+
+00:13:13,200 --> 00:13:17,820
+pointer X this is going to be safe you
+
+00:13:16,020 --> 00:13:22,530
+know if it axis is the memory outside
+
+00:13:17,820 --> 00:13:23,970
+the bounds of that pointer reject if it
+
+00:13:22,530 --> 00:13:25,860
+looks like this is this programs going
+
+00:13:23,970 --> 00:13:27,060
+to loop forever we reject it so we can
+
+00:13:25,860 --> 00:13:32,699
+down the
+
+00:13:27,060 --> 00:13:35,399
+the runtime of this application to tune
+
+00:13:32,699 --> 00:13:37,589
+to ensure that so eventually if
+
+00:13:35,399 --> 00:13:39,720
+everything is safe ok great
+
+00:13:37,589 --> 00:13:44,009
+allow the time allow the program to be
+
+00:13:39,720 --> 00:13:46,009
+loaded and attach it so when we're
+
+00:13:44,009 --> 00:13:48,029
+looking at trying to do this for sockets
+
+00:13:46,009 --> 00:13:49,230
+there's a couple of different ways we
+
+00:13:48,029 --> 00:13:54,720
+could do this so we could do this
+
+00:13:49,230 --> 00:13:57,720
+implicitly so in this case the person
+
+00:13:54,720 --> 00:13:58,920
+writing the BPF beauty of code you know
+
+00:13:57,720 --> 00:14:02,250
+maybe write something like this and see
+
+00:13:58,920 --> 00:14:04,259
+you do a walk lookup of the of the
+
+00:14:02,250 --> 00:14:05,670
+socket and then you may use it you know
+
+00:14:04,259 --> 00:14:07,560
+you have to check if it's if it's a
+
+00:14:05,670 --> 00:14:11,160
+valid pointer you use it and you
+
+00:14:07,560 --> 00:14:12,779
+basically forget about it so behind the
+
+00:14:11,160 --> 00:14:16,620
+scenes what the kernel needs to do at
+
+00:14:12,779 --> 00:14:18,660
+the runtime for this model is that when
+
+00:14:16,620 --> 00:14:20,970
+you perform the socket lookup it needs
+
+00:14:18,660 --> 00:14:22,800
+to store that pointer on sound free list
+
+00:14:20,970 --> 00:14:26,339
+and then once you've finished executing
+
+00:14:22,800 --> 00:14:27,750
+your entire BPF program you need to go
+
+00:14:26,339 --> 00:14:30,930
+and iterate through this list and free
+
+00:14:27,750 --> 00:14:34,019
+all of the sockets so when you look at
+
+00:14:30,930 --> 00:14:37,709
+what is happening in like XDP the fact
+
+00:14:34,019 --> 00:14:39,600
+that there would be a step after each
+
+00:14:37,709 --> 00:14:41,819
+vpf program where you need to check
+
+00:14:39,600 --> 00:14:43,050
+whether you need to free sockets this is
+
+00:14:41,819 --> 00:14:45,089
+not very good because this is a cost
+
+00:14:43,050 --> 00:14:46,559
+that would be incurred regardless of
+
+00:14:45,089 --> 00:14:49,470
+whether you using the socket lookup
+
+00:14:46,559 --> 00:14:51,300
+helpers or not so we ended up going with
+
+00:14:49,470 --> 00:14:54,029
+instead is we make this explicit so
+
+00:14:51,300 --> 00:14:55,860
+developers need to know that they are
+
+00:14:54,029 --> 00:14:58,019
+taking a reference on the socket and
+
+00:14:55,860 --> 00:15:00,389
+they need to explicitly release that and
+
+00:14:58,019 --> 00:15:03,329
+it's very natural you know you just need
+
+00:15:00,389 --> 00:15:07,649
+to balance the sockets so I could look
+
+00:15:03,329 --> 00:15:09,930
+up and release so how do we actually do
+
+00:15:07,649 --> 00:15:11,660
+this in the verifier so you've got the
+
+00:15:09,930 --> 00:15:14,699
+step where you acquire the resource
+
+00:15:11,660 --> 00:15:16,110
+you've got the step where you're perhaps
+
+00:15:14,699 --> 00:15:18,569
+holding this resource we need to make
+
+00:15:16,110 --> 00:15:23,160
+sure that the use of that resource is
+
+00:15:18,569 --> 00:15:25,709
+valid and then you've got the release so
+
+00:15:23,160 --> 00:15:28,680
+when we look at resource acquisition so
+
+00:15:25,709 --> 00:15:30,500
+at the time when we are verifying this
+
+00:15:28,680 --> 00:15:32,490
+program we don't actually have
+
+00:15:30,500 --> 00:15:34,379
+references to sockets and so on we're
+
+00:15:32,490 --> 00:15:37,319
+not actually executing this code we're
+
+00:15:34,379 --> 00:15:39,940
+statically analyzing this is the the
+
+00:15:37,319 --> 00:15:42,880
+steps through the BPF program
+
+00:15:39,940 --> 00:15:46,990
+so through this particular path it takes
+
+00:15:42,880 --> 00:15:51,070
+a reference to a socket so we need to
+
+00:15:46,990 --> 00:15:53,590
+somehow track the fact that this
+
+00:15:51,070 --> 00:15:57,100
+particular path through the program has
+
+00:15:53,590 --> 00:15:58,750
+a reference to the socket and ensure
+
+00:15:57,100 --> 00:16:00,250
+that at the end of the program we've
+
+00:15:58,750 --> 00:16:03,130
+released all the references that we've
+
+00:16:00,250 --> 00:16:04,960
+acquired so how do we do this we
+
+00:16:03,130 --> 00:16:06,910
+basically generate an identifier that's
+
+00:16:04,960 --> 00:16:08,590
+basically uniquely identifies that
+
+00:16:06,910 --> 00:16:10,090
+particular socket lookup so if you have
+
+00:16:08,590 --> 00:16:13,840
+multiple socket lookups in your program
+
+00:16:10,090 --> 00:16:16,150
+each one would win on the instruction
+
+00:16:13,840 --> 00:16:17,830
+where it returns the pointer we
+
+00:16:16,150 --> 00:16:20,500
+associate an identifier with that
+
+00:16:17,830 --> 00:16:24,850
+particular instance of the execution of
+
+00:16:20,500 --> 00:16:26,110
+that socket lookup and then so we store
+
+00:16:24,850 --> 00:16:28,270
+this in the verify state and basically
+
+00:16:26,110 --> 00:16:29,890
+at the end of the program we will go
+
+00:16:28,270 --> 00:16:33,040
+through these at the end of a
+
+00:16:29,890 --> 00:16:35,530
+verification so once we ensure that the
+
+00:16:33,040 --> 00:16:38,320
+program reaches the end instruction the
+
+00:16:35,530 --> 00:16:40,050
+exit instruction we ensure that there
+
+00:16:38,320 --> 00:16:42,130
+are no reference it's still being held
+
+00:16:40,050 --> 00:16:44,620
+and there's another piece here which is
+
+00:16:42,130 --> 00:16:46,780
+we need to associate the register that
+
+00:16:44,620 --> 00:16:50,380
+receives this pointer with this
+
+00:16:46,780 --> 00:16:53,860
+identifier so this allows us to later on
+
+00:16:50,380 --> 00:16:55,360
+in the verification we can pass this we
+
+00:16:53,860 --> 00:16:58,270
+we see that the the instructions pass
+
+00:16:55,360 --> 00:17:01,090
+this register to some other function or
+
+00:16:58,270 --> 00:17:04,030
+when it D references that instruction or
+
+00:17:01,090 --> 00:17:06,550
+when it passes that register as in that
+
+00:17:04,030 --> 00:17:08,530
+pointer to the free function that the
+
+00:17:06,550 --> 00:17:11,410
+types are correct and and the bounds
+
+00:17:08,530 --> 00:17:15,280
+chicken committee can be done so a few
+
+00:17:11,410 --> 00:17:19,990
+steps for the execution time within
+
+00:17:15,280 --> 00:17:22,180
+while holding this reference so one of
+
+00:17:19,990 --> 00:17:24,280
+them is that in know if someone could
+
+00:17:22,180 --> 00:17:26,020
+write a a program this is you know I
+
+00:17:24,280 --> 00:17:27,400
+will take this socket pointer and then
+
+00:17:26,020 --> 00:17:28,840
+I'll mangle it in some way and then I'll
+
+00:17:27,400 --> 00:17:30,400
+try and pass it the release function
+
+00:17:28,840 --> 00:17:31,990
+right and then the release function
+
+00:17:30,400 --> 00:17:35,350
+wouldn't be getting a valid pointer so
+
+00:17:31,990 --> 00:17:37,990
+okay disallow that BPF tail call is
+
+00:17:35,350 --> 00:17:39,880
+another one so this is a feature which
+
+00:17:37,990 --> 00:17:42,510
+allows you to take one BPF program and
+
+00:17:39,880 --> 00:17:45,400
+then chain it onto another BPF program
+
+00:17:42,510 --> 00:17:47,950
+but there's no mechanism right now to be
+
+00:17:45,400 --> 00:17:49,930
+able to pass this socket state between
+
+00:17:47,950 --> 00:17:52,510
+one BPF program to another BPF program
+
+00:17:49,930 --> 00:17:53,630
+so if the first vpf program performed
+
+00:17:52,510 --> 00:17:56,570
+the socket lookup
+
+00:17:53,630 --> 00:17:58,490
+and did not release it but tail called
+
+00:17:56,570 --> 00:17:59,930
+to another BPF program then you're
+
+00:17:58,490 --> 00:18:03,890
+basically leaking a reference to that
+
+00:17:59,930 --> 00:18:07,640
+socket so if you release before the tail
+
+00:18:03,890 --> 00:18:09,230
+call it's okay so the another
+
+00:18:07,640 --> 00:18:14,240
+interesting one though with the load
+
+00:18:09,230 --> 00:18:19,490
+absolute and load and direct so even if
+
+00:18:14,240 --> 00:18:21,800
+we ensured that the BPF program has
+
+00:18:19,490 --> 00:18:25,610
+balanced look up and release functions
+
+00:18:21,800 --> 00:18:29,980
+and will reach the end of us the program
+
+00:18:25,610 --> 00:18:32,180
+these instructions could potentially
+
+00:18:29,980 --> 00:18:34,370
+close some problems
+
+00:18:32,180 --> 00:18:39,530
+so these instructions basically the idea
+
+00:18:34,370 --> 00:18:44,180
+is they were used to index into a packet
+
+00:18:39,530 --> 00:18:47,750
+and if the if that the packet is not
+
+00:18:44,180 --> 00:18:49,040
+long enough to like it is shorter than
+
+00:18:47,750 --> 00:18:51,140
+the index that you're in nixing there
+
+00:18:49,040 --> 00:18:55,070
+then basically would terminate the BPF
+
+00:18:51,140 --> 00:18:56,630
+program at runtime so what this means is
+
+00:18:55,070 --> 00:18:57,740
+like from a verification perspective you
+
+00:18:56,630 --> 00:19:00,800
+could have a perfect program that
+
+00:18:57,740 --> 00:19:02,300
+balances your lookup and release but
+
+00:19:00,800 --> 00:19:03,560
+when you actually go to run that if it
+
+00:19:02,300 --> 00:19:05,030
+has one of these instructions in the
+
+00:19:03,560 --> 00:19:07,310
+middle of while holding that socket
+
+00:19:05,030 --> 00:19:10,460
+release while holding their socket sorry
+
+00:19:07,310 --> 00:19:14,680
+then you've basically leaked the socket
+
+00:19:10,460 --> 00:19:17,690
+there as well so finally we've got a
+
+00:19:14,680 --> 00:19:19,580
+reference release so we need to validate
+
+00:19:17,690 --> 00:19:20,870
+that the pointer type that we pass in to
+
+00:19:19,580 --> 00:19:23,180
+this release function is the correct
+
+00:19:20,870 --> 00:19:26,000
+pointer type that it has mangled and so
+
+00:19:23,180 --> 00:19:29,710
+on and then we need to clean up the
+
+00:19:26,000 --> 00:19:32,540
+state and say okay so if this particular
+
+00:19:29,710 --> 00:19:36,740
+resource which is corresponds to this
+
+00:19:32,540 --> 00:19:38,330
+identifier has been released then we
+
+00:19:36,740 --> 00:19:40,690
+don't need to track whether or not it's
+
+00:19:38,330 --> 00:19:45,140
+going to be released after that point
+
+00:19:40,690 --> 00:19:46,910
+yeah and then finally the the register
+
+00:19:45,140 --> 00:19:49,460
+association with that identifier needs
+
+00:19:46,910 --> 00:19:52,820
+to be cleared so we don't try to allow a
+
+00:19:49,460 --> 00:19:54,320
+program to index within some socket
+
+00:19:52,820 --> 00:19:59,750
+pointer after the socket pointer has
+
+00:19:54,320 --> 00:20:02,840
+been released so looking a bit at the
+
+00:19:59,750 --> 00:20:04,670
+API so if you wanted to do this select
+
+00:20:02,840 --> 00:20:06,100
+the lookup socket release you know the
+
+00:20:04,670 --> 00:20:08,210
+simplest possible
+
+00:20:06,100 --> 00:20:10,309
+implementation would look something like
+
+00:20:08,210 --> 00:20:12,770
+this you can imagine passing the SK
+
+00:20:10,309 --> 00:20:18,790
+buffin the SK buff already has metadata
+
+00:20:12,770 --> 00:20:21,080
+about what the packet contents is and so
+
+00:20:18,790 --> 00:20:25,670
+you could imagine just looking up the
+
+00:20:21,080 --> 00:20:27,350
+socket for this particular packet so
+
+00:20:25,670 --> 00:20:28,370
+what one aspect of this is so if you if
+
+00:20:27,350 --> 00:20:31,040
+you look at the way that kubernetes
+
+00:20:28,370 --> 00:20:32,270
+configures networking typically what
+
+00:20:31,040 --> 00:20:34,010
+you'll have is you'll have the host name
+
+00:20:32,270 --> 00:20:35,540
+space within that namespace you'll have
+
+00:20:34,010 --> 00:20:39,170
+a network name space like holder pod
+
+00:20:35,540 --> 00:20:41,809
+this shares the network name spacing
+
+00:20:39,170 --> 00:20:45,530
+between multiple containers so if you
+
+00:20:41,809 --> 00:20:47,210
+wanted to implement some sort of socket
+
+00:20:45,530 --> 00:20:50,030
+introspection logic in the host name
+
+00:20:47,210 --> 00:20:53,360
+space then you want to be able to figure
+
+00:20:50,030 --> 00:20:55,670
+out what what sockets are associated
+
+00:20:53,360 --> 00:20:58,070
+with applications running inside of a
+
+00:20:55,670 --> 00:20:59,270
+separate network namespace so we need
+
+00:20:58,070 --> 00:21:03,640
+some sort of network namespace
+
+00:20:59,270 --> 00:21:06,350
+identifier arbitrary socket lookup so
+
+00:21:03,640 --> 00:21:08,570
+while it's true that you could just
+
+00:21:06,350 --> 00:21:10,850
+allow the socket to be looked up for
+
+00:21:08,570 --> 00:21:14,000
+this particular packet it's far more
+
+00:21:10,850 --> 00:21:17,570
+flexible and useful for the BPF
+
+00:21:14,000 --> 00:21:21,740
+developer to be able to pass this tuple
+
+00:21:17,570 --> 00:21:25,160
+explicitly to the lookup function so one
+
+00:21:21,740 --> 00:21:26,630
+reason is if you built in this
+
+00:21:25,160 --> 00:21:30,050
+assumption that it's got the sk buff
+
+00:21:26,630 --> 00:21:33,980
+then I can get this metadata easily then
+
+00:21:30,050 --> 00:21:35,630
+when you try to plug the same helper
+
+00:21:33,980 --> 00:21:38,630
+function into the xdp side well you no
+
+00:21:35,630 --> 00:21:41,600
+longer have the sk buff so it's going to
+
+00:21:38,630 --> 00:21:45,320
+be much easier to write BPF programs
+
+00:21:41,600 --> 00:21:49,730
+that will work at either of the like cos
+
+00:21:45,320 --> 00:21:53,390
+act or xdp hook points if if they can
+
+00:21:49,730 --> 00:21:54,710
+have a consistent signature and then
+
+00:21:53,390 --> 00:21:56,090
+another one is like if you do any kind
+
+00:21:54,710 --> 00:21:57,080
+of network address translation that kind
+
+00:21:56,090 --> 00:21:59,960
+of thing
+
+00:21:57,080 --> 00:22:01,940
+then it will be nice to be able to put
+
+00:21:59,960 --> 00:22:03,770
+that logic we want it to be inside of
+
+00:22:01,940 --> 00:22:06,920
+your be PF program rather than forcing
+
+00:22:03,770 --> 00:22:08,840
+you to apply packet translation onto the
+
+00:22:06,920 --> 00:22:10,400
+buffer and then pass that buffer into
+
+00:22:08,840 --> 00:22:15,080
+your helper so that you can look up the
+
+00:22:10,400 --> 00:22:16,490
+appropriate socket so there's a few
+
+00:22:15,080 --> 00:22:18,080
+notes on extensibility so there was a
+
+00:22:16,490 --> 00:22:19,730
+bit of discussion on the west about it's
+
+00:22:18,080 --> 00:22:21,860
+a reuse port
+
+00:22:19,730 --> 00:22:23,480
+and which socket you would actually find
+
+00:22:21,860 --> 00:22:26,090
+when you do this lookup
+
+00:22:23,480 --> 00:22:27,410
+so if multiple applications have socket
+
+00:22:26,090 --> 00:22:29,330
+its corresponding to the same five tuple
+
+00:22:27,410 --> 00:22:31,310
+you actually have multiple sockets there
+
+00:22:29,330 --> 00:22:32,690
+so there may be some I don't have a
+
+00:22:31,310 --> 00:22:36,160
+specific use case but there may be some
+
+00:22:32,690 --> 00:22:39,140
+use case in future for allowing
+
+00:22:36,160 --> 00:22:41,240
+configuration of how or influencing
+
+00:22:39,140 --> 00:22:44,300
+which socket will actually be found by
+
+00:22:41,240 --> 00:22:48,260
+this lookup function and another aspects
+
+00:22:44,300 --> 00:22:51,050
+aspect to extensibility is determining
+
+00:22:48,260 --> 00:22:53,510
+socket type support at low time so
+
+00:22:51,050 --> 00:22:55,850
+ideally when you insert your BPF program
+
+00:22:53,510 --> 00:22:58,040
+into the kernel you can tell what the
+
+00:22:55,850 --> 00:23:00,050
+support of some particular function is
+
+00:22:58,040 --> 00:23:03,200
+going to be at that time rather than
+
+00:23:00,050 --> 00:23:04,490
+just successfully loading this BPF
+
+00:23:03,200 --> 00:23:04,970
+program into the kernel and find out
+
+00:23:04,490 --> 00:23:07,220
+later on
+
+00:23:04,970 --> 00:23:11,300
+oh I don't support UDP or I don't
+
+00:23:07,220 --> 00:23:14,600
+support HTTP so the idea behind this is
+
+00:23:11,300 --> 00:23:16,490
+we can form the API such that if the
+
+00:23:14,600 --> 00:23:18,590
+socket type is supported for what we're
+
+00:23:16,490 --> 00:23:20,360
+trying to look up then we will load the
+
+00:23:18,590 --> 00:23:22,070
+program if the socket type is not
+
+00:23:20,360 --> 00:23:23,570
+supported then we'll reject that program
+
+00:23:22,070 --> 00:23:28,820
+so that makes it far more explicit for
+
+00:23:23,570 --> 00:23:31,790
+developers so a couple of optimizations
+
+00:23:28,820 --> 00:23:34,100
+so I mentioned earlier that for some
+
+00:23:31,790 --> 00:23:36,560
+socket types the releases the socket the
+
+00:23:34,100 --> 00:23:40,090
+free of the socket is ICU deferred so in
+
+00:23:36,560 --> 00:23:43,040
+those cases we can actually while we
+
+00:23:40,090 --> 00:23:45,470
+provide the constraint to BPF developers
+
+00:23:43,040 --> 00:23:47,120
+that they must balance these look up and
+
+00:23:45,470 --> 00:23:48,590
+release functions in the actual
+
+00:23:47,120 --> 00:23:50,060
+implementation behind the scenes we
+
+00:23:48,590 --> 00:23:52,040
+don't need to take that reference we can
+
+00:23:50,060 --> 00:23:54,020
+guarantee that for the lifetime of the
+
+00:23:52,040 --> 00:23:57,560
+execution of the DPF program that it's
+
+00:23:54,020 --> 00:23:59,150
+running under ops you and so that socket
+
+00:23:57,560 --> 00:24:02,150
+will be available for the duration of
+
+00:23:59,150 --> 00:24:04,250
+the execution of the program so that
+
+00:24:02,150 --> 00:24:10,670
+that saves us a little bit of a couple
+
+00:24:04,250 --> 00:24:13,550
+Atomics another one we we did was to
+
+00:24:10,670 --> 00:24:16,880
+allow the lookup using Pecha pointers so
+
+00:24:13,550 --> 00:24:19,580
+rather than forcing vpf developers to
+
+00:24:16,880 --> 00:24:20,870
+extract the tuple from the packet onto
+
+00:24:19,580 --> 00:24:23,570
+the stack and you pass the pointer from
+
+00:24:20,870 --> 00:24:25,220
+the stack into this lookup helper
+
+00:24:23,570 --> 00:24:27,470
+instead you can just find the
+
+00:24:25,220 --> 00:24:29,000
+appropriate index into your packet and
+
+00:24:27,470 --> 00:24:32,030
+just pass that point it directly to
+
+00:24:29,000 --> 00:24:33,350
+lookup function now this only works if
+
+00:24:32,030 --> 00:24:35,299
+your
+
+00:24:33,350 --> 00:24:36,919
+it's are particularly formed where you
+
+00:24:35,299 --> 00:24:39,080
+have the IP addresses right next to your
+
+00:24:36,919 --> 00:24:40,520
+reports so if you've got you know IP
+
+00:24:39,080 --> 00:24:42,470
+fragmentation anything like that then
+
+00:24:40,520 --> 00:24:43,820
+it's not going to work for that case so
+
+00:24:42,470 --> 00:24:47,900
+that logic would need to be built into
+
+00:24:43,820 --> 00:24:49,700
+your NGO PPF program so this is what we
+
+00:24:47,900 --> 00:24:52,030
+ended up with so I've got different
+
+00:24:49,700 --> 00:24:54,350
+lookup helpers for tea speeding UDP
+
+00:24:52,030 --> 00:24:56,200
+regardless of which of those you use you
+
+00:24:54,350 --> 00:25:00,110
+need to pass such as a release function
+
+00:24:56,200 --> 00:25:01,309
+the context needs to be passed in as the
+
+00:25:00,110 --> 00:25:02,570
+first parameter so that will defer
+
+00:25:01,309 --> 00:25:06,470
+depending on whether you're running it
+
+00:25:02,570 --> 00:25:08,120
+cos act or at HTTP you can see the
+
+00:25:06,470 --> 00:25:10,220
+explicit tuple there we've got a tuple
+
+00:25:08,120 --> 00:25:11,720
+size which I'll touch on in a moment
+
+00:25:10,220 --> 00:25:14,299
+and without the snare nation in the
+
+00:25:11,720 --> 00:25:15,860
+flags allows us to potentially extend
+
+00:25:14,299 --> 00:25:19,490
+this in future so right now we will
+
+00:25:15,860 --> 00:25:22,490
+reject any applications which attempts
+
+00:25:19,490 --> 00:25:24,620
+to use non zero flags so again this is
+
+00:25:22,490 --> 00:25:27,140
+this kind of reject what we don't
+
+00:25:24,620 --> 00:25:31,669
+support and then in future we can lose
+
+00:25:27,140 --> 00:25:33,770
+loosen these restrictions so looking at
+
+00:25:31,669 --> 00:25:37,549
+the tuple that you pass in it's a full
+
+00:25:33,770 --> 00:25:40,730
+tuple so protocol is explicitly part of
+
+00:25:37,549 --> 00:25:43,340
+the the functions name you can see here
+
+00:25:40,730 --> 00:25:45,110
+we've got ipv4 and ipv6 so to determine
+
+00:25:43,340 --> 00:25:49,370
+whether you should look up a v4 v6
+
+00:25:45,110 --> 00:25:51,500
+socket we infer this based on the tuple
+
+00:25:49,370 --> 00:25:56,000
+size that you pass in so if you pass in
+
+00:25:51,500 --> 00:25:59,299
+size of 2.84 then we'll do a ipv4 lookup
+
+00:25:56,000 --> 00:26:04,039
+if you pass in size of tuple to ipv6
+
+00:25:59,299 --> 00:26:06,289
+we'll do an ipv6 socket lookup here's a
+
+00:26:04,039 --> 00:26:08,240
+brief look at what's available for the
+
+00:26:06,289 --> 00:26:11,480
+socket so from your BPA program here's
+
+00:26:08,240 --> 00:26:13,010
+what you can access today I presume that
+
+00:26:11,480 --> 00:26:15,289
+this will be extended in future there's
+
+00:26:13,010 --> 00:26:17,330
+definitely some other interesting pieces
+
+00:26:15,289 --> 00:26:20,110
+that we want to be able to look at from
+
+00:26:17,330 --> 00:26:20,110
+a BPF program
+
+00:26:23,980 --> 00:26:29,370
+so finally so this is another use case
+
+00:26:26,289 --> 00:26:32,710
+for this so I've mainly focused on
+
+00:26:29,370 --> 00:26:34,299
+stateful firewall in kind of cases but
+
+00:26:32,710 --> 00:26:37,059
+there's another one where there are
+
+00:26:34,299 --> 00:26:38,559
+vendors which will provide a box which
+
+00:26:37,059 --> 00:26:40,419
+is running Linux
+
+00:26:38,559 --> 00:26:44,230
+they will take packets into the software
+
+00:26:40,419 --> 00:26:46,330
+and then maybe they're running BGP or a
+
+00:26:44,230 --> 00:26:48,850
+CMP or various other protocols on the
+
+00:26:46,330 --> 00:26:50,409
+management CPU there and they want to be
+
+00:26:48,850 --> 00:26:53,919
+able to determine when you receive
+
+00:26:50,409 --> 00:26:56,830
+packets is this packet corresponding to
+
+00:26:53,919 --> 00:26:58,870
+the control connection that I have for
+
+00:26:56,830 --> 00:27:01,570
+an application running on my my system
+
+00:26:58,870 --> 00:27:03,279
+so if it is BGP or whatever you can pass
+
+00:27:01,570 --> 00:27:04,929
+it on the stack if it's not then you
+
+00:27:03,279 --> 00:27:06,760
+jump over to the logic which performs
+
+00:27:04,929 --> 00:27:10,149
+your forwarding routing you know
+
+00:27:06,760 --> 00:27:12,610
+whatever the function view device is so
+
+00:27:10,149 --> 00:27:14,770
+the socket look up from HTTP that was
+
+00:27:12,610 --> 00:27:18,270
+motioned to be PF next just recently so
+
+00:27:14,770 --> 00:27:22,860
+this use case is now supported as well
+
+00:27:18,270 --> 00:27:25,240
+briefly a little bit on future work so
+
+00:27:22,860 --> 00:27:28,059
+it'd be nice to be able to gain access
+
+00:27:25,240 --> 00:27:30,909
+to more socket attributes so one of the
+
+00:27:28,059 --> 00:27:33,130
+things might be something like TCP State
+
+00:27:30,909 --> 00:27:34,720
+now how exactly we want to reflect that
+
+00:27:33,130 --> 00:27:35,799
+in the beep EFI API is a question
+
+00:27:34,720 --> 00:27:40,890
+whether you want to have some sort of
+
+00:27:35,799 --> 00:27:43,779
+generic you know this is in a uh applied
+
+00:27:40,890 --> 00:27:46,390
+kind of state or we've seen two-way
+
+00:27:43,779 --> 00:27:49,029
+traffic or so on or whether you want to
+
+00:27:46,390 --> 00:27:51,309
+get more granularity into like it's TCP
+
+00:27:49,029 --> 00:27:54,279
+time weight that kind of thing that's
+
+00:27:51,309 --> 00:27:55,779
+sort of an open question I'm sure some
+
+00:27:54,279 --> 00:27:57,279
+of you would be able to suggest some
+
+00:27:55,779 --> 00:27:58,659
+other attributes that we may want to
+
+00:27:57,279 --> 00:28:00,220
+access but we do need to think about how
+
+00:27:58,659 --> 00:28:02,260
+to do this in a sensible way so that
+
+00:28:00,220 --> 00:28:06,279
+we're not just exposing everything and
+
+00:28:02,260 --> 00:28:10,299
+making things difficult for us there's
+
+00:28:06,279 --> 00:28:12,100
+one point which so for the ancient
+
+00:28:10,299 --> 00:28:16,390
+racking map that I referred to much
+
+00:28:12,100 --> 00:28:17,320
+earlier I talked about the different
+
+00:28:16,390 --> 00:28:19,149
+things you might want to put in the
+
+00:28:17,320 --> 00:28:21,429
+value for the for the connection
+
+00:28:19,149 --> 00:28:23,350
+tracking entry so there's kind of an
+
+00:28:21,429 --> 00:28:24,880
+analogue here as well where we may want
+
+00:28:23,350 --> 00:28:27,190
+to associate some metadata with the
+
+00:28:24,880 --> 00:28:29,620
+socket and exactly how we do this is a
+
+00:28:27,190 --> 00:28:31,270
+sort of an open question right now what
+
+00:28:29,620 --> 00:28:33,220
+we can do is we can say okay we'll just
+
+00:28:31,270 --> 00:28:34,510
+put a BPF map we'll index by the five to
+
+00:28:33,220 --> 00:28:35,590
+four and then we can store whatever
+
+00:28:34,510 --> 00:28:37,720
+information we
+
+00:28:35,590 --> 00:28:39,790
+but then again we've got this problem
+
+00:28:37,720 --> 00:28:41,320
+where we are now sizing we now have to
+
+00:28:39,790 --> 00:28:43,600
+figure out the size of this map and so
+
+00:28:41,320 --> 00:28:45,100
+on and so the the sort of benefit of
+
+00:28:43,600 --> 00:28:46,510
+being able to tie directly to what
+
+00:28:45,100 --> 00:28:49,600
+sockets are actually existing on the
+
+00:28:46,510 --> 00:28:51,370
+system or not is you know we've lost
+
+00:28:49,600 --> 00:28:53,590
+that benefit so it'd be nice to be able
+
+00:28:51,370 --> 00:28:58,710
+to for instance maybe ahead of time you
+
+00:28:53,590 --> 00:29:01,090
+would say I want 64 bytes of metadata
+
+00:28:58,710 --> 00:29:02,920
+whenever I do a socket lookup well maybe
+
+00:29:01,090 --> 00:29:04,960
+we have a new helper this is like giving
+
+00:29:02,920 --> 00:29:07,900
+me the scratch buffer associated with a
+
+00:29:04,960 --> 00:29:11,320
+socket then we can put something in
+
+00:29:07,900 --> 00:29:12,850
+there and then maybe we can store our
+
+00:29:11,320 --> 00:29:15,790
+counters or on that state or whatever
+
+00:29:12,850 --> 00:29:17,800
+else we want in there and then the other
+
+00:29:15,790 --> 00:29:22,290
+thing that so this reference tracking
+
+00:29:17,800 --> 00:29:25,870
+fortunately it's written in a very I
+
+00:29:22,290 --> 00:29:28,420
+guess generic kind of a way so this is
+
+00:29:25,870 --> 00:29:30,580
+quite separate from the socket handling
+
+00:29:28,420 --> 00:29:32,500
+logic so what this will allow us to do
+
+00:29:30,580 --> 00:29:35,740
+is build things like locking primitives
+
+00:29:32,500 --> 00:29:39,670
+and so on on top of that reference
+
+00:29:35,740 --> 00:29:40,120
+tracking implementation so that's all
+
+00:29:39,670 --> 00:29:47,980
+I've got
+
+00:29:40,120 --> 00:29:50,650
+thank you okay we have about five
+
+00:29:47,980 --> 00:29:54,660
+minutes for questions if anyone has any
+
+00:29:50,650 --> 00:29:58,270
+questions for Joe's work ask them now
+
+00:29:54,660 --> 00:29:59,500
+nobody okay
+
+00:29:58,270 --> 00:30:01,980
+thank you very much Joe for your
+
+00:29:59,500 --> 00:30:01,980
+presentation
+
+00:30:02,720 --> 00:30:07,660
+
+YouTube URL: https://www.youtube.com/watch?v=KpcSbnJz33o
+
+

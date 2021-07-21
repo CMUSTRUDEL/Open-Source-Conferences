@@ -1,0 +1,2477 @@
+Title: [2017] Failing Migrations: How & Why by Dr. David Alan Gilbert
+Publication date: 2017-11-10
+Playlist: KVM Forum 2017
+Description: 
+	Failing migrations: How & Why (David Gilbert, Red Hat) - Despite our best efforts, QEMU migrations sometimes fail. This talk will describe some of the types of failures we see, their causes and how device emulation developers can help ensure successful migrations in production. Hints on debugging failed migrations will be included as well as what information should be provided to help making troubleshooting easy.
+
+---
+
+Dr. David Alan Gilbert
+Red Hat, Inc.
+Principal Software Engineer
+Manchester, UK
+
+I'm a Principal Software Engineer for Red Hat, based in Manchester, UK. I work in the migration sub-team. My main tasks are looking after Postcopy migration and ensuring migration compatibility between our QEMU versions. I previously spoke (with Andrea Arcangeli) at KVM Forum 2014 on the implementation of postcopy.
+Captions: 
+	00:00:00,390 --> 00:00:02,709
+[Music]
+
+00:00:05,839 --> 00:00:14,759
+good morning hello I'm Dave Gilbert and
+
+00:00:11,010 --> 00:00:20,279
+I work for Red Hat in the migration sub
+
+00:00:14,759 --> 00:00:23,369
+team of Clem you team and most of the
+
+00:00:20,279 --> 00:00:27,029
+talks tell you about great new things
+
+00:00:23,369 --> 00:00:31,439
+that work great and how everything just
+
+00:00:27,029 --> 00:00:37,230
+works I'm going to tell you about why
+
+00:00:31,439 --> 00:00:39,899
+migrations fail but first I'd like to
+
+00:00:37,230 --> 00:00:43,800
+emphasize actually they don't fail very
+
+00:00:39,899 --> 00:00:46,530
+often for those of us who work on them
+
+00:00:43,800 --> 00:00:49,260
+day to day and spend our lives fixing
+
+00:00:46,530 --> 00:00:52,079
+migration books you think they fail all
+
+00:00:49,260 --> 00:00:53,760
+the time but actually when you go out
+
+00:00:52,079 --> 00:00:59,250
+and speak to people they say well
+
+00:00:53,760 --> 00:01:01,350
+actually he works and if you do hit
+
+00:00:59,250 --> 00:01:05,369
+problems we've now got a troubleshooting
+
+00:01:01,350 --> 00:01:07,549
+page on the qmu wiki to help you work
+
+00:01:05,369 --> 00:01:09,900
+through some of the more common errors
+
+00:01:07,549 --> 00:01:13,890
+and if you hit one that isn't there
+
+00:01:09,900 --> 00:01:17,280
+please let us know so we can add it so
+
+00:01:13,890 --> 00:01:21,420
+that's great the the work that's got to
+
+00:01:17,280 --> 00:01:24,000
+be good the downside is that now people
+
+00:01:21,420 --> 00:01:28,200
+know that they work people expect them
+
+00:01:24,000 --> 00:01:30,780
+to work every time so what used to
+
+00:01:28,200 --> 00:01:32,579
+happen is that people would carefully
+
+00:01:30,780 --> 00:01:34,079
+plan migrations they would tell
+
+00:01:32,579 --> 00:01:37,350
+everybody that there was going to be a
+
+00:01:34,079 --> 00:01:39,689
+migration that they better make sure
+
+00:01:37,350 --> 00:01:42,420
+they weren't doing anything too critical
+
+00:01:39,689 --> 00:01:46,140
+did plan it at a weekend and it'd all be
+
+00:01:42,420 --> 00:01:50,970
+very carefully planned but now it's
+
+00:01:46,140 --> 00:01:53,670
+fully automated your large clouds bounce
+
+00:01:50,970 --> 00:01:56,369
+vm's around as if you didn't know what
+
+00:01:53,670 --> 00:01:58,770
+was happening the admins of the cloud
+
+00:01:56,369 --> 00:02:03,360
+don't even know what the VMS are running
+
+00:01:58,770 --> 00:02:06,930
+while the migrating them automatic load
+
+00:02:03,360 --> 00:02:11,819
+balancing and host evacuations are very
+
+00:02:06,930 --> 00:02:13,600
+common but we still need those
+
+00:02:11,819 --> 00:02:15,640
+migrations to work even
+
+00:02:13,600 --> 00:02:18,040
+if the guest is rebooting or in the
+
+00:02:15,640 --> 00:02:20,530
+middle of an installation or even if the
+
+00:02:18,040 --> 00:02:22,750
+guests had already crashed because the
+
+00:02:20,530 --> 00:02:25,450
+admin of the clown doesn't know that
+
+00:02:22,750 --> 00:02:27,580
+about their VMs but they just want to
+
+00:02:25,450 --> 00:02:30,250
+all of the VMS to move off this host
+
+00:02:27,580 --> 00:02:32,770
+that is on fire or that they need to
+
+00:02:30,250 --> 00:02:37,090
+replace the power supply on or they need
+
+00:02:32,770 --> 00:02:39,190
+to shut down so let's start with some
+
+00:02:37,090 --> 00:02:42,910
+basic expectations that we can rely on
+
+00:02:39,190 --> 00:02:45,490
+for migrations we need a good TCP socket
+
+00:02:42,910 --> 00:02:47,230
+connection between our hosts we need
+
+00:02:45,490 --> 00:02:49,990
+working hosts that aren't otherwise
+
+00:02:47,230 --> 00:02:52,510
+failing and when there's problems we
+
+00:02:49,990 --> 00:02:55,650
+want some accurate error reports those
+
+00:02:52,510 --> 00:02:59,970
+are reasonable basic expectations of
+
+00:02:55,650 --> 00:03:03,910
+course they were all completely wrong
+
+00:02:59,970 --> 00:03:06,730
+one of the books I had last year was bad
+
+00:03:03,910 --> 00:03:08,440
+NIC driver that just randomly lost more
+
+00:03:06,730 --> 00:03:13,240
+than 1/2 Meg out in the middle of the
+
+00:03:08,440 --> 00:03:17,260
+migration stream you find bug reports
+
+00:03:13,240 --> 00:03:20,290
+that hit on migrations that are MCS on
+
+00:03:17,260 --> 00:03:23,830
+the host but storage broken shared
+
+00:03:20,290 --> 00:03:27,540
+storage all sorts of broken host
+
+00:03:23,830 --> 00:03:29,770
+configurations and for some reason
+
+00:03:27,540 --> 00:03:35,110
+migrations are really good at finding
+
+00:03:29,770 --> 00:03:39,250
+kernel bugs you also tend to get very
+
+00:03:35,110 --> 00:03:41,620
+varied every reporting so you'll get
+
+00:03:39,250 --> 00:03:44,620
+stories about how the migrations failed
+
+00:03:41,620 --> 00:03:46,450
+for this person and only after a week of
+
+00:03:44,620 --> 00:03:48,520
+debugging did they admit to the fact
+
+00:03:46,450 --> 00:03:52,200
+that it was on a weird nested set up on
+
+00:03:48,520 --> 00:03:52,200
+the machine that only just about works
+
+00:03:52,890 --> 00:03:59,740
+so the most common type of migration
+
+00:03:55,480 --> 00:04:02,230
+failure is a timeout and this comes from
+
+00:03:59,740 --> 00:04:06,100
+a fundamental difference of the
+
+00:04:02,230 --> 00:04:11,230
+bandwidth we've got to deal with roughly
+
+00:04:06,100 --> 00:04:13,840
+taking your modern Xeon to memory you've
+
+00:04:11,230 --> 00:04:17,859
+got about a hundred gigabyte per second
+
+00:04:13,840 --> 00:04:20,620
+of memory bandwidth by the time you get
+
+00:04:17,859 --> 00:04:23,560
+to your PCI bus you might have 15
+
+00:04:20,620 --> 00:04:25,780
+gigabyte on a good day and pretty much
+
+00:04:23,560 --> 00:04:27,200
+the fastest easin that you can get is
+
+00:04:25,780 --> 00:04:29,900
+about 100
+
+00:04:27,200 --> 00:04:33,500
+a bit so there's a factor of about eight
+
+00:04:29,900 --> 00:04:36,350
+there between the Rambam words from the
+
+00:04:33,500 --> 00:04:39,170
+CPU and the rate at which you can stuff
+
+00:04:36,350 --> 00:04:43,040
+a migration stream across the network
+
+00:04:39,170 --> 00:04:44,480
+even on a really good day the reality is
+
+00:04:43,040 --> 00:04:46,880
+it's much worse
+
+00:04:44,480 --> 00:04:49,580
+we can't saturate much more than a ten
+
+00:04:46,880 --> 00:04:52,480
+gigabit link with the normal migration
+
+00:04:49,580 --> 00:04:56,770
+code you can with the audio may code and
+
+00:04:52,480 --> 00:05:00,310
+if the CPU writes a single byte in a
+
+00:04:56,770 --> 00:05:04,040
+page then you send the whole page across
+
+00:05:00,310 --> 00:05:06,740
+again so the reality once you're also
+
+00:05:04,040 --> 00:05:09,620
+sharing network bandwidth is you might
+
+00:05:06,740 --> 00:05:11,150
+only have a hundred so a thousandth of
+
+00:05:09,620 --> 00:05:15,410
+the bandwidth you can write to memory
+
+00:05:11,150 --> 00:05:20,320
+words to move the migration stream so a
+
+00:05:15,410 --> 00:05:20,320
+busy VM just times out the migration
+
+00:05:20,480 --> 00:05:26,840
+similarly rapidshare disk writes can
+
+00:05:22,970 --> 00:05:29,570
+have similar problems we've added
+
+00:05:26,840 --> 00:05:32,690
+recently mechanisms to help you in those
+
+00:05:29,570 --> 00:05:38,480
+situations post copy migration copes
+
+00:05:32,690 --> 00:05:41,390
+with very busy VMs and auto converge is
+
+00:05:38,480 --> 00:05:45,590
+a mechanism that throttles the CPU usage
+
+00:05:41,390 --> 00:05:47,720
+of the VM on the hope that it'll write
+
+00:05:45,590 --> 00:05:51,350
+to ram less and less to enable the
+
+00:05:47,720 --> 00:05:54,350
+migration to complete one thing to be
+
+00:05:51,350 --> 00:05:56,750
+careful of in management layers is to
+
+00:05:54,350 --> 00:05:59,840
+make sure that if your migration fails
+
+00:05:56,750 --> 00:06:03,050
+by a timeout or anything else the you
+
+00:05:59,840 --> 00:06:07,370
+clean up for example any shared
+
+00:06:03,050 --> 00:06:10,430
+networking goes back to the source house
+
+00:06:07,370 --> 00:06:12,560
+now that the migration has failed we've
+
+00:06:10,430 --> 00:06:16,250
+had problems in the past where
+
+00:06:12,560 --> 00:06:18,230
+migrations fail but then network
+
+00:06:16,250 --> 00:06:19,850
+configurations and things still think
+
+00:06:18,230 --> 00:06:22,660
+they want to move over to the
+
+00:06:19,850 --> 00:06:22,660
+destination
+
+00:06:22,810 --> 00:06:28,910
+so before we go any further it's useful
+
+00:06:26,300 --> 00:06:32,150
+to talk about the way our migration
+
+00:06:28,910 --> 00:06:34,840
+stream is structured and there's not a
+
+00:06:32,150 --> 00:06:37,430
+vast amount of structure in there
+
+00:06:34,840 --> 00:06:41,090
+there's a simple header that says hey
+
+00:06:37,430 --> 00:06:42,919
+were the migration stream he's got some
+
+00:06:41,090 --> 00:06:46,520
+version information and machine type
+
+00:06:42,919 --> 00:06:49,729
+information and now and then we've got a
+
+00:06:46,520 --> 00:06:53,990
+series of what we call sections and each
+
+00:06:49,729 --> 00:06:57,220
+section has a header which says hey I'm
+
+00:06:53,990 --> 00:07:01,669
+Brahm or hey I'm this device or whatever
+
+00:06:57,220 --> 00:07:06,460
+and the data within that section and
+
+00:07:01,669 --> 00:07:10,190
+then a marker at the end the footer and
+
+00:07:06,460 --> 00:07:13,100
+what we have is some devices or what we
+
+00:07:10,190 --> 00:07:16,160
+call iterative so Ram is iterative where
+
+00:07:13,100 --> 00:07:17,810
+we send the data for the RAM and we keep
+
+00:07:16,160 --> 00:07:21,350
+sending the data over and over again
+
+00:07:17,810 --> 00:07:25,190
+until it converges most of the devices
+
+00:07:21,350 --> 00:07:27,710
+say an IDE controller just get sent in
+
+00:07:25,190 --> 00:07:30,200
+one section at the end so each one of
+
+00:07:27,710 --> 00:07:33,710
+those sections would be saying IDE
+
+00:07:30,200 --> 00:07:38,750
+control though one disk or each one
+
+00:07:33,710 --> 00:07:42,199
+would have its own section and those
+
+00:07:38,750 --> 00:07:43,840
+sections are named by typically the PCI
+
+00:07:42,199 --> 00:07:50,780
+device ID
+
+00:07:43,840 --> 00:07:54,020
+so the PCI number one of the critical
+
+00:07:50,780 --> 00:07:56,479
+things to having a migration work is to
+
+00:07:54,020 --> 00:07:59,570
+get your source and destination qmu is
+
+00:07:56,479 --> 00:08:02,570
+configured absolutely identically you're
+
+00:07:59,570 --> 00:08:05,539
+sucking the state out of one emulation
+
+00:08:02,570 --> 00:08:08,419
+and stuffing it into a destination and
+
+00:08:05,539 --> 00:08:10,700
+unless they match exactly you're either
+
+00:08:08,419 --> 00:08:13,490
+going to have some state that doesn't
+
+00:08:10,700 --> 00:08:17,270
+know where to go or some state you've
+
+00:08:13,490 --> 00:08:19,280
+not provided or even worse you can have
+
+00:08:17,270 --> 00:08:22,310
+some state that thinks that it's the
+
+00:08:19,280 --> 00:08:24,530
+state for one piece of information but
+
+00:08:22,310 --> 00:08:30,260
+goes into a hole for something entirely
+
+00:08:24,530 --> 00:08:34,219
+unrelated one of the critical parts to
+
+00:08:30,260 --> 00:08:39,409
+it is our machine types and in QM you on
+
+00:08:34,219 --> 00:08:43,339
+at least x86 I think arm power and I
+
+00:08:39,409 --> 00:08:49,160
+think s/390 now we have version machine
+
+00:08:43,339 --> 00:08:53,060
+types so you will have your PC 2.10
+
+00:08:49,160 --> 00:08:55,380
+machine type for i4 40 FX and you'll
+
+00:08:53,060 --> 00:08:57,660
+have a 2.9 machines
+
+00:08:55,380 --> 00:09:00,930
+and what that means is if we need to
+
+00:08:57,660 --> 00:09:04,500
+make a change in how a device simulation
+
+00:09:00,930 --> 00:09:07,290
+works or the migration data you can tie
+
+00:09:04,500 --> 00:09:10,260
+that change to a particular new machine
+
+00:09:07,290 --> 00:09:13,380
+type that means that an incoming
+
+00:09:10,260 --> 00:09:15,060
+migration stream from a 2.9 QM you
+
+00:09:13,380 --> 00:09:18,690
+configured with the two-point-nine
+
+00:09:15,060 --> 00:09:22,140
+machine type could be correctly read by
+
+00:09:18,690 --> 00:09:27,450
+a 2.10 QM you configured with the same
+
+00:09:22,140 --> 00:09:29,730
+two-point-nine machine type if we get it
+
+00:09:27,450 --> 00:09:32,400
+right that is it's very easy to screw
+
+00:09:29,730 --> 00:09:34,740
+that up and add a new field incorrectly
+
+00:09:32,400 --> 00:09:40,410
+that it gets added to all of the machine
+
+00:09:34,740 --> 00:09:43,910
+types and their scripts Amit has a
+
+00:09:40,410 --> 00:09:49,200
+script that helps look for changes in
+
+00:09:43,910 --> 00:09:52,170
+the migration data but it's very
+
+00:09:49,200 --> 00:09:55,170
+interesting when you miss this so if you
+
+00:09:52,170 --> 00:09:58,050
+are they filled in somewhere and you
+
+00:09:55,170 --> 00:10:00,750
+don't notice it at the 2.10 release say
+
+00:09:58,050 --> 00:10:04,140
+you come along and try and fix it into
+
+00:10:00,750 --> 00:10:06,660
+point 11 but find you in the state now
+
+00:10:04,140 --> 00:10:11,010
+that if you fix it you might now accept
+
+00:10:06,660 --> 00:10:14,190
+a migration from 2.10 but breaking
+
+00:10:11,010 --> 00:10:16,740
+migration from two point nine so it's
+
+00:10:14,190 --> 00:10:22,110
+very difficult if you don't find it soon
+
+00:10:16,740 --> 00:10:26,070
+enough another critical issue is device
+
+00:10:22,110 --> 00:10:29,130
+addressing the nor during QM use command
+
+00:10:26,070 --> 00:10:31,620
+line ordering is in no way guaranteed so
+
+00:10:29,130 --> 00:10:34,910
+if you create three disks or three USB
+
+00:10:31,620 --> 00:10:37,470
+devices which devices they get assigned
+
+00:10:34,910 --> 00:10:39,630
+which numbers they get assigned unless
+
+00:10:37,470 --> 00:10:42,510
+you explicitly state it is not
+
+00:10:39,630 --> 00:10:47,970
+guaranteed and that's especially true
+
+00:10:42,510 --> 00:10:53,340
+with hot-plug that's great fun if you
+
+00:10:47,970 --> 00:10:55,830
+have say two USB storage devices and you
+
+00:10:53,340 --> 00:10:59,730
+migrate them to a destination where the
+
+00:10:55,830 --> 00:11:01,920
+destination qmu has associated those two
+
+00:10:59,730 --> 00:11:04,530
+USB devices with the opposite address
+
+00:11:01,920 --> 00:11:09,170
+and the guest suddenly is accessing the
+
+00:11:04,530 --> 00:11:09,170
+wrong disk for the same data
+
+00:11:09,790 --> 00:11:17,000
+one final one on this case is padding of
+
+00:11:13,790 --> 00:11:19,240
+roms so let's say we take our BIOS and
+
+00:11:17,000 --> 00:11:22,250
+let's say that you configured your
+
+00:11:19,240 --> 00:11:27,170
+configured to built your C BIOS and it
+
+00:11:22,250 --> 00:11:30,830
+comes out as a 64 K warm image in your
+
+00:11:27,170 --> 00:11:32,990
+next build in your next release you add
+
+00:11:30,830 --> 00:11:37,060
+something you fix something minor and
+
+00:11:32,990 --> 00:11:42,740
+you'll see BIOS comes out at let's say
+
+00:11:37,060 --> 00:11:45,170
+68 K one image what you now have a
+
+00:11:42,740 --> 00:11:50,120
+problem that if you try and migrate a
+
+00:11:45,170 --> 00:11:54,290
+68k ROM image into a 64 K hole you it
+
+00:11:50,120 --> 00:11:57,430
+doesn't fit so one of the things we do
+
+00:11:54,290 --> 00:12:00,950
+downstream in Red Hat is we pad our roms
+
+00:11:57,430 --> 00:12:03,350
+so we've had I think generally to the
+
+00:12:00,950 --> 00:12:12,770
+next power of two which gives us plenty
+
+00:12:03,350 --> 00:12:16,850
+of room for growth finally on matching
+
+00:12:12,770 --> 00:12:20,180
+source of destination getting a matching
+
+00:12:16,850 --> 00:12:23,740
+source and destination CPU definition is
+
+00:12:20,180 --> 00:12:27,830
+critical and that's actually quite hard
+
+00:12:23,740 --> 00:12:31,220
+if you know that you say have a sundy
+
+00:12:27,830 --> 00:12:35,540
+Bridge CPU you could say - CPU Sandy
+
+00:12:31,220 --> 00:12:37,190
+Bridge and all's good except that
+
+00:12:35,540 --> 00:12:38,420
+actually there are now lots of
+
+00:12:37,190 --> 00:12:43,160
+variations
+
+00:12:38,420 --> 00:12:45,890
+so there are server variants of CPUs and
+
+00:12:43,160 --> 00:12:50,180
+a few different server ones with
+
+00:12:45,890 --> 00:12:53,750
+different flags available so that no
+
+00:12:50,180 --> 00:12:56,540
+single name can cover them all and there
+
+00:12:53,750 --> 00:12:59,240
+are other things that are less obvious
+
+00:12:56,540 --> 00:13:03,170
+for example if you have a machine
+
+00:12:59,240 --> 00:13:05,300
+configured with hyper-threading the
+
+00:13:03,170 --> 00:13:09,680
+number of performance counters available
+
+00:13:05,300 --> 00:13:12,200
+pervert your call is half of that that
+
+00:13:09,680 --> 00:13:15,110
+you have on a system that's configured
+
+00:13:12,200 --> 00:13:16,850
+without hyper threading and so if you
+
+00:13:15,110 --> 00:13:19,010
+try and migrate between them
+
+00:13:16,850 --> 00:13:20,240
+you get a mismatch because the number of
+
+00:13:19,010 --> 00:13:22,370
+performance counters does
+
+00:13:20,240 --> 00:13:28,600
+match if you've enabled performance
+
+00:13:22,370 --> 00:13:32,089
+counters in new emulation you also get
+
+00:13:28,600 --> 00:13:34,970
+new generations of CPUs that we move a
+
+00:13:32,089 --> 00:13:37,750
+feature so for example you might think
+
+00:13:34,970 --> 00:13:43,310
+that a conservative thing to do is
+
+00:13:37,750 --> 00:13:45,050
+choose the older CPU in your clout so
+
+00:13:43,310 --> 00:13:48,950
+let's say you've got cloud you bring a
+
+00:13:45,050 --> 00:13:52,959
+new new latest generation CPU into your
+
+00:13:48,950 --> 00:13:56,149
+cloud and you've stuck with an old one
+
+00:13:52,959 --> 00:13:59,990
+occasionally CPU vendors will remove an
+
+00:13:56,149 --> 00:14:03,190
+obscure feature but we can't then enable
+
+00:13:59,990 --> 00:14:05,899
+you to run with asking for that feature
+
+00:14:03,190 --> 00:14:10,300
+because when the guest starts trying to
+
+00:14:05,899 --> 00:14:10,300
+access that register its non-existent
+
+00:14:10,779 --> 00:14:19,430
+and what happens when you come along and
+
+00:14:15,440 --> 00:14:22,279
+put in the last latest greatest CPU into
+
+00:14:19,430 --> 00:14:27,110
+your cloud which is newer than qmu knows
+
+00:14:22,279 --> 00:14:30,470
+about which one do you pick and that can
+
+00:14:27,110 --> 00:14:34,220
+be quite a difficult question to solve
+
+00:14:30,470 --> 00:14:36,350
+so generally ignoring some of what I
+
+00:14:34,220 --> 00:14:39,220
+said the best thing to do is to pick a
+
+00:14:36,350 --> 00:14:44,029
+CPU type that Chrome you knows about
+
+00:14:39,220 --> 00:14:48,560
+that is compatible with all of the CPUs
+
+00:14:44,029 --> 00:14:50,240
+in your set of hardware and at some
+
+00:14:48,560 --> 00:14:59,450
+point you have to jump forward if you
+
+00:14:50,240 --> 00:15:02,060
+want your new features now one of the
+
+00:14:59,450 --> 00:15:04,459
+cases of other cases of failing
+
+00:15:02,060 --> 00:15:08,839
+migration other than mismatches in
+
+00:15:04,459 --> 00:15:11,209
+configuration is failures that occur
+
+00:15:08,839 --> 00:15:14,510
+while serializing or deserializing
+
+00:15:11,209 --> 00:15:17,029
+device date so if you think about what
+
+00:15:14,510 --> 00:15:21,560
+we're doing we have the serialization
+
+00:15:17,029 --> 00:15:24,350
+deserialization and the code that's in
+
+00:15:21,560 --> 00:15:28,550
+individual devices tends to do some
+
+00:15:24,350 --> 00:15:32,510
+checks and these checks that occur tend
+
+00:15:28,550 --> 00:15:35,920
+to be more substantial than the checks
+
+00:15:32,510 --> 00:15:35,920
+that you do while you're normally
+
+00:15:36,139 --> 00:15:43,639
+if you do a check during an outgoing
+
+00:15:40,790 --> 00:15:46,779
+migration and you realize your device
+
+00:15:43,639 --> 00:15:49,670
+state is inconsistent what do you do
+
+00:15:46,779 --> 00:15:52,940
+well some device drivers their device
+
+00:15:49,670 --> 00:15:55,850
+emulations are bought at that point now
+
+00:15:52,940 --> 00:15:59,110
+if you were bought the emulation people
+
+00:15:55,850 --> 00:16:03,649
+go oh my god the migration killed the VN
+
+00:15:59,110 --> 00:16:08,779
+because the VM has died and all they did
+
+00:16:03,649 --> 00:16:10,819
+was try migrator but you have found an
+
+00:16:08,779 --> 00:16:15,470
+inconsistency in your device state so
+
+00:16:10,819 --> 00:16:19,699
+what do you do if you do a check on the
+
+00:16:15,470 --> 00:16:22,880
+incoming side that's a bit safer in this
+
+00:16:19,699 --> 00:16:27,079
+in the case that what happens there is
+
+00:16:22,880 --> 00:16:31,399
+that the destination VM doesn't run but
+
+00:16:27,079 --> 00:16:34,160
+at least the migration fails cleanly the
+
+00:16:31,399 --> 00:16:37,370
+sauce VM is still running so at least
+
+00:16:34,160 --> 00:16:39,319
+the user still has their running VM with
+
+00:16:37,370 --> 00:16:44,360
+whatever critical workload they have on
+
+00:16:39,319 --> 00:16:47,630
+it even if they can't migrate my ideal
+
+00:16:44,360 --> 00:16:49,910
+scenario is I prefer that you don't fail
+
+00:16:47,630 --> 00:16:52,670
+the migration even if your device state
+
+00:16:49,910 --> 00:16:54,949
+is inconsistent I prefer that you just
+
+00:16:52,670 --> 00:16:58,130
+over your device I know there's people
+
+00:16:54,949 --> 00:16:59,569
+who hate that idea but that's that's my
+
+00:16:58,130 --> 00:17:02,560
+preference because I never liked
+
+00:16:59,569 --> 00:17:02,560
+migrations to fail
+
+00:17:02,960 --> 00:17:06,119
+[Music]
+
+00:17:09,099 --> 00:17:15,589
+one of the critical things is problems
+
+00:17:12,619 --> 00:17:19,970
+of failing migration due to what the
+
+00:17:15,589 --> 00:17:22,249
+guest has done so there's effectively
+
+00:17:19,970 --> 00:17:25,759
+two types of checks that can be done
+
+00:17:22,249 --> 00:17:28,220
+during serialization of a device one of
+
+00:17:25,759 --> 00:17:31,159
+them is on your internal state within
+
+00:17:28,220 --> 00:17:33,739
+your emulation and the other one is to
+
+00:17:31,159 --> 00:17:37,159
+do with what the guest has programmed
+
+00:17:33,739 --> 00:17:43,220
+your device to do one of the things you
+
+00:17:37,159 --> 00:17:46,820
+can find is that the guest can have miss
+
+00:17:43,220 --> 00:17:50,139
+programmed your device and during the
+
+00:17:46,820 --> 00:17:53,179
+serialization you throw that as an error
+
+00:17:50,139 --> 00:17:55,820
+but that's the guests fault and you
+
+00:17:53,179 --> 00:17:59,450
+shouldn't stop the cloud admin migrating
+
+00:17:55,820 --> 00:18:01,789
+that guest to another host even if their
+
+00:17:59,450 --> 00:18:06,859
+guest is kind of screwy because of the
+
+00:18:01,789 --> 00:18:10,639
+device driver in it and sometimes these
+
+00:18:06,859 --> 00:18:13,989
+types of checks trigger erroneously due
+
+00:18:10,639 --> 00:18:19,330
+to the time that performed for example
+
+00:18:13,989 --> 00:18:21,849
+if I migrate during boot up of a guest
+
+00:18:19,330 --> 00:18:25,820
+while it's doing the most basic
+
+00:18:21,849 --> 00:18:27,950
+initialization of your device will the
+
+00:18:25,820 --> 00:18:32,809
+device state be consistent enough to
+
+00:18:27,950 --> 00:18:37,070
+pass your checks what about if I migrate
+
+00:18:32,809 --> 00:18:40,039
+during the BIOS or perhaps if I migrate
+
+00:18:37,070 --> 00:18:44,479
+from the installation disk of the OS
+
+00:18:40,039 --> 00:18:46,849
+which has a different driver on it all
+
+00:18:44,479 --> 00:18:49,489
+of these things come back to us as a
+
+00:18:46,849 --> 00:18:52,399
+migration failure and then it takes
+
+00:18:49,489 --> 00:18:54,229
+quite a bit of digging to find that for
+
+00:18:52,399 --> 00:18:59,210
+example there was a new device driver
+
+00:18:54,229 --> 00:19:04,340
+just released onto the guest OS and now
+
+00:18:59,210 --> 00:19:06,590
+all the migrations are failing however
+
+00:19:04,340 --> 00:19:08,929
+whenever you find any of these things in
+
+00:19:06,590 --> 00:19:11,989
+your serialization please use every
+
+00:19:08,929 --> 00:19:14,599
+report I'd like to be able to see in the
+
+00:19:11,989 --> 00:19:17,089
+standard error logs something that says
+
+00:19:14,599 --> 00:19:20,299
+this device is broken because this is
+
+00:19:17,089 --> 00:19:21,410
+wrong that way when I see a migration
+
+00:19:20,299 --> 00:19:23,390
+failure
+
+00:19:21,410 --> 00:19:33,530
+on a particular device I can immediately
+
+00:19:23,390 --> 00:19:35,270
+see why that device failed one tricky
+
+00:19:33,530 --> 00:19:38,660
+issue is what to do with conditional
+
+00:19:35,270 --> 00:19:42,830
+State now what I mean by conditional
+
+00:19:38,660 --> 00:19:45,230
+state is data that is part of your
+
+00:19:42,830 --> 00:19:48,830
+device state that you don't always need
+
+00:19:45,230 --> 00:19:54,650
+to include and there was effectively two
+
+00:19:48,830 --> 00:19:58,580
+types of reason for this happening one
+
+00:19:54,650 --> 00:20:00,830
+of them is a piece of state that only
+
+00:19:58,580 --> 00:20:02,990
+happens in some rare configuration of a
+
+00:20:00,830 --> 00:20:08,690
+device
+
+00:20:02,990 --> 00:20:11,360
+another type of thing is where you
+
+00:20:08,690 --> 00:20:14,750
+realized that you forgot to migrate some
+
+00:20:11,360 --> 00:20:19,180
+state so that in the next version next
+
+00:20:14,750 --> 00:20:19,180
+machine type you add the extra state in
+
+00:20:20,020 --> 00:20:27,020
+now there are two ways of doing this and
+
+00:20:24,110 --> 00:20:30,620
+I'm assuming you're using the VM state
+
+00:20:27,020 --> 00:20:33,530
+macros one of them is you can make a
+
+00:20:30,620 --> 00:20:35,930
+conditional field so in this case what
+
+00:20:33,530 --> 00:20:39,650
+we're talking about is a 16-bit integer
+
+00:20:35,930 --> 00:20:41,750
+and we're saying that that 16-bit state
+
+00:20:39,650 --> 00:20:45,040
+will only be stored into the migration
+
+00:20:41,750 --> 00:20:47,920
+stream if ball funk returns true and
+
+00:20:45,040 --> 00:20:50,360
+that function could be is help
+
+00:20:47,920 --> 00:20:52,550
+hair-raising lis complicated as you like
+
+00:20:50,360 --> 00:20:56,600
+looking at lots of different bits of
+
+00:20:52,550 --> 00:21:00,710
+state but it's very delicate
+
+00:20:56,600 --> 00:21:05,240
+if your destination ball from doesn't
+
+00:21:00,710 --> 00:21:09,200
+agree we read 16 bits of data off the
+
+00:21:05,240 --> 00:21:12,290
+stream when we shouldn't have and those
+
+00:21:09,200 --> 00:21:14,930
+two bytes suddenly land up in the next
+
+00:21:12,290 --> 00:21:16,690
+field along and it all gets horribly out
+
+00:21:14,930 --> 00:21:20,170
+of sync
+
+00:21:16,690 --> 00:21:23,000
+hopefully the section footer is
+
+00:21:20,170 --> 00:21:24,920
+inconsistent and you'll fail cleanly it
+
+00:21:23,000 --> 00:21:27,920
+didn't used to it used to just carry on
+
+00:21:24,920 --> 00:21:33,590
+and if you're unlucky you just get a
+
+00:21:27,920 --> 00:21:34,970
+dead guest so ideally try and avoid
+
+00:21:33,590 --> 00:21:39,400
+conditional
+
+00:21:34,970 --> 00:21:39,400
+data fields like that done that way
+
+00:21:40,330 --> 00:21:49,929
+because the alternative is subsections
+
+00:21:44,740 --> 00:21:55,429
+now subsections are a named section
+
+00:21:49,929 --> 00:21:57,530
+within the device and just like the
+
+00:21:55,429 --> 00:21:59,390
+named fields you can make them
+
+00:21:57,530 --> 00:22:01,460
+conditional on anything you like you can
+
+00:21:59,390 --> 00:22:05,179
+make them conditional on the machine
+
+00:22:01,460 --> 00:22:09,860
+type a property of the device the state
+
+00:22:05,179 --> 00:22:11,539
+of the device whatever but the nice
+
+00:22:09,860 --> 00:22:18,679
+thing about them is because they were
+
+00:22:11,539 --> 00:22:20,990
+named structured edition if you are
+
+00:22:18,679 --> 00:22:23,600
+inconsistent with the check you get a
+
+00:22:20,990 --> 00:22:28,039
+nice error telling you that that
+
+00:22:23,600 --> 00:22:33,500
+subsection wasn't expected and it all
+
+00:22:28,039 --> 00:22:35,570
+fails quite cleanly you still have to be
+
+00:22:33,500 --> 00:22:40,970
+careful that if you want to maintain
+
+00:22:35,570 --> 00:22:43,280
+backwards migration capability you never
+
+00:22:40,970 --> 00:22:53,590
+send that subsection for the old machine
+
+00:22:43,280 --> 00:22:56,120
+type now what about testing your devices
+
+00:22:53,590 --> 00:22:59,210
+well all of these conditionals and
+
+00:22:56,120 --> 00:23:02,419
+subsections increase the test load quite
+
+00:22:59,210 --> 00:23:05,450
+a lot it means you now have to check
+
+00:23:02,419 --> 00:23:08,980
+that your migrations work when these
+
+00:23:05,450 --> 00:23:12,080
+subsections are present or missing
+
+00:23:08,980 --> 00:23:14,390
+you've got to check in odd States that
+
+00:23:12,080 --> 00:23:17,720
+you might not have thought about like an
+
+00:23:14,390 --> 00:23:22,299
+ejected cd-rom or a keyboard with a full
+
+00:23:17,720 --> 00:23:27,130
+import FIFO I say during migration
+
+00:23:22,299 --> 00:23:31,450
+during firmware or during a reboot
+
+00:23:27,130 --> 00:23:34,669
+during a screen mode change for example
+
+00:23:31,450 --> 00:23:36,380
+and the OS install the disk had to have
+
+00:23:34,669 --> 00:23:44,480
+simpler drivers on that a more
+
+00:23:36,380 --> 00:23:47,840
+conservative similarly if you migrate of
+
+00:23:44,480 --> 00:23:48,850
+the air the destination VM runs with the
+
+00:23:47,840 --> 00:23:54,030
+sea BIOS
+
+00:23:48,850 --> 00:23:59,440
+vmf image that was running on the source
+
+00:23:54,030 --> 00:24:02,950
+host even if you reboot the guest on the
+
+00:23:59,440 --> 00:24:05,910
+destination host it's still using the
+
+00:24:02,950 --> 00:24:09,670
+wrong image that it got from the source
+
+00:24:05,910 --> 00:24:14,110
+so what that means is that you have to
+
+00:24:09,670 --> 00:24:16,750
+test your QM you using your older ones
+
+00:24:14,110 --> 00:24:20,830
+as well as your current ROM so if you
+
+00:24:16,750 --> 00:24:24,520
+make a release with a Q mu and this
+
+00:24:20,830 --> 00:24:27,040
+particular c bios and you test them
+
+00:24:24,520 --> 00:24:29,560
+together that's all great but you've
+
+00:24:27,040 --> 00:24:33,280
+still got to test that if you migrate in
+
+00:24:29,560 --> 00:24:36,100
+words from an old guest that had an old
+
+00:24:33,280 --> 00:24:39,220
+c bios image enabled that that still
+
+00:24:36,100 --> 00:24:44,070
+works because maybe your new device
+
+00:24:39,220 --> 00:24:44,070
+model doesn't work with the old c bios
+
+00:24:44,400 --> 00:24:49,330
+critically you can never assume that
+
+00:24:46,750 --> 00:24:51,820
+you've tested all your OS versions
+
+00:24:49,330 --> 00:24:54,460
+you see people come along and say well I
+
+00:24:51,820 --> 00:24:56,620
+tested on Windows version this and
+
+00:24:54,460 --> 00:25:00,510
+Windows version that and I tested on
+
+00:24:56,620 --> 00:25:03,430
+three different versions of Linux and
+
+00:25:00,510 --> 00:25:05,620
+always a week after that happens
+
+00:25:03,430 --> 00:25:08,560
+somebody comes along with the other
+
+00:25:05,620 --> 00:25:10,330
+version of Windows or the other version
+
+00:25:08,560 --> 00:25:12,280
+of Windows that people thought was the
+
+00:25:10,330 --> 00:25:15,160
+same version of Windows except that it's
+
+00:25:12,280 --> 00:25:23,200
+the one they got via that moved or had
+
+00:25:15,160 --> 00:25:26,350
+an update or whatever one specific thing
+
+00:25:23,200 --> 00:25:31,740
+to look out for is migration of PCI
+
+00:25:26,350 --> 00:25:34,810
+config data PCI devices have a block of
+
+00:25:31,740 --> 00:25:39,070
+config data that contains all different
+
+00:25:34,810 --> 00:25:41,740
+sorts of information all things to do
+
+00:25:39,070 --> 00:25:45,130
+with PCI Express set up into up set up
+
+00:25:41,740 --> 00:25:47,950
+loads of different things and basically
+
+00:25:45,130 --> 00:25:52,330
+that config data has to match on the
+
+00:25:47,950 --> 00:25:55,030
+destination such that you think that
+
+00:25:52,330 --> 00:25:57,310
+your PCI device is configured in the
+
+00:25:55,030 --> 00:26:01,060
+same way as you specified it on the
+
+00:25:57,310 --> 00:26:02,559
+command line if they mismatch for some
+
+00:26:01,060 --> 00:26:08,049
+reason you'll get an error like
+
+00:26:02,559 --> 00:26:11,649
+that not telling you that but xxx within
+
+00:26:08,049 --> 00:26:14,169
+the config is mismatched and they're off
+
+00:26:11,649 --> 00:26:19,480
+masks to say whether particular bits
+
+00:26:14,169 --> 00:26:22,690
+were allowed to match or not typically
+
+00:26:19,480 --> 00:26:26,440
+what happens is that somebody fixes a
+
+00:26:22,690 --> 00:26:29,799
+PCI device because they realize they
+
+00:26:26,440 --> 00:26:32,649
+missed a feature out in that pci model
+
+00:26:29,799 --> 00:26:35,230
+you add that new feature it updates a
+
+00:26:32,649 --> 00:26:42,759
+capability flag and then when you try
+
+00:26:35,230 --> 00:26:46,840
+and migrated inwards it fails one thing
+
+00:26:42,759 --> 00:26:48,549
+again to look out for is some of that
+
+00:26:46,840 --> 00:26:53,289
+capability data is actually a linked
+
+00:26:48,549 --> 00:26:54,940
+list of capability blocks that list has
+
+00:26:53,289 --> 00:26:57,940
+to be in the same order
+
+00:26:54,940 --> 00:27:03,940
+you can't reorder it when you clean up a
+
+00:26:57,940 --> 00:27:07,869
+device for example and a really simple
+
+00:27:03,940 --> 00:27:10,539
+way to check is LS PCI - V in the guest
+
+00:27:07,869 --> 00:27:11,529
+should basically match between source
+
+00:27:10,539 --> 00:27:19,450
+and destination
+
+00:27:11,529 --> 00:27:22,299
+well source and a new version one book
+
+00:27:19,450 --> 00:27:25,149
+that one problem you often get is you're
+
+00:27:22,299 --> 00:27:27,309
+getting a pair of errors like this so
+
+00:27:25,149 --> 00:27:30,610
+the the top error is what you see on the
+
+00:27:27,309 --> 00:27:34,090
+destination saying I couldn't load it
+
+00:27:30,610 --> 00:27:36,249
+there was an error and you get the
+
+00:27:34,090 --> 00:27:39,070
+bottom error on the source which said I
+
+00:27:36,249 --> 00:27:43,330
+tried to write into my socket and I got
+
+00:27:39,070 --> 00:27:45,369
+an error so who broke well maybe it was
+
+00:27:43,330 --> 00:27:47,230
+the destination that failed maybe it was
+
+00:27:45,369 --> 00:27:50,110
+the source that failed maybe it was the
+
+00:27:47,230 --> 00:27:53,019
+network that was in between if the
+
+00:27:50,110 --> 00:27:54,970
+network goes away you'll say that you've
+
+00:27:53,019 --> 00:27:58,240
+totaled your migration stream through
+
+00:27:54,970 --> 00:28:00,879
+something then you'll get both of these
+
+00:27:58,240 --> 00:28:03,970
+errors at the same time and you won't be
+
+00:28:00,879 --> 00:28:06,820
+able to figure out what fails because
+
+00:28:03,970 --> 00:28:10,990
+neither the neither side of the QM use
+
+00:28:06,820 --> 00:28:15,220
+had the problem you can also get the top
+
+00:28:10,990 --> 00:28:16,909
+error if a device state loading say a
+
+00:28:15,220 --> 00:28:19,639
+disk migrate
+
+00:28:16,909 --> 00:28:22,669
+fails within a hour so that might not
+
+00:28:19,639 --> 00:28:27,590
+actually be a network migration stream
+
+00:28:22,669 --> 00:28:29,240
+ever but that can be quite tricky if you
+
+00:28:27,590 --> 00:28:32,330
+can't tell whether it was the source or
+
+00:28:29,240 --> 00:28:34,519
+the destination that failed first again
+
+00:28:32,330 --> 00:28:46,730
+that can happen if your device state
+
+00:28:34,519 --> 00:28:49,730
+verification breaks on both sides one
+
+00:28:46,730 --> 00:28:54,649
+tricky thing to get right is ordering
+
+00:28:49,730 --> 00:28:58,399
+and timing say that you're loading a
+
+00:28:54,649 --> 00:29:01,759
+state of a PCI device and you're also
+
+00:28:58,399 --> 00:29:05,269
+loading the state of a PCI bridge or an
+
+00:29:01,759 --> 00:29:10,009
+interrupt controller if the PCI device
+
+00:29:05,269 --> 00:29:12,950
+asserts an interrupt as it's migrated is
+
+00:29:10,009 --> 00:29:14,809
+the interrupt controller that is going
+
+00:29:12,950 --> 00:29:19,309
+to receive that interrupt ready to
+
+00:29:14,809 --> 00:29:22,070
+handle it and what that may require you
+
+00:29:19,309 --> 00:29:24,559
+to do is to ensure that the devices are
+
+00:29:22,070 --> 00:29:26,299
+migrated in a consistent order for
+
+00:29:24,559 --> 00:29:28,669
+example he might require that you're
+
+00:29:26,299 --> 00:29:31,509
+into a controller which migrated before
+
+00:29:28,669 --> 00:29:35,419
+any of your devices that generate
+
+00:29:31,509 --> 00:29:40,700
+interrupts to it and there's support for
+
+00:29:35,419 --> 00:29:44,299
+explicitly ordering the devices now most
+
+00:29:40,700 --> 00:29:47,419
+machine types actually get by due to
+
+00:29:44,299 --> 00:29:51,590
+implicit ordering and the order which
+
+00:29:47,419 --> 00:29:56,799
+devices are created this is scary and
+
+00:29:51,590 --> 00:29:56,799
+probably breaks when we least expect it
+
+00:29:57,279 --> 00:30:02,539
+the other order of good timing issue you
+
+00:30:00,169 --> 00:30:06,379
+get is what happens just after you've
+
+00:30:02,539 --> 00:30:09,649
+loaded the device for example loading
+
+00:30:06,379 --> 00:30:13,039
+the device the device might have an
+
+00:30:09,649 --> 00:30:16,070
+emulated timer in it when do you start
+
+00:30:13,039 --> 00:30:18,289
+that timer running well the answer is
+
+00:30:16,070 --> 00:30:22,190
+not immediately in the code that loads
+
+00:30:18,289 --> 00:30:24,619
+the device state because that timer
+
+00:30:22,190 --> 00:30:28,090
+might trigger before the migration is
+
+00:30:24,619 --> 00:30:28,090
+actually finished loading
+
+00:30:28,670 --> 00:30:35,990
+and you certainly shouldn't be a doing
+
+00:30:33,380 --> 00:30:39,740
+it using a physical time a host-based
+
+00:30:35,990 --> 00:30:41,990
+timer doing it based on virtual time
+
+00:30:39,740 --> 00:30:46,490
+works because it doesn't happen until
+
+00:30:41,990 --> 00:30:49,340
+the CPU starts running on the guest all
+
+00:30:46,490 --> 00:30:53,180
+the ways or you can wire will pay one
+
+00:30:49,340 --> 00:30:56,840
+state change handler so that you defer
+
+00:30:53,180 --> 00:31:09,070
+are starting your timers until the VM
+
+00:30:56,840 --> 00:31:09,070
+has started running also look out for
+
+00:31:09,610 --> 00:31:15,740
+that the management layers typically
+
+00:31:12,470 --> 00:31:18,470
+start the destination with - s and what
+
+00:31:15,740 --> 00:31:22,070
+- s does is that once the migration data
+
+00:31:18,470 --> 00:31:25,130
+is loaded QM you doesn't immediately
+
+00:31:22,070 --> 00:31:28,520
+start the guest running it gives libvirt
+
+00:31:25,130 --> 00:31:31,700
+a chance to reconfigure networking and
+
+00:31:28,520 --> 00:31:34,160
+storage so again that delays the point
+
+00:31:31,700 --> 00:31:36,740
+at which your device emulation actually
+
+00:31:34,160 --> 00:31:40,060
+starts execution and you have to be
+
+00:31:36,740 --> 00:31:42,290
+careful of device state and things that
+
+00:31:40,060 --> 00:31:47,450
+timers and things that happen in that
+
+00:31:42,290 --> 00:31:50,120
+gap and snapshots is the worst case
+
+00:31:47,450 --> 00:31:53,390
+because a snapshot is a migration that
+
+00:31:50,120 --> 00:32:01,100
+goes away for six months while it the VM
+
+00:31:53,390 --> 00:32:03,530
+image sits on the disk and briefly going
+
+00:32:01,100 --> 00:32:07,370
+to talk about storage I don't actually
+
+00:32:03,530 --> 00:32:09,170
+deal with storage migration much because
+
+00:32:07,370 --> 00:32:15,770
+it's quite separate from the core
+
+00:32:09,170 --> 00:32:19,730
+migration curve this is kind of the
+
+00:32:15,770 --> 00:32:22,250
+worst case is that you might have a
+
+00:32:19,730 --> 00:32:25,730
+shared disk that's connected to the
+
+00:32:22,250 --> 00:32:30,230
+source and destination house you can
+
+00:32:25,730 --> 00:32:32,030
+have non shared disks which are on the
+
+00:32:30,230 --> 00:32:36,290
+local filesystem of the source and
+
+00:32:32,030 --> 00:32:38,120
+destination host and the worst case
+
+00:32:36,290 --> 00:32:41,920
+actually is maybe you have a failed
+
+00:32:38,120 --> 00:32:43,420
+storage device as well
+
+00:32:41,920 --> 00:32:46,060
+that's an interesting problem maybe a
+
+00:32:43,420 --> 00:32:51,670
+full storage device or storage devices
+
+00:32:46,060 --> 00:32:54,340
+actually fails one thing that we've had
+
+00:32:51,670 --> 00:32:56,890
+problems with previously his management
+
+00:32:54,340 --> 00:33:01,510
+layers miss detecting whether a storage
+
+00:32:56,890 --> 00:33:04,690
+device is shared or non shared so for
+
+00:33:01,510 --> 00:33:07,290
+example if you think that a device is
+
+00:33:04,690 --> 00:33:09,970
+shared but it's actually not
+
+00:33:07,290 --> 00:33:14,200
+then you won't bother doing a block
+
+00:33:09,970 --> 00:33:16,960
+migration and when you start executing
+
+00:33:14,200 --> 00:33:19,600
+on the destination it starts reading
+
+00:33:16,960 --> 00:33:23,770
+data off a blank disk file because
+
+00:33:19,600 --> 00:33:26,080
+nobody bothered to migrate the data the
+
+00:33:23,770 --> 00:33:29,560
+opposite of that is actually worse and
+
+00:33:26,080 --> 00:33:34,990
+the opposite is the case where you think
+
+00:33:29,560 --> 00:33:37,120
+that your disk is a non shared so what
+
+00:33:34,990 --> 00:33:39,880
+you do is you start migrating your disk
+
+00:33:37,120 --> 00:33:42,700
+contents to the destination but you've
+
+00:33:39,880 --> 00:33:45,100
+actually shared the disk image as so you
+
+00:33:42,700 --> 00:33:47,830
+overwrite the disk image which is shared
+
+00:33:45,100 --> 00:33:49,990
+by the data form itself going over the
+
+00:33:47,830 --> 00:33:53,640
+migration stream and you end up with a
+
+00:33:49,990 --> 00:33:53,640
+hopelessly corrupt disk
+
+00:33:56,310 --> 00:34:03,610
+that's basically what I said there are
+
+00:34:00,490 --> 00:34:06,280
+some especially with shared discs
+
+00:34:03,610 --> 00:34:09,990
+getting the permissions and locking
+
+00:34:06,280 --> 00:34:13,750
+right on the shared this is tricky
+
+00:34:09,990 --> 00:34:17,400
+because during migration you've got to
+
+00:34:13,750 --> 00:34:21,669
+hand off who's actually owning that disk
+
+00:34:17,400 --> 00:34:27,400
+and in recent QM use there's some
+
+00:34:21,669 --> 00:34:30,130
+explicit locking code in there but other
+
+00:34:27,400 --> 00:34:32,860
+than that you have to be careful of some
+
+00:34:30,130 --> 00:34:35,050
+storage devices just don't like having a
+
+00:34:32,860 --> 00:34:37,679
+source and destination accessing the
+
+00:34:35,050 --> 00:34:37,679
+same device
+
+00:34:43,420 --> 00:34:50,930
+one other issue with storage devices is
+
+00:34:47,030 --> 00:34:54,140
+that at the end of the migration on the
+
+00:34:50,930 --> 00:34:57,320
+source you have to drain all of any
+
+00:34:54,140 --> 00:35:00,470
+outstanding rights have to be pushed out
+
+00:34:57,320 --> 00:35:02,930
+to the storage device and if you have a
+
+00:35:00,470 --> 00:35:07,070
+guest that's heavily performing storage
+
+00:35:02,930 --> 00:35:09,290
+wise that last piece of writing can
+
+00:35:07,070 --> 00:35:13,160
+delay the end of migration and increase
+
+00:35:09,290 --> 00:35:21,350
+the downtime substantially that's quite
+
+00:35:13,160 --> 00:35:26,090
+tricky to fix one way is to is to just
+
+00:35:21,350 --> 00:35:28,220
+throttle the right bandwidth but the
+
+00:35:26,090 --> 00:35:31,730
+worst case of this is actually if at
+
+00:35:28,220 --> 00:35:36,950
+that point your disk fails and you're
+
+00:35:31,730 --> 00:35:41,140
+left trying to write out your blocks
+
+00:35:36,950 --> 00:35:41,140
+before you migrate where you can't
+
+00:35:41,230 --> 00:35:49,520
+there's a complex interaction with the
+
+00:35:44,900 --> 00:35:53,270
+NBD based block migration which actually
+
+00:35:49,520 --> 00:35:56,900
+we've just as of two days ago changed
+
+00:35:53,270 --> 00:36:00,620
+that to allow the management layer to
+
+00:35:56,900 --> 00:36:05,420
+pause the main migration code and allow
+
+00:36:00,620 --> 00:36:08,780
+it to tear down any blocked migration
+
+00:36:05,420 --> 00:36:15,890
+using NBD before allowing the migration
+
+00:36:08,780 --> 00:36:18,950
+to finish there's also the old in qmu
+
+00:36:15,890 --> 00:36:24,860
+block migration code please don't use it
+
+00:36:18,950 --> 00:36:28,880
+use the new NBD stuff and finally on
+
+00:36:24,860 --> 00:36:35,060
+storage disk caching if your source is
+
+00:36:28,880 --> 00:36:37,370
+caching storage data and you migrate to
+
+00:36:35,060 --> 00:36:40,490
+the destination and you have white data
+
+00:36:37,370 --> 00:36:43,550
+that hasn't actually made it to the
+
+00:36:40,490 --> 00:36:47,330
+shared storage and you stopped running
+
+00:36:43,550 --> 00:36:50,060
+on your destination before that white
+
+00:36:47,330 --> 00:36:53,090
+data was made it again you end up with
+
+00:36:50,060 --> 00:36:55,990
+something that's inconsistent typically
+
+00:36:53,090 --> 00:36:59,250
+for posited storage we say you must you
+
+00:36:55,990 --> 00:37:03,550
+cash equals non on your storage devices
+
+00:36:59,250 --> 00:37:05,560
+for other storage eg Seth it depends on
+
+00:37:03,550 --> 00:37:07,630
+the particular library you're using as
+
+00:37:05,560 --> 00:37:14,500
+to which cash equals option you need to
+
+00:37:07,630 --> 00:37:16,750
+use so my final two slides are not an
+
+00:37:14,500 --> 00:37:22,930
+important question is did the migration
+
+00:37:16,750 --> 00:37:24,580
+actually work well it's normally most of
+
+00:37:22,930 --> 00:37:26,980
+the failures are fairly obvious you get
+
+00:37:24,580 --> 00:37:33,430
+an i/o error and well it definitely
+
+00:37:26,980 --> 00:37:36,940
+didn't work however that check to see
+
+00:37:33,430 --> 00:37:39,580
+whether a migration has worked used to
+
+00:37:36,940 --> 00:37:43,480
+be fragile because all it used to depend
+
+00:37:39,580 --> 00:37:46,450
+on was getting the TCP socket closed and
+
+00:37:43,480 --> 00:37:49,090
+if we got the TCP socket closed on the
+
+00:37:46,450 --> 00:37:53,590
+my gracious dream the source said yep
+
+00:37:49,090 --> 00:37:56,920
+that's good however that's quite fragile
+
+00:37:53,590 --> 00:38:01,090
+in terms of if your device state loads
+
+00:37:56,920 --> 00:38:04,290
+if your device state loading fails that
+
+00:38:01,090 --> 00:38:07,720
+device state can be in the last 4k block
+
+00:38:04,290 --> 00:38:09,790
+that's in transit on the network and you
+
+00:38:07,720 --> 00:38:12,540
+get a race condition about whether or
+
+00:38:09,790 --> 00:38:18,460
+not both side agree it fails
+
+00:38:12,540 --> 00:38:21,760
+Peter recently added an explicit check
+
+00:38:18,460 --> 00:38:23,980
+ID used to return path even in pre copy
+
+00:38:21,760 --> 00:38:30,070
+so we now at least get something that
+
+00:38:23,980 --> 00:38:33,400
+says hey world you can get failures of
+
+00:38:30,070 --> 00:38:35,830
+networking or storage in the gap between
+
+00:38:33,400 --> 00:38:40,240
+the point at which the migration stream
+
+00:38:35,830 --> 00:38:42,880
+finished and live starting the
+
+00:38:40,240 --> 00:38:45,010
+destination so if your network you
+
+00:38:42,880 --> 00:38:47,710
+failed at that point or you failed to
+
+00:38:45,010 --> 00:38:52,240
+reconfigure a switch or a sound you have
+
+00:38:47,710 --> 00:38:54,609
+a problem and the hardest problems to
+
+00:38:52,240 --> 00:38:56,740
+deal with or when the migration has
+
+00:38:54,609 --> 00:39:00,760
+apparently all worked but the guest is
+
+00:38:56,740 --> 00:39:05,609
+just dead those are really nasty to
+
+00:39:00,760 --> 00:39:07,990
+debug typical causes missing interrupts
+
+00:39:05,609 --> 00:39:09,300
+timers that don't agree in either
+
+00:39:07,990 --> 00:39:13,150
+direction
+
+00:39:09,300 --> 00:39:16,540
+or corrupt ramen storage those that's
+
+00:39:13,150 --> 00:39:21,190
+the worst case for debugging and this is
+
+00:39:16,540 --> 00:39:23,170
+my final slide so okay you migrated the
+
+00:39:21,190 --> 00:39:24,610
+guest is still working are you sure
+
+00:39:23,170 --> 00:39:29,730
+everything's okay
+
+00:39:24,610 --> 00:39:32,860
+well is the guest really okay after
+
+00:39:29,730 --> 00:39:36,760
+migration what happens if you reboot
+
+00:39:32,860 --> 00:39:38,980
+after you migrated that will cause you
+
+00:39:36,760 --> 00:39:41,950
+to take different paths through your
+
+00:39:38,980 --> 00:39:45,460
+device code and again it will cause you
+
+00:39:41,950 --> 00:39:50,650
+to use your old firmware version on your
+
+00:39:45,460 --> 00:39:54,010
+new destination qmu you can get old down
+
+00:39:50,650 --> 00:39:56,470
+times so again the migration has
+
+00:39:54,010 --> 00:39:59,380
+apparently worked but networking
+
+00:39:56,470 --> 00:40:01,360
+disappeared for five minutes
+
+00:39:59,380 --> 00:40:03,850
+you didn't get any errors but people
+
+00:40:01,360 --> 00:40:06,060
+said the guest doesn't respond so you
+
+00:40:03,850 --> 00:40:08,890
+know checking the the grow-op
+
+00:40:06,060 --> 00:40:12,460
+advertisements for networking works is
+
+00:40:08,890 --> 00:40:15,160
+it a good case of that similarly post
+
+00:40:12,460 --> 00:40:17,320
+copy if it never actually gets the
+
+00:40:15,160 --> 00:40:23,140
+request back to the source it will
+
+00:40:17,320 --> 00:40:25,270
+complete just very slowly is the
+
+00:40:23,140 --> 00:40:28,720
+performance on the destination the same
+
+00:40:25,270 --> 00:40:30,520
+as the performance on the source did the
+
+00:40:28,720 --> 00:40:33,390
+transparent huge pay did we build
+
+00:40:30,520 --> 00:40:36,460
+correctly is your Numa placement correct
+
+00:40:33,390 --> 00:40:40,270
+and the world your disk caching correct
+
+00:40:36,460 --> 00:40:41,670
+on the destination and finally to wrap
+
+00:40:40,270 --> 00:40:46,300
+around to the beginning
+
+00:40:41,670 --> 00:40:48,490
+will it migrate a second time you know
+
+00:40:46,300 --> 00:40:50,710
+one of the common tests we have is what
+
+00:40:48,490 --> 00:40:52,960
+we call the ping pong where we just
+
+00:40:50,710 --> 00:40:55,480
+migrate it back and forward between two
+
+00:40:52,960 --> 00:40:57,880
+machines and just leave it going and if
+
+00:40:55,480 --> 00:41:04,380
+it survives over a weekend your
+
+00:40:57,880 --> 00:41:04,380
+migration probably works thank you
+
+00:41:07,390 --> 00:41:11,230
+any questions
+
+00:41:23,239 --> 00:41:30,359
+hello I have a question regarding your
+
+00:41:25,859 --> 00:41:33,119
+suggestion to use cat equals none this
+
+00:41:30,359 --> 00:41:34,969
+is just missing F data saying somewhere
+
+00:41:33,119 --> 00:41:40,229
+is this a fundamental issue that we
+
+00:41:34,969 --> 00:41:43,019
+cannot solve by putting proper barriers
+
+00:41:40,229 --> 00:41:48,900
+in the code somewhere my understanding
+
+00:41:43,019 --> 00:41:54,289
+is that with NFS there's no way to
+
+00:41:48,900 --> 00:41:58,199
+ensure that the all of your rights or
+
+00:41:54,289 --> 00:42:00,539
+synchronous on the source and do you get
+
+00:41:58,199 --> 00:42:03,269
+your then guaranteed to get them on the
+
+00:42:00,539 --> 00:42:07,170
+destination except with the cash equals
+
+00:42:03,269 --> 00:42:10,079
+non settled so that that's my
+
+00:42:07,170 --> 00:42:12,719
+understanding of that box I know that
+
+00:42:10,079 --> 00:42:16,079
+every time we ask this question we get a
+
+00:42:12,719 --> 00:42:17,940
+different opinion from someone and then
+
+00:42:16,079 --> 00:42:19,949
+we fall back to saying that the only one
+
+00:42:17,940 --> 00:42:28,109
+that everybody agrees is safe is cash
+
+00:42:19,949 --> 00:42:35,369
+equals not so yeah certainly
+
+00:42:28,109 --> 00:42:39,359
+the other case is the 7 like or more or
+
+00:42:35,369 --> 00:42:41,249
+the opposite case which is harder so as
+
+00:42:39,359 --> 00:42:44,759
+far as I know the real problem is not
+
+00:42:41,249 --> 00:42:48,299
+about the getting the data flashed on
+
+00:42:44,759 --> 00:42:50,969
+the source which we do f thing so that
+
+00:42:48,299 --> 00:42:54,779
+should be fine the real problem is that
+
+00:42:50,969 --> 00:42:57,509
+if we have on a source data already in a
+
+00:42:54,779 --> 00:42:59,059
+kernel page cache there's no safe and
+
+00:42:57,509 --> 00:43:01,949
+reliable way for us to invalidate
+
+00:42:59,059 --> 00:43:05,969
+invalidate that cache so that reloads
+
+00:43:01,949 --> 00:43:08,069
+the data that the source has synced so
+
+00:43:05,969 --> 00:43:10,559
+it can happen that the destination will
+
+00:43:08,069 --> 00:43:14,869
+still read stale data that it already
+
+00:43:10,559 --> 00:43:17,940
+had in its cache that's a real problem
+
+00:43:14,869 --> 00:43:19,799
+yeah I think one of the answers here is
+
+00:43:17,940 --> 00:43:21,949
+if the defend the kernel person who
+
+00:43:19,799 --> 00:43:26,299
+would like to give us that ability that
+
+00:43:21,949 --> 00:43:26,299
+that would probably help a lot
+
+00:43:34,570 --> 00:43:39,890
+nope there we go amazing yeah you had
+
+00:43:38,000 --> 00:43:42,890
+some really great suggestions about how
+
+00:43:39,890 --> 00:43:44,450
+to do things like subsections and what
+
+00:43:42,890 --> 00:43:47,030
+the right and wrong way to write device
+
+00:43:44,450 --> 00:43:48,470
+VM state structures is how would you
+
+00:43:47,030 --> 00:43:50,750
+feel about maybe writing some of those
+
+00:43:48,470 --> 00:43:53,780
+into a patch to Doc's devel migration
+
+00:43:50,750 --> 00:43:55,550
+dot text yeah yeah definitely
+
+00:43:53,780 --> 00:43:56,780
+I think with if we can write that down
+
+00:43:55,550 --> 00:43:58,430
+it will be much easier because then we
+
+00:43:56,780 --> 00:44:01,280
+can just point people and say look is
+
+00:43:58,430 --> 00:44:03,500
+how we suggest we do this great yeah I
+
+00:44:01,280 --> 00:44:05,750
+mean one of the difficulties so
+
+00:44:03,500 --> 00:44:08,329
+certainly pushing people to use
+
+00:44:05,750 --> 00:44:17,210
+subsections is something we've done for
+
+00:44:08,329 --> 00:44:19,460
+a while some of the other ones yeah they
+
+00:44:17,210 --> 00:44:21,609
+certainly have said best practices which
+
+00:44:19,460 --> 00:44:30,440
+should probably be written down in there
+
+00:44:21,609 --> 00:44:33,560
+definitely do you have any hints or
+
+00:44:30,440 --> 00:44:36,140
+tools for helping in debugging the cases
+
+00:44:33,560 --> 00:44:42,640
+when the guest things because of missed
+
+00:44:36,140 --> 00:44:46,640
+interrupt or something a good set of
+
+00:44:42,640 --> 00:44:49,940
+food to work with and some relaxation
+
+00:44:46,640 --> 00:44:55,849
+and something to keep you sane because
+
+00:44:49,940 --> 00:44:58,339
+there is really hard there's some the
+
+00:44:55,849 --> 00:45:01,540
+various cases for example we know
+
+00:44:58,339 --> 00:45:04,760
+Windows doesn't like a difference in
+
+00:45:01,540 --> 00:45:06,700
+timers so if your hosts clock is
+
+00:45:04,760 --> 00:45:10,030
+different on the source and destination
+
+00:45:06,700 --> 00:45:13,400
+that's a known case we know it breaks
+
+00:45:10,030 --> 00:45:15,230
+but missing interrupts you just have to
+
+00:45:13,400 --> 00:45:17,690
+follow the interrupt through and find
+
+00:45:15,230 --> 00:45:20,300
+out where it went but that's really
+
+00:45:17,690 --> 00:45:25,010
+difficult because it's so dynamic and
+
+00:45:20,300 --> 00:45:28,130
+you can't repeat the stage on every time
+
+00:45:25,010 --> 00:45:31,369
+you work a lot of these cases will fail
+
+00:45:28,130 --> 00:45:33,859
+as in a it fails about one in ten times
+
+00:45:31,369 --> 00:45:39,069
+type of things when it loses interrupts
+
+00:45:33,859 --> 00:45:41,880
+and those are really hard to deal with
+
+00:45:39,069 --> 00:45:46,290
+one of the things for corrupt men
+
+00:45:41,880 --> 00:45:49,950
+we contents I tend to migrate something
+
+00:45:46,290 --> 00:45:53,850
+like Google's stress out test which is
+
+00:45:49,950 --> 00:45:56,780
+really designed to test whether real
+
+00:45:53,850 --> 00:45:59,610
+physical hardware has broken ROM or
+
+00:45:56,780 --> 00:46:02,820
+broken hardware that's corrupting memory
+
+00:45:59,610 --> 00:46:05,280
+contents if that passes a new memory on
+
+00:46:02,820 --> 00:46:07,950
+the destination work comes out the same
+
+00:46:05,280 --> 00:46:14,700
+then you probably migrated the data
+
+00:46:07,950 --> 00:46:18,630
+correctly but yeah broken when it hangs
+
+00:46:14,700 --> 00:46:21,920
+like that that's just really hard the
+
+00:46:18,630 --> 00:46:25,710
+the best thing is to try and isolate if
+
+00:46:21,920 --> 00:46:28,680
+something changes it's like if I use a
+
+00:46:25,710 --> 00:46:30,660
+different network device or if I turn
+
+00:46:28,680 --> 00:46:33,270
+that feature on and off does the problem
+
+00:46:30,660 --> 00:46:37,560
+go away you know just to try and isolate
+
+00:46:33,270 --> 00:46:39,690
+into one case but often these things are
+
+00:46:37,560 --> 00:46:42,240
+the worst case of books you have because
+
+00:46:39,690 --> 00:46:44,550
+they may only happen on a particular
+
+00:46:42,240 --> 00:46:47,490
+machine with a particular speed of a
+
+00:46:44,550 --> 00:46:53,910
+particular configuration and that's the
+
+00:46:47,490 --> 00:46:55,670
+worst case migration books we get thank
+
+00:46:53,910 --> 00:46:58,190
+you very much
+
+00:46:55,670 --> 00:47:04,619
+[Applause]
+
+00:46:58,190 --> 00:47:04,619
+
+YouTube URL: https://www.youtube.com/watch?v=Ku8zgSeGjrM
+
+

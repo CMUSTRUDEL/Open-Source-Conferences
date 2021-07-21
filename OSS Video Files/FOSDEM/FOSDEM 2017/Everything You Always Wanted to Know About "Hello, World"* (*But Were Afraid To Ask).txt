@@ -1,0 +1,2282 @@
+Title: Everything You Always Wanted to Know About "Hello, World"* (*But Were Afraid To Ask)
+Publication date: 2018-03-06
+Playlist: FOSDEM 2017
+Description: 
+	by Brooks Davis
+
+At: FOSDEM 2017
+
+I've been working on a new system call ABI and the required runtime supportfor a C variant with spacial memory safety. Along the way I've encounteredlots of interesting bits and pieces required to implement a simple C "Hello,World" program. I found the process fascinating so this talk brings all thatknowledge together in one place.
+
+The first example in the classic "The C Programming Language" by Kernighan andRitchie is in fact a remarkably complete test of the C programming language.This talk provides a guided tour a slightly more complex program whereprintf() is called with multiple arguments. Along the way from the initialprocesses' call to exec() to the final _exit(), we'll tour the program loadingcode in the kernel and the dynamic linker, the basics of system callimplementation, the implementation of the memory allocator, and of courseprintf(). We'll also touch on localization and a little on threading support.Where appropriate, I'll discuss portions of the system that need changing toaccommodate memory safe versions of C like the version we are developing forour CHERI CPU.
+
+This talk will assume some knowledge of a language with C-like syntax (C, C++,Java, and PHP should all be fine).
+
+
+Room: Janson
+Scheduled start: 2017-02-04 14:00:00
+Captions: 
+	00:00:06,410 --> 00:00:11,910
+welcome your next speaker Alex Davis
+
+00:00:09,330 --> 00:00:14,940
+telling us everything you ever wanted to
+
+00:00:11,910 --> 00:00:19,100
+know about hello world
+
+00:00:14,940 --> 00:00:19,100
+[Applause]
+
+00:00:22,560 --> 00:00:29,980
+okay is that better am I on there oh
+
+00:00:28,960 --> 00:00:34,650
+there we are
+
+00:00:29,980 --> 00:00:34,650
+okay welcome thanks for coming
+
+00:00:37,860 --> 00:00:40,860
+sorry
+
+00:00:42,530 --> 00:00:49,200
+so okay so I'm here today to talk to you
+
+00:00:46,200 --> 00:00:51,680
+about HelloWorld the simplest little C
+
+00:00:49,200 --> 00:00:54,270
+program the first example in knr and
+
+00:00:51,680 --> 00:00:56,670
+explain a bit how we got to the point
+
+00:00:54,270 --> 00:00:59,760
+where the basic hello world is over a
+
+00:00:56,670 --> 00:01:02,070
+megabyte stripped on miss there's
+
+00:00:59,760 --> 00:01:04,949
+actually good reasons for this but it's
+
+00:01:02,070 --> 00:01:06,479
+a little unobvious but before I could
+
+00:01:04,949 --> 00:01:08,760
+dive into that I'm gonna give you a
+
+00:01:06,479 --> 00:01:10,260
+little introduction as to how I dug in
+
+00:01:08,760 --> 00:01:13,470
+you started digging into all this stuff
+
+00:01:10,260 --> 00:01:16,530
+so turned out I wanted to understand the
+
+00:01:13,470 --> 00:01:19,259
+process avi how processes start and the
+
+00:01:16,530 --> 00:01:21,720
+basics of the C runtime because I want
+
+00:01:19,259 --> 00:01:23,250
+to change all of it so I'm not really
+
+00:01:21,720 --> 00:01:24,810
+gonna talk about how I'm going to change
+
+00:01:23,250 --> 00:01:27,570
+it today very much I'll allude to some
+
+00:01:24,810 --> 00:01:29,399
+bits but the reason that I want to
+
+00:01:27,570 --> 00:01:32,009
+change it is that I'm part of a research
+
+00:01:29,399 --> 00:01:34,170
+project at SR I international in the
+
+00:01:32,009 --> 00:01:39,960
+University of Cambridge where we're
+
+00:01:34,170 --> 00:01:42,450
+developing extensions to CPU ISAs which
+
+00:01:39,960 --> 00:01:45,110
+give us the ability to make C compatible
+
+00:01:42,450 --> 00:01:50,369
+memory safety and enforce it in hardware
+
+00:01:45,110 --> 00:01:52,259
+so we can recompile C code and eliminate
+
+00:01:50,369 --> 00:01:55,440
+most buffer overflows pretty much out of
+
+00:01:52,259 --> 00:01:57,840
+the box with only some minor changes to
+
+00:01:55,440 --> 00:02:00,060
+runtimes and I had to dig into all these
+
+00:01:57,840 --> 00:02:03,209
+bits of how a simple program like hello
+
+00:02:00,060 --> 00:02:05,580
+world works in order to change them in
+
+00:02:03,209 --> 00:02:07,979
+the right way to make this all work just
+
+00:02:05,580 --> 00:02:10,200
+a few more things about our architecture
+
+00:02:07,979 --> 00:02:12,840
+we replace integer pointers with
+
+00:02:10,200 --> 00:02:14,940
+unforgeable capabilities this means that
+
+00:02:12,840 --> 00:02:15,990
+you can't materialize pointers out of
+
+00:02:14,940 --> 00:02:19,650
+out of thin air
+
+00:02:15,990 --> 00:02:21,209
+you can't say you're the author of Lib
+
+00:02:19,650 --> 00:02:23,880
+Perl you can't download them off the
+
+00:02:21,209 --> 00:02:27,209
+internet by accident and run them you
+
+00:02:23,880 --> 00:02:29,459
+know things like that and as I said
+
+00:02:27,209 --> 00:02:31,830
+before we prevent buffer overflows and
+
+00:02:29,459 --> 00:02:34,620
+we also make compartmentalization
+
+00:02:31,830 --> 00:02:36,989
+extremely cheap we'd like to go be able
+
+00:02:34,620 --> 00:02:38,069
+to go from current compartmentalization
+
+00:02:36,989 --> 00:02:40,980
+where something like Chrome or Firefox
+
+00:02:38,069 --> 00:02:43,140
+has a process per tab we'd like to have
+
+00:02:40,980 --> 00:02:44,459
+a million compartments in your in your
+
+00:02:43,140 --> 00:02:47,640
+web browser
+
+00:02:44,459 --> 00:02:49,049
+so that's just an aside when I mentioned
+
+00:02:47,640 --> 00:02:51,930
+cherry throughout the talk that's the
+
+00:02:49,049 --> 00:02:53,670
+front that's what I'm talking about but
+
+00:02:51,930 --> 00:02:58,319
+now we'll dive into the way it works
+
+00:02:53,670 --> 00:03:00,030
+today on 64-bit MIPS so here's the first
+
+00:02:58,319 --> 00:03:02,939
+example
+
+00:03:00,030 --> 00:03:04,950
+from in Kerrigan and Richie's the C
+
+00:03:02,939 --> 00:03:06,989
+programming language it's quite simple
+
+00:03:04,950 --> 00:03:10,500
+all it does is print a string hello
+
+00:03:06,989 --> 00:03:13,230
+world course you'll notice that this
+
+00:03:10,500 --> 00:03:13,950
+particular code isn't actually valid C
+
+00:03:13,230 --> 00:03:15,629
+anymore
+
+00:03:13,950 --> 00:03:18,680
+so we need to make a few tweaks before
+
+00:03:15,629 --> 00:03:21,840
+we talk about it we need to declare the
+
+00:03:18,680 --> 00:03:24,959
+arguments to main or rather ignore them
+
+00:03:21,840 --> 00:03:27,480
+in this case and then that's a little
+
+00:03:24,959 --> 00:03:29,519
+boring so we're gonna take this one step
+
+00:03:27,480 --> 00:03:31,950
+further and make printf take a couple
+
+00:03:29,519 --> 00:03:37,769
+arguments one thing it's interesting
+
+00:03:31,950 --> 00:03:40,500
+here is that printf in C is pretty darn
+
+00:03:37,769 --> 00:03:43,650
+close to a complete test of the C
+
+00:03:40,500 --> 00:03:45,150
+programming language in runtime one
+
+00:03:43,650 --> 00:03:47,069
+person I talked to who wrote a different
+
+00:03:45,150 --> 00:03:49,739
+C like language said that they got to
+
+00:03:47,069 --> 00:03:52,019
+about 90% in their conformance suite
+
+00:03:49,739 --> 00:03:55,739
+before it was possible to run hello
+
+00:03:52,019 --> 00:03:57,389
+world so there's lots of complicated
+
+00:03:55,739 --> 00:04:00,650
+stuff behind the scenes and we'll start
+
+00:03:57,389 --> 00:04:03,479
+we'll start to dive into that a bit
+
+00:04:00,650 --> 00:04:05,430
+naively you might expect it this program
+
+00:04:03,479 --> 00:04:08,639
+it's actually something like this
+
+00:04:05,430 --> 00:04:10,560
+program where simply you have a string
+
+00:04:08,639 --> 00:04:13,379
+you smush the string bits together and
+
+00:04:10,560 --> 00:04:16,169
+you write them out you might further
+
+00:04:13,379 --> 00:04:20,639
+expect that it looks like this bit of
+
+00:04:16,169 --> 00:04:21,659
+MIPS assembly now this you know don't
+
+00:04:20,639 --> 00:04:22,949
+worry you don't really need to
+
+00:04:21,659 --> 00:04:25,500
+understand this to understand the talk
+
+00:04:22,949 --> 00:04:28,169
+but what happens here is we were putting
+
+00:04:25,500 --> 00:04:30,360
+the first argument this one here in the
+
+00:04:28,169 --> 00:04:32,639
+argue first argument register we're
+
+00:04:30,360 --> 00:04:35,009
+loading the address of the string down
+
+00:04:32,639 --> 00:04:37,740
+here into the second argument register
+
+00:04:35,009 --> 00:04:39,570
+the length here and then the system call
+
+00:04:37,740 --> 00:04:42,530
+number here and we're triggering a
+
+00:04:39,570 --> 00:04:42,530
+system call exception
+
+00:04:44,890 --> 00:04:51,650
+okay I will try to turn my body instead
+
+00:04:47,740 --> 00:04:54,980
+so we here at this point we call the
+
+00:04:51,650 --> 00:04:59,090
+system call and then we return from that
+
+00:04:54,980 --> 00:05:00,770
+system call and we exit you might think
+
+00:04:59,090 --> 00:05:03,170
+that's what's going on in the previous
+
+00:05:00,770 --> 00:05:05,420
+program here but it's actually quite a
+
+00:05:03,170 --> 00:05:07,370
+bit more complicated the assembly
+
+00:05:05,420 --> 00:05:10,760
+program previously compiles to nine
+
+00:05:07,370 --> 00:05:17,060
+instructions less than a kilobyte mostly
+
+00:05:10,760 --> 00:05:20,210
+random elf junk and it yeah
+
+00:05:17,060 --> 00:05:22,220
+however the minimal C program there and
+
+00:05:20,210 --> 00:05:26,930
+this is without printf or seemingly
+
+00:05:22,220 --> 00:05:29,960
+without printf so for 550 K so most of
+
+00:05:26,930 --> 00:05:32,630
+that it turns out is malloc and a bit of
+
+00:05:29,960 --> 00:05:34,610
+it is a localization and we'll get into
+
+00:05:32,630 --> 00:05:38,540
+that more so where does all this stuff
+
+00:05:34,610 --> 00:05:41,120
+come from this program didn't do
+
+00:05:38,540 --> 00:05:43,490
+anything requiring localization it did
+
+00:05:41,120 --> 00:05:46,880
+you know it has it has to basically make
+
+00:05:43,490 --> 00:05:49,550
+a simple system call so let's take a
+
+00:05:46,880 --> 00:05:51,740
+look at program linkage so you might be
+
+00:05:49,550 --> 00:05:54,919
+linking hello world here's a simple
+
+00:05:51,740 --> 00:05:58,070
+command line if you pass the rather
+
+00:05:54,919 --> 00:06:00,860
+strange argument to to your C compiler
+
+00:05:58,070 --> 00:06:04,730
+and this works on both GCC and clang of
+
+00:06:00,860 --> 00:06:07,430
+- hash hash hash you'll see what things
+
+00:06:04,730 --> 00:06:11,690
+it's invoking so here's the actual
+
+00:06:07,430 --> 00:06:14,930
+linkage command you notice it's a bit of
+
+00:06:11,690 --> 00:06:16,820
+a mess we have you know we have some
+
+00:06:14,930 --> 00:06:18,980
+simple stuff about the ABI that we're
+
+00:06:16,820 --> 00:06:22,640
+linking it statically that we're
+
+00:06:18,980 --> 00:06:25,700
+outputting it and then we have a bunch
+
+00:06:22,640 --> 00:06:27,230
+of extra files and so where did those
+
+00:06:25,700 --> 00:06:29,180
+come from and then we have some extra
+
+00:06:27,230 --> 00:06:32,120
+libraries and then we link in Lindsey
+
+00:06:29,180 --> 00:06:36,050
+implicitly and then finally some more
+
+00:06:32,120 --> 00:06:40,340
+files so what are those here's a quick
+
+00:06:36,050 --> 00:06:43,910
+table of the various bits so first of
+
+00:06:40,340 --> 00:06:46,070
+all CRT 1.0 this contains the actual
+
+00:06:43,910 --> 00:06:47,540
+function that gets started at the
+
+00:06:46,070 --> 00:06:49,640
+beginning of the program it's by
+
+00:06:47,540 --> 00:06:52,550
+convention on freebsd at least
+
+00:06:49,640 --> 00:06:54,729
+underscore underscore start and it's job
+
+00:06:52,550 --> 00:06:59,509
+is to call main
+
+00:06:54,729 --> 00:07:02,270
+next up is CRT I see RTI is a weird
+
+00:06:59,509 --> 00:07:04,820
+function is oh is a weird bit of code
+
+00:07:02,270 --> 00:07:06,320
+it contains the prologues - two
+
+00:07:04,820 --> 00:07:10,100
+functions underscore in it and
+
+00:07:06,320 --> 00:07:13,370
+underscore fee name all it does is set
+
+00:07:10,100 --> 00:07:15,530
+up a stack frame later code including
+
+00:07:13,370 --> 00:07:18,110
+any file in your program might conclude
+
+00:07:15,530 --> 00:07:21,949
+bits of that function as raw machine
+
+00:07:18,110 --> 00:07:23,479
+code it's a bit terrifying and it is
+
+00:07:21,949 --> 00:07:28,850
+deprecated but it's still nonetheless
+
+00:07:23,479 --> 00:07:31,660
+there next up some variant of CRT begin
+
+00:07:28,850 --> 00:07:34,940
+is included there's different ones for
+
+00:07:31,660 --> 00:07:39,370
+relocatable code shared code and for
+
+00:07:34,940 --> 00:07:43,300
+static code this includes the
+
+00:07:39,370 --> 00:07:46,190
+constructor and destructor sections and
+
+00:07:43,300 --> 00:07:49,190
+declares declares function calls to
+
+00:07:46,190 --> 00:07:52,729
+these finally there's CR TN which
+
+00:07:49,190 --> 00:07:56,840
+terminates those arrays and then there's
+
+00:07:52,729 --> 00:07:58,280
+their CRT end which contains the bits of
+
+00:07:56,840 --> 00:08:01,729
+the functions for an it and fini that
+
+00:07:58,280 --> 00:08:04,240
+actually return on FreeBSD the path is
+
+00:08:01,729 --> 00:08:06,669
+that they're included or there are here
+
+00:08:04,240 --> 00:08:09,440
+before I go on with the rest of the talk
+
+00:08:06,669 --> 00:08:12,229
+I'm gonna be showing you a lot of flame
+
+00:08:09,440 --> 00:08:15,020
+charts generated with traces that I've
+
+00:08:12,229 --> 00:08:18,169
+made with Q EMU with a customized QE mu
+
+00:08:15,020 --> 00:08:20,539
+and then generated and then the charts
+
+00:08:18,169 --> 00:08:23,599
+are generated with Brendan Greg's flame
+
+00:08:20,539 --> 00:08:25,760
+graph tool those charts are online is
+
+00:08:23,599 --> 00:08:28,699
+clickable SPG's so if you want to zoom
+
+00:08:25,760 --> 00:08:32,959
+in and out it's kind of neat otherwise
+
+00:08:28,699 --> 00:08:36,709
+you'll see them on the screen so we're
+
+00:08:32,959 --> 00:08:38,620
+gonna start before the program starts so
+
+00:08:36,709 --> 00:08:42,020
+if we're gonna look at the exact V
+
+00:08:38,620 --> 00:08:44,060
+system call exactly YZ job is to take a
+
+00:08:42,020 --> 00:08:48,290
+process and replace its entire contents
+
+00:08:44,060 --> 00:08:49,820
+with a new one so typically if say
+
+00:08:48,290 --> 00:08:52,339
+you're starting to starting hello world
+
+00:08:49,820 --> 00:08:54,110
+from a shell you will have forked the
+
+00:08:52,339 --> 00:08:55,339
+shell who made an extra process which is
+
+00:08:54,110 --> 00:08:56,990
+copy of the shell and then you're going
+
+00:08:55,339 --> 00:09:00,290
+to replace its contents with exactly
+
+00:08:56,990 --> 00:09:01,580
+using exec de on some operating systems
+
+00:09:00,290 --> 00:09:03,530
+you'll take a little more
+
+00:09:01,580 --> 00:09:04,990
+commonly used something like posix spawn
+
+00:09:03,530 --> 00:09:07,220
+which does both of these things at once
+
+00:09:04,990 --> 00:09:08,690
+which is convenient to that you don't
+
+00:09:07,220 --> 00:09:11,780
+have to set up a process that's a
+
+00:09:08,690 --> 00:09:15,440
+complicated copy of your batch or T sure
+
+00:09:11,780 --> 00:09:17,210
+whatever just to throw it all away but
+
+00:09:15,440 --> 00:09:21,530
+in this example we're going to look at
+
+00:09:17,210 --> 00:09:25,550
+exactly e so now we're gonna zoom in a
+
+00:09:21,530 --> 00:09:34,340
+bit the first bit of exact V is exact
+
+00:09:25,550 --> 00:09:38,060
+copy in Arms its job so it does a bit of
+
+00:09:34,340 --> 00:09:41,780
+memory allocation in the kernel and then
+
+00:09:38,060 --> 00:09:43,910
+it copies in the program path as well as
+
+00:09:41,780 --> 00:09:46,340
+all the command-line arguments for the
+
+00:09:43,910 --> 00:09:48,770
+program and all the environment that was
+
+00:09:46,340 --> 00:09:51,140
+passed to the program it has to get this
+
+00:09:48,770 --> 00:09:53,210
+out of the parent process and into the
+
+00:09:51,140 --> 00:09:59,780
+kernel so that can then be copied into
+
+00:09:53,210 --> 00:10:01,820
+the new process that's next up after
+
+00:09:59,780 --> 00:10:08,410
+that we move on to the next part which
+
+00:10:01,820 --> 00:10:08,410
+is the body of executives at ve function
+
+00:10:08,830 --> 00:10:14,270
+so inside their current exec fee is the
+
+00:10:11,990 --> 00:10:16,340
+general implementation in FreeBSD we
+
+00:10:14,270 --> 00:10:19,100
+have we separate the system call which
+
+00:10:16,340 --> 00:10:20,930
+is the sis underscore variant from the
+
+00:10:19,100 --> 00:10:23,240
+actual actual implementation in most
+
+00:10:20,930 --> 00:10:25,880
+cases the reason is for instance that we
+
+00:10:23,240 --> 00:10:28,220
+use the current version for both FreeBSD
+
+00:10:25,880 --> 00:10:29,480
+and Lennox emulation they have us they
+
+00:10:28,220 --> 00:10:32,360
+may have we may have to make some
+
+00:10:29,480 --> 00:10:34,460
+adjustments they say - to make make
+
+00:10:32,360 --> 00:10:36,140
+Linux work but the underlying bits of
+
+00:10:34,460 --> 00:10:39,740
+replacing the process are all the same
+
+00:10:36,140 --> 00:10:44,690
+similarly we use this so so we can run
+
+00:10:39,740 --> 00:10:47,000
+32-bit programs on 64-bit machines so
+
+00:10:44,690 --> 00:10:49,670
+the first bit of current exactly is a
+
+00:10:47,000 --> 00:10:51,020
+eases name I which is horrible and
+
+00:10:49,670 --> 00:10:52,340
+complicated and involved in the file
+
+00:10:51,020 --> 00:10:54,230
+system so we're not going to talk about
+
+00:10:52,340 --> 00:10:56,000
+it any further except to say that it's
+
+00:10:54,230 --> 00:11:00,370
+job is to resolve the path that was
+
+00:10:56,000 --> 00:11:05,570
+passed in and find it in the file system
+
+00:11:00,370 --> 00:11:06,920
+next up exact check permissions verifies
+
+00:11:05,570 --> 00:11:08,990
+that the file has the right permissions
+
+00:11:06,920 --> 00:11:11,300
+that were allowed to open it and execute
+
+00:11:08,990 --> 00:11:14,060
+it and then it opens it
+
+00:11:11,300 --> 00:11:19,940
+just a bit mashed together but that's
+
+00:11:14,060 --> 00:11:21,740
+how it is then exact map first page does
+
+00:11:19,940 --> 00:11:23,209
+is about what you'd expect it maps the
+
+00:11:21,740 --> 00:11:25,580
+first page worth of data from the
+
+00:11:23,209 --> 00:11:27,320
+program it does this so that it can
+
+00:11:25,580 --> 00:11:29,660
+examine the headers in the program and
+
+00:11:27,320 --> 00:11:31,670
+determine whether for instance it is at
+
+00:11:29,660 --> 00:11:34,160
+actual elf executable as we're talking
+
+00:11:31,670 --> 00:11:39,370
+about or perhaps a shell script where it
+
+00:11:34,160 --> 00:11:39,370
+needs to find a find a a program to run
+
+00:11:39,670 --> 00:11:49,339
+now the body the main part here is a is
+
+00:11:45,740 --> 00:11:50,870
+elf is this executive image act it's an
+
+00:11:49,339 --> 00:11:52,490
+image activator which is what we call
+
+00:11:50,870 --> 00:11:57,019
+the thing that takes a program and
+
+00:11:52,490 --> 00:11:59,180
+instantiates it into memory so if you
+
+00:11:57,019 --> 00:12:02,839
+were wanting to dig into this part a bit
+
+00:11:59,180 --> 00:12:05,240
+more one hint all the elf things in
+
+00:12:02,839 --> 00:12:07,370
+previous dr compiled in a very are named
+
+00:12:05,240 --> 00:12:10,279
+in a very strange way so that 32-bit and
+
+00:12:07,370 --> 00:12:11,810
+64-bit code can be shared this bit down
+
+00:12:10,279 --> 00:12:13,940
+here is what the function declaration
+
+00:12:11,810 --> 00:12:16,070
+looks like so if you're trying to find
+
+00:12:13,940 --> 00:12:18,470
+this particular one it's not a whole lot
+
+00:12:16,070 --> 00:12:20,510
+of fun unless you know where to look I
+
+00:12:18,470 --> 00:12:22,180
+include this largely because I was
+
+00:12:20,510 --> 00:12:24,649
+writing up a paper version of this talk
+
+00:12:22,180 --> 00:12:26,180
+recently and it took me about 10 minutes
+
+00:12:24,649 --> 00:12:28,790
+to figure out where the darn thing was
+
+00:12:26,180 --> 00:12:33,829
+so thought a little hint might be
+
+00:12:28,790 --> 00:12:37,910
+appropriate so the first bit of the
+
+00:12:33,829 --> 00:12:40,520
+image activator is a call to exact new
+
+00:12:37,910 --> 00:12:42,440
+namespace which does kind of what you
+
+00:12:40,520 --> 00:12:44,870
+might think just to say it takes the
+
+00:12:42,440 --> 00:12:46,670
+process or and it rips all the VM space
+
+00:12:44,870 --> 00:12:48,500
+out so it rips all the page mappings out
+
+00:12:46,670 --> 00:12:51,490
+and you end up now with an empty process
+
+00:12:48,500 --> 00:12:57,500
+which has no memory behind it
+
+00:12:51,490 --> 00:13:01,120
+next up so internally sorry it goes in
+
+00:12:57,500 --> 00:13:04,970
+rips out rips out all the pages and then
+
+00:13:01,120 --> 00:13:06,740
+it Maps a stack an initial stack into
+
+00:13:04,970 --> 00:13:10,130
+the process address space as you can see
+
+00:13:06,740 --> 00:13:11,899
+down here at the bottom from there we
+
+00:13:10,130 --> 00:13:13,339
+get back into the image activator code
+
+00:13:11,899 --> 00:13:19,640
+whose job it is to actually load the
+
+00:13:13,339 --> 00:13:22,130
+program first elf load section maps the
+
+00:13:19,640 --> 00:13:23,570
+text segment of memory into memory for
+
+00:13:22,130 --> 00:13:23,810
+those who aren't familiar with with the
+
+00:13:23,570 --> 00:13:25,310
+tech
+
+00:13:23,810 --> 00:13:26,360
+saying that the tech segment is the part
+
+00:13:25,310 --> 00:13:29,240
+of the program that contains the
+
+00:13:26,360 --> 00:13:32,540
+executable code as well as typically
+
+00:13:29,240 --> 00:13:35,480
+some constants related to execution for
+
+00:13:32,540 --> 00:13:39,529
+instance offsets for jump tables and the
+
+00:13:35,480 --> 00:13:43,640
+like next up another call to L flowed
+
+00:13:39,529 --> 00:13:45,710
+section Maps data and the BSS region
+
+00:13:43,640 --> 00:13:48,740
+which is the part of data which is
+
+00:13:45,710 --> 00:13:50,180
+initialized to zero so for instance some
+
+00:13:48,740 --> 00:13:52,460
+random global variable that you've
+
+00:13:50,180 --> 00:13:54,380
+declared it will default to being zero
+
+00:13:52,460 --> 00:13:56,510
+and that's part of the application
+
+00:13:54,380 --> 00:14:03,800
+binary interface for basic UNIX
+
+00:13:56,510 --> 00:14:06,050
+processes so back to current exec fee we
+
+00:14:03,800 --> 00:14:09,230
+now have much of the program Maps and
+
+00:14:06,050 --> 00:14:12,260
+now we're going to copy out the various
+
+00:14:09,230 --> 00:14:13,339
+arguments and environment bits and a few
+
+00:14:12,260 --> 00:14:16,810
+other things that we'll get to in a
+
+00:14:13,339 --> 00:14:16,810
+minute to the end of the stack
+
+00:14:18,380 --> 00:14:24,710
+finally this exact set regs function
+
+00:14:22,220 --> 00:14:26,930
+sets up the registers of the processor
+
+00:14:24,710 --> 00:14:30,380
+so that when the system called the exec
+
+00:14:26,930 --> 00:14:31,790
+the system call returns it returns into
+
+00:14:30,380 --> 00:14:33,950
+a call to the underscore underscore
+
+00:14:31,790 --> 00:14:39,620
+start function so we're actually about
+
+00:14:33,950 --> 00:14:43,339
+to get ready to actually run code so
+
+00:14:39,620 --> 00:14:45,050
+back dis exec fee we have set up all of
+
+00:14:43,339 --> 00:14:46,730
+our memory we have mapped all of our
+
+00:14:45,050 --> 00:14:50,540
+bits and now we're about to return to
+
+00:14:46,730 --> 00:14:52,220
+the address space so as a recap the
+
+00:14:50,540 --> 00:14:53,720
+staffing stack has been mapped into the
+
+00:14:52,220 --> 00:14:56,650
+address space the program has been
+
+00:14:53,720 --> 00:14:59,990
+mapped into the address space and
+
+00:14:56,650 --> 00:15:02,540
+various strings environment variables
+
+00:14:59,990 --> 00:15:06,170
+have been copied in as well as signal
+
+00:15:02,540 --> 00:15:08,360
+handler and some other bits so a bit of
+
+00:15:06,170 --> 00:15:10,580
+an aside on those various bits that are
+
+00:15:08,360 --> 00:15:14,780
+copied in despite the fact that we're on
+
+00:15:10,580 --> 00:15:17,240
+MIPS we're using the scope I 3 d6 ABI
+
+00:15:14,780 --> 00:15:20,810
+and in fact on basically every process
+
+00:15:17,240 --> 00:15:23,510
+we followed this ABI this is how memory
+
+00:15:20,810 --> 00:15:25,370
+is laid out so that when we enter the
+
+00:15:23,510 --> 00:15:27,800
+program we can call the we can find
+
+00:15:25,370 --> 00:15:29,630
+things we need to find so there's a
+
+00:15:27,800 --> 00:15:32,600
+bunch of bits here most of the bits to
+
+00:15:29,630 --> 00:15:34,880
+the far right are FreeBSD specific so PS
+
+00:15:32,600 --> 00:15:35,480
+strings cig code is the signal return
+
+00:15:34,880 --> 00:15:37,790
+trample
+
+00:15:35,480 --> 00:15:40,730
+when half a signal handler and it exit
+
+00:15:37,790 --> 00:15:42,110
+it returns the cig code is responsible
+
+00:15:40,730 --> 00:15:44,870
+for actually getting you back into the
+
+00:15:42,110 --> 00:15:46,389
+kernel this is in fact a terrible idea
+
+00:15:44,870 --> 00:15:49,250
+and we need to take it off the stack
+
+00:15:46,389 --> 00:15:52,970
+because currently requires the stack to
+
+00:15:49,250 --> 00:15:56,480
+be executable there's some other bits
+
+00:15:52,970 --> 00:15:58,550
+here and then currently sharing on the
+
+00:15:56,480 --> 00:16:01,430
+on the far left of that orange section
+
+00:15:58,550 --> 00:16:03,170
+is where all the strings for the
+
+00:16:01,430 --> 00:16:07,310
+environment and all your argument
+
+00:16:03,170 --> 00:16:09,260
+vectors are stored next up there is the
+
+00:16:07,310 --> 00:16:11,829
+elf axillary arguments array this
+
+00:16:09,260 --> 00:16:14,269
+contains a bunch of information about
+
+00:16:11,829 --> 00:16:15,740
+your process where it's about your
+
+00:16:14,269 --> 00:16:19,100
+program where it's mapped into memory
+
+00:16:15,740 --> 00:16:20,870
+where the start address is basically it
+
+00:16:19,100 --> 00:16:22,610
+allows the program and the runtime
+
+00:16:20,870 --> 00:16:25,820
+linker if you were doing right if you
+
+00:16:22,610 --> 00:16:27,320
+were using a dynamic program to find a
+
+00:16:25,820 --> 00:16:28,970
+bunch of things about the program
+
+00:16:27,320 --> 00:16:31,959
+without having to parse the entire
+
+00:16:28,970 --> 00:16:34,459
+executable which is rather expensive
+
+00:16:31,959 --> 00:16:36,800
+additionally it gets used for things
+
+00:16:34,459 --> 00:16:38,389
+like for instance a pointer to the stack
+
+00:16:36,800 --> 00:16:41,300
+canary value which is a randomly
+
+00:16:38,389 --> 00:16:42,949
+generated string and it's just
+
+00:16:41,300 --> 00:16:45,019
+convenient to use so it keeps getting
+
+00:16:42,949 --> 00:16:48,350
+extended and extended as people add new
+
+00:16:45,019 --> 00:16:51,260
+features next up is the environment
+
+00:16:48,350 --> 00:16:54,079
+array this is the array of pointers into
+
+00:16:51,260 --> 00:16:55,399
+this set of strings for the name value
+
+00:16:54,079 --> 00:16:58,730
+pairs for all the things in your
+
+00:16:55,399 --> 00:17:03,560
+environment likewise the Arg V array and
+
+00:16:58,730 --> 00:17:05,990
+then the argument count all of this
+
+00:17:03,560 --> 00:17:10,429
+looks a bit like how you would call a
+
+00:17:05,990 --> 00:17:11,900
+function in under an I 3 D 6 system and
+
+00:17:10,429 --> 00:17:15,140
+that's because that's where this
+
+00:17:11,900 --> 00:17:17,660
+convention came from one oddity here is
+
+00:17:15,140 --> 00:17:20,480
+that well art the Argosy argument of the
+
+00:17:17,660 --> 00:17:23,449
+main program is an integer here it's
+
+00:17:20,480 --> 00:17:25,280
+always a long because that allows the
+
+00:17:23,449 --> 00:17:28,910
+stack to remain properly aligned on
+
+00:17:25,280 --> 00:17:30,770
+64-bit machines so at this point the
+
+00:17:28,910 --> 00:17:34,820
+stack pointer on return is set to this
+
+00:17:30,770 --> 00:17:36,610
+is that to Arg C and it's also passed as
+
+00:17:34,820 --> 00:17:40,429
+the first argument to the start function
+
+00:17:36,610 --> 00:17:42,380
+and with that's used to derive values
+
+00:17:40,429 --> 00:17:44,810
+and sort of and get the arguments
+
+00:17:42,380 --> 00:17:47,340
+required for main ready to go
+
+00:17:44,810 --> 00:17:50,970
+so now we're ready to jump into user
+
+00:17:47,340 --> 00:17:53,070
+space so starting in underscore
+
+00:17:50,970 --> 00:17:56,880
+underscore start which is in execution
+
+00:17:53,070 --> 00:17:58,650
+for the entire life of the program one
+
+00:17:56,880 --> 00:18:01,350
+thing you wouldn't you'd notice here if
+
+00:17:58,650 --> 00:18:03,470
+you look at it carefully is that there's
+
+00:18:01,350 --> 00:18:06,330
+a lot of je underscore functions in here
+
+00:18:03,470 --> 00:18:10,890
+and in fact this program spends almost
+
+00:18:06,330 --> 00:18:15,440
+all of its time in malloc so J malloc is
+
+00:18:10,890 --> 00:18:18,870
+in fact about 880 thousand lines of code
+
+00:18:15,440 --> 00:18:21,360
+it's part of that portability but it is
+
+00:18:18,870 --> 00:18:23,310
+a beast and so for a program this
+
+00:18:21,360 --> 00:18:25,070
+trivial it's way overkill it's a super
+
+00:18:23,310 --> 00:18:28,830
+high-performance threaded allocator
+
+00:18:25,070 --> 00:18:30,600
+but in this case we pay a lot of
+
+00:18:28,830 --> 00:18:34,800
+overhead I'm not gonna dive a whole lot
+
+00:18:30,600 --> 00:18:36,990
+into how malloc works but just want to
+
+00:18:34,800 --> 00:18:40,320
+point out that there is a awful lot of
+
+00:18:36,990 --> 00:18:42,060
+the cycles are spent there so underscore
+
+00:18:40,320 --> 00:18:46,020
+start the first half of underscore start
+
+00:18:42,060 --> 00:18:50,960
+which is a very simple function sets up
+
+00:18:46,020 --> 00:18:54,180
+arrgh CRV and an environment pointer
+
+00:18:50,960 --> 00:18:57,060
+these are then passed to this to this
+
+00:18:54,180 --> 00:19:01,020
+function handle RV which takes them in
+
+00:18:57,060 --> 00:19:03,060
+sets and processes arc C&R to be a
+
+00:19:01,020 --> 00:19:06,270
+little bit and then sets up the
+
+00:19:03,060 --> 00:19:08,130
+environment pointer the environ array
+
+00:19:06,270 --> 00:19:11,210
+also sets the program name variable
+
+00:19:08,130 --> 00:19:16,110
+which is used to for programs to query
+
+00:19:11,210 --> 00:19:19,020
+how they were at how they were run next
+
+00:19:16,110 --> 00:19:24,510
+up an it TLS this is actually why this
+
+00:19:19,020 --> 00:19:26,430
+program is so big so an it TLS sets up
+
+00:19:24,510 --> 00:19:28,500
+thread-local storage so thread-local
+
+00:19:26,430 --> 00:19:31,140
+storage is much like global variables
+
+00:19:28,500 --> 00:19:33,900
+except that their per thread you might
+
+00:19:31,140 --> 00:19:36,000
+think it's a simple hello world why why
+
+00:19:33,900 --> 00:19:40,230
+do I have thread-local variables but
+
+00:19:36,000 --> 00:19:42,150
+turns out that printf is localized which
+
+00:19:40,230 --> 00:19:44,240
+means for instance that the decimal
+
+00:19:42,150 --> 00:19:46,520
+character could be different
+
+00:19:44,240 --> 00:19:49,460
+and therefore you need to have a a per
+
+00:19:46,520 --> 00:19:51,080
+thread locale available and there's a
+
+00:19:49,460 --> 00:19:52,610
+there's a number of other things related
+
+00:19:51,080 --> 00:19:56,180
+to Mal'akh but that's that's the main
+
+00:19:52,610 --> 00:19:59,420
+thing as with the rest of the program
+
+00:19:56,180 --> 00:20:01,700
+most of the time is spent in Mallik the
+
+00:19:59,420 --> 00:20:03,650
+first thing that a NIT TLS does is it
+
+00:20:01,700 --> 00:20:06,590
+has to find the elf axillary arguments
+
+00:20:03,650 --> 00:20:10,460
+vector as you might recall that vector
+
+00:20:06,590 --> 00:20:12,950
+lives after the art after the
+
+00:20:10,460 --> 00:20:14,840
+environment array so in fact this lovely
+
+00:20:12,950 --> 00:20:17,390
+bit of code finds the exhilarate
+
+00:20:14,840 --> 00:20:19,310
+arguments factor we take the environment
+
+00:20:17,390 --> 00:20:22,550
+the environment er that was previously
+
+00:20:19,310 --> 00:20:26,060
+set up we walked to the end of the array
+
+00:20:22,550 --> 00:20:28,010
+and then we walk off of it this is of
+
+00:20:26,060 --> 00:20:33,680
+course not defined behavior in C but
+
+00:20:28,010 --> 00:20:36,800
+nonetheless this is what we do and in
+
+00:20:33,680 --> 00:20:38,660
+fact on the Cherry processor where we
+
+00:20:36,800 --> 00:20:41,120
+have memory safety we have had to take a
+
+00:20:38,660 --> 00:20:42,680
+different approach here because if you
+
+00:20:41,120 --> 00:20:44,420
+have Buffalo buffalo protections
+
+00:20:42,680 --> 00:20:45,950
+defeating them just so that you can do
+
+00:20:44,420 --> 00:20:48,200
+silly things like walk off the end of
+
+00:20:45,950 --> 00:20:52,160
+one array to find the next one it's not
+
+00:20:48,200 --> 00:20:55,160
+a good idea so we find this elf axillary
+
+00:20:52,160 --> 00:20:57,440
+arguments array we use that to find the
+
+00:20:55,160 --> 00:20:59,300
+program headers there's a field in there
+
+00:20:57,440 --> 00:21:01,670
+that says the program headers are are in
+
+00:20:59,300 --> 00:21:03,470
+the right place we use the program
+
+00:21:01,670 --> 00:21:05,300
+headers to find the tls section this
+
+00:21:03,470 --> 00:21:07,010
+contains the initial values of all
+
+00:21:05,300 --> 00:21:11,920
+thread-local variables which aren't
+
+00:21:07,010 --> 00:21:14,870
+initialized to 0 we do a bit of
+
+00:21:11,920 --> 00:21:17,180
+allocation to allocate some space for
+
+00:21:14,870 --> 00:21:21,200
+TLS that results in that all those
+
+00:21:17,180 --> 00:21:23,060
+cycles spent on calling malloc and we
+
+00:21:21,200 --> 00:21:25,660
+copy over the initial values for the non
+
+00:21:23,060 --> 00:21:25,660
+0 bit
+
+00:21:27,180 --> 00:21:32,830
+yes yeah so the funny names here in part
+
+00:21:30,430 --> 00:21:35,290
+because J Malik uses TLS extensively but
+
+00:21:32,830 --> 00:21:38,170
+yet we need to use malloc to allocate
+
+00:21:35,290 --> 00:21:39,970
+our TLS storage because if we were a
+
+00:21:38,170 --> 00:21:42,730
+dynamic program we might later load a
+
+00:21:39,970 --> 00:21:44,710
+library but also needed to allocate TLS
+
+00:21:42,730 --> 00:21:46,930
+and at that point we might need to free
+
+00:21:44,710 --> 00:21:48,610
+the current allocation and so there are
+
+00:21:46,930 --> 00:21:50,710
+other ways around it but the current
+
+00:21:48,610 --> 00:21:53,500
+solution is in fact to just allocate
+
+00:21:50,710 --> 00:21:56,590
+some space finally we set the TLS
+
+00:21:53,500 --> 00:21:59,410
+pointer one interesting thing of here on
+
+00:21:56,590 --> 00:22:02,560
+myths is that historically that was done
+
+00:21:59,410 --> 00:22:03,910
+through a system call which was fine
+
+00:22:02,560 --> 00:22:05,200
+when no one was using thread local
+
+00:22:03,910 --> 00:22:07,060
+storage
+
+00:22:05,200 --> 00:22:08,680
+it was also retrieved through a system
+
+00:22:07,060 --> 00:22:10,000
+call it's probably okay to set it
+
+00:22:08,680 --> 00:22:10,600
+through the system call we don't do it
+
+00:22:10,000 --> 00:22:12,520
+very often
+
+00:22:10,600 --> 00:22:14,860
+but retrieving it through a system calm
+
+00:22:12,520 --> 00:22:18,310
+it but every call to malloc required a
+
+00:22:14,860 --> 00:22:19,420
+system call we fixed that recently is it
+
+00:22:18,310 --> 00:22:24,220
+apparent that people are not paying
+
+00:22:19,420 --> 00:22:27,340
+enough attention to our MIT platform so
+
+00:22:24,220 --> 00:22:28,630
+out of an it TLS we're gonna return to
+
+00:22:27,340 --> 00:22:32,500
+underscore star underscore underscore
+
+00:22:28,630 --> 00:22:34,720
+start and this handle static init
+
+00:22:32,500 --> 00:22:36,930
+function is responsible for calling all
+
+00:22:34,720 --> 00:22:38,820
+the initializers at program startup
+
+00:22:36,930 --> 00:22:41,230
+through a variety of historical
+
+00:22:38,820 --> 00:22:44,860
+accidents and inability to deprecate
+
+00:22:41,230 --> 00:22:47,380
+functionality there are four different
+
+00:22:44,860 --> 00:22:49,830
+ways to call it to call a bit of code to
+
+00:22:47,380 --> 00:22:52,540
+initialize something in your program
+
+00:22:49,830 --> 00:22:54,940
+there's a there's an array of function
+
+00:22:52,540 --> 00:22:56,860
+pointers called the pre anit array which
+
+00:22:54,940 --> 00:22:58,720
+presumably exists because of the anit
+
+00:22:56,860 --> 00:23:00,660
+array that you see at the bottom people
+
+00:22:58,720 --> 00:23:03,100
+realize they need to do things earlier
+
+00:23:00,660 --> 00:23:06,970
+there's the underscore init function I
+
+00:23:03,100 --> 00:23:08,950
+alluded to hope to before which is this
+
+00:23:06,970 --> 00:23:10,600
+terrifying thing where you smash a bunch
+
+00:23:08,950 --> 00:23:11,890
+of assembly code together and hope that
+
+00:23:10,600 --> 00:23:13,600
+it goes in the right order and doesn't
+
+00:23:11,890 --> 00:23:16,150
+have any side effects and then you call
+
+00:23:13,600 --> 00:23:19,900
+it as a function and then there's the
+
+00:23:16,150 --> 00:23:23,170
+see tors array in at least the variant
+
+00:23:19,900 --> 00:23:25,540
+of the canary startup code in freebsd
+
+00:23:23,170 --> 00:23:27,310
+that's actually called via in it there's
+
+00:23:25,540 --> 00:23:29,180
+not really a good reason why it couldn't
+
+00:23:27,310 --> 00:23:32,150
+be called by some other mechanism
+
+00:23:29,180 --> 00:23:39,020
+but it is currently the one thing that
+
+00:23:32,150 --> 00:23:40,790
+uses the net in the system so now we get
+
+00:23:39,020 --> 00:23:42,260
+to the point where start is about to
+
+00:23:40,790 --> 00:23:43,880
+call mein so we're actually going to run
+
+00:23:42,260 --> 00:23:45,560
+our program it's very exciting
+
+00:23:43,880 --> 00:23:49,280
+you know we're twenty two minutes into
+
+00:23:45,560 --> 00:23:52,070
+my talk and we can start to we can start
+
+00:23:49,280 --> 00:23:56,330
+to actually run some code or at least
+
+00:23:52,070 --> 00:23:59,150
+the code we thought we were running so
+
+00:23:56,330 --> 00:24:02,360
+what happens in main is it calls printf
+
+00:23:59,150 --> 00:24:05,240
+printf calls VF printf which is the
+
+00:24:02,360 --> 00:24:07,280
+underlying implementation in freebsd no
+
+00:24:05,240 --> 00:24:10,400
+matter what you're printing - you're
+
+00:24:07,280 --> 00:24:13,910
+always printing through a file a file
+
+00:24:10,400 --> 00:24:16,540
+struct and it's either one that's
+
+00:24:13,910 --> 00:24:19,370
+printing to standard output to an output
+
+00:24:16,540 --> 00:24:21,830
+file or it could be to us something that
+
+00:24:19,370 --> 00:24:26,480
+it's impending to a string in this case
+
+00:24:21,830 --> 00:24:28,670
+we're printing to standard out so as I
+
+00:24:26,480 --> 00:24:31,700
+said before here's why we need GLS we
+
+00:24:28,670 --> 00:24:34,970
+need to call get locale so that we have
+
+00:24:31,700 --> 00:24:36,790
+our current locale and we can pass it on
+
+00:24:34,970 --> 00:24:42,320
+to the localized version of printf
+
+00:24:36,790 --> 00:24:44,210
+inside it does a bit of work it's not
+
+00:24:42,320 --> 00:24:45,860
+very complicated it just but it is
+
+00:24:44,210 --> 00:24:49,720
+something that has to be done
+
+00:24:45,860 --> 00:24:52,640
+so back in VF printf PF printf calls
+
+00:24:49,720 --> 00:24:54,470
+underscore VF printf yeah abstraction
+
+00:24:52,640 --> 00:24:56,990
+here's the comment from the top of the
+
+00:24:54,470 --> 00:24:59,870
+file this code is large and complicated
+
+00:24:56,990 --> 00:25:02,990
+it's not that bad files only a thousand
+
+00:24:59,870 --> 00:25:04,820
+lines you know it could be worse it does
+
+00:25:02,990 --> 00:25:06,650
+make use of extensive use of macros
+
+00:25:04,820 --> 00:25:08,980
+though so the code is in fact a bit
+
+00:25:06,650 --> 00:25:14,270
+bigger than that
+
+00:25:08,980 --> 00:25:17,390
+so now you know as you as usual all this
+
+00:25:14,270 --> 00:25:19,310
+bit is allocating a buffer this is done
+
+00:25:17,390 --> 00:25:22,250
+the first time and not done again but
+
+00:25:19,310 --> 00:25:25,130
+nonetheless we spend a lot of time
+
+00:25:22,250 --> 00:25:28,040
+allocating memory so let's get into the
+
+00:25:25,130 --> 00:25:29,810
+part that's actually interesting so here
+
+00:25:28,040 --> 00:25:33,110
+we're getting ready to print our string
+
+00:25:29,810 --> 00:25:37,430
+and what we see happen is the first
+
+00:25:33,110 --> 00:25:39,970
+thing we do in printf is we for reasons
+
+00:25:37,430 --> 00:25:41,990
+of historical laziness
+
+00:25:39,970 --> 00:25:44,600
+always look up the decimal point
+
+00:25:41,990 --> 00:25:46,790
+separator and get into the function this
+
+00:25:44,600 --> 00:25:50,630
+involves taking that locale we were
+
+00:25:46,790 --> 00:25:52,700
+passed and querying it and asking so if
+
+00:25:50,630 --> 00:25:54,410
+I did happen to have to print a
+
+00:25:52,700 --> 00:25:56,510
+floating-point number
+
+00:25:54,410 --> 00:26:01,340
+how would I separate it the whole part
+
+00:25:56,510 --> 00:26:04,820
+from the fractional part after that
+
+00:26:01,340 --> 00:26:09,800
+after that the print the function
+
+00:26:04,820 --> 00:26:12,530
+allocates it a structure containing 8 up
+
+00:26:09,800 --> 00:26:15,020
+to 8 strings which are which will be
+
+00:26:12,530 --> 00:26:18,110
+concatenated together for each section
+
+00:26:15,020 --> 00:26:21,110
+of the of the string that's being
+
+00:26:18,110 --> 00:26:22,310
+printed the reason for 8 is due to the
+
+00:26:21,110 --> 00:26:23,480
+details of floating points and I
+
+00:26:22,310 --> 00:26:26,600
+probably should have put a slide in here
+
+00:26:23,480 --> 00:26:29,810
+on that but it's the various sections so
+
+00:26:26,600 --> 00:26:32,270
+the the bit preceding the first format
+
+00:26:29,810 --> 00:26:35,390
+you find whether or not it has a sign
+
+00:26:32,270 --> 00:26:39,740
+whether or not it's a hexadecimal thing
+
+00:26:35,390 --> 00:26:43,490
+a number a decimal point things after
+
+00:26:39,740 --> 00:26:49,520
+the decimal point and somehow that adds
+
+00:26:43,490 --> 00:26:52,040
+up to 8 so the way this code works is it
+
+00:26:49,520 --> 00:26:55,100
+loops through the string looking for
+
+00:26:52,040 --> 00:26:58,430
+formats so at the beginning we find out
+
+00:26:55,100 --> 00:27:01,220
+we have a percent s so it finds a finds
+
+00:26:58,430 --> 00:27:03,260
+a percent sign and then parses the
+
+00:27:01,220 --> 00:27:07,970
+format and says oh simple I got I got a
+
+00:27:03,260 --> 00:27:10,220
+type so I've got a string here so that's
+
+00:27:07,970 --> 00:27:13,310
+that's quite straightforward it takes
+
+00:27:10,220 --> 00:27:16,340
+that and it sends a sync this i/o buffer
+
+00:27:13,310 --> 00:27:20,420
+which just contains a pointer to this
+
+00:27:16,340 --> 00:27:23,330
+hello string that gets accumulated and
+
+00:27:20,420 --> 00:27:25,820
+doesn't get printed just yet because the
+
+00:27:23,330 --> 00:27:28,610
+standard behavior of printf is that IO
+
+00:27:25,820 --> 00:27:30,650
+is buffered otherwise we'd spend forever
+
+00:27:28,610 --> 00:27:32,860
+making write system calls to write out a
+
+00:27:30,650 --> 00:27:35,620
+simple string
+
+00:27:32,860 --> 00:27:37,000
+next up having parsed that one we get
+
+00:27:35,620 --> 00:27:39,130
+into the next stage where we repeat the
+
+00:27:37,000 --> 00:27:41,430
+process this time we parse a bit and
+
+00:27:39,130 --> 00:27:44,500
+find a space and then we find a percent
+
+00:27:41,430 --> 00:27:46,180
+so we have once a single character
+
+00:27:44,500 --> 00:27:51,120
+string that we've appended to our buffer
+
+00:27:46,180 --> 00:27:53,920
+or our vector then we have our number
+
+00:27:51,120 --> 00:27:56,590
+there's a internally allocated buffer
+
+00:27:53,920 --> 00:28:02,500
+that's used to render this integer into
+
+00:27:56,590 --> 00:28:05,380
+a string and that's buffered so that's
+
+00:28:02,500 --> 00:28:10,510
+that's added to the file structure next
+
+00:28:05,380 --> 00:28:14,080
+up we find the /n the /n because of the
+
+00:28:10,510 --> 00:28:16,810
+buffering behavior triggers will trigger
+
+00:28:14,080 --> 00:28:18,220
+or write so we'll get to that now we're
+
+00:28:16,810 --> 00:28:22,450
+going to look at the S print function a
+
+00:28:18,220 --> 00:28:25,840
+bit s print parses that parses the set
+
+00:28:22,450 --> 00:28:28,240
+of vectors and looks over each one of
+
+00:28:25,840 --> 00:28:31,810
+them looking to see if there's a newline
+
+00:28:28,240 --> 00:28:33,520
+character that newline character will
+
+00:28:31,810 --> 00:28:35,860
+only exist in the first buffer in normal
+
+00:28:33,520 --> 00:28:38,230
+circumstances so it does a stir char on
+
+00:28:35,860 --> 00:28:40,270
+every output buffer this is a bit
+
+00:28:38,230 --> 00:28:43,230
+suboptimal but it does does do it that
+
+00:28:40,270 --> 00:28:46,900
+way so it finds a newline character
+
+00:28:43,230 --> 00:28:51,430
+because of that we will later call F
+
+00:28:46,900 --> 00:28:56,160
+flush these responsibilities it is to to
+
+00:28:51,430 --> 00:29:00,140
+actually call write and at this point
+
+00:28:56,160 --> 00:29:00,140
+get our output
+
+00:29:06,830 --> 00:29:14,100
+now as you probably noticed nothing is
+
+00:29:10,080 --> 00:29:16,170
+ever simple so so now we're gonna return
+
+00:29:14,100 --> 00:29:20,220
+out of printf in domain main we'll
+
+00:29:16,170 --> 00:29:22,650
+return to start returning a value and
+
+00:29:20,220 --> 00:29:24,270
+start now has to exit it calls the exit
+
+00:29:22,650 --> 00:29:25,770
+function which is not in fact a system
+
+00:29:24,270 --> 00:29:31,710
+call it's a wrapper around the system
+
+00:29:25,770 --> 00:29:34,650
+call which does a bunch of stuff so the
+
+00:29:31,710 --> 00:29:37,020
+first thing it does is when I was
+
+00:29:34,650 --> 00:29:38,940
+talking about initialization earlier all
+
+00:29:37,020 --> 00:29:42,450
+of those initialization methods have a
+
+00:29:38,940 --> 00:29:43,940
+counterpart for destructors or finalizes
+
+00:29:42,450 --> 00:29:48,540
+so there's a for the init function
+
+00:29:43,940 --> 00:29:50,280
+there's a Fein a function for C tours
+
+00:29:48,540 --> 00:29:52,760
+there's detours there's destructors to
+
+00:29:50,280 --> 00:29:57,000
+go at the Constructors and there's also
+
+00:29:52,760 --> 00:29:59,280
+a femaie array of function pointers in
+
+00:29:57,000 --> 00:30:02,340
+this program none of them actually get
+
+00:29:59,280 --> 00:30:04,050
+called to speak of but one other one
+
+00:30:02,340 --> 00:30:06,330
+function does get called which is this
+
+00:30:04,050 --> 00:30:08,070
+underscore cleanup function it's job is
+
+00:30:06,330 --> 00:30:10,230
+to ensure that any buffered file
+
+00:30:08,070 --> 00:30:13,800
+descriptors which still have output get
+
+00:30:10,230 --> 00:30:15,300
+flushed in our case that there aren't
+
+00:30:13,800 --> 00:30:16,800
+there aren't any of those because we
+
+00:30:15,300 --> 00:30:21,480
+have actually we've successfully flushed
+
+00:30:16,800 --> 00:30:22,980
+the file descriptor but it it would take
+
+00:30:21,480 --> 00:30:29,180
+care of that if we had not included that
+
+00:30:22,980 --> 00:30:34,110
+/n finally it calls exit and the program
+
+00:30:29,180 --> 00:30:35,820
+exits so that was all a static binary
+
+00:30:34,110 --> 00:30:38,310
+i'm gonna give you a very brief view of
+
+00:30:35,820 --> 00:30:43,470
+what a dynamic by of how a dynamic
+
+00:30:38,310 --> 00:30:45,570
+binary differs so as you recall in our
+
+00:30:43,470 --> 00:30:48,990
+previous our previous program we had
+
+00:30:45,570 --> 00:30:52,890
+memory we had a program data text and
+
+00:30:48,990 --> 00:30:55,830
+and the stack in a dynamic binary the
+
+00:30:52,890 --> 00:30:58,740
+program needs to load libraries in order
+
+00:30:55,830 --> 00:31:00,390
+to do its work for that to happen the
+
+00:30:58,740 --> 00:31:04,050
+kernel in addition to loading to program
+
+00:31:00,390 --> 00:31:07,260
+loads the runs fine linker the runs and
+
+00:31:04,050 --> 00:31:10,530
+enters the runtime linker initially the
+
+00:31:07,260 --> 00:31:12,090
+runtime linker relocates itself because
+
+00:31:10,530 --> 00:31:14,309
+it might end up anywhere depending on
+
+00:31:12,090 --> 00:31:16,860
+how big the program is
+
+00:31:14,309 --> 00:31:19,470
+and then it loads and relocates lid see
+
+00:31:16,860 --> 00:31:23,610
+this is in fact almost all the work that
+
+00:31:19,470 --> 00:31:25,409
+this program does in fact so it loads
+
+00:31:23,610 --> 00:31:28,650
+Livesey here and it does a bit of
+
+00:31:25,409 --> 00:31:30,659
+blinking it hand it resolves global
+
+00:31:28,650 --> 00:31:33,960
+variables as required does a bit of
+
+00:31:30,659 --> 00:31:36,450
+setup and then it calls underscore start
+
+00:31:33,960 --> 00:31:39,090
+which is this tiny little box on the
+
+00:31:36,450 --> 00:31:40,830
+right and that was the whole previous
+
+00:31:39,090 --> 00:31:46,200
+talk except now it's more complicated
+
+00:31:40,830 --> 00:31:49,230
+and does more work so here we are in
+
+00:31:46,200 --> 00:31:51,990
+underscore start the first thing it does
+
+00:31:49,230 --> 00:31:55,860
+is called printf but printf is in Lib C
+
+00:31:51,990 --> 00:31:58,380
+so it has to resolve it has to look up
+
+00:31:55,860 --> 00:32:00,750
+the address in Lib C it does this at all
+
+00:31:58,380 --> 00:32:03,090
+it does this lazily because if we were
+
+00:32:00,750 --> 00:32:05,399
+if it were to look up every address all
+
+00:32:03,090 --> 00:32:06,390
+right every function in Lindsey and do
+
+00:32:05,399 --> 00:32:08,669
+something with it that would be
+
+00:32:06,390 --> 00:32:11,190
+tremendously wasteful even just the ones
+
+00:32:08,669 --> 00:32:13,590
+that were accessed that are potentially
+
+00:32:11,190 --> 00:32:14,789
+called by this program and are known to
+
+00:32:13,590 --> 00:32:17,520
+the linker would still be fairly
+
+00:32:14,789 --> 00:32:18,720
+wasteful because in fact most functions
+
+00:32:17,520 --> 00:32:20,880
+that are linked to Lindsey in a small
+
+00:32:18,720 --> 00:32:22,740
+program like this are probably things
+
+00:32:20,880 --> 00:32:29,520
+related to error handling of errors that
+
+00:32:22,740 --> 00:32:31,250
+aren't going to occur so what happens
+
+00:32:29,520 --> 00:32:33,929
+here is there is a table called the PLT
+
+00:32:31,250 --> 00:32:36,270
+which contains a little there's a little
+
+00:32:33,929 --> 00:32:39,120
+stub that we use to jump to the table
+
+00:32:36,270 --> 00:32:42,120
+and look up and and normally will jump
+
+00:32:39,120 --> 00:32:43,710
+to the the printf function initially
+
+00:32:42,120 --> 00:32:45,390
+though we jump to a magic function in
+
+00:32:43,710 --> 00:32:47,220
+the runtime linker whose job it is to
+
+00:32:45,390 --> 00:32:49,169
+find the printf function and then
+
+00:32:47,220 --> 00:32:52,020
+replace the stub with something that
+
+00:32:49,169 --> 00:32:57,299
+calls the right bit of code so that bit
+
+00:32:52,020 --> 00:33:00,059
+is a MIPS RTL D find I am short long
+
+00:32:57,299 --> 00:33:04,320
+time so that's that that so it's mostly
+
+00:33:00,059 --> 00:33:06,990
+the same except that every call into
+
+00:33:04,320 --> 00:33:09,390
+every call into a Lindsey function has
+
+00:33:06,990 --> 00:33:13,670
+this this extra step where it has to go
+
+00:33:09,390 --> 00:33:18,990
+off and find the function and call it
+
+00:33:13,670 --> 00:33:23,310
+so that is that is my talk I'm happy to
+
+00:33:18,990 --> 00:33:25,560
+take questions at this point and one
+
+00:33:23,310 --> 00:33:27,420
+request I would really like to get
+
+00:33:25,560 --> 00:33:29,130
+feedback so use the fosston feedback
+
+00:33:27,420 --> 00:33:32,880
+form send me an email talk to me later
+
+00:33:29,130 --> 00:33:35,910
+that you know what you what you liked
+
+00:33:32,880 --> 00:33:37,320
+about this and what you you know if I
+
+00:33:35,910 --> 00:33:39,560
+dwell too much on something boring tell
+
+00:33:37,320 --> 00:33:39,560
+me that
+
+00:33:40,370 --> 00:33:50,680
+[Applause]
+
+00:33:51,680 --> 00:33:55,170
+hi
+
+00:33:53,310 --> 00:33:57,870
+you showed us that underscore underscore
+
+00:33:55,170 --> 00:34:00,420
+start calls main with three arguments
+
+00:33:57,870 --> 00:34:02,610
+but we can declare main with zero
+
+00:34:00,420 --> 00:34:08,669
+arguments one are two arguments or three
+
+00:34:02,610 --> 00:34:10,530
+arguments how does it work so in
+
+00:34:08,669 --> 00:34:13,110
+practice if you so it calls it with
+
+00:34:10,530 --> 00:34:15,600
+three arguments in ordinary calling
+
+00:34:13,110 --> 00:34:16,710
+conventions if you don't if you don't
+
+00:34:15,600 --> 00:34:17,850
+acknowledge that you're being called
+
+00:34:16,710 --> 00:34:22,850
+with those arguments it makes no
+
+00:34:17,850 --> 00:34:22,850
+difference you just ignore them so
+
+00:34:28,060 --> 00:34:31,170
+[Music]
+
+00:34:35,899 --> 00:34:42,780
+so my question is knowing what you know
+
+00:34:39,270 --> 00:34:45,750
+now if we were gonna start again what
+
+00:34:42,780 --> 00:34:51,690
+would we do better or is this actually
+
+00:34:45,750 --> 00:34:54,540
+the best way there's a bunch of things
+
+00:34:51,690 --> 00:34:55,889
+that are coupled to the stack that
+
+00:34:54,540 --> 00:34:57,210
+probably would be better if they were
+
+00:34:55,889 --> 00:35:00,230
+stored somewhere else
+
+00:34:57,210 --> 00:35:04,200
+that's probably the most obvious thing
+
+00:35:00,230 --> 00:35:06,450
+yeah so I would say that the things that
+
+00:35:04,200 --> 00:35:08,460
+are coupled to the stack that's
+
+00:35:06,450 --> 00:35:10,859
+definitely a historical accident with no
+
+00:35:08,460 --> 00:35:12,510
+good reason I mean it's it's there
+
+00:35:10,859 --> 00:35:16,829
+because that's how you call functions on
+
+00:35:12,510 --> 00:35:19,260
+x86 but is and it is in some ways useful
+
+00:35:16,829 --> 00:35:22,820
+and it is lazy but I probably I wouldn't
+
+00:35:19,260 --> 00:35:25,800
+do that most of the rest of it is
+
+00:35:22,820 --> 00:35:28,910
+relatively sane I mean the MIPS bits are
+
+00:35:25,800 --> 00:35:35,210
+all insane because that's MIPS but
+
+00:35:28,910 --> 00:35:35,210
+otherwise it's relatively sane
+
+00:35:49,020 --> 00:35:52,190
+
+YouTube URL: https://www.youtube.com/watch?v=WeJMR3CyjUI
+
+

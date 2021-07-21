@@ -1,0 +1,3796 @@
+Title: [2020] KVM Address Space Isolation by Alexandre Chartre & Ofir Weisse
+Publication date: 2020-12-09
+Playlist: KVM Forum 2020
+Description: 
+	First investigations about Kernel Address Space Isolation (ASI) were presented at Linux Plumber and KVM Forum last year. Kernel Address Space Isolation aims to mitigate some cpu hyper-threading data leaks possible with speculative execution attacks (like L1 Terminal Fault (L1TF) and Microarchitectural Data Sampling (MDS)). In particular, Kernel Address Space Isolation will provide a separate kernel address space for KVM when running virtual machines, in order to protect against a malicious guest VM attacking the host kernel using speculative execution attacks.
+
+Several RFCs for implementing this solution have been submitted. This presentation will describe the current state of the Kernel Address Space Isolation proposal with focusing on its usage with KVM, in particular the page table mapping requirements and the performance impact.
+
+---
+
+Ofir Weisse
+Google, Senior Software Engineer
+
+Ofir is a senior software engineer at the Google Cloud kernel team. His work focuses on providing better security for the cloud without compromising performance. Ofir received his PhD from the University of Michigan, where his research focused on micro-architecture and security. His academic research led to the discovery of the Foreshadow/L1TF speculative execution vulnerability.
+
+Alexandre Chartre
+Oracle, Consulting Developer
+
+Alexandre Chartre is a Consulting Developer in the Linux and Virtualization engineering team at Oracle. Lately, he has been focusing on security issues on Linux, in particular on Spectre and Meltdown issues (and all variants and derivatives) and their impact on virtualization and KVM in particular. Alexandre has more than 20 years experience in kernel development and virtualization, more recently with Linux and KVM on x86 systems, and previously with Solaris and Logical Domains (LDoms) on SPARC systems.
+Captions: 
+	00:00:05,920 --> 00:00:10,160
+hello everyone
+
+00:00:06,879 --> 00:00:11,840
+thanks for joining us my name is uh phil
+
+00:00:10,160 --> 00:00:13,920
+i work for google cloud
+
+00:00:11,840 --> 00:00:16,240
+today alex from oracle and i will
+
+00:00:13,920 --> 00:00:19,680
+present address space isolation for
+
+00:00:16,240 --> 00:00:20,640
+avm this idea started more than a year
+
+00:00:19,680 --> 00:00:23,760
+ago
+
+00:00:20,640 --> 00:00:25,840
+i was presented also in lpc
+
+00:00:23,760 --> 00:00:28,000
+by several different companies they were
+
+00:00:25,840 --> 00:00:31,279
+trying to merge
+
+00:00:28,000 --> 00:00:34,000
+work by ibm or google
+
+00:00:31,279 --> 00:00:36,239
+and potentially others into one unified
+
+00:00:34,000 --> 00:00:39,120
+framework for other space isolation
+
+00:00:36,239 --> 00:00:40,879
+but more on that slightly later on and
+
+00:00:39,120 --> 00:00:41,600
+other space isolation is a defense
+
+00:00:40,879 --> 00:00:44,239
+mechanism
+
+00:00:41,600 --> 00:00:45,680
+against a speculative microarchitectural
+
+00:00:44,239 --> 00:00:47,039
+attack
+
+00:00:45,680 --> 00:00:48,800
+and we'll discuss more of that in a
+
+00:00:47,039 --> 00:00:51,520
+second
+
+00:00:48,800 --> 00:00:51,920
+so why do we need other space isolation
+
+00:00:51,520 --> 00:00:54,000
+so
+
+00:00:51,920 --> 00:00:56,399
+about a couple of years ago we've seen
+
+00:00:54,000 --> 00:00:59,280
+attacks like l1tf and mvs
+
+00:00:56,399 --> 00:01:01,520
+that are able to get information uh for
+
+00:00:59,280 --> 00:01:04,479
+microarchitectural buffers
+
+00:01:01,520 --> 00:01:06,000
+l1tf can get data from the l1 cache and
+
+00:01:04,479 --> 00:01:07,280
+if you look at this drawing you see for
+
+00:01:06,000 --> 00:01:10,000
+example
+
+00:01:07,280 --> 00:01:11,760
+two vms running one of them the attacker
+
+00:01:10,000 --> 00:01:13,200
+vm and the other is the victim vm and
+
+00:01:11,760 --> 00:01:16,080
+the attacker vm
+
+00:01:13,200 --> 00:01:18,560
+is capable uh basically uh in scrubbing
+
+00:01:16,080 --> 00:01:20,240
+the l1 cache it doesn't even matter
+
+00:01:18,560 --> 00:01:21,920
+who this data belong to whether it
+
+00:01:20,240 --> 00:01:24,240
+belongs to the victim vm
+
+00:01:21,920 --> 00:01:27,119
+or maybe to the host attacker is capable
+
+00:01:24,240 --> 00:01:30,320
+of getting this data
+
+00:01:27,119 --> 00:01:32,240
+if we look at the mds attacks
+
+00:01:30,320 --> 00:01:34,479
+the attacker is able to get data from my
+
+00:01:32,240 --> 00:01:37,200
+architectural buffers
+
+00:01:34,479 --> 00:01:37,680
+for example the light buffer and this is
+
+00:01:37,200 --> 00:01:39,280
+bad
+
+00:01:37,680 --> 00:01:41,439
+and the reason this is bad is because
+
+00:01:39,280 --> 00:01:43,680
+obviously we are breaking the
+
+00:01:41,439 --> 00:01:45,520
+vm boundary one vm can steal data
+
+00:01:43,680 --> 00:01:48,799
+belonging to another vm
+
+00:01:45,520 --> 00:01:50,640
+um and also a
+
+00:01:48,799 --> 00:01:52,640
+victim vm can also steal data that
+
+00:01:50,640 --> 00:01:53,040
+belongs to the host potentially the host
+
+00:01:52,640 --> 00:01:55,759
+has
+
+00:01:53,040 --> 00:01:58,240
+credentials to communicate with the rest
+
+00:01:55,759 --> 00:02:00,000
+of the data center
+
+00:01:58,240 --> 00:02:02,159
+and while it seems initially that those
+
+00:02:00,000 --> 00:02:03,280
+attacks can only work in very specific
+
+00:02:02,159 --> 00:02:05,040
+scenarios they seem
+
+00:02:03,280 --> 00:02:06,880
+those attacks are actually very powerful
+
+00:02:05,040 --> 00:02:08,959
+because
+
+00:02:06,880 --> 00:02:09,920
+they seemed to be more practical than uh
+
+00:02:08,959 --> 00:02:11,920
+one would think
+
+00:02:09,920 --> 00:02:13,520
+so the danger is that one vm can see
+
+00:02:11,920 --> 00:02:14,720
+data from another vm or still from the
+
+00:02:13,520 --> 00:02:17,200
+platform
+
+00:02:14,720 --> 00:02:18,640
+um and this is obviously very bad for
+
+00:02:17,200 --> 00:02:20,400
+the cloud environment
+
+00:02:18,640 --> 00:02:21,760
+and we want to come up with an efficient
+
+00:02:20,400 --> 00:02:24,160
+mitigation
+
+00:02:21,760 --> 00:02:25,840
+that allow us uh to prevent these
+
+00:02:24,160 --> 00:02:26,640
+attacks in a reasonable performance
+
+00:02:25,840 --> 00:02:28,480
+overhead
+
+00:02:26,640 --> 00:02:29,760
+so let's first see what are the obvious
+
+00:02:28,480 --> 00:02:32,959
+mitigations
+
+00:02:29,760 --> 00:02:34,160
+that one can deploy in order to prevent
+
+00:02:32,959 --> 00:02:36,800
+these attacks
+
+00:02:34,160 --> 00:02:37,599
+so one obvious mitigation is to disable
+
+00:02:36,800 --> 00:02:39,200
+hyper threading
+
+00:02:37,599 --> 00:02:40,959
+basically saying you know what hyper
+
+00:02:39,200 --> 00:02:44,160
+threading is a bad idea
+
+00:02:40,959 --> 00:02:45,680
+uh but that comes with uh that's just
+
+00:02:44,160 --> 00:02:48,000
+pretty reliable solution
+
+00:02:45,680 --> 00:02:49,599
+but it's quite expensive uh in theory we
+
+00:02:48,000 --> 00:02:52,400
+can lose up to 30 percent
+
+00:02:49,599 --> 00:02:54,160
+if we disable hypothetic and that's not
+
+00:02:52,400 --> 00:02:57,440
+what we want
+
+00:02:54,160 --> 00:03:00,879
+another option is to basically
+
+00:02:57,440 --> 00:03:03,280
+make sure no two different vms
+
+00:03:00,879 --> 00:03:04,319
+are running on the same physical core
+
+00:03:03,280 --> 00:03:06,080
+again it creates
+
+00:03:04,319 --> 00:03:08,080
+a slightly more complicated scheduling
+
+00:03:06,080 --> 00:03:09,599
+it's possible but we still have the
+
+00:03:08,080 --> 00:03:10,720
+problem what happens when we need to
+
+00:03:09,599 --> 00:03:13,200
+serve a vm exit
+
+00:03:10,720 --> 00:03:14,720
+then the host need to run some code
+
+00:03:13,200 --> 00:03:16,560
+maybe bring some
+
+00:03:14,720 --> 00:03:18,170
+secret data into the cache or do some
+
+00:03:16,560 --> 00:03:19,760
+other microarchitecture buffers
+
+00:03:18,170 --> 00:03:22,400
+[Music]
+
+00:03:19,760 --> 00:03:22,959
+and basically what you need to do then
+
+00:03:22,400 --> 00:03:26,319
+is
+
+00:03:22,959 --> 00:03:28,239
+maybe find a way to
+
+00:03:26,319 --> 00:03:29,680
+stop the other thread let's say you have
+
+00:03:28,239 --> 00:03:32,319
+one one sibling
+
+00:03:29,680 --> 00:03:34,640
+logical call serving a vm exit then
+
+00:03:32,319 --> 00:03:38,480
+before you serve the vm exit you want to
+
+00:03:34,640 --> 00:03:38,480
+somehow pause the other sibling thread
+
+00:03:38,640 --> 00:03:43,680
+that's also quite expensive obviously
+
+00:03:40,400 --> 00:03:45,840
+and it's a quite complicated mechanism
+
+00:03:43,680 --> 00:03:47,760
+and in other space isolation what we
+
+00:03:45,840 --> 00:03:51,440
+want to do is basically
+
+00:03:47,760 --> 00:03:53,360
+deploy defense mechanisms
+
+00:03:51,440 --> 00:03:55,280
+only when we actually meet meaning only
+
+00:03:53,360 --> 00:03:58,640
+when we actually
+
+00:03:55,280 --> 00:03:59,680
+access what can be sensitive data only
+
+00:03:58,640 --> 00:04:03,120
+then
+
+00:03:59,680 --> 00:04:06,640
+we will deploy mitigations
+
+00:04:03,120 --> 00:04:07,920
+so um let's try to give some information
+
+00:04:06,640 --> 00:04:12,159
+about asi
+
+00:04:07,920 --> 00:04:15,120
+so in the next slide um
+
+00:04:12,159 --> 00:04:16,799
+if you can yeah uh the intuition to an
+
+00:04:15,120 --> 00:04:20,400
+asi is basically
+
+00:04:16,799 --> 00:04:23,520
+we will try uh for the most time
+
+00:04:20,400 --> 00:04:26,000
+most of the time to not have uh
+
+00:04:23,520 --> 00:04:29,040
+most memory mapped in the page and
+
+00:04:26,000 --> 00:04:31,440
+here's a preview example of
+
+00:04:29,040 --> 00:04:32,960
+spectre version one it's a function that
+
+00:04:31,440 --> 00:04:34,960
+will access an array
+
+00:04:32,960 --> 00:04:36,639
+it's location index and if you look at
+
+00:04:34,960 --> 00:04:39,280
+the if in the beginning
+
+00:04:36,639 --> 00:04:40,720
+uh we will check if index is uh within
+
+00:04:39,280 --> 00:04:43,199
+the bounds of the array
+
+00:04:40,720 --> 00:04:45,040
+and then we'll access some other array
+
+00:04:43,199 --> 00:04:46,320
+with this index
+
+00:04:45,040 --> 00:04:48,479
+and what will happen is that if the
+
+00:04:46,320 --> 00:04:51,600
+index is too big and the branch
+
+00:04:48,479 --> 00:04:53,680
+will be predicted accidentally as taken
+
+00:04:51,600 --> 00:04:55,120
+we will access array location
+
+00:04:53,680 --> 00:04:57,600
+potentially million
+
+00:04:55,120 --> 00:04:59,360
+and in theory we can access an arbitrary
+
+00:04:57,600 --> 00:05:01,759
+location memory
+
+00:04:59,360 --> 00:05:03,280
+uh and then this this memory will be
+
+00:05:01,759 --> 00:05:04,960
+brought into the l1 cache
+
+00:05:03,280 --> 00:05:08,320
+or into some other micro architecture
+
+00:05:04,960 --> 00:05:11,120
+buffers and the idea is that
+
+00:05:08,320 --> 00:05:12,639
+if when a program runs only data that is
+
+00:05:11,120 --> 00:05:14,400
+not sensitive
+
+00:05:12,639 --> 00:05:16,160
+uh will be mapping the page table then
+
+00:05:14,400 --> 00:05:18,000
+any access
+
+00:05:16,160 --> 00:05:20,720
+whether it was speculative or not
+
+00:05:18,000 --> 00:05:23,919
+speculative it would cause a page fault
+
+00:05:20,720 --> 00:05:25,600
+and uh basically the processor cannot
+
+00:05:23,919 --> 00:05:27,199
+speculate behind a page fault if the
+
+00:05:25,600 --> 00:05:28,160
+processor doesn't know the translation
+
+00:05:27,199 --> 00:05:31,120
+between
+
+00:05:28,160 --> 00:05:31,600
+virtual to physical it cannot bring data
+
+00:05:31,120 --> 00:05:34,400
+uh
+
+00:05:31,600 --> 00:05:35,680
+into the microarchitectural buffers and
+
+00:05:34,400 --> 00:05:38,160
+if you cannot bring the data
+
+00:05:35,680 --> 00:05:40,160
+then it means that sequels are not in
+
+00:05:38,160 --> 00:05:42,160
+microarchitectural buffers
+
+00:05:40,160 --> 00:05:43,199
+so that's the key intuition between
+
+00:05:42,160 --> 00:05:45,440
+behind aside
+
+00:05:43,199 --> 00:05:46,720
+let's basically let's not map data that
+
+00:05:45,440 --> 00:05:49,280
+we don't need to
+
+00:05:46,720 --> 00:05:49,280
+into the page
+
+00:05:49,919 --> 00:05:54,800
+so as an overview the idea is let's say
+
+00:05:52,000 --> 00:05:57,440
+we have at least in the case of vms
+
+00:05:54,800 --> 00:05:58,319
+we have two guests running and most of
+
+00:05:57,440 --> 00:06:00,479
+the time when we
+
+00:05:58,319 --> 00:06:02,800
+are serving a vm exit whether it was for
+
+00:06:00,479 --> 00:06:06,000
+an interrupt or something else
+
+00:06:02,800 --> 00:06:07,919
+we touch memory that has to do with the
+
+00:06:06,000 --> 00:06:09,600
+current guest that is running
+
+00:06:07,919 --> 00:06:11,440
+and the idea in the science let's have a
+
+00:06:09,600 --> 00:06:13,440
+page table a limited page table you can
+
+00:06:11,440 --> 00:06:15,759
+think about it as like sty domains
+
+00:06:13,440 --> 00:06:16,720
+guest a will have in this example s
+
+00:06:15,759 --> 00:06:20,080
+domain one
+
+00:06:16,720 --> 00:06:22,720
+and guess the is asi domain two and
+
+00:06:20,080 --> 00:06:23,680
+when guest a is running uh to serve most
+
+00:06:22,720 --> 00:06:26,560
+vm exits
+
+00:06:23,680 --> 00:06:28,479
+we're only touching data that has to do
+
+00:06:26,560 --> 00:06:30,720
+with guest a
+
+00:06:28,479 --> 00:06:32,840
+and the idea is that if guest a is
+
+00:06:30,720 --> 00:06:34,880
+trying to steal data that belongs to
+
+00:06:32,840 --> 00:06:36,560
+itself then we're saying
+
+00:06:34,880 --> 00:06:38,240
+we're slightly relaxing the security
+
+00:06:36,560 --> 00:06:40,720
+requirements basically saying
+
+00:06:38,240 --> 00:06:41,440
+if a guest vm steals data that has to do
+
+00:06:40,720 --> 00:06:45,520
+with
+
+00:06:41,440 --> 00:06:47,120
+managing itself then we're okay it can
+
+00:06:45,520 --> 00:06:48,639
+try and steal it because there will be
+
+00:06:47,120 --> 00:06:51,360
+no uh
+
+00:06:48,639 --> 00:06:52,080
+particular secrets that can be exposed
+
+00:06:51,360 --> 00:06:54,000
+and
+
+00:06:52,080 --> 00:06:55,280
+uh what happens if we need to serve a vm
+
+00:06:54,000 --> 00:06:57,280
+exit and and then
+
+00:06:55,280 --> 00:06:58,319
+touch some other data then we want to
+
+00:06:57,280 --> 00:07:00,639
+identify it and say
+
+00:06:58,319 --> 00:07:02,720
+okay now there's a chance we're actually
+
+00:07:00,639 --> 00:07:04,880
+touching secrets in memory
+
+00:07:02,720 --> 00:07:06,080
+and we want to be more careful maybe now
+
+00:07:04,880 --> 00:07:08,319
+we want to
+
+00:07:06,080 --> 00:07:09,759
+synchronize with the other sibling core
+
+00:07:08,319 --> 00:07:13,599
+and posit
+
+00:07:09,759 --> 00:07:16,479
+that's sometimes known as stunning and
+
+00:07:13,599 --> 00:07:18,400
+then maybe when we touch privileged
+
+00:07:16,479 --> 00:07:21,039
+memory before we get back
+
+00:07:18,400 --> 00:07:21,680
+into the asi domain then maybe we want
+
+00:07:21,039 --> 00:07:24,319
+to
+
+00:07:21,680 --> 00:07:25,919
+scrub secrets from buffets for example
+
+00:07:24,319 --> 00:07:28,000
+to prevent l1df
+
+00:07:25,919 --> 00:07:30,240
+after we touch privileged memory and we
+
+00:07:28,000 --> 00:07:33,759
+want to go back into the asi domain
+
+00:07:30,240 --> 00:07:35,599
+we will only then flash the l1 cache
+
+00:07:33,759 --> 00:07:37,599
+and that's nice because it means that
+
+00:07:35,599 --> 00:07:38,960
+hopefully for most vm exits we're only
+
+00:07:37,599 --> 00:07:40,720
+touching guest a staff
+
+00:07:38,960 --> 00:07:42,479
+and only every once in a while we touch
+
+00:07:40,720 --> 00:07:45,039
+some other data and only then we'll
+
+00:07:42,479 --> 00:07:46,720
+flash l1 cache not on every bmx
+
+00:07:45,039 --> 00:07:48,879
+and if you want to defend against mbs
+
+00:07:46,720 --> 00:07:50,560
+attacks it means that maybe we'll run
+
+00:07:48,879 --> 00:07:53,759
+the verw
+
+00:07:50,560 --> 00:07:54,800
+discovery instruction only if we
+
+00:07:53,759 --> 00:07:57,599
+actually touched
+
+00:07:54,800 --> 00:07:59,039
+potentially sensitive data and and with
+
+00:07:57,599 --> 00:08:00,560
+si we will know that the potentially
+
+00:07:59,039 --> 00:08:03,360
+touch sensitive data because
+
+00:08:00,560 --> 00:08:04,960
+when we touch it we get a page fault uh
+
+00:08:03,360 --> 00:08:06,960
+and that's something very tangible that
+
+00:08:04,960 --> 00:08:09,280
+we can notice an event that we can
+
+00:08:06,960 --> 00:08:11,360
+uh manage and then there's also a
+
+00:08:09,280 --> 00:08:14,240
+question on
+
+00:08:11,360 --> 00:08:15,919
+how we under interrupts of course but
+
+00:08:14,240 --> 00:08:19,919
+more on that
+
+00:08:15,919 --> 00:08:22,080
+slightly later on and
+
+00:08:19,919 --> 00:08:24,560
+this idea now we explain is how to
+
+00:08:22,080 --> 00:08:28,400
+manage address space isolation for
+
+00:08:24,560 --> 00:08:32,080
+kbm there are other options as well
+
+00:08:28,400 --> 00:08:34,399
+and alex now will explain what other
+
+00:08:32,080 --> 00:08:36,640
+usages can can we can have for other
+
+00:08:34,399 --> 00:08:39,919
+space isolation
+
+00:08:36,640 --> 00:08:40,959
+yeah thank you so all oisi was initially
+
+00:08:39,919 --> 00:08:43,919
+designed for
+
+00:08:40,959 --> 00:08:44,320
+an application with kvm to to mitigate
+
+00:08:43,919 --> 00:08:47,440
+the
+
+00:08:44,320 --> 00:08:50,880
+uh some speculative attack we expect
+
+00:08:47,440 --> 00:08:53,519
+that we will have overusage for asi
+
+00:08:50,880 --> 00:08:54,640
+and that we can make a site more generic
+
+00:08:53,519 --> 00:08:58,480
+and not specific
+
+00:08:54,640 --> 00:09:00,560
+to to kvm so for kvm has explained
+
+00:08:58,480 --> 00:09:04,160
+obviously that's the protector
+
+00:09:00,560 --> 00:09:07,200
+against this guest was attack
+
+00:09:04,160 --> 00:09:08,000
+main challenge in there is what data do
+
+00:09:07,200 --> 00:09:11,440
+we want to include
+
+00:09:08,000 --> 00:09:13,680
+in vsi what is really sensitive and
+
+00:09:11,440 --> 00:09:16,880
+secret
+
+00:09:13,680 --> 00:09:21,279
+what we expect asi to be used for too is
+
+00:09:16,880 --> 00:09:24,880
+to do what we call user asi
+
+00:09:21,279 --> 00:09:28,720
+which is to re-implement the
+
+00:09:24,880 --> 00:09:28,720
+the kernel and user page table
+
+00:09:29,040 --> 00:09:32,720
+the page table itself and the switch
+
+00:09:31,040 --> 00:09:35,920
+with asi
+
+00:09:32,720 --> 00:09:39,200
+in order to refactor over kernel page
+
+00:09:35,920 --> 00:09:42,399
+isolations of the kpti which is um
+
+00:09:39,200 --> 00:09:45,440
+as a mitigation for spectral v1
+
+00:09:42,399 --> 00:09:47,680
+and kpt i use almost
+
+00:09:45,440 --> 00:09:49,200
+work almost the same way as asi that is
+
+00:09:47,680 --> 00:09:50,000
+that you have one page cable for the
+
+00:09:49,200 --> 00:09:52,880
+camera and one for
+
+00:09:50,000 --> 00:09:54,399
+you username and when you enter exit
+
+00:09:52,880 --> 00:09:55,760
+you're the land kernel you will switch
+
+00:09:54,399 --> 00:09:58,480
+the page table
+
+00:09:55,760 --> 00:09:59,120
+so this is this is an area where we can
+
+00:09:58,480 --> 00:10:02,160
+use
+
+00:09:59,120 --> 00:10:06,640
+asi to to have
+
+00:10:02,160 --> 00:10:10,160
+the same implementation um
+
+00:10:06,640 --> 00:10:13,760
+over a possibility would be to have some
+
+00:10:10,160 --> 00:10:15,600
+username aside this is some idea where i
+
+00:10:13,760 --> 00:10:17,760
+don't look into
+
+00:10:15,600 --> 00:10:19,600
+too much detail yet but the idea would
+
+00:10:17,760 --> 00:10:22,640
+be
+
+00:10:19,600 --> 00:10:24,880
+to provide the ability to use a process
+
+00:10:22,640 --> 00:10:26,959
+to have multiple address space so
+
+00:10:24,880 --> 00:10:29,440
+currently you use a process as a single
+
+00:10:26,959 --> 00:10:31,839
+address space that's a single page table
+
+00:10:29,440 --> 00:10:33,360
+but we can imagine a process having
+
+00:10:31,839 --> 00:10:35,200
+multiple page table
+
+00:10:33,360 --> 00:10:37,519
+and being able to switch between the
+
+00:10:35,200 --> 00:10:40,640
+different page table
+
+00:10:37,519 --> 00:10:44,959
+we think these may have some
+
+00:10:40,640 --> 00:10:46,160
+useful usage for a virtual environment
+
+00:10:44,959 --> 00:10:49,200
+like the virtual
+
+00:10:46,160 --> 00:10:51,360
+the java virtual machine or the graphic
+
+00:10:49,200 --> 00:10:54,000
+tune machine or containers
+
+00:10:51,360 --> 00:10:54,959
+where you need to a single processor is
+
+00:10:54,000 --> 00:10:58,000
+running multiple
+
+00:10:54,959 --> 00:11:00,640
+environment and you want to be secure
+
+00:10:58,000 --> 00:11:01,440
+uh between these different environment
+
+00:11:00,640 --> 00:11:03,040
+so this is
+
+00:11:01,440 --> 00:11:06,399
+really something we are only
+
+00:11:03,040 --> 00:11:06,399
+investigating at the moment
+
+00:11:06,959 --> 00:11:11,040
+now uh we are going to go into more uh
+
+00:11:09,680 --> 00:11:14,240
+specifics about the
+
+00:11:11,040 --> 00:11:17,920
+uh kvm asi implementation
+
+00:11:14,240 --> 00:11:21,200
+and how this is used exactly
+
+00:11:17,920 --> 00:11:24,800
+so the idea is to have an address space
+
+00:11:21,200 --> 00:11:28,640
+with a limited kernel and vm mappings
+
+00:11:24,800 --> 00:11:30,760
+so basically we need the
+
+00:11:28,640 --> 00:11:32,320
+mapping to enter the vm
+
+00:11:30,760 --> 00:11:35,440
+[Music]
+
+00:11:32,320 --> 00:11:37,839
+and then under the vm exit the goal is
+
+00:11:35,440 --> 00:11:41,040
+really to be able to run the vm
+
+00:11:37,839 --> 00:11:45,279
+and under most vm exits
+
+00:11:41,040 --> 00:11:48,480
+at this the most we can without exiting
+
+00:11:45,279 --> 00:11:52,560
+asi so that we can loop and stay
+
+00:11:48,480 --> 00:11:55,360
+running safely with the asi
+
+00:11:52,560 --> 00:11:56,800
+so the idea is that on an isi we are
+
+00:11:55,360 --> 00:12:00,800
+going to need to map the
+
+00:11:56,800 --> 00:12:03,680
+um the data for a single vm
+
+00:12:00,800 --> 00:12:04,160
+and that way we can prevent over vm
+
+00:12:03,680 --> 00:12:07,120
+running
+
+00:12:04,160 --> 00:12:10,880
+on on the cpu core to steal data from
+
+00:12:07,120 --> 00:12:13,760
+another vm or from the host
+
+00:12:10,880 --> 00:12:16,399
+and to do that also safely uh we would
+
+00:12:13,760 --> 00:12:19,680
+need to synchronize on the vm entry
+
+00:12:16,399 --> 00:12:21,519
+uh if the other sibling is not running
+
+00:12:19,680 --> 00:12:23,760
+there's no need to to synchronize if
+
+00:12:21,519 --> 00:12:25,360
+you're if your sibling cpu thread is
+
+00:12:23,760 --> 00:12:27,279
+also running aside
+
+00:12:25,360 --> 00:12:29,279
+because we know it itself we know there
+
+00:12:27,279 --> 00:12:32,880
+is no data to
+
+00:12:29,279 --> 00:12:36,000
+secret data that you can get from pair
+
+00:12:32,880 --> 00:12:38,720
+but if anything else is running in
+
+00:12:36,000 --> 00:12:42,160
+kernel context not in aside then
+
+00:12:38,720 --> 00:12:44,560
+potentially you can steal something so
+
+00:12:42,160 --> 00:12:46,000
+this synchronizes synchronization is
+
+00:12:44,560 --> 00:12:48,560
+really needed
+
+00:12:46,000 --> 00:12:50,399
+and in that area core scheduling is
+
+00:12:48,560 --> 00:12:52,079
+going to help
+
+00:12:50,399 --> 00:12:53,440
+because with core scheduling you are
+
+00:12:52,079 --> 00:12:57,040
+going to be able to
+
+00:12:53,440 --> 00:12:59,200
+to schedule on the same cpu core um
+
+00:12:57,040 --> 00:13:01,600
+process from the same vm so you would
+
+00:12:59,200 --> 00:13:05,040
+know about athletes that's the same vm
+
+00:13:01,600 --> 00:13:07,440
+and you just have the the risk of
+
+00:13:05,040 --> 00:13:10,639
+being in camera contacts where you can
+
+00:13:07,440 --> 00:13:10,639
+you can steal some data
+
+00:13:12,720 --> 00:13:20,320
+um so as i mentioned asi is
+
+00:13:16,160 --> 00:13:25,279
+is is more generic it's not specific to
+
+00:13:20,320 --> 00:13:27,279
+to kvn and the generic lifecycle for isi
+
+00:13:25,279 --> 00:13:28,480
+is pretty simple basically you you
+
+00:13:27,279 --> 00:13:30,639
+create an isi
+
+00:13:28,480 --> 00:13:32,320
+each asi is going to have its own page
+
+00:13:30,639 --> 00:13:35,839
+table
+
+00:13:32,320 --> 00:13:37,120
+um then you would need to populate the
+
+00:13:35,839 --> 00:13:38,800
+aside page table
+
+00:13:37,120 --> 00:13:40,880
+with data you know which is not
+
+00:13:38,800 --> 00:13:41,199
+sensitive so anyone can access it it's
+
+00:13:40,880 --> 00:13:44,639
+not
+
+00:13:41,199 --> 00:13:46,160
+it's not a problem and then all you have
+
+00:13:44,639 --> 00:13:48,800
+to do is to enter asi
+
+00:13:46,160 --> 00:13:50,560
+so when you enter isi that's an explicit
+
+00:13:48,800 --> 00:13:52,800
+command and it will switch
+
+00:13:50,560 --> 00:13:54,320
+from the kernel page table to the asi
+
+00:13:52,800 --> 00:13:56,240
+page table
+
+00:13:54,320 --> 00:13:58,079
+once we're running with the aside page
+
+00:13:56,240 --> 00:14:01,199
+table we still need
+
+00:13:58,079 --> 00:14:03,440
+need obviously be able to handle the
+
+00:14:01,199 --> 00:14:04,720
+entrap the exception before the context
+
+00:14:03,440 --> 00:14:06,560
+switch
+
+00:14:04,720 --> 00:14:08,000
+and sometime to do that we'll need to
+
+00:14:06,560 --> 00:14:10,959
+interrupt the
+
+00:14:08,000 --> 00:14:11,519
+va sign and maybe resume depending on on
+
+00:14:10,959 --> 00:14:14,639
+the
+
+00:14:11,519 --> 00:14:17,839
+context once we are
+
+00:14:14,639 --> 00:14:18,639
+all done with that and we don't need asi
+
+00:14:17,839 --> 00:14:21,839
+anymore
+
+00:14:18,639 --> 00:14:24,399
+we exit the yes i was switch back to the
+
+00:14:21,839 --> 00:14:26,320
+kernel page table once we are completely
+
+00:14:24,399 --> 00:14:30,160
+done with the si we can destroy the
+
+00:14:26,320 --> 00:14:32,639
+psi and htable so that's a fairly
+
+00:14:30,160 --> 00:14:33,199
+simple use basically like yeah page
+
+00:14:32,639 --> 00:14:35,440
+label
+
+00:14:33,199 --> 00:14:37,760
+use that page table when you are done
+
+00:14:35,440 --> 00:14:41,920
+you exit
+
+00:14:37,760 --> 00:14:45,120
+if you like if we look like uh
+
+00:14:41,920 --> 00:14:49,360
+if we look at the usage more specific to
+
+00:14:45,120 --> 00:14:53,199
+kvm the idea is that we will create
+
+00:14:49,360 --> 00:14:55,199
+one airside per vm or pair vcpu it
+
+00:14:53,199 --> 00:14:57,760
+depends on the implementation
+
+00:14:55,199 --> 00:14:58,800
+i know i have test both but you have
+
+00:14:57,760 --> 00:15:01,920
+prime cones
+
+00:14:58,800 --> 00:15:04,639
+for for both of them uh
+
+00:15:01,920 --> 00:15:06,560
+if you create one pair vm then you will
+
+00:15:04,639 --> 00:15:09,440
+use the same asi for all
+
+00:15:06,560 --> 00:15:12,480
+uh vcpu otherwise you can also have one
+
+00:15:09,440 --> 00:15:14,639
+very cpu it depends on
+
+00:15:12,480 --> 00:15:17,120
+the implementation you want to do
+
+00:15:14,639 --> 00:15:17,120
+exactly
+
+00:15:17,279 --> 00:15:24,000
+then obviously you populate your kvma
+
+00:15:21,040 --> 00:15:24,800
+si page demo with things which are
+
+00:15:24,000 --> 00:15:26,880
+generic as
+
+00:15:24,800 --> 00:15:28,480
+canon information you need just to enter
+
+00:15:26,880 --> 00:15:30,720
+and run your asi
+
+00:15:28,480 --> 00:15:34,240
+and also things which are specific to
+
+00:15:30,720 --> 00:15:34,240
+your vm or your vcpu
+
+00:15:34,800 --> 00:15:40,079
+and after that the kvm asi
+
+00:15:37,839 --> 00:15:42,000
+will be used when you when you are
+
+00:15:40,079 --> 00:15:45,920
+running the vm itself so
+
+00:15:42,000 --> 00:15:47,360
+when the guests are running the vcp you
+
+00:15:45,920 --> 00:15:50,800
+guest
+
+00:15:47,360 --> 00:15:52,160
+so it will all start with the kvm run io
+
+00:15:50,800 --> 00:15:55,279
+tool
+
+00:15:52,160 --> 00:15:58,399
+um and you enter uh
+
+00:15:55,279 --> 00:16:00,120
+in kbm with vcpu run loop
+
+00:15:58,399 --> 00:16:02,720
+and during that loop we'll enter the
+
+00:16:00,120 --> 00:16:04,959
+kvmsi
+
+00:16:02,720 --> 00:16:06,110
+and right before entering the vm we need
+
+00:16:04,959 --> 00:16:07,839
+to ensure that the
+
+00:16:06,110 --> 00:16:10,880
+[Music]
+
+00:16:07,839 --> 00:16:14,160
+sibling cpu they are also running
+
+00:16:10,880 --> 00:16:14,639
+uh with the kvm aside this is where we
+
+00:16:14,160 --> 00:16:18,480
+want to
+
+00:16:14,639 --> 00:16:20,480
+ensure that what we are going in the vm
+
+00:16:18,480 --> 00:16:22,079
+we are going to run is secure and it's
+
+00:16:20,480 --> 00:16:23,440
+not going to steal up our data
+
+00:16:22,079 --> 00:16:25,920
+so this is where we'll have some
+
+00:16:23,440 --> 00:16:29,440
+synchronization to to to do
+
+00:16:25,920 --> 00:16:31,360
+once we know that the zebrain cpu are
+
+00:16:29,440 --> 00:16:34,880
+also running the kvm asi
+
+00:16:31,360 --> 00:16:38,320
+we can do the vm enter run the vm
+
+00:16:34,880 --> 00:16:40,480
+once we are done we exit the vm and once
+
+00:16:38,320 --> 00:16:44,000
+we have exited the vm
+
+00:16:40,480 --> 00:16:47,040
+we can stop this enforcement of having a
+
+00:16:44,000 --> 00:16:49,519
+kvmsi running and disabling
+
+00:16:47,040 --> 00:16:51,040
+so we are back from the vm we're still
+
+00:16:49,519 --> 00:16:55,279
+running with asi
+
+00:16:51,040 --> 00:16:58,240
+and now we want to process the vm exits
+
+00:16:55,279 --> 00:17:01,920
+so we'll try to run most of bm exits
+
+00:16:58,240 --> 00:17:01,920
+with ksi that's really the goal
+
+00:17:02,399 --> 00:17:05,919
+if there is if we need at some point
+
+00:17:04,400 --> 00:17:09,199
+when running the handler to
+
+00:17:05,919 --> 00:17:12,079
+to exit to the kernel we'll do that but
+
+00:17:09,199 --> 00:17:13,839
+because this is uh this is a loop we are
+
+00:17:12,079 --> 00:17:15,760
+going to re-enter and we are going
+
+00:17:13,839 --> 00:17:18,160
+before doing the vm enter we are going
+
+00:17:15,760 --> 00:17:21,039
+to re-enter the kvm asi to be safe
+
+00:17:18,160 --> 00:17:21,039
+on the next round
+
+00:17:22,400 --> 00:17:26,720
+so first thing as i mentioned is too
+
+00:17:24,640 --> 00:17:29,919
+when you have an asi is to fill
+
+00:17:26,720 --> 00:17:32,000
+the page table of the asi
+
+00:17:29,919 --> 00:17:34,000
+so there is a very basic solution which
+
+00:17:32,000 --> 00:17:37,679
+is the just to add each
+
+00:17:34,000 --> 00:17:38,240
+mapping that you need uh we have common
+
+00:17:37,679 --> 00:17:41,440
+like
+
+00:17:38,240 --> 00:17:43,600
+asi map where you specify your isi the
+
+00:17:41,440 --> 00:17:45,760
+address you want to map
+
+00:17:43,600 --> 00:17:46,799
+and the the size of the buffer you want
+
+00:17:45,760 --> 00:17:50,640
+to map and
+
+00:17:46,799 --> 00:17:51,039
+and and then a map command when you are
+
+00:17:50,640 --> 00:17:53,600
+done
+
+00:17:51,039 --> 00:17:55,520
+so this is similar to the memory
+
+00:17:53,600 --> 00:17:57,200
+allocant free
+
+00:17:55,520 --> 00:18:00,640
+so instead your map on your unmapped
+
+00:17:57,200 --> 00:18:03,440
+your ph table and that works fine um
+
+00:18:00,640 --> 00:18:05,039
+if you have well known buffer you know
+
+00:18:03,440 --> 00:18:06,720
+when they are located
+
+00:18:05,039 --> 00:18:08,400
+especially if they are pre-allocated
+
+00:18:06,720 --> 00:18:09,120
+they are located at the beginning of the
+
+00:18:08,400 --> 00:18:11,919
+boot or
+
+00:18:09,120 --> 00:18:12,840
+when your model is loaded it's easy to
+
+00:18:11,919 --> 00:18:16,480
+map them
+
+00:18:12,840 --> 00:18:20,480
+before before entering your isi
+
+00:18:16,480 --> 00:18:22,320
+it's becoming more complicated
+
+00:18:20,480 --> 00:18:24,480
+when you have buffer which are
+
+00:18:22,320 --> 00:18:25,760
+dynamically allocated and frequently
+
+00:18:24,480 --> 00:18:28,400
+relocated
+
+00:18:25,760 --> 00:18:30,000
+especially this is happening while you
+
+00:18:28,400 --> 00:18:31,919
+are running with asi
+
+00:18:30,000 --> 00:18:34,559
+so we need some mechanisms which are
+
+00:18:31,919 --> 00:18:36,320
+more performance
+
+00:18:34,559 --> 00:18:39,600
+especially for trying to add some
+
+00:18:36,320 --> 00:18:39,600
+mapping more automatically
+
+00:18:40,000 --> 00:18:45,600
+so one first idea is to
+
+00:18:43,360 --> 00:18:47,120
+to track and tag the statically
+
+00:18:45,600 --> 00:18:49,520
+allocated buffer
+
+00:18:47,120 --> 00:18:51,280
+that we need and we know have no
+
+00:18:49,520 --> 00:18:54,799
+sensitive data
+
+00:18:51,280 --> 00:18:58,640
+so a simple solution is just to put this
+
+00:18:54,799 --> 00:19:02,320
+this data into a dedicated uh
+
+00:18:58,640 --> 00:19:04,160
+section uh it can be fair
+
+00:19:02,320 --> 00:19:06,480
+fairly simply done by just adding a
+
+00:19:04,160 --> 00:19:09,120
+computer section a computer
+
+00:19:06,480 --> 00:19:12,080
+a compiler attribute with the section
+
+00:19:09,120 --> 00:19:14,880
+where you want to store this information
+
+00:19:12,080 --> 00:19:16,640
+uh so a simple solution is just to
+
+00:19:14,880 --> 00:19:18,960
+define a special tag
+
+00:19:16,640 --> 00:19:20,559
+aside not sensitive which is an
+
+00:19:18,960 --> 00:19:23,440
+attribute
+
+00:19:20,559 --> 00:19:24,080
+compiler attributes which specified but
+
+00:19:23,440 --> 00:19:27,200
+these data
+
+00:19:24,080 --> 00:19:29,919
+institute in dedicated section
+
+00:19:27,200 --> 00:19:32,720
+and once we have that when we create an
+
+00:19:29,919 --> 00:19:36,400
+ssi we can just map the entire section
+
+00:19:32,720 --> 00:19:39,600
+into vsi we know these data are safe
+
+00:19:36,400 --> 00:19:42,080
+and but we need them to run
+
+00:19:39,600 --> 00:19:42,080
+our stuff
+
+00:19:42,799 --> 00:19:50,240
+um for the dynamically allocated buffer
+
+00:19:47,200 --> 00:19:54,160
+um what we would need to do
+
+00:19:50,240 --> 00:19:59,039
+is is to to flag this buffer
+
+00:19:54,160 --> 00:20:01,520
+uh so to do that we can use a new tag
+
+00:19:59,039 --> 00:20:02,960
+to specify that the date of the buffer
+
+00:20:01,520 --> 00:20:06,559
+we're locating
+
+00:20:02,960 --> 00:20:10,400
+is going to store non-sensitive uh data
+
+00:20:06,559 --> 00:20:11,440
+so currently there is there is a global
+
+00:20:10,400 --> 00:20:14,400
+and sensitive and
+
+00:20:11,440 --> 00:20:17,039
+local non-sensitive a global insensitive
+
+00:20:14,400 --> 00:20:20,559
+would mean that
+
+00:20:17,039 --> 00:20:23,440
+the data are not sensitive whatever
+
+00:20:20,559 --> 00:20:24,240
+asr you are using so you can map them
+
+00:20:23,440 --> 00:20:28,159
+into
+
+00:20:24,240 --> 00:20:29,919
+any asi the local non-sensitive
+
+00:20:28,159 --> 00:20:32,080
+is a bit different in that it's
+
+00:20:29,919 --> 00:20:35,200
+sensitive data
+
+00:20:32,080 --> 00:20:37,679
+but it's not sensitive only for
+
+00:20:35,200 --> 00:20:39,280
+this process for the current process a
+
+00:20:37,679 --> 00:20:42,799
+good example for kvm
+
+00:20:39,280 --> 00:20:46,880
+is the vmcs so the vmcf
+
+00:20:42,799 --> 00:20:50,000
+has information about the vm but it's
+
+00:20:46,880 --> 00:20:52,400
+it's not sensitive if you are
+
+00:20:50,000 --> 00:20:53,280
+using and running the vm it's sensitive
+
+00:20:52,400 --> 00:20:56,559
+regarding
+
+00:20:53,280 --> 00:20:58,480
+a different vm but not uh
+
+00:20:56,559 --> 00:21:00,480
+regarding the current process and the
+
+00:20:58,480 --> 00:21:03,520
+current vm
+
+00:21:00,480 --> 00:21:04,960
+so when using this tag um the buffer are
+
+00:21:03,520 --> 00:21:08,400
+located
+
+00:21:04,960 --> 00:21:11,520
+and they are automatically mapped into
+
+00:21:08,400 --> 00:21:13,200
+the asi in the current asi
+
+00:21:11,520 --> 00:21:14,840
+and they will be also automatically
+
+00:21:13,200 --> 00:21:17,840
+unmapped when you when you free the
+
+00:21:14,840 --> 00:21:17,840
+buffer
+
+00:21:19,360 --> 00:21:25,679
+once you have your page table undefined
+
+00:21:23,039 --> 00:21:28,000
+for asi
+
+00:21:25,679 --> 00:21:30,000
+we need a mechanism to to switch the
+
+00:21:28,000 --> 00:21:30,400
+page table when you enter vsi and when
+
+00:21:30,000 --> 00:21:33,440
+you
+
+00:21:30,400 --> 00:21:36,799
+exit vsi so that's very simple
+
+00:21:33,440 --> 00:21:38,640
+especially on x86 it's just a control
+
+00:21:36,799 --> 00:21:40,799
+register to update but we see a free
+
+00:21:38,640 --> 00:21:42,480
+control register
+
+00:21:40,799 --> 00:21:45,200
+so that's basically one assembly
+
+00:21:42,480 --> 00:21:48,159
+instruction very simple
+
+00:21:45,200 --> 00:21:51,200
+the complication is that it's not very
+
+00:21:48,159 --> 00:21:53,919
+efficient if you don't consider the tlb
+
+00:21:51,200 --> 00:21:55,840
+so the tlb is the translation local side
+
+00:21:53,919 --> 00:21:58,320
+buffer this is a cache of the
+
+00:21:55,840 --> 00:22:00,000
+virtual address to physical address
+
+00:21:58,320 --> 00:22:03,760
+translation
+
+00:22:00,000 --> 00:22:07,280
+and this cache having um avoid having
+
+00:22:03,760 --> 00:22:08,799
+to go avoid diving via me to go through
+
+00:22:07,280 --> 00:22:09,600
+the entire page table to do the
+
+00:22:08,799 --> 00:22:11,280
+translation
+
+00:22:09,600 --> 00:22:13,280
+because the translation is already
+
+00:22:11,280 --> 00:22:16,480
+cached
+
+00:22:13,280 --> 00:22:17,039
+so when you switch you are required to
+
+00:22:16,480 --> 00:22:19,440
+flush
+
+00:22:17,039 --> 00:22:21,039
+the tlb and this has an impact on
+
+00:22:19,440 --> 00:22:23,760
+performance
+
+00:22:21,039 --> 00:22:24,880
+if if you don't do any special
+
+00:22:23,760 --> 00:22:27,039
+processing
+
+00:22:24,880 --> 00:22:29,760
+so now the intel processor they have
+
+00:22:27,039 --> 00:22:33,360
+some optimization which is the
+
+00:22:29,760 --> 00:22:35,200
+user process user context identifier the
+
+00:22:33,360 --> 00:22:38,640
+pcid
+
+00:22:35,200 --> 00:22:41,200
+um pcid that's a facility
+
+00:22:38,640 --> 00:22:42,720
+to associate to tlb entry with page
+
+00:22:41,200 --> 00:22:45,600
+table
+
+00:22:42,720 --> 00:22:47,840
+and the benefit is that it avoid
+
+00:22:45,600 --> 00:22:51,919
+flashing the entire page table
+
+00:22:47,840 --> 00:22:55,200
+or tlb you will just flush the tnb entry
+
+00:22:51,919 --> 00:22:58,640
+for your page table
+
+00:22:55,200 --> 00:23:00,400
+and so in in the implementation this is
+
+00:22:58,640 --> 00:23:01,280
+something we are taking into account so
+
+00:23:00,400 --> 00:23:04,720
+that we have
+
+00:23:01,280 --> 00:23:05,440
+an efficient page table switching
+
+00:23:04,720 --> 00:23:09,840
+mechanism
+
+00:23:05,440 --> 00:23:09,840
+when we enter and exit vsi
+
+00:23:11,280 --> 00:23:15,760
+so now we have created the page table we
+
+00:23:14,240 --> 00:23:16,320
+have a mechanism to switch to the page
+
+00:23:15,760 --> 00:23:18,640
+table
+
+00:23:16,320 --> 00:23:20,840
+and now when we are running asi we need
+
+00:23:18,640 --> 00:23:22,480
+to be able to handle the entrap and the
+
+00:23:20,840 --> 00:23:24,640
+exception
+
+00:23:22,480 --> 00:23:26,000
+because yeah you still need to process
+
+00:23:24,640 --> 00:23:28,480
+them
+
+00:23:26,000 --> 00:23:30,559
+the problem is that you have asl you you
+
+00:23:28,480 --> 00:23:31,760
+have defined so your page table you have
+
+00:23:30,559 --> 00:23:34,240
+defined for your af
+
+00:23:31,760 --> 00:23:35,360
+size may not necessarily have all the
+
+00:23:34,240 --> 00:23:39,360
+mapping to run
+
+00:23:35,360 --> 00:23:43,360
+the interrupt and exception handler
+
+00:23:39,360 --> 00:23:46,400
+so a simple solution for that is to
+
+00:23:43,360 --> 00:23:47,520
+suspend the asi when there is an
+
+00:23:46,400 --> 00:23:50,159
+interrupt
+
+00:23:47,520 --> 00:23:51,760
+process the interrupt and then re-enter
+
+00:23:50,159 --> 00:23:54,799
+the asi
+
+00:23:51,760 --> 00:23:59,039
+that's why the this drawing
+
+00:23:54,799 --> 00:24:01,200
+is showing so you start with some code
+
+00:23:59,039 --> 00:24:02,320
+running with asi there's an interrupt
+
+00:24:01,200 --> 00:24:04,400
+you switch you
+
+00:24:02,320 --> 00:24:06,480
+exit bsi switch to the kind of page
+
+00:24:04,400 --> 00:24:10,000
+table process the entire calendar
+
+00:24:06,480 --> 00:24:10,400
+when you are done you switch back to va
+
+00:24:10,000 --> 00:24:14,320
+sign
+
+00:24:10,400 --> 00:24:17,919
+and your code is going to continue
+
+00:24:14,320 --> 00:24:20,000
+that's a simple implementation we expect
+
+00:24:17,919 --> 00:24:22,080
+we can do better for some
+
+00:24:20,000 --> 00:24:23,520
+interrupt and exception handler because
+
+00:24:22,080 --> 00:24:27,760
+this mechanism
+
+00:24:23,520 --> 00:24:27,760
+require an additional page table switch
+
+00:24:28,080 --> 00:24:32,960
+so ideally we would like to be able to
+
+00:24:30,960 --> 00:24:34,880
+run the enter up an exception under with
+
+00:24:32,960 --> 00:24:37,039
+the aside page table
+
+00:24:34,880 --> 00:24:39,120
+of course this may not be always
+
+00:24:37,039 --> 00:24:41,679
+possible for particular android white
+
+00:24:39,120 --> 00:24:42,159
+it's better just to switch switch off to
+
+00:24:41,679 --> 00:24:45,200
+the
+
+00:24:42,159 --> 00:24:47,600
+to the kernel page table
+
+00:24:45,200 --> 00:24:50,000
+but still we can we can put in place a
+
+00:24:47,600 --> 00:24:53,039
+mechanism to do that
+
+00:24:50,000 --> 00:24:55,120
+so the idea is that the angler uh when
+
+00:24:53,039 --> 00:24:57,840
+there is an
+
+00:24:55,120 --> 00:25:00,000
+entrap the handler is going to start but
+
+00:24:57,840 --> 00:25:01,200
+it's not going to switch the page to the
+
+00:25:00,000 --> 00:25:02,720
+asi
+
+00:25:01,200 --> 00:25:05,919
+so it will continue to run with the
+
+00:25:02,720 --> 00:25:05,919
+aside page table
+
+00:25:06,080 --> 00:25:11,760
+obviously it can fail at some point
+
+00:25:10,159 --> 00:25:13,760
+because there is not the required
+
+00:25:11,760 --> 00:25:15,679
+mapping to do to do the processing in
+
+00:25:13,760 --> 00:25:17,360
+that case it's going to take a page
+
+00:25:15,679 --> 00:25:19,520
+fault
+
+00:25:17,360 --> 00:25:21,679
+and the solution there is to handle the
+
+00:25:19,520 --> 00:25:24,080
+fold and to do
+
+00:25:21,679 --> 00:25:26,799
+and switch at one point to the canon
+
+00:25:24,080 --> 00:25:26,799
+page table
+
+00:25:27,360 --> 00:25:30,640
+to continue the processes of the
+
+00:25:29,760 --> 00:25:34,240
+processing
+
+00:25:30,640 --> 00:25:36,559
+of the interrupt handler so here
+
+00:25:34,240 --> 00:25:38,720
+the figure is showing the ideal
+
+00:25:36,559 --> 00:25:40,799
+situation we've got code
+
+00:25:38,720 --> 00:25:42,400
+running with asi we take an end track we
+
+00:25:40,799 --> 00:25:43,120
+don't switch the page level and we
+
+00:25:42,400 --> 00:25:45,919
+continue
+
+00:25:43,120 --> 00:25:47,200
+and are able to process the entire the
+
+00:25:45,919 --> 00:25:51,039
+entire interrupt with
+
+00:25:47,200 --> 00:25:53,200
+asi when we are done with
+
+00:25:51,039 --> 00:25:56,240
+the interrupt return and we resume the
+
+00:25:53,200 --> 00:25:58,640
+execution of the code still with asi
+
+00:25:56,240 --> 00:26:00,559
+most of the time what is going to happen
+
+00:25:58,640 --> 00:26:04,080
+is this situation where
+
+00:26:00,559 --> 00:26:06,000
+we've got some code running we've got an
+
+00:26:04,080 --> 00:26:09,039
+interrupt
+
+00:26:06,000 --> 00:26:10,080
+we start processing the interrupt with
+
+00:26:09,039 --> 00:26:12,080
+asi
+
+00:26:10,080 --> 00:26:13,679
+but at some point because we don't have
+
+00:26:12,080 --> 00:26:15,440
+all the mapping we are going to take a
+
+00:26:13,679 --> 00:26:17,520
+page fault in the asi
+
+00:26:15,440 --> 00:26:19,360
+so we go to the page font handler at
+
+00:26:17,520 --> 00:26:22,080
+this point we are switching to the canon
+
+00:26:19,360 --> 00:26:22,080
+page table
+
+00:26:23,279 --> 00:26:29,039
+and we retry and continue the interrupt
+
+00:26:26,159 --> 00:26:31,120
+handler with the kernel page table
+
+00:26:29,039 --> 00:26:32,320
+once we are done so we have processed
+
+00:26:31,120 --> 00:26:36,400
+the interior
+
+00:26:32,320 --> 00:26:38,799
+entire interrupt part of it
+
+00:26:36,400 --> 00:26:40,880
+with vsi part of it with the canon page
+
+00:26:38,799 --> 00:26:43,360
+table but once we are done
+
+00:26:40,880 --> 00:26:44,159
+we return to the esi and the card
+
+00:26:43,360 --> 00:26:48,080
+continues
+
+00:26:44,159 --> 00:26:51,120
+its execution so it may be a way to
+
+00:26:48,080 --> 00:26:54,640
+to investigate which
+
+00:26:51,120 --> 00:26:54,640
+which handler we can run
+
+00:26:54,960 --> 00:27:00,400
+with asi and found which mapping we need
+
+00:26:58,159 --> 00:27:02,159
+to do the processing
+
+00:27:00,400 --> 00:27:03,919
+but that's basically an optimization
+
+00:27:02,159 --> 00:27:05,440
+we're trying to to be
+
+00:27:03,919 --> 00:27:07,520
+more efficient when there is an
+
+00:27:05,440 --> 00:27:10,880
+interrupt or exception
+
+00:27:07,520 --> 00:27:10,880
+while we are running an asi
+
+00:27:11,840 --> 00:27:16,320
+now there is a particular case like you
+
+00:27:14,559 --> 00:27:19,440
+have seen also with the
+
+00:27:16,320 --> 00:27:23,039
+page fault so
+
+00:27:19,440 --> 00:27:25,120
+if you have an asi and you don't have
+
+00:27:23,039 --> 00:27:26,880
+the mapping you're running away aside
+
+00:27:25,120 --> 00:27:29,919
+there's mapping which is not that you
+
+00:27:26,880 --> 00:27:34,240
+need which is not present in basi
+
+00:27:29,919 --> 00:27:36,640
+then a basic behavior is to exit vsi
+
+00:27:34,240 --> 00:27:39,600
+switch so there's page for the page for
+
+00:27:36,640 --> 00:27:41,679
+handler is going to exit vsi
+
+00:27:39,600 --> 00:27:43,200
+so switch to the canon page table and
+
+00:27:41,679 --> 00:27:46,480
+it's going to retry
+
+00:27:43,200 --> 00:27:49,120
+the instruction we have a photo here
+
+00:27:46,480 --> 00:27:50,559
+so basically we are executing the scion
+
+00:27:49,120 --> 00:27:53,200
+page fault
+
+00:27:50,559 --> 00:27:53,600
+um what we do in that case is that we
+
+00:27:53,200 --> 00:27:55,440
+log
+
+00:27:53,600 --> 00:27:56,880
+some information about the fault so that
+
+00:27:55,440 --> 00:28:00,080
+we can identify
+
+00:27:56,880 --> 00:28:04,399
+after afterwards what is missing in
+
+00:28:00,080 --> 00:28:07,200
+any va far nba cyan what as goes before
+
+00:28:04,399 --> 00:28:09,200
+and eventually after that we can add the
+
+00:28:07,200 --> 00:28:10,960
+missing mapping to be a site page table
+
+00:28:09,200 --> 00:28:14,240
+to prevent default
+
+00:28:10,960 --> 00:28:17,120
+so this is this is manual processing we
+
+00:28:14,240 --> 00:28:20,640
+have to look at blog figure out what's
+
+00:28:17,120 --> 00:28:24,159
+missing and then add the mapping
+
+00:28:20,640 --> 00:28:27,360
+we can certainly do better
+
+00:28:24,159 --> 00:28:30,559
+and there is some um
+
+00:28:27,360 --> 00:28:32,640
+automatic way to do this by
+
+00:28:30,559 --> 00:28:34,960
+automatically adding the missing mapping
+
+00:28:32,640 --> 00:28:37,039
+to the page table
+
+00:28:34,960 --> 00:28:39,120
+the only issue if we add the mapping
+
+00:28:37,039 --> 00:28:39,679
+automatically is that we need to ensure
+
+00:28:39,120 --> 00:28:41,440
+that
+
+00:28:39,679 --> 00:28:44,320
+it does not provide access to a
+
+00:28:41,440 --> 00:28:47,919
+sensitive data
+
+00:28:44,320 --> 00:28:50,720
+so if we have that we can
+
+00:28:47,919 --> 00:28:51,760
+add the mapping automatically and return
+
+00:28:50,720 --> 00:28:53,840
+to the asi
+
+00:28:51,760 --> 00:28:55,200
+so retry before the instruction and
+
+00:28:53,840 --> 00:28:56,159
+hopefully it will work and we'll
+
+00:28:55,200 --> 00:28:59,360
+continue
+
+00:28:56,159 --> 00:29:02,559
+and it will also avoid uh faulting
+
+00:28:59,360 --> 00:29:04,320
+again in the later on the same same
+
+00:29:02,559 --> 00:29:07,760
+problem
+
+00:29:04,320 --> 00:29:11,440
+um and to do that um
+
+00:29:07,760 --> 00:29:13,679
+we're also making usage of the um
+
+00:29:11,440 --> 00:29:16,480
+global non-sensitive flag i mentioned
+
+00:29:13,679 --> 00:29:19,520
+earlier about dynamic allocations
+
+00:29:16,480 --> 00:29:20,399
+if you have done if an allocation was
+
+00:29:19,520 --> 00:29:22,880
+done with
+
+00:29:20,399 --> 00:29:24,159
+that flag you know that this data is not
+
+00:29:22,880 --> 00:29:27,039
+sensitive
+
+00:29:24,159 --> 00:29:28,240
+and so you can automatically map it into
+
+00:29:27,039 --> 00:29:30,720
+vsi
+
+00:29:28,240 --> 00:29:31,760
+if there has been a fault on it so
+
+00:29:30,720 --> 00:29:34,399
+that's
+
+00:29:31,760 --> 00:29:34,880
+that's a way also to improve the mapping
+
+00:29:34,399 --> 00:29:37,679
+in an
+
+00:29:34,880 --> 00:29:37,679
+automatic way
+
+00:29:39,360 --> 00:29:42,799
+um what can happen also when you are
+
+00:29:41,440 --> 00:29:46,000
+using using asi
+
+00:29:42,799 --> 00:29:47,600
+is that you are being scheduled out and
+
+00:29:46,000 --> 00:29:49,039
+in that case the behavior would be
+
+00:29:47,600 --> 00:29:51,919
+fairly simple is that we
+
+00:29:49,039 --> 00:29:55,120
+interrupt vsi so it's going to exit vsi
+
+00:29:51,919 --> 00:29:57,360
+save the async information for a task
+
+00:29:55,120 --> 00:29:59,440
+and once the task is scheduling then we
+
+00:29:57,360 --> 00:30:03,200
+are going to resume the aside that is
+
+00:29:59,440 --> 00:30:05,919
+enter the a sign again and with the
+
+00:30:03,200 --> 00:30:07,039
+information we which were set for this
+
+00:30:05,919 --> 00:30:09,120
+task
+
+00:30:07,039 --> 00:30:10,799
+there's there's a bit of complexity if
+
+00:30:09,120 --> 00:30:12,559
+we secure during an interrupt an
+
+00:30:10,799 --> 00:30:17,039
+exception handler because the
+
+00:30:12,559 --> 00:30:17,039
+asi may have already been
+
+00:30:17,440 --> 00:30:22,000
+exited or interrupted so this is just
+
+00:30:20,240 --> 00:30:24,880
+thing we need to take into account into
+
+00:30:22,000 --> 00:30:24,880
+the implementation
+
+00:30:25,919 --> 00:30:29,279
+now a more complex mechanism that we are
+
+00:30:28,399 --> 00:30:31,200
+also using
+
+00:30:29,279 --> 00:30:32,559
+is the synchronization of course across
+
+00:30:31,200 --> 00:30:34,880
+the pure thread
+
+00:30:32,559 --> 00:30:36,159
+as i mentioned for kvm asi when you
+
+00:30:34,880 --> 00:30:38,559
+enter kvm
+
+00:30:36,159 --> 00:30:40,080
+we need to make sure when you enter vm
+
+00:30:38,559 --> 00:30:44,240
+you need to make sure that the zipping
+
+00:30:40,080 --> 00:30:46,880
+cpu is also running the kbmaxi
+
+00:30:44,240 --> 00:30:48,559
+so we need a mechanism to force all cpu
+
+00:30:46,880 --> 00:30:52,640
+thread from a cpu core to use
+
+00:30:48,559 --> 00:30:54,399
+a specified asi and to do that we need
+
+00:30:52,640 --> 00:30:56,799
+this cpu
+
+00:30:54,399 --> 00:30:58,640
+to look at the other receiving cpu if
+
+00:30:56,799 --> 00:30:59,600
+they are running asi or not if they are
+
+00:30:58,640 --> 00:31:01,760
+running inside
+
+00:30:59,600 --> 00:31:03,039
+then that's fine we can just continue to
+
+00:31:01,760 --> 00:31:04,960
+run
+
+00:31:03,039 --> 00:31:06,559
+the only thing is that they should not
+
+00:31:04,960 --> 00:31:10,080
+be allowed to to
+
+00:31:06,559 --> 00:31:11,519
+exit vasi because we want them to run
+
+00:31:10,080 --> 00:31:13,200
+aside
+
+00:31:11,519 --> 00:31:15,519
+if the sibling frame is not running
+
+00:31:13,200 --> 00:31:19,200
+aside then we need to force
+
+00:31:15,519 --> 00:31:22,640
+it to run asi and to do that we send
+
+00:31:19,200 --> 00:31:25,600
+a rescue request
+
+00:31:22,640 --> 00:31:28,080
+and if the next stack is using ssi then
+
+00:31:25,600 --> 00:31:31,120
+we can let it enter isi and run
+
+00:31:28,080 --> 00:31:34,799
+otherwise we need to enter aside but
+
+00:31:31,120 --> 00:31:34,799
+with weight in an idle loop
+
+00:31:34,960 --> 00:31:41,039
+so basically the mechanism is like this
+
+00:31:38,480 --> 00:31:42,080
+we've got the the cpu in the middle
+
+00:31:41,039 --> 00:31:47,279
+which is running
+
+00:31:42,080 --> 00:31:52,080
+kvm suppose we have two sibling cpu
+
+00:31:47,279 --> 00:31:54,720
+uh so first the cpu running kvm
+
+00:31:52,080 --> 00:31:56,159
+uh at some point before entering the vm
+
+00:31:54,720 --> 00:31:58,399
+it's going to start this
+
+00:31:56,159 --> 00:32:01,440
+synchronization process and it's going
+
+00:31:58,399 --> 00:32:04,720
+to have a look so pick
+
+00:32:01,440 --> 00:32:06,640
+4 asi if it is running and be our cpu
+
+00:32:04,720 --> 00:32:08,159
+in that case we can see that the t over
+
+00:32:06,640 --> 00:32:11,279
+cpu we are running asi
+
+00:32:08,159 --> 00:32:13,120
+so this is fine there is nothing to do
+
+00:32:11,279 --> 00:32:14,799
+and we can start the vm we know the
+
+00:32:13,120 --> 00:32:18,799
+other cpu are running
+
+00:32:14,799 --> 00:32:20,880
+asi if one disabling cpu for example cpu
+
+00:32:18,799 --> 00:32:23,279
+to try to exit asi
+
+00:32:20,880 --> 00:32:26,840
+then we are going to block it it's going
+
+00:32:23,279 --> 00:32:29,279
+to be blocked in a sign and an idle loop
+
+00:32:26,840 --> 00:32:32,799
+until uh the main cpu
+
+00:32:29,279 --> 00:32:35,120
+exit the vm and stop the synchronization
+
+00:32:32,799 --> 00:32:36,480
+and this point is free to go into the
+
+00:32:35,120 --> 00:32:38,399
+kernel we have a
+
+00:32:36,480 --> 00:32:42,320
+cpu if it is running inside we'll just
+
+00:32:38,399 --> 00:32:45,600
+continue to run
+
+00:32:42,320 --> 00:32:48,559
+if the um other cpu
+
+00:32:45,600 --> 00:32:50,240
+is not running aside that's there's a
+
+00:32:48,559 --> 00:32:52,480
+bit more complication
+
+00:32:50,240 --> 00:32:53,360
+because in that case we still still have
+
+00:32:52,480 --> 00:32:56,320
+the same beginning
+
+00:32:53,360 --> 00:32:59,279
+we start the synchronization we look for
+
+00:32:56,320 --> 00:33:02,080
+asi and we have a cpu in that case
+
+00:32:59,279 --> 00:33:03,120
+over cpu we are not running esi so we'll
+
+00:33:02,080 --> 00:33:06,240
+send a reschedule
+
+00:33:03,120 --> 00:33:09,039
+request to this cpu so
+
+00:33:06,240 --> 00:33:11,039
+they will select a new task for example
+
+00:33:09,039 --> 00:33:13,440
+cpu one is going to select a task which
+
+00:33:11,039 --> 00:33:17,120
+is using si so that's fine it can enter
+
+00:33:13,440 --> 00:33:19,679
+asi and continue to run our cputo
+
+00:33:17,120 --> 00:33:20,240
+is picking a task which is not running
+
+00:33:19,679 --> 00:33:23,760
+asi
+
+00:33:20,240 --> 00:33:25,919
+so in that case we cannot run that
+
+00:33:23,760 --> 00:33:27,440
+task immediately instead we switch to
+
+00:33:25,919 --> 00:33:29,919
+asi and wait
+
+00:33:27,440 --> 00:33:30,880
+so at this point when both the sibling
+
+00:33:29,919 --> 00:33:34,159
+cpu
+
+00:33:30,880 --> 00:33:36,960
+that enter asi we can run the vm
+
+00:33:34,159 --> 00:33:38,960
+safely once we are done with running the
+
+00:33:36,960 --> 00:33:42,720
+vm we stop the synchronization
+
+00:33:38,960 --> 00:33:44,159
+so this for the cpu already running asi
+
+00:33:42,720 --> 00:33:47,279
+there's no impact
+
+00:33:44,159 --> 00:33:49,679
+but for a cpu which was in the id loop
+
+00:33:47,279 --> 00:33:53,279
+we stopped this loop and we can run the
+
+00:33:49,679 --> 00:33:55,679
+task which was not using asi
+
+00:33:53,279 --> 00:33:56,799
+so that's a bit of yeah there's a bit of
+
+00:33:55,679 --> 00:34:00,399
+complexity to do
+
+00:33:56,799 --> 00:34:02,000
+all this synchronization but and this is
+
+00:34:00,399 --> 00:34:07,679
+this is something we are still
+
+00:34:02,000 --> 00:34:09,200
+investigating and trying to to optimize
+
+00:34:07,679 --> 00:34:10,879
+another thing with this cpu
+
+00:34:09,200 --> 00:34:12,720
+synchronization is
+
+00:34:10,879 --> 00:34:15,359
+how do we handle the interrupt an
+
+00:34:12,720 --> 00:34:18,320
+exception especially
+
+00:34:15,359 --> 00:34:20,560
+if you need if there is another enter of
+
+00:34:18,320 --> 00:34:23,359
+exception and you need to exit asi
+
+00:34:20,560 --> 00:34:25,440
+and in that case we have to force all
+
+00:34:23,359 --> 00:34:27,760
+the evening cpu to interrupt
+
+00:34:25,440 --> 00:34:31,040
+so that everyone is going to stop can do
+
+00:34:27,760 --> 00:34:31,040
+the processing and interact
+
+00:34:31,520 --> 00:34:37,599
+and and so there there is a
+
+00:34:34,879 --> 00:34:39,520
+synchronization needed to
+
+00:34:37,599 --> 00:34:41,440
+when we do the processing of interrupt
+
+00:34:39,520 --> 00:34:44,560
+and we are synchronizing the
+
+00:34:41,440 --> 00:34:46,560
+va sign we
+
+00:34:44,560 --> 00:34:48,320
+are also going to look at what core
+
+00:34:46,560 --> 00:34:51,599
+scheduling is doing because they are
+
+00:34:48,320 --> 00:34:54,639
+they have a similar mechanism in place
+
+00:34:51,599 --> 00:34:55,599
+uh when when they got an interrupt on
+
+00:34:54,639 --> 00:35:00,320
+them
+
+00:34:55,599 --> 00:35:00,320
+on the core which is running a attack
+
+00:35:00,839 --> 00:35:05,839
+process
+
+00:35:02,800 --> 00:35:07,680
+um and now yeah we
+
+00:35:05,839 --> 00:35:09,280
+will have a bit more detail about the
+
+00:35:07,680 --> 00:35:09,920
+page level i would like to author
+
+00:35:09,280 --> 00:35:14,000
+continue
+
+00:35:09,920 --> 00:35:15,760
+about that thanks alex uh so now we'll
+
+00:35:14,000 --> 00:35:18,079
+give a brief discussion on how page
+
+00:35:15,760 --> 00:35:19,520
+tables look like uh there are probably
+
+00:35:18,079 --> 00:35:21,200
+several ways on how to manage page
+
+00:35:19,520 --> 00:35:23,119
+tables but this is one way that we're
+
+00:35:21,200 --> 00:35:26,160
+doing it right now
+
+00:35:23,119 --> 00:35:27,599
+uh and just like as a general
+
+00:35:26,160 --> 00:35:29,760
+background to kind of like ease into
+
+00:35:27,599 --> 00:35:30,800
+like why we design the page table as
+
+00:35:29,760 --> 00:35:34,079
+they are
+
+00:35:30,800 --> 00:35:34,079
+if you look in the next slide
+
+00:35:35,119 --> 00:35:42,240
+we have this is
+
+00:35:39,040 --> 00:35:44,000
+a rough description of what look how it
+
+00:35:42,240 --> 00:35:47,200
+looks like for kpti right when
+
+00:35:44,000 --> 00:35:47,839
+uh the million user space only user
+
+00:35:47,200 --> 00:35:50,079
+space
+
+00:35:47,839 --> 00:35:50,960
+uh memory is mapped other than tiny bits
+
+00:35:50,079 --> 00:35:54,160
+of trampoline
+
+00:35:50,960 --> 00:35:56,560
+uh memory when we switch into the kernel
+
+00:35:54,160 --> 00:35:58,640
+we're switching the page table into a
+
+00:35:56,560 --> 00:36:00,880
+page table tablet also has
+
+00:35:58,640 --> 00:36:02,160
+everything that the camera has which
+
+00:36:00,880 --> 00:36:03,680
+also belongs
+
+00:36:02,160 --> 00:36:05,760
+to all the processes in the system
+
+00:36:03,680 --> 00:36:07,119
+global variables obviously also kind of
+
+00:36:05,760 --> 00:36:09,839
+text
+
+00:36:07,119 --> 00:36:11,760
+uh and in kpti basically the idea is
+
+00:36:09,839 --> 00:36:13,200
+that privilege is based on whether
+
+00:36:11,760 --> 00:36:16,720
+you're in new zealand
+
+00:36:13,200 --> 00:36:19,200
+or in canon space and in asi
+
+00:36:16,720 --> 00:36:20,079
+this is uh slightly more nuanced so
+
+00:36:19,200 --> 00:36:22,480
+instead of like
+
+00:36:20,079 --> 00:36:23,280
+basically saying are you in canada space
+
+00:36:22,480 --> 00:36:25,359
+or not
+
+00:36:23,280 --> 00:36:26,960
+basically what you're saying is well
+
+00:36:25,359 --> 00:36:29,760
+we're defining privilege
+
+00:36:26,960 --> 00:36:31,119
+based on the data not necessarily on the
+
+00:36:29,760 --> 00:36:33,599
+executioner
+
+00:36:31,119 --> 00:36:35,599
+so we had for example on the right hand
+
+00:36:33,599 --> 00:36:38,800
+side user space page table
+
+00:36:35,599 --> 00:36:41,599
+and now we have a simplified
+
+00:36:38,800 --> 00:36:43,359
+at least scenario two extra page tables
+
+00:36:41,599 --> 00:36:45,280
+the unrestricted page table which is
+
+00:36:43,359 --> 00:36:46,640
+basically what we used to think of
+
+00:36:45,280 --> 00:36:49,119
+the kernel page table which has
+
+00:36:46,640 --> 00:36:51,119
+everything and then we have the
+
+00:36:49,119 --> 00:36:53,359
+restricted page table which is the asi
+
+00:36:51,119 --> 00:36:56,320
+page table
+
+00:36:53,359 --> 00:36:58,960
+and the restricted page table only has
+
+00:36:56,320 --> 00:37:01,280
+mappings of non-sensitive data
+
+00:36:58,960 --> 00:37:03,359
+and the question is how do you define
+
+00:37:01,280 --> 00:37:06,480
+non-sensitive versus sensitive
+
+00:37:03,359 --> 00:37:09,359
+in general uh at least now we
+
+00:37:06,480 --> 00:37:10,480
+are hoping to use um kind of like an
+
+00:37:09,359 --> 00:37:13,359
+allow list approach
+
+00:37:10,480 --> 00:37:15,200
+of saying okay everything is a secret
+
+00:37:13,359 --> 00:37:18,560
+except for what we mean to be
+
+00:37:15,200 --> 00:37:19,359
+a non-secret or non-sensitive so this
+
+00:37:18,560 --> 00:37:21,760
+can be
+
+00:37:19,359 --> 00:37:23,200
+global non-sensitive data or local and
+
+00:37:21,760 --> 00:37:24,160
+sensitive data which we'll talk about in
+
+00:37:23,200 --> 00:37:26,640
+a second
+
+00:37:24,160 --> 00:37:27,839
+but basically we're saying non-sensitive
+
+00:37:26,640 --> 00:37:31,280
+data is data that we are
+
+00:37:27,839 --> 00:37:34,800
+okay to if it's stolen if
+
+00:37:31,280 --> 00:37:37,359
+a malicious virtual machine tries to
+
+00:37:34,800 --> 00:37:39,040
+perform l1tf attack or mds attack to see
+
+00:37:37,359 --> 00:37:40,720
+the data
+
+00:37:39,040 --> 00:37:43,280
+stealing this data will not pose a
+
+00:37:40,720 --> 00:37:45,119
+threat to other virtual machines or to
+
+00:37:43,280 --> 00:37:48,240
+the cloud infrastructure
+
+00:37:45,119 --> 00:37:50,320
+and for performance reasons we clearly
+
+00:37:48,240 --> 00:37:52,960
+care about data that is frequently
+
+00:37:50,320 --> 00:37:55,680
+accessed in order to serve a vm exit
+
+00:37:52,960 --> 00:37:58,160
+uh because if data is being frequently
+
+00:37:55,680 --> 00:38:00,000
+accessed it means that if we will not
+
+00:37:58,160 --> 00:38:01,599
+uh put it in consider it is
+
+00:38:00,000 --> 00:38:04,800
+non-sensitive it means we will
+
+00:38:01,599 --> 00:38:07,839
+encore many asi exits and any asi exit
+
+00:38:04,800 --> 00:38:09,520
+obviously has a performance cost and now
+
+00:38:07,839 --> 00:38:11,040
+we can
+
+00:38:09,520 --> 00:38:13,680
+kind of like discuss a bit more in
+
+00:38:11,040 --> 00:38:16,640
+detail uh
+
+00:38:13,680 --> 00:38:18,000
+of that so as we said nonstick data can
+
+00:38:16,640 --> 00:38:21,359
+be accessed by lmdf
+
+00:38:18,000 --> 00:38:24,079
+for other information is thank you rx
+
+00:38:21,359 --> 00:38:25,680
+and we can discuss what does it mean to
+
+00:38:24,079 --> 00:38:27,680
+be local versus global data
+
+00:38:25,680 --> 00:38:29,359
+so local data as alex mentioned before
+
+00:38:27,680 --> 00:38:32,640
+it can be the vmcs
+
+00:38:29,359 --> 00:38:36,000
+maybe the file descriptor table
+
+00:38:32,640 --> 00:38:39,119
+anything that belongs to the
+
+00:38:36,000 --> 00:38:42,079
+specific vm and again we say if the vm
+
+00:38:39,119 --> 00:38:43,520
+tries to mount an attack to steal it
+
+00:38:42,079 --> 00:38:45,440
+maybe it's not ideal but
+
+00:38:43,520 --> 00:38:46,720
+doesn't necessarily cause a significant
+
+00:38:45,440 --> 00:38:48,240
+threat to other vms of the
+
+00:38:46,720 --> 00:38:51,920
+infrastructure
+
+00:38:48,240 --> 00:38:54,000
+and global data is data that can be
+
+00:38:51,920 --> 00:38:55,280
+basically accessed by all virtual
+
+00:38:54,000 --> 00:38:57,200
+machines
+
+00:38:55,280 --> 00:39:00,320
+in the specific machine and if it's
+
+00:38:57,200 --> 00:39:02,880
+stolen there's no significant friend
+
+00:39:00,320 --> 00:39:03,440
+um and the nice thing about the global
+
+00:39:02,880 --> 00:39:06,800
+data
+
+00:39:03,440 --> 00:39:08,320
+is that we can share uh the pgd entries
+
+00:39:06,800 --> 00:39:10,880
+in the page table
+
+00:39:08,320 --> 00:39:12,000
+across all the different asi page tables
+
+00:39:10,880 --> 00:39:13,839
+and this gives us
+
+00:39:12,000 --> 00:39:15,599
+a really nice way to manage memory
+
+00:39:13,839 --> 00:39:18,720
+because uh
+
+00:39:15,599 --> 00:39:21,040
+if you think about uh local data and
+
+00:39:18,720 --> 00:39:22,000
+if we need to update the asi map we
+
+00:39:21,040 --> 00:39:25,119
+probably need to
+
+00:39:22,000 --> 00:39:28,400
+uh update it
+
+00:39:25,119 --> 00:39:30,640
+uh across all the uh calls
+
+00:39:28,400 --> 00:39:32,320
+uh that run this specific asi map and
+
+00:39:30,640 --> 00:39:32,960
+this is specifically a problem if you
+
+00:39:32,320 --> 00:39:34,800
+are
+
+00:39:32,960 --> 00:39:36,960
+deciding to unmap a piece of data from
+
+00:39:34,800 --> 00:39:38,000
+the asi map we probably need to flash
+
+00:39:36,960 --> 00:39:42,960
+the tlb
+
+00:39:38,000 --> 00:39:45,119
+for all calls or on the same asm app um
+
+00:39:42,960 --> 00:39:46,880
+and with the global data if we share
+
+00:39:45,119 --> 00:39:50,160
+pgds it means
+
+00:39:46,880 --> 00:39:53,040
+that we can edit uh
+
+00:39:50,160 --> 00:39:54,480
+like the global aside page table and we
+
+00:39:53,040 --> 00:39:56,720
+don't need to update even if we have
+
+00:39:54,480 --> 00:39:58,160
+hundreds or thousands of asi page tables
+
+00:39:56,720 --> 00:39:59,599
+we don't need to update them
+
+00:39:58,160 --> 00:40:01,599
+uh if they will have a page fault we
+
+00:39:59,599 --> 00:40:02,160
+will basically look to see if the page
+
+00:40:01,599 --> 00:40:04,240
+port was
+
+00:40:02,160 --> 00:40:05,680
+in the area of the global and sensitive
+
+00:40:04,240 --> 00:40:08,560
+data and if it was
+
+00:40:05,680 --> 00:40:10,079
+we will just add the pgd entry and
+
+00:40:08,560 --> 00:40:14,319
+that's it
+
+00:40:10,079 --> 00:40:17,440
+um and i think now we can go
+
+00:40:14,319 --> 00:40:20,800
+to the next uh slide and talk about
+
+00:40:17,440 --> 00:40:20,800
+uh results that we have
+
+00:40:20,960 --> 00:40:26,079
+so we have various implementations which
+
+00:40:24,640 --> 00:40:28,400
+we open to kind of like
+
+00:40:26,079 --> 00:40:30,000
+coalesce into one uh unified one but
+
+00:40:28,400 --> 00:40:33,599
+this one
+
+00:40:30,000 --> 00:40:35,760
+is one again um on l spike ycsb
+
+00:40:33,599 --> 00:40:36,640
+uh benchmark and the first thing we can
+
+00:40:35,760 --> 00:40:38,720
+look at
+
+00:40:36,640 --> 00:40:39,680
+is the ratio of asi exits versus vm
+
+00:40:38,720 --> 00:40:41,839
+assets
+
+00:40:39,680 --> 00:40:43,599
+obviously ideally we want this ratio to
+
+00:40:41,839 --> 00:40:45,200
+be as low as possible let's say we had
+
+00:40:43,599 --> 00:40:47,520
+10 000 vm exits
+
+00:40:45,200 --> 00:40:48,480
+ideally we want only once or twice to
+
+00:40:47,520 --> 00:40:52,400
+touch something that
+
+00:40:48,480 --> 00:40:54,160
+forced us to do an aster exit
+
+00:40:52,400 --> 00:40:55,680
+uh we're not there yet but what you can
+
+00:40:54,160 --> 00:40:58,240
+see here in this data uh
+
+00:40:55,680 --> 00:40:59,119
+on the specific benchmark configuration
+
+00:40:58,240 --> 00:41:02,560
+again
+
+00:40:59,119 --> 00:41:05,520
+we had two vms and every vm
+
+00:41:02,560 --> 00:41:06,720
+had eight vcpus and if you look at
+
+00:41:05,520 --> 00:41:08,960
+what's uh
+
+00:41:06,720 --> 00:41:11,280
+circulating the red rectangle we can see
+
+00:41:08,960 --> 00:41:12,400
+the reaction between asi axis versus vm
+
+00:41:11,280 --> 00:41:16,240
+exits
+
+00:41:12,400 --> 00:41:18,880
+um it's between 20 and 50
+
+00:41:16,240 --> 00:41:21,760
+um which at least shows that we can
+
+00:41:18,880 --> 00:41:24,800
+implement asi in a way
+
+00:41:21,760 --> 00:41:25,920
+that we don't have to do an asi exit for
+
+00:41:24,800 --> 00:41:28,240
+every vmx
+
+00:41:25,920 --> 00:41:30,720
+and we believe that basically by adding
+
+00:41:28,240 --> 00:41:33,680
+more and more data into the asi
+
+00:41:30,720 --> 00:41:34,640
+page table we can hopefully reduce it to
+
+00:41:33,680 --> 00:41:37,520
+a very low number
+
+00:41:34,640 --> 00:41:39,520
+hopefully in the low in the lows uh two
+
+00:41:37,520 --> 00:41:42,079
+percent three percent five percent
+
+00:41:39,520 --> 00:41:42,560
+so the performance impact of si will not
+
+00:41:42,079 --> 00:41:45,680
+be
+
+00:41:42,560 --> 00:41:47,040
+uh too significant so if you go to the
+
+00:41:45,680 --> 00:41:51,200
+next slide
+
+00:41:47,040 --> 00:41:51,200
+um we can start
+
+00:41:51,440 --> 00:41:56,960
+seeing uh how can we analyze what caused
+
+00:41:53,599 --> 00:42:00,160
+the vm the asi exits i think that's uh
+
+00:41:56,960 --> 00:42:02,079
+one of them one of the big challenges in
+
+00:42:00,160 --> 00:42:03,280
+asl is kind of like okay what exactly do
+
+00:42:02,079 --> 00:42:05,440
+you need to put
+
+00:42:03,280 --> 00:42:07,440
+inside your page table and as we said
+
+00:42:05,440 --> 00:42:10,319
+before whenever we have an asi
+
+00:42:07,440 --> 00:42:12,000
+exit we can log this information and if
+
+00:42:10,319 --> 00:42:12,319
+we look briefly at the columns like on
+
+00:42:12,000 --> 00:42:14,240
+the
+
+00:42:12,319 --> 00:42:16,319
+on the left side you see the instruction
+
+00:42:14,240 --> 00:42:17,440
+pointer which instruction pointer calls
+
+00:42:16,319 --> 00:42:20,000
+the page fault
+
+00:42:17,440 --> 00:42:21,520
+because the asi exit we can look at the
+
+00:42:20,000 --> 00:42:23,520
+address
+
+00:42:21,520 --> 00:42:25,040
+what was accessed and then we can start
+
+00:42:23,520 --> 00:42:26,560
+and do some analysis
+
+00:42:25,040 --> 00:42:28,240
+so if you look at the middle column
+
+00:42:26,560 --> 00:42:29,680
+which is accessor is basically
+
+00:42:28,240 --> 00:42:31,359
+an interpretation of the instruction
+
+00:42:29,680 --> 00:42:34,800
+painter saying
+
+00:42:31,359 --> 00:42:36,480
+okay what source line access this data
+
+00:42:34,800 --> 00:42:38,079
+and if we go to the next column called
+
+00:42:36,480 --> 00:42:41,200
+allocator it's basically
+
+00:42:38,079 --> 00:42:44,480
+our debug framework trying to interpret
+
+00:42:41,200 --> 00:42:46,800
+okay who allocated this data
+
+00:42:44,480 --> 00:42:47,839
+and this is very useful because then if
+
+00:42:46,800 --> 00:42:51,359
+we see
+
+00:42:47,839 --> 00:42:53,119
+which code allocated this data we can
+
+00:42:51,359 --> 00:42:56,240
+maybe say something smart whether this
+
+00:42:53,119 --> 00:42:58,160
+data is sensitive or non-sensitive
+
+00:42:56,240 --> 00:43:00,000
+and hopefully we can decide it's
+
+00:42:58,160 --> 00:43:02,480
+non-sensitive data and add
+
+00:43:00,000 --> 00:43:04,400
+the flag like gfp local and sensitive or
+
+00:43:02,480 --> 00:43:06,880
+gfp global non-sensitive
+
+00:43:04,400 --> 00:43:08,800
+uh to edit so next time that will rerun
+
+00:43:06,880 --> 00:43:11,599
+the benchmark of the experiment
+
+00:43:08,800 --> 00:43:12,240
+it will already be in the asi map and it
+
+00:43:11,599 --> 00:43:15,119
+will not cause
+
+00:43:12,240 --> 00:43:16,000
+asi exits we can even do a little bit of
+
+00:43:15,119 --> 00:43:19,119
+more analysis
+
+00:43:16,000 --> 00:43:19,119
+if we go to the next slide
+
+00:43:22,319 --> 00:43:26,880
+so for example we can look at the
+
+00:43:24,880 --> 00:43:30,000
+allocators
+
+00:43:26,880 --> 00:43:33,200
+and kind of like uh see which
+
+00:43:30,000 --> 00:43:36,640
+uh allocators are the mo the most common
+
+00:43:33,200 --> 00:43:39,520
+because asi exit um
+
+00:43:36,640 --> 00:43:40,000
+and okay the top one is something that
+
+00:43:39,520 --> 00:43:42,160
+we
+
+00:43:40,000 --> 00:43:43,440
+couldn't infer who allocated it but
+
+00:43:42,160 --> 00:43:45,760
+again we can look at the data
+
+00:43:43,440 --> 00:43:47,520
+see uh which source line accessed it and
+
+00:43:45,760 --> 00:43:50,079
+maybe say something about it
+
+00:43:47,520 --> 00:43:51,040
+but if we look below we see for example
+
+00:43:50,079 --> 00:43:54,240
+the second place
+
+00:43:51,040 --> 00:43:56,880
+is uh basically allocating
+
+00:43:54,240 --> 00:43:58,400
+uh pmu uh context basically health
+
+00:43:56,880 --> 00:44:00,960
+events context
+
+00:43:58,400 --> 00:44:02,160
+which potentially we can argue that uh
+
+00:44:00,960 --> 00:44:03,359
+the context of uh
+
+00:44:02,160 --> 00:44:05,440
+pair of events maybe is not that
+
+00:44:03,359 --> 00:44:08,960
+sensitive and we can try and say
+
+00:44:05,440 --> 00:44:10,160
+okay those allocations we can consider
+
+00:44:08,960 --> 00:44:13,839
+to be non-sensitive
+
+00:44:10,160 --> 00:44:16,560
+and add them to asi um we can see
+
+00:44:13,839 --> 00:44:16,880
+i think it's uh the fourth line here you
+
+00:44:16,560 --> 00:44:19,680
+see
+
+00:44:16,880 --> 00:44:22,079
+sdlc size that's a global variable that
+
+00:44:19,680 --> 00:44:23,520
+apparently was accessed quite frequent
+
+00:44:22,079 --> 00:44:25,599
+and can look at it and say okay this
+
+00:44:23,520 --> 00:44:28,160
+global variable is probably
+
+00:44:25,599 --> 00:44:30,160
+not that sensitive just basically says
+
+00:44:28,160 --> 00:44:32,720
+what the lsc size is
+
+00:44:30,160 --> 00:44:34,079
+uh so we can add the tag of a sign on
+
+00:44:32,720 --> 00:44:36,480
+not sensitive
+
+00:44:34,079 --> 00:44:38,480
+and that way we can have an integrity uh
+
+00:44:36,480 --> 00:44:40,640
+process of saying okay we want an allow
+
+00:44:38,480 --> 00:44:43,680
+list we want to only have an asi
+
+00:44:40,640 --> 00:44:45,839
+data that begin to be done sensitive uh
+
+00:44:43,680 --> 00:44:48,400
+and we can use this debug framework
+
+00:44:45,839 --> 00:44:49,680
+to give us some visibility as to what
+
+00:44:48,400 --> 00:44:51,440
+actually causes six
+
+00:44:49,680 --> 00:44:53,040
+and hopefully by doing this utility
+
+00:44:51,440 --> 00:44:55,599
+process uh
+
+00:44:53,040 --> 00:44:57,200
+we can add more and more data uh to get
+
+00:44:55,599 --> 00:45:00,480
+better and better performance
+
+00:44:57,200 --> 00:45:03,040
+uh for aside um
+
+00:45:00,480 --> 00:45:04,480
+now alex is gonna talk about the coin
+
+00:45:03,040 --> 00:45:07,520
+status
+
+00:45:04,480 --> 00:45:07,520
+of the air style project
+
+00:45:07,920 --> 00:45:13,920
+thanks so just a quick story of
+
+00:45:11,599 --> 00:45:14,960
+where we are coming from with asi so the
+
+00:45:13,920 --> 00:45:17,920
+idea was
+
+00:45:14,960 --> 00:45:18,800
+suggested after the i1 have speculation
+
+00:45:17,920 --> 00:45:21,280
+i
+
+00:45:18,800 --> 00:45:24,000
+attack discovery this was yeah by the
+
+00:45:21,280 --> 00:45:25,839
+end of 2008 there was first presentation
+
+00:45:24,000 --> 00:45:28,960
+like kvm forum
+
+00:45:25,839 --> 00:45:32,640
+it's mostly inspired from a fix that
+
+00:45:28,960 --> 00:45:36,160
+microsoft has done in their hyper-v
+
+00:45:32,640 --> 00:45:37,119
+for their ipad mitigation we had more
+
+00:45:36,160 --> 00:45:41,680
+discussion
+
+00:45:37,119 --> 00:45:45,280
+at linux splunker in 2019
+
+00:45:41,680 --> 00:45:47,599
+and also first development
+
+00:45:45,280 --> 00:45:48,480
+where started at oracle where we have
+
+00:45:47,599 --> 00:45:51,920
+submitted uh
+
+00:45:48,480 --> 00:45:55,359
+several rfc there was a rfc
+
+00:45:51,920 --> 00:45:58,160
+v1 which was very kbn specific
+
+00:45:55,359 --> 00:46:00,480
+and the common from upstream that was
+
+00:45:58,160 --> 00:46:01,280
+that we needed something more generic so
+
+00:46:00,480 --> 00:46:04,960
+that's what
+
+00:46:01,280 --> 00:46:08,800
+the version two has proposed um
+
+00:46:04,960 --> 00:46:12,560
+which provides a canon si framework
+
+00:46:08,800 --> 00:46:15,359
+and kvm is just a consumer
+
+00:46:12,560 --> 00:46:16,400
+v3 was the integration with pti this was
+
+00:46:15,359 --> 00:46:19,440
+another command
+
+00:46:16,400 --> 00:46:22,319
+wave upstream that asi is similar to
+
+00:46:19,440 --> 00:46:25,520
+what pti is doing so we should be using
+
+00:46:22,319 --> 00:46:28,000
+asi to implement vti
+
+00:46:25,520 --> 00:46:29,040
+as we have in generic framework
+
+00:46:28,000 --> 00:46:32,560
+framework
+
+00:46:29,040 --> 00:46:33,359
+um v3 added some page table management
+
+00:46:32,560 --> 00:46:35,440
+function
+
+00:46:33,359 --> 00:46:36,560
+which might not be the final solution we
+
+00:46:35,440 --> 00:46:40,560
+are going to but
+
+00:46:36,560 --> 00:46:42,480
+this was a first try there was a v5
+
+00:46:40,560 --> 00:46:45,119
+which was supposed
+
+00:46:42,480 --> 00:46:47,520
+to be released after a linux spramber
+
+00:46:45,119 --> 00:46:50,800
+this year
+
+00:46:47,520 --> 00:46:51,760
+but so this was adding vsi
+
+00:46:50,800 --> 00:46:55,440
+synchronization
+
+00:46:51,760 --> 00:46:58,960
+in addition of v4
+
+00:46:55,440 --> 00:47:01,440
+but at least there was also this um
+
+00:46:58,960 --> 00:47:03,359
+a presentation from google of a
+
+00:47:01,440 --> 00:47:05,520
+different implementation
+
+00:47:03,359 --> 00:47:07,839
+so since then we are working together to
+
+00:47:05,520 --> 00:47:08,880
+go to common solution instead of
+
+00:47:07,839 --> 00:47:12,160
+developing
+
+00:47:08,880 --> 00:47:13,839
+our own implementation so really
+
+00:47:12,160 --> 00:47:16,640
+the work we are doing now is some
+
+00:47:13,839 --> 00:47:18,400
+collaboration between oracle and google
+
+00:47:16,640 --> 00:47:20,319
+to define a common solution and to
+
+00:47:18,400 --> 00:47:22,960
+convert our implementation
+
+00:47:20,319 --> 00:47:23,680
+so we have something to there's a lot of
+
+00:47:22,960 --> 00:47:25,680
+work to do
+
+00:47:23,680 --> 00:47:27,359
+especially around yeah how we do the
+
+00:47:25,680 --> 00:47:30,640
+page table management
+
+00:47:27,359 --> 00:47:32,400
+what uh what would be the solution we're
+
+00:47:30,640 --> 00:47:34,559
+going to to manage the interrupt the
+
+00:47:32,400 --> 00:47:36,319
+head section the page fault how do we do
+
+00:47:34,559 --> 00:47:38,319
+the um
+
+00:47:36,319 --> 00:47:39,520
+synchronization of the cpu threads with
+
+00:47:38,319 --> 00:47:42,319
+cpu stunning
+
+00:47:39,520 --> 00:47:44,319
+uh we need to look at uh what's
+
+00:47:42,319 --> 00:47:47,920
+happening also on the core scheduling
+
+00:47:44,319 --> 00:47:49,440
+side where they also have a cpu stunning
+
+00:47:47,920 --> 00:47:53,040
+mechanism
+
+00:47:49,440 --> 00:47:54,000
+and also there is the pti integration to
+
+00:47:53,040 --> 00:47:56,800
+investigate
+
+00:47:54,000 --> 00:47:58,400
+because of the different implementation
+
+00:47:56,800 --> 00:48:00,800
+but the goal is really to provide
+
+00:47:58,400 --> 00:48:02,000
+um and to upstream a common
+
+00:48:00,800 --> 00:48:05,359
+implementation and
+
+00:48:02,000 --> 00:48:09,119
+not to have different implementation
+
+00:48:05,359 --> 00:48:11,400
+um so there's a lot of work to do uh
+
+00:48:09,119 --> 00:48:14,160
+we also preparing some predominant
+
+00:48:11,400 --> 00:48:17,760
+preliminary work which is to
+
+00:48:14,160 --> 00:48:18,240
+diff related to pti which is going to
+
+00:48:17,760 --> 00:48:20,640
+help
+
+00:48:18,240 --> 00:48:22,400
+and simplify the support of asi which is
+
+00:48:20,640 --> 00:48:24,880
+to defer some
+
+00:48:22,400 --> 00:48:26,480
+page table switching that pti is doing
+
+00:48:24,880 --> 00:48:29,760
+currently in assembly code to c
+
+00:48:26,480 --> 00:48:32,800
+code so
+
+00:48:29,760 --> 00:48:35,440
+so we are doing a lot of collaboration
+
+00:48:32,800 --> 00:48:38,480
+and there's but there's still a lot to
+
+00:48:35,440 --> 00:48:38,480
+do at the moment
+
+00:48:39,760 --> 00:48:42,880
+so that's that's it for this
+
+00:48:41,680 --> 00:48:45,920
+presentation
+
+00:48:42,880 --> 00:48:46,240
+and uh thanks for uh your attention if
+
+00:48:45,920 --> 00:48:49,200
+you
+
+00:48:46,240 --> 00:48:49,839
+if you went that far and hopefully we'll
+
+00:48:49,200 --> 00:48:52,480
+have some
+
+00:48:49,839 --> 00:48:53,119
+opportunity to get some feedback and
+
+00:48:52,480 --> 00:48:56,160
+questions
+
+00:48:53,119 --> 00:48:57,599
+at the kbm forum offi is there anything
+
+00:48:56,160 --> 00:49:00,079
+you want to add
+
+00:48:57,599 --> 00:49:02,720
+uh no thank you very much alex uh we'll
+
+00:49:00,079 --> 00:49:13,359
+be happy to take questions
+
+00:49:02,720 --> 00:49:13,359
+
+YouTube URL: https://www.youtube.com/watch?v=ktt1-6zy1yc
+
+
