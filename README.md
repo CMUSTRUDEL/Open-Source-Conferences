@@ -1,5 +1,5 @@
 # Open-Source-Conferences
-A dataset of transcripts and descriptions from most OSS conferences after 2013.
+A dataset of transcripts and descriptions from most OSS conferences after 2012.
 
 ## Method
 1. Searched for list of conferences through previous knowledge and [other sources](#sources).
