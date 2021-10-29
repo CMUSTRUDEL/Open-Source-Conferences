@@ -11,9 +11,9 @@ Note: In order to run scripts, do the following:
 1. Access the [Google APIs Client Library](https://developers.google.com/explorer-help/guides/code_samples#python)
 2. Make an API Key on the site.
 3. Install pytube.
-'''
+```
 pip install pytube
-'''
+```
 
 ## Sources
 
