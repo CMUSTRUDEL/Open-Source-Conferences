@@ -1,5 +1,5 @@
 # Open-Source-Conferences
-A dataset of transcripts and descriptions from most OSS conferences after 2011.
+A dataset of transcripts and descriptions from most Open-Source Software conferences from January 2011 to June 2021.
 
 ## Method
 1. Searched for list of conferences through previous knowledge and [other sources](#sources).
@@ -9,12 +9,20 @@ A dataset of transcripts and descriptions from most OSS conferences after 2011.
 
 
 Note: In order to run scripts, do the following:
-1. Access the [Google APIs Client Library](https://developers.google.com/explorer-help/guides/code_samples#python)
+1. Access the [Google APIs Client Library](https://developers.google.com/youtube/v3/getting-started#before-you-start).
 2. Make an API Key on the site.
-3. Install pytube.
+3. Download the ```client_secrets.json``` file connected to you API Key. Put this in the 'Scripts' directory.
+4. Install pytube.
 ```
 pip install pytube
 ```
+
+Note: Although our dataset doesn't contain the captions for each video, the given scripts will include all data including captions. Please do not share these captions since that is a violation of the YouTube License.
+
+## Updates
+**Last updated:** July 2021
+This dataset will be updated every other year in July using existing conferences.
+This dataset can updated by third-parties by using the provided scripts and submitting a pull request. If there is a conference missing from the conference list, please use the suggestion feature in [Google Sheets](https://docs.google.com/spreadsheets/d/1Yd5ssM62rCE3pZKQndBB6DrwdZDCovpHeSN7pCeVtvs/edit?usp=sharing) or submit an issue on this repository.
 
 ## Sources
 
