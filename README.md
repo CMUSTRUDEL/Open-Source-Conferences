@@ -21,6 +21,7 @@ Note: Although our dataset doesn't contain the captions for each video, the give
 
 ## Updates
 **Last updated:** July 2021
+
 This dataset will be updated every other year in July using existing conferences.
 This dataset can updated by third-parties by using the provided scripts and submitting a pull request. If there is a conference missing from the conference list, please use the suggestion feature in [Google Sheets](https://docs.google.com/spreadsheets/d/1Yd5ssM62rCE3pZKQndBB6DrwdZDCovpHeSN7pCeVtvs/edit?usp=sharing) or submit an issue on this repository.
 
