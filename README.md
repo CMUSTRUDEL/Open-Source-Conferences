@@ -5,6 +5,7 @@ A dataset of descriptions from most Open-Source Software conferences from Januar
 - Playlist (often the conference edition)
 - Description
 - YouTube URL
+
 Due to the YouTube license, we cannot show the video transcripts. Run the given scripts to get the full dataset (with transcripts).
 
 ## Get Transcripts
@@ -24,7 +25,6 @@ Where for channel_ids, you can type ```'all'``` (to get videos from all conferen
 ## Updates
 **Last updated:** July 2021
 
-This dataset will be updated every other year in July using existing conferences.
 This dataset can updated by third-parties by using the provided scripts and submitting a pull request. If there is a conference missing from the conference list, please use the suggestion feature in [Google Sheets](https://docs.google.com/spreadsheets/d/1Yd5ssM62rCE3pZKQndBB6DrwdZDCovpHeSN7pCeVtvs/edit?usp=sharing) or submit an issue on this repository.
 
 ## Sources
