@@ -14,6 +14,7 @@ Due to the YouTube license, we cannot show the video transcripts. Run the given 
 3. Download the ```client_secrets.json``` file connected to you API Key. Put this in the 'Scripts' directory.
 4. Install pytube.
 5. In the 'Scripts' directory, run ```python3 parse_through_playlists.py [channel_ids: list] [saved directory: string]```
+
 Where for channel_ids, you can type ```'all'``` (to get videos from all conferences in the list) or enter a list of conference ids in the following format: ```[id1, id2, id3, ..., idn]```
 
 ## Method
